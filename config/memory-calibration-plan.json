@@ -12,6 +12,7 @@
       "name": "mlx-z-image-q4-fresh-reference-resident",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -42,6 +43,7 @@
       "name": "mlx-z-image-q4-fresh-reference-staged",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -73,6 +75,7 @@
       "name": "mlx-z-image-q4-fresh-reference-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -107,6 +110,7 @@
       "name": "mlx-z-image-q4-fresh-reference-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -143,6 +147,7 @@
       "name": "mlx-z-image-q4-fresh-reference-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image_turbo",
         "modelId": "z_image_turbo",
@@ -181,6 +186,7 @@
       "name": "candle-krea-q4-fresh-reference-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -211,6 +217,7 @@
       "name": "candle-krea-q4-fresh-reference-staged",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -242,6 +249,7 @@
       "name": "candle-krea-q4-fresh-reference-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -277,6 +285,7 @@
       "name": "candle-krea-q4-fresh-reference-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -314,6 +323,7 @@
       "name": "candle-krea-q4-fresh-reference-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -353,6 +363,7 @@
       "name": "mlx-qwen-bf16-resident",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -383,6 +394,7 @@
       "name": "mlx-qwen-bf16-staged-residency",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -414,6 +426,7 @@
       "name": "mlx-qwen-bf16-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -490,6 +503,7 @@
       "name": "mlx-qwen-bf16-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -526,6 +540,7 @@
       "name": "mlx-qwen-bf16-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -565,78 +580,161 @@
       "name": "mlx-qwen-q4-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
         "tier": "q4",
         "mode": "text_to_image",
         "overlay": "none",
-        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
       },
       "rung": "bounded_attention",
-      "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention"
+      ],
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
       "fixture": "qwen-image-q4-seed16353-step2",
-      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864
+          },
+          "expectedResult": "passed"
+        }
+      ]
     },
     {
       "name": "mlx-qwen-q4-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
         "tier": "q4",
         "mode": "text_to_image",
         "overlay": "none",
-        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
       },
       "rung": "bounded_transformer_residency",
-      "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
       "fixture": "qwen-image-q4-seed16353-step2",
-      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
     },
     {
       "name": "mlx-qwen-q8-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
         "tier": "q8",
         "mode": "text_to_image",
         "overlay": "none",
-        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
       },
       "rung": "bounded_attention",
-      "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention"
+      ],
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
       "fixture": "qwen-image-q8-seed16353-step2",
-      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864
+          },
+          "expectedResult": "passed"
+        }
+      ]
     },
     {
       "name": "mlx-qwen-q8-bounded-transformer",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
         "tier": "q8",
         "mode": "text_to_image",
         "overlay": "none",
-        "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
       },
       "rung": "bounded_transformer_residency",
-      "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
       "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
       "fixture": "qwen-image-q8-seed16353-step2",
-      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
     },
     {
       "name": "mlx-krea-pose-control-q4-768",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "krea_2_turbo_control",
         "modelId": "krea_2_turbo",
@@ -671,6 +769,7 @@
       "name": "mlx-krea-pose-control-q4-896",
       "evidenceScope": "authoritative",
       "backend": "mlx",
+      "loadShape": "eager_materialization",
       "target": {
         "provider": "krea_2_turbo_control",
         "modelId": "krea_2_turbo",
@@ -705,6 +804,7 @@
       "name": "candle-krea-production-current-v1",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -744,6 +844,7 @@
       "name": "candle-krea-v2-candidates",
       "evidenceScope": "candidate",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "krea_2_turbo",
         "modelId": "krea_2_turbo",
@@ -792,6 +893,7 @@
       "name": "candle-z-image-q4-text_to_image-none-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -822,6 +924,7 @@
       "name": "candle-z-image-q4-text_to_image-none-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -853,6 +956,7 @@
       "name": "candle-z-image-q4-text_to_image-none-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -888,6 +992,7 @@
       "name": "candle-z-image-q4-text_to_image-none-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -925,6 +1030,7 @@
       "name": "candle-z-image-q4-text_to_image-none-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -964,6 +1070,7 @@
       "name": "candle-z-image-q4-text_to_image-lora-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -994,6 +1101,7 @@
       "name": "candle-z-image-q4-text_to_image-lora-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1025,6 +1133,7 @@
       "name": "candle-z-image-q4-text_to_image-lora-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1060,6 +1169,7 @@
       "name": "candle-z-image-q4-text_to_image-lora-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1097,6 +1207,7 @@
       "name": "candle-z-image-q4-text_to_image-lora-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1136,6 +1247,7 @@
       "name": "candle-z-image-q4-text_to_image-control-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1166,6 +1278,7 @@
       "name": "candle-z-image-q4-text_to_image-control-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1197,6 +1310,7 @@
       "name": "candle-z-image-q4-text_to_image-control-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1232,6 +1346,7 @@
       "name": "candle-z-image-q4-text_to_image-control-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1269,6 +1384,7 @@
       "name": "candle-z-image-q4-text_to_image-control-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1308,6 +1424,7 @@
       "name": "candle-z-image-q4-style_variations-none-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1338,6 +1455,7 @@
       "name": "candle-z-image-q4-style_variations-none-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1369,6 +1487,7 @@
       "name": "candle-z-image-q4-style_variations-none-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1404,6 +1523,7 @@
       "name": "candle-z-image-q4-style_variations-none-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1441,6 +1561,7 @@
       "name": "candle-z-image-q4-style_variations-none-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1480,6 +1601,7 @@
       "name": "candle-z-image-q4-style_variations-lora-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1510,6 +1632,7 @@
       "name": "candle-z-image-q4-style_variations-lora-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1541,6 +1664,7 @@
       "name": "candle-z-image-q4-style_variations-lora-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1576,6 +1700,7 @@
       "name": "candle-z-image-q4-style_variations-lora-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1613,6 +1738,7 @@
       "name": "candle-z-image-q4-style_variations-lora-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1652,6 +1778,7 @@
       "name": "candle-z-image-q4-style_variations-control-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1682,6 +1809,7 @@
       "name": "candle-z-image-q4-style_variations-control-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1713,6 +1841,7 @@
       "name": "candle-z-image-q4-style_variations-control-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1748,6 +1877,7 @@
       "name": "candle-z-image-q4-style_variations-control-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1785,6 +1915,7 @@
       "name": "candle-z-image-q4-style_variations-control-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1824,6 +1955,7 @@
       "name": "candle-z-image-q8-text_to_image-none-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1854,6 +1986,7 @@
       "name": "candle-z-image-q8-text_to_image-none-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1885,6 +2018,7 @@
       "name": "candle-z-image-q8-text_to_image-none-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1920,6 +2054,7 @@
       "name": "candle-z-image-q8-text_to_image-none-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1957,6 +2092,7 @@
       "name": "candle-z-image-q8-text_to_image-none-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -1996,6 +2132,7 @@
       "name": "candle-z-image-q8-text_to_image-lora-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2026,6 +2163,7 @@
       "name": "candle-z-image-q8-text_to_image-lora-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2057,6 +2195,7 @@
       "name": "candle-z-image-q8-text_to_image-lora-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2092,6 +2231,7 @@
       "name": "candle-z-image-q8-text_to_image-lora-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2129,6 +2269,7 @@
       "name": "candle-z-image-q8-text_to_image-lora-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2168,6 +2309,7 @@
       "name": "candle-z-image-q8-text_to_image-control-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2198,6 +2340,7 @@
       "name": "candle-z-image-q8-text_to_image-control-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2229,6 +2372,7 @@
       "name": "candle-z-image-q8-text_to_image-control-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2264,6 +2408,7 @@
       "name": "candle-z-image-q8-text_to_image-control-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2301,6 +2446,7 @@
       "name": "candle-z-image-q8-text_to_image-control-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2340,6 +2486,7 @@
       "name": "candle-z-image-q8-style_variations-none-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2370,6 +2517,7 @@
       "name": "candle-z-image-q8-style_variations-none-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2401,6 +2549,7 @@
       "name": "candle-z-image-q8-style_variations-none-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2436,6 +2585,7 @@
       "name": "candle-z-image-q8-style_variations-none-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2473,6 +2623,7 @@
       "name": "candle-z-image-q8-style_variations-none-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2512,6 +2663,7 @@
       "name": "candle-z-image-q8-style_variations-lora-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2542,6 +2694,7 @@
       "name": "candle-z-image-q8-style_variations-lora-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2573,6 +2726,7 @@
       "name": "candle-z-image-q8-style_variations-lora-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2608,6 +2762,7 @@
       "name": "candle-z-image-q8-style_variations-lora-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2645,6 +2800,7 @@
       "name": "candle-z-image-q8-style_variations-lora-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2684,6 +2840,7 @@
       "name": "candle-z-image-q8-style_variations-control-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2714,6 +2871,7 @@
       "name": "candle-z-image-q8-style_variations-control-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2745,6 +2903,7 @@
       "name": "candle-z-image-q8-style_variations-control-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2780,6 +2939,7 @@
       "name": "candle-z-image-q8-style_variations-control-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2817,6 +2977,7 @@
       "name": "candle-z-image-q8-style_variations-control-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2856,6 +3017,7 @@
       "name": "candle-z-image-bf16-text_to_image-none-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2886,6 +3048,7 @@
       "name": "candle-z-image-bf16-text_to_image-none-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2917,6 +3080,7 @@
       "name": "candle-z-image-bf16-text_to_image-none-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2952,6 +3116,7 @@
       "name": "candle-z-image-bf16-text_to_image-none-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -2989,6 +3154,7 @@
       "name": "candle-z-image-bf16-text_to_image-none-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3028,6 +3194,7 @@
       "name": "candle-z-image-bf16-text_to_image-lora-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3058,6 +3225,7 @@
       "name": "candle-z-image-bf16-text_to_image-lora-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3089,6 +3257,7 @@
       "name": "candle-z-image-bf16-text_to_image-lora-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3124,6 +3293,7 @@
       "name": "candle-z-image-bf16-text_to_image-lora-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3161,6 +3331,7 @@
       "name": "candle-z-image-bf16-text_to_image-lora-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3200,6 +3371,7 @@
       "name": "candle-z-image-bf16-text_to_image-control-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3230,6 +3402,7 @@
       "name": "candle-z-image-bf16-text_to_image-control-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3261,6 +3434,7 @@
       "name": "candle-z-image-bf16-text_to_image-control-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3296,6 +3470,7 @@
       "name": "candle-z-image-bf16-text_to_image-control-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3333,6 +3508,7 @@
       "name": "candle-z-image-bf16-text_to_image-control-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3372,6 +3548,7 @@
       "name": "candle-z-image-bf16-style_variations-none-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3402,6 +3579,7 @@
       "name": "candle-z-image-bf16-style_variations-none-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3433,6 +3611,7 @@
       "name": "candle-z-image-bf16-style_variations-none-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3468,6 +3647,7 @@
       "name": "candle-z-image-bf16-style_variations-none-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3505,6 +3685,7 @@
       "name": "candle-z-image-bf16-style_variations-none-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3544,6 +3725,7 @@
       "name": "candle-z-image-bf16-style_variations-lora-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3574,6 +3756,7 @@
       "name": "candle-z-image-bf16-style_variations-lora-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3605,6 +3788,7 @@
       "name": "candle-z-image-bf16-style_variations-lora-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3640,6 +3824,7 @@
       "name": "candle-z-image-bf16-style_variations-lora-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3677,6 +3862,7 @@
       "name": "candle-z-image-bf16-style_variations-lora-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3716,6 +3902,7 @@
       "name": "candle-z-image-bf16-style_variations-control-resident",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3746,6 +3933,7 @@
       "name": "candle-z-image-bf16-style_variations-control-staged_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3777,6 +3965,7 @@
       "name": "candle-z-image-bf16-style_variations-control-bounded_decode",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3812,6 +4001,7 @@
       "name": "candle-z-image-bf16-style_variations-control-bounded_attention",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3849,6 +4039,7 @@
       "name": "candle-z-image-bf16-style_variations-control-bounded_transformer_residency",
       "evidenceScope": "authoritative",
       "backend": "candle",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "z_image",
         "modelId": "z_image",
@@ -3879,6 +4070,584 @@
             "decodeOverlap": 128,
             "attentionChunkSize": 67108864,
             "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-image-q4-resident-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-image-q4-staged-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-image-q4-decode-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 768,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 640,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 448,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 384,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 320,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 256,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-image-q4-attention-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-image-q4-transformer-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image",
+        "modelId": "qwen_image",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-image-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 2
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 4
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 8
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 15
+          },
+          "expectedResult": "passed"
+        },
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 30
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-q4-resident-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-q4-staged-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-q4-decode-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-q4-attention-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-q4-transformer-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-resident-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511_lightning",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "lora",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-staged-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511_lightning",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "lora",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-decode-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511_lightning",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "lora",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-qwen-edit-lightning-q4-attention-sc15817",
+      "evidenceScope": "candidate",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "qwen_image_edit",
+        "modelId": "qwen_image_edit_2511_lightning",
+        "tier": "q4",
+        "mode": "edit",
+        "overlay": "lora",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "fixture": "qwen-edit-lightning-candle-q4-seed15817-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67108864
           },
           "expectedResult": "passed"
         }

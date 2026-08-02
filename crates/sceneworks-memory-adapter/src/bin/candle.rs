@@ -15,6 +15,8 @@ use std::process::Command;
 
 const KREA_ID: &str = "krea_2_turbo";
 const KREA_PLAIN_EXECUTION_PATH: &str = "the Candle Krea base-only text-to-image path";
+const QWEN_ID: &str = "qwen_image";
+const QWEN_PLAIN_EXECUTION_PATH: &str = "the Candle Qwen-Image base-only text-to-image path";
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
 
@@ -257,7 +259,9 @@ fn execute_lifecycle_request(
         .memory
         .as_mut()
         .ok_or_else(|| "optimized lifecycle request did not receive GenerationMemory".to_owned())?;
-    memory.calibration_error_phase = fault_phase;
+    if let Some(phase) = fault_phase {
+        memory.authorize_calibration_fault(phase);
+    }
     scope
         .enter_phase(MemoryPhase::Conditioning)
         .map_err(|error| format!("enter lifecycle conditioning phase: {error}"))?;
@@ -512,6 +516,23 @@ fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
     }
 }
 
+fn planned_provider(request: &Value) -> Result<&str, String> {
+    protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())
+}
+
+fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
+    match planned_provider(request)? {
+        "qwen_image" => Ok(QWEN_PLAIN_EXECUTION_PATH),
+        "krea_2_turbo" => Ok(KREA_PLAIN_EXECUTION_PATH),
+        provider => Err(format!(
+            "Candle five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+
 fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
     let strategy = planned_memory_strategy(request)?;
     let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
@@ -570,8 +591,12 @@ fn measured_strategy(
     Ok(measured)
 }
 
-fn load_five_rung_generator() -> Result<
+fn load_five_rung_generator(
+    request: &Value,
+) -> Result<
     (
+        &'static str,
+        &'static str,
         String,
         String,
         Box<dyn runtime_cuda::gen_core::Generator>,
@@ -579,51 +604,89 @@ fn load_five_rung_generator() -> Result<
     ),
     String,
 > {
-    let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
-    let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
-    protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
-    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
-        "SCENEWORKS_KREA_ROOT",
-    )?))
-    .map_err(|error| format!("canonicalize SCENEWORKS_KREA_ROOT: {error}"))?;
+    let (provider_id, execution_path, repository_env, revision_env, root_env, expected_repository) =
+        match planned_provider(request)? {
+            "qwen_image" => (
+                QWEN_ID,
+                QWEN_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_QWEN_IMAGE_REPOSITORY",
+                "SCENEWORKS_QWEN_IMAGE_REVISION",
+                "SCENEWORKS_QWEN_IMAGE_ROOT",
+                protocol::QWEN_REPOSITORY,
+            ),
+            "krea_2_turbo" => (
+                KREA_ID,
+                KREA_PLAIN_EXECUTION_PATH,
+                "SCENEWORKS_KREA_REPOSITORY",
+                "SCENEWORKS_KREA_REVISION",
+                "SCENEWORKS_KREA_ROOT",
+                protocol::KREA_REPOSITORY,
+            ),
+            provider => {
+                return Err(format!(
+                    "Candle five-rung calibration does not implement provider {provider:?}"
+                ))
+            }
+        };
+    let repository = protocol::required_env(repository_env)?;
+    let revision = protocol::required_env(revision_env)?;
+    protocol::validate_artifact_identity(&repository, &revision, expected_repository)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(root_env)?))
+        .map_err(|error| format!("canonicalize {root_env}: {error}"))?;
     protocol::validate_huggingface_snapshot_root(
         &root,
         &repository,
         &revision,
         "q4",
-        protocol::KREA_REPOSITORY,
+        expected_repository,
     )?;
     let spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_quant(Quant::Q4)
         .with_offload_policy(OffloadPolicy::Sequential)
         .with_load_shape(LoadShape::DeferredMaterialization);
+    let spec = if provider_id == KREA_ID {
+        spec.with_quant(Quant::Q4)
+    } else {
+        // Qwen packed Diffusers snapshots declare their device-format quantization in
+        // transformer/config.json. Passing LoadSpec.quant would request a second, unsupported
+        // runtime quantization pass instead of loading the q4 artifact as authored.
+        spec
+    };
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
     let mut vram = VramProbe::start_rendered().assert_idle(1.0);
     let load_sample = vram.phase();
     let generator = catalog
         .media()
-        .load(KREA_ID, &spec)
-        .map_err(|error| format!("load real {KREA_ID} q4 generator: {error}"))?;
+        .load(provider_id, &spec)
+        .map_err(|error| format!("load real {provider_id} q4 generator: {error}"))?;
     vram.end_load(load_sample);
-    Ok((repository, revision, generator, vram))
+    Ok((
+        provider_id,
+        execution_path,
+        repository,
+        revision,
+        generator,
+        vram,
+    ))
 }
 
 fn run_five_rung_reference_loaded(
     request: &Value,
+    provider_id: &str,
+    execution_path: &str,
     generator: &dyn runtime_cuda::gen_core::Generator,
     vram: &mut VramProbe,
     repository: &str,
     revision: &str,
 ) -> Result<Value, String> {
-    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
+    protocol::validate_plain_overlay_target(request, execution_path)?;
     let contract = generator
         .memory_strategy_contract()
-        .ok_or_else(|| format!("loaded {KREA_ID} has no memory-strategy contract"))?;
+        .ok_or_else(|| format!("loaded {provider_id} has no memory-strategy contract"))?;
     let selection = planned_selection(request)?;
-    contract
-        .validate_selection(&selection)
-        .map_err(|error| format!("pinned Krea provider rejected planned selection: {error}"))?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned {provider_id} provider rejected planned selection: {error}")
+    })?;
     let strategy = measured_strategy(
         request,
         &selection,
@@ -641,6 +704,19 @@ fn run_five_rung_reference_loaded(
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
             calibration.fingerprint
+        ));
+    }
+    let planned_load_shape = protocol::planned(request)?
+        .get("loadShape")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?;
+    let actual_load_shape = match calibration.load_shape {
+        LoadShape::EagerMaterialization => "eager_materialization",
+        LoadShape::DeferredMaterialization => "deferred_materialization",
+    };
+    if planned_load_shape != actual_load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={planned_load_shape}, pinned provider={actual_load_shape}"
         ));
     }
     let (width, height) = protocol::target_geometry(request)?;
@@ -662,6 +738,7 @@ fn run_five_rung_reference_loaded(
             height,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         overlay: None,
         budget: MemoryBudget {
@@ -676,27 +753,33 @@ fn run_five_rung_reference_loaded(
     };
     let mut scope = generator
         .begin_memory_strategy_request(&context)
-        .map_err(|error| format!("begin Krea fresh-reference scope: {error}"))?
+        .map_err(|error| format!("begin {provider_id} fresh-reference scope: {error}"))?
         .ok_or_else(|| {
-            "Krea fresh-reference selection did not create a provider scope".to_owned()
+            format!("{provider_id} fresh-reference selection did not create a provider scope")
         })?;
     let parameters = context.selection.parameters;
     match (parameters.decode_tile_edge, parameters.decode_overlap) {
         (Some(edge), Some(overlap)) => scope
             .configure_decode(edge, overlap, context.geometry)
-            .map_err(|error| format!("configure Krea fresh-reference decode: {error}"))?,
+            .map_err(|error| format!("configure {provider_id} fresh-reference decode: {error}"))?,
         (None, None) => {}
-        _ => return Err("Krea decode edge and overlap must be selected together".to_owned()),
+        _ => {
+            return Err(format!(
+                "{provider_id} decode edge and overlap must be selected together"
+            ))
+        }
     }
     if let Some(attention) = parameters.attention_chunk_size {
-        scope
-            .configure_attention(attention)
-            .map_err(|error| format!("configure Krea fresh-reference attention: {error}"))?;
+        scope.configure_attention(attention).map_err(|error| {
+            format!("configure {provider_id} fresh-reference attention: {error}")
+        })?;
     }
     if let Some(window) = parameters.transformer_window_size {
         scope
             .materialize_transformer_window(0, window)
-            .map_err(|error| format!("configure Krea fresh-reference transformer: {error}"))?;
+            .map_err(|error| {
+                format!("configure {provider_id} fresh-reference transformer: {error}")
+            })?;
     }
     let mut generation = GenerationRequest {
         prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
@@ -712,10 +795,10 @@ fn run_five_rung_reference_loaded(
     };
     scope
         .configure_request(&mut generation)
-        .map_err(|error| format!("apply Krea fresh-reference strategy: {error}"))?;
+        .map_err(|error| format!("apply {provider_id} fresh-reference strategy: {error}"))?;
     scope
         .enter_phase(MemoryPhase::Conditioning)
-        .map_err(|error| format!("enter Krea fresh-reference conditioning: {error}"))?;
+        .map_err(|error| format!("enter {provider_id} fresh-reference conditioning: {error}"))?;
     let generation_sample = vram.phase();
     let mut phase_sample = Some(vram.phase());
     let mut phase = MemoryPhase::Conditioning;
@@ -745,12 +828,12 @@ fn run_five_rung_reference_loaded(
             MemoryPhase::Decode => decode_peak_gb = peak,
         }
         if let Err(error) = scope.leave_phase(phase) {
-            phase_error = Some(format!("leave Krea {phase:?}: {error}"));
+            phase_error = Some(format!("leave {provider_id} {phase:?}: {error}"));
             return;
         }
         let next = memory_phase(next);
         if let Err(error) = scope.enter_phase(next) {
-            phase_error = Some(format!("enter Krea {next:?}: {error}"));
+            phase_error = Some(format!("enter {provider_id} {next:?}: {error}"));
             return;
         }
         phase = next;
@@ -775,45 +858,59 @@ fn run_five_rung_reference_loaded(
         Ok(runtime_cuda::gen_core::GenerationOutput::Images(images)) if images.len() == 1 => {}
         Ok(runtime_cuda::gen_core::GenerationOutput::Images(images)) => {
             return Err(format!(
-                "Krea fresh reference returned {} images",
+                "{provider_id} fresh reference returned {} images",
                 images.len()
             ));
         }
-        Ok(_) => return Err("Krea fresh reference returned non-image output".to_owned()),
+        Ok(_) => {
+            return Err(format!(
+                "{provider_id} fresh reference returned non-image output"
+            ))
+        }
         Err(error) => {
             let message = error.to_string();
             let _ = scope.finish(MemoryRunOutcome::Error {
                 message: message.clone(),
             });
-            return Err(format!("Krea fresh-reference generation failed: {message}"));
+            return Err(format!(
+                "{provider_id} fresh-reference generation failed: {message}"
+            ));
         }
     }
     scope
         .leave_phase(phase)
-        .map_err(|error| format!("leave Krea fresh-reference terminal phase: {error}"))?;
+        .map_err(|error| format!("leave {provider_id} fresh-reference terminal phase: {error}"))?;
     scope
         .finish(MemoryRunOutcome::Complete)
-        .map_err(|error| format!("finish Krea fresh-reference scope: {error}"))?;
-    let conditioning_bytes =
-        decimal_gb_to_bytes(conditioning_peak_gb.ok_or_else(|| {
-            "Krea fresh reference did not expose conditioning boundary".to_owned()
+        .map_err(|error| format!("finish {provider_id} fresh-reference scope: {error}"))?;
+    let conditioning_bytes = decimal_gb_to_bytes(conditioning_peak_gb.ok_or_else(|| {
+        format!("{provider_id} fresh reference did not expose conditioning boundary")
+    })?);
+    let denoise_bytes =
+        decimal_gb_to_bytes(denoise_peak_gb.ok_or_else(|| {
+            format!("{provider_id} fresh reference did not expose denoise boundary")
         })?);
-    let denoise_bytes = decimal_gb_to_bytes(
-        denoise_peak_gb
-            .ok_or_else(|| "Krea fresh reference did not expose denoise boundary".to_owned())?,
-    );
     let decode_bytes = decimal_gb_to_bytes(
-        decode_peak_gb.ok_or_else(|| "Krea fresh reference did not complete decode".to_owned())?,
+        decode_peak_gb
+            .ok_or_else(|| format!("{provider_id} fresh reference did not complete decode"))?,
     );
     let overall_bytes = conditioning_bytes.max(denoise_bytes).max(decode_bytes);
-    let blocker = concat!(
-        "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
-        "sc-16059; it intentionally remains gated because this run does not repeat the full ",
-        "promotion-quality, negative-mutation, and lifecycle scenario suite"
-    );
+    let blocker = if provider_id == QWEN_ID {
+        concat!(
+            "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, ",
+            "and loadability; it intentionally remains gated because this run does not repeat ",
+            "each sibling story's promotion-quality, negative-mutation, and lifecycle suite"
+        )
+    } else {
+        concat!(
+            "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
+            "SC-16059; it intentionally remains gated because this run does not repeat the full ",
+            "promotion-quality, negative-mutation, and lifecycle scenario suite"
+        )
+    };
     let mut fragment = protocol::plain_gated_fragment(
         request,
-        KREA_PLAIN_EXECUTION_PATH,
+        execution_path,
         protocol::PlainGatedFragment {
             artifact: artifact(repository, revision),
             sweep: protocol::reference_sweep(request, "passed")?,
@@ -825,7 +922,7 @@ fn run_five_rung_reference_loaded(
                 "resolvedPathFingerprint": loadability_fingerprint(repository, revision),
             }),
             diagnostics: protocol::diagnostics(
-                "memory-candle-adapter:krea-five-rung-reference",
+                &format!("memory-candle-adapter:{provider_id}-five-rung-reference"),
                 "executed",
                 [blocker.to_owned()],
                 [
@@ -848,10 +945,14 @@ fn run_five_rung_reference_loaded(
 }
 
 fn run_five_rung_reference(request: &Value) -> Result<Value, String> {
-    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
-    let (repository, revision, generator, mut vram) = load_five_rung_generator()?;
+    let execution_path = plain_execution_path(request)?;
+    protocol::validate_plain_overlay_target(request, execution_path)?;
+    let (provider_id, execution_path, repository, revision, generator, mut vram) =
+        load_five_rung_generator(request)?;
     run_five_rung_reference_loaded(
         request,
+        provider_id,
+        execution_path,
         generator.as_ref(),
         &mut vram,
         &repository,
@@ -914,10 +1015,15 @@ fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
         let mut per_rung_request = request.clone();
         per_rung_request["action"] = json!("run");
         per_rung_request["planned"] = item.clone();
-        protocol::validate_plain_overlay_target(&per_rung_request, KREA_PLAIN_EXECUTION_PATH)?;
+        let execution_path = plain_execution_path(&per_rung_request)?;
+        protocol::validate_plain_overlay_target(&per_rung_request, execution_path)?;
     }
 
-    let (repository, revision, generator, mut vram) = load_five_rung_generator()?;
+    let mut first_request = request.clone();
+    first_request["action"] = json!("run");
+    first_request["planned"] = planned[0].clone();
+    let (provider_id, execution_path, repository, revision, generator, mut vram) =
+        load_five_rung_generator(&first_request)?;
     let smi = NvidiaSmi::resolve()?;
     // Krea uses DeferredMaterialization, so loading the generator does not establish its
     // steady-state device residency. The canonical batch starts with `resident`; use the
@@ -931,6 +1037,8 @@ fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
         per_rung_request["planned"] = item.clone();
         fragments.push(run_five_rung_reference_loaded(
             &per_rung_request,
+            provider_id,
+            execution_path,
             generator.as_ref(),
             &mut vram,
             &repository,
@@ -953,13 +1061,20 @@ fn run(request: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
-    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)?;
+    let provider = planned_provider(request)?;
+    let execution_path = plain_execution_path(request)?;
+    protocol::validate_plain_overlay_target(request, execution_path)?;
     let is_five_rung_reference = protocol::planned(request)?
         .get("fixture")
         .and_then(Value::as_str)
         .is_some_and(|fixture| fixture.starts_with("fresh-five-rung-"));
-    if is_five_rung_reference {
+    if is_five_rung_reference || provider == "qwen_image" {
         return run_five_rung_reference(request);
+    }
+    if provider != "krea_2_turbo" {
+        return Err(format!(
+            "unsupported Candle calibration provider {provider:?}"
+        ));
     }
     let parameters = protocol::strategy_parameters(request)?;
     let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
@@ -1091,6 +1206,7 @@ fn run(request: &Value) -> Result<Value, String> {
             height,
             batch: 1,
             frames: 1,
+            reference_count: 0,
         },
         overlay: None,
         budget: MemoryBudget {
@@ -1426,6 +1542,39 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn qwen_request() -> Value {
+        json!({
+            "planned": {
+                "target": { "provider": "qwen_image", "overlay": "none" },
+                "strategy": { "rung": "resident", "parameters": {} },
+                "loadShape": "deferred_materialization"
+            }
+        })
+    }
+
+    #[test]
+    fn qwen_plan_routes_to_the_qwen_base_execution_path() {
+        let request = qwen_request();
+        assert_eq!(planned_provider(&request).unwrap(), "qwen_image");
+        assert_eq!(
+            plain_execution_path(&request).unwrap(),
+            QWEN_PLAIN_EXECUTION_PATH
+        );
+        assert_eq!(
+            planned_memory_strategy(&request).unwrap(),
+            MemoryStrategy::Resident
+        );
+    }
+
+    #[test]
+    fn edit_plan_is_not_mislabeled_as_base_qwen_conformance() {
+        let mut request = qwen_request();
+        request["planned"]["target"]["provider"] = json!("qwen_image_edit");
+        let error = plain_execution_path(&request).unwrap_err();
+        assert!(error.contains("qwen_image_edit"));
+        assert!(error.contains("does not implement"));
+    }
 
     #[test]
     fn deferred_materialization_establishes_retention_baseline_after_resident_rung() {

@@ -88,39 +88,44 @@ both final thresholds and proving the gate detects the known bad decoder.
 
 ## Provenance and fail-closed behavior
 
-The bundle contains 90 logical records and 49 source sessions: five exact artifact inventories, 15 physical control-memory trials, 15
-resident-versus-rung image comparisons, three style trials, six LoRA trials, three LoRA comparisons, one
-lifecycle test transcript, and one negative-mutation comparison. The active reconstruction uses the 48
-`6583-*` sessions plus the retained `7410-negative-mutation.log`; the other `7410-*` transcripts are
-historical and are not attached to promoted records. Each record names sources separately for
-memory, quality, negative mutation, lifecycle, loadability, and overlay behavior.
+The committed historical capture set describes 90 logical cases across 49 source sessions: five exact
+artifact inventories, 15 physical control-memory trials, 15 resident-versus-rung image comparisons,
+three style trials, six LoRA trials, three LoRA comparisons, one lifecycle test transcript, and one
+negative-mutation comparison. The reconstruction uses the 48 `6583-*` sessions plus the retained
+`7410-negative-mutation.log`; the other `7410-*` transcripts are historical and are not attached to any
+case.
 
-Schema and runtime validation reject missing source sessions, duplicate claims, cross-tier memory/quality
-reuse, cross-rung memory reuse, and direct overlay claims from a different overlay. Runtime selection also
-rejects stale inference pins, calibration-fingerprint mismatches, unknown budgets, wrong geometry, and
-uncertified ControlNet overrides. The production base route resolves the immutable
+These captures predate the schema-v4 `loadShape` axis. Because eager versus deferred materialization was
+not recorded during collection, the 90 cases are validated as historical evidence but are not promoted
+into the current authoritative bundle and do not create manifest calibration bindings. The current
+bundle therefore retains only the 24 independently typed Qwen records. Re-certifying Z-Image requires
+new measurements that record the declared `deferred_materialization` load shape from the plan.
+
+The historical reconstructor rejects missing source sessions, duplicate claims, cross-tier memory/quality
+reuse, cross-rung memory reuse, and direct overlay claims from a different overlay. Schema and runtime
+validation reject incomplete typed evidence, stale inference pins, calibration-fingerprint mismatches,
+unknown budgets, wrong geometry, and uncertified ControlNet overrides. The production base route resolves the immutable
 `SceneWorks/z-image-mlx` snapshot revision rather than mutable `refs/main`; explicit `modelPath` and any
 resolved base outside that pinned tier remain resident-only.
 
 ## Reproduction and verification
 
 The inference repository provides `control_vram_probe`, `sequential_vram_probe`, and the unit/integration
-suite. SceneWorks generates and verifies the promoted bundle with:
+suite. SceneWorks validates the historical sources and writes the fail-closed current bundle with:
 
 ```powershell
 node scripts/sc-16170-certification.mjs --write
-node scripts/sc-16170-certification.mjs --check
+node scripts/sc-16170-certification.mjs
 node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json
 node scripts/generate-memory-matrix.mjs
 node scripts/calibration-cost-model.mjs
 ```
 
-The check command reconstructs the evidence and manifest bindings from every committed transcript and
-inventory log, recomputes each transcript's exact-byte hash and every inventory digest, attaches inventory
-identities by the session's declared tier/overlay, and byte-compares the result with the checked-in files.
-The matrix reports the 90 current Z-Image/Candle cells Verified only while the exact inference revision,
-provider fingerprint, artifact identity, binding, and source-session derivations remain valid. The 24
-pre-existing records remain historical after the inference pin change.
+The check command reconstructs all 90 historical cases from every committed transcript and inventory
+log, recomputes each transcript's exact-byte hash and every inventory digest, and verifies that the
+checked-in evidence and manifests contain no untyped SC-16170 promotion. Consequently the current matrix
+does not report these Z-Image/Candle cells as Verified. Their raw measurements remain available for audit,
+while runtime admission fails closed until schema-v4 measurements replace them.
 
 The base and LoRA cells bind the packed-sidecar contract
 `z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2`; strict-control cells bind

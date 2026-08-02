@@ -84,7 +84,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
-    assert len(evidence_ids) == len(calibration["records"]) == 114
+    assert len(evidence_ids) == len(calibration["records"]) == 24
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
     assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
     current_eligible = [
@@ -93,27 +93,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
     assert current_eligible == []
-    historical_z_image = [
-        run
+    assert all(
+        run["record"]["target"]["modelId"] != "z_image"
         for run in matrix["calibrationRuns"]
-        if run["semantics"] == "historical"
-        and run["record"]["target"]["modelId"] == "z_image"
-        and run["binding"]["eligible"]
-    ]
-    assert len(historical_z_image) == 90
-    assert all(run["binding"]["reasons"] == [] for run in historical_z_image)
-    assert {run["record"]["target"]["modelId"] for run in historical_z_image} == {
-        "z_image"
-    }
-    assert Counter(
-        run["record"]["strategy"]["rung"] for run in historical_z_image
-    ) == {
-        "resident": 18,
-        "staged_residency": 18,
-        "bounded_decode": 18,
-        "bounded_attention": 18,
-        "bounded_transformer_residency": 18,
-    }
+    ), "captures without a measured loadShape must remain outside the schema-v4 bundle"
     historical_qwen = [
         run
         for run in matrix["calibrationRuns"]
@@ -176,6 +159,7 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
             {
                 "evidenceScope": "fixture",
                 "backend": "candle",
+                "loadShape": "eager_materialization",
                 "target": {
                     "provider": "krea_2_turbo",
                     "modelId": "krea_2_turbo",
@@ -285,7 +269,7 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_historical_z_image_records_remain_attached_without_runtime_promotion():
+def test_untyped_historical_z_image_records_remain_unattached_without_runtime_promotion():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
@@ -297,17 +281,7 @@ def test_historical_z_image_records_remain_attached_without_runtime_promotion():
         and cell["backend"] == "candle"
         and cell["evidence"]["historicalVerification"]
     ]
-    assert len(historical_z_image) == 90
-    assert all(cell["state"] == "Implemented/unverified" for cell in historical_z_image)
-    assert all(
-        cell["evidence"]["currentEnvironmentVerification"] == []
-        for cell in historical_z_image
-    )
-    assert Counter(cell["overlay"] for cell in historical_z_image) == {
-        "none": 30,
-        "lora": 30,
-        "control": 30,
-    }
+    assert historical_z_image == []
     historical_qwen_cells = [
         cell
         for cell in matrix["cells"]

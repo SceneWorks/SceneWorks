@@ -614,6 +614,7 @@ pub(crate) struct MlxRequestInputs {
     pub overlay: Option<String>,
     pub adapter_count: usize,
     pub has_reference: bool,
+    pub reference_count: u32,
     pub use_pid: bool,
     pub has_phases: bool,
 }
@@ -669,6 +670,7 @@ fn request_geometry(inputs: &MlxRequestInputs) -> MemoryGeometry {
         height: inputs.height,
         batch: request_batch(inputs),
         frames: 1,
+        reference_count: inputs.reference_count,
     }
 }
 
@@ -2553,6 +2555,7 @@ fn generic_mlx_shared_observation(
         height: 1,
         batch: 1,
         frames: 1,
+        reference_count: 0,
     };
     let selection = MemorySelection {
         strategy: MemoryStrategy::Resident,
@@ -3136,6 +3139,7 @@ mod tests {
                 height: 1024,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             1,
             None,
@@ -3261,6 +3265,7 @@ mod tests {
             overlay: Some("references:2+mask+adapters:1".to_owned()),
             adapter_count: 0,
             has_reference: true,
+            reference_count: 2,
             use_pid: false,
             has_phases: false,
         }
@@ -3532,6 +3537,7 @@ mod tests {
             overlay: None,
             adapter_count: 0,
             has_reference: false,
+            reference_count: 0,
             use_pid: false,
             has_phases: false,
         }
@@ -4966,24 +4972,18 @@ mod tests {
     }
 
     #[test]
-    fn packaged_bundle_without_an_exact_record_is_a_normal_legacy_reason_not_drift() {
-        // The packaged evidence is still the schema-v3 / ABI-1 collection, which schema v4
-        // deliberately classifies as a stale bundle (sc-16583's typed load-shape axis): the route
-        // degrades to legacy with `StaleBundle`, not a hard error and not drift. Once the bundle is
-        // re-collected under the v4 harness this reverts to the `NoRecord` distinction for an
-        // uncovered fixture.
+    fn packaged_bundle_without_an_exact_record_is_a_normal_no_record_reason() {
+        // The packaged evidence is current for schema v4 / ABI 3. An uncovered fixture therefore
+        // degrades to the legacy path with the precise `NoRecord` reason, not bundle drift.
         let route = packaged_admission_route(
             &fixture_plan(),
             &fixture_inputs(1024, 1024),
             "text_to_image",
             fixture_budget(8.0),
         )
-        .expect("a stale promoted bundle degrades, never errors");
+        .expect("a current promoted bundle with no exact record degrades, never errors");
         assert_eq!(route.path, AdmissionPath::Legacy);
-        assert_eq!(
-            route.fallback_reason,
-            Some(LegacyAdmissionReason::StaleBundle)
-        );
+        assert_eq!(route.fallback_reason, Some(LegacyAdmissionReason::NoRecord));
     }
 
     /// SC-15805: `memory_for_selection` is the live MLX memory-admission seam — the
@@ -5887,6 +5887,7 @@ mod tests {
                     height: 1024,
                     batch: 1,
                     frames: 1,
+                    reference_count: inputs.reference_count,
                 },
                 strategy: selection.strategy,
                 engaged_composition: contract.engaged_composition(selection.strategy),

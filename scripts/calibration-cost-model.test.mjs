@@ -507,17 +507,17 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
 
 test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
-  assert.equal(model.completedBaseline.completeRecords, 114);
+  assert.equal(model.completedBaseline.completeRecords, 24);
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
     0,
-    "the ABI-1 SC-16170 measurements remain complete history but cannot authorize ABI-2 runtime admission",
+    "the Qwen captures remain complete history after the inference runtime pin advances",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
-  assert.match(model.completedBaseline.note, /114 complete record\(s\) exist/);
+  assert.match(model.completedBaseline.note, /24 complete record\(s\) exist/);
   assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
-  assert.match(model.biggestUncertainties[0].why, /Only 4 of 53 catalog entries/);
+  assert.match(model.biggestUncertainties[0].why, /Only 6 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
   assert.doesNotMatch(
     allProse,

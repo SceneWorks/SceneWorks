@@ -5,10 +5,10 @@
 //! every other state falls back to the resident candidate and the established Candle gate.
 
 use gen_core::{
-    GenerationMemory, LoadSpec, MemoryCacheState, MemoryConformanceState, MemoryEvidence,
-    MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryParityContract, MemoryParityResult, MemoryRunContext, MemorySelection,
-    MemoryStrategy, Precision, Quant,
+    GenerationMemory, LoadSpec, MemoryBackend, MemoryCacheState, MemoryConformanceState,
+    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
+    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract, MemoryParityResult,
+    MemoryRunContext, MemorySelection, MemoryStrategy, Precision, Quant,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceQuery, EvidenceVerdict,
@@ -20,7 +20,8 @@ use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 use crate::vram_gate::VramBudget;
 use crate::{WorkerError, WorkerResult};
 
-const REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
+const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
+const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 pub(crate) struct CandleMemoryEvaluation {
@@ -143,9 +144,6 @@ fn text<'a>(object: &'a JsonObject<String, Value>, key: &str) -> Option<&'a str>
 
 fn binding(object: &JsonObject<String, Value>) -> Option<CalibrationBinding> {
     let abi = u32::try_from(object.get("abi")?.as_u64()?).ok()?;
-    // ABI 2 keys receipts by the typed materialization shape; the opt-in must declare the shape its
-    // receipts were measured under. ABI-1 opt-ins predate the axis and are stale on the ABI check
-    // alone, so the placeholder value is never compared.
     let load_shape = match object.get("loadShape").and_then(Value::as_str) {
         Some("eager_materialization") => LoadShapeKey::EagerMaterialization,
         Some("deferred_materialization") => LoadShapeKey::DeferredMaterialization,
@@ -278,13 +276,17 @@ fn verified_candidates(
             continue;
         }
         let selected_strategy = strategy(rung);
+        let load_shape = match record.load_shape {
+            LoadShapeKey::EagerMaterialization => gen_core::LoadShape::EagerMaterialization,
+            LoadShapeKey::DeferredMaterialization => gen_core::LoadShape::DeferredMaterialization,
+        };
         candidates.push(MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: runtime_provider.to_owned(),
-                backend: gen_core::MemoryBackend::Candle,
+                backend: MemoryBackend::Candle,
                 tier: numeric_tier(tier).expect("validated numeric tier"),
-                load_shape: crate::memory_strategy::load_shape_from_receipt(record.load_shape),
-                mode: crate::memory_strategy::memory_mode_from_mode_key(mode),
+                mode: request_mode(mode).0,
+                load_shape,
                 overlay: (overlay != "none").then(|| overlay.to_owned()),
                 geometry,
                 strategy: selected_strategy,
@@ -357,7 +359,7 @@ fn memory_for_selection(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_z_image(
+pub(crate) fn evaluate_shared_image(
     engine_id: &'static str,
     model_id: &str,
     spec: &LoadSpec,
@@ -377,10 +379,20 @@ pub(crate) fn evaluate_z_image(
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     if !matches!(
         engine_id,
-        "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control"
+        "z_image"
+            | "z_image_turbo"
+            | "z_image_control"
+            | "z_image_turbo_control"
+            | "qwen_image"
+            | "qwen_image_edit"
     ) {
         return Ok(None);
     }
+    let request_evidence_revision = if matches!(engine_id, "qwen_image" | "qwen_image_edit") {
+        QWEN_IMAGE_REQUEST_EVIDENCE_REVISION
+    } else {
+        Z_IMAGE_REQUEST_EVIDENCE_REVISION
+    };
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
     // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
     // Keep that surface on its established path until it mints one scope per pass.
@@ -414,10 +426,10 @@ pub(crate) fn evaluate_z_image(
     let mut resident = MemoryEvidence {
         key: MemoryEvidenceKey {
             resolved_route: engine_id.to_owned(),
-            backend: gen_core::MemoryBackend::Candle,
+            backend: MemoryBackend::Candle,
             tier,
+            mode: mode.clone(),
             load_shape: contract.load_shape,
-            mode: crate::memory_strategy::memory_mode_from_mode_key(mode_key),
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: MemoryStrategy::Resident,
@@ -436,7 +448,7 @@ pub(crate) fn evaluate_z_image(
         calibration_abi: calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
         calibration_fingerprint: calibration
             .map_or_else(String::new, |item| item.fingerprint.clone()),
-        sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+        sceneworks_revision: request_evidence_revision.to_owned(),
         inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned(),
         harness_version: String::new(),
         predicted_peak_bytes: (resident_peak_gb * BYTES_PER_GIB).ceil() as u64,
@@ -538,8 +550,8 @@ pub(crate) fn evaluate_z_image(
             selection,
             calibration_abi: selected_evidence.calibration_abi,
             calibration_fingerprint: selected_evidence.calibration_fingerprint.clone(),
-            load_shape: contract.load_shape,
             mode,
+            load_shape: contract.load_shape,
             has_reference,
             use_pid,
             has_phases,
@@ -554,7 +566,7 @@ pub(crate) fn evaluate_z_image(
             predicted_peak_bytes: selected_evidence.predicted_peak_bytes,
             cache_state,
             evidence_revision: if selection.strategy == MemoryStrategy::Resident {
-                REQUEST_EVIDENCE_REVISION.to_owned()
+                request_evidence_revision.to_owned()
             } else {
                 selected_evidence.harness_version.clone()
             },
@@ -601,7 +613,7 @@ mod tests {
         .unwrap()
         .clone();
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
-        let evaluation = evaluate_z_image(
+        let evaluation = evaluate_shared_image(
             "z_image_turbo",
             "z_image_edit",
             &spec,
@@ -615,6 +627,7 @@ mod tests {
                 height: 512,
                 batch: 1,
                 frames: 1,
+                reference_count: 1,
             },
             true,
             false,
@@ -646,7 +659,7 @@ mod tests {
     fn hires_fix_does_not_reuse_one_geometry_scope_for_both_passes() {
         let manifest = JsonObject::new();
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
-        let evaluation = evaluate_z_image(
+        let evaluation = evaluate_shared_image(
             "z_image",
             "z_image",
             &spec,
@@ -660,6 +673,7 @@ mod tests {
                 height: 512,
                 batch: 1,
                 frames: 1,
+                reference_count: 0,
             },
             false,
             false,

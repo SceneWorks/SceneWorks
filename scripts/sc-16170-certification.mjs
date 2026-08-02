@@ -283,18 +283,6 @@ function makeRecord(spec, matrixSourceRevision, sources) {
   return record;
 }
 
-function binding(spec, matrixSourceRevision) {
-  const artifact = artifactFor(spec.target.tier, spec.target.overlay);
-  return {
-    abi: 1, fingerprint: spec.calibrationFingerprint, sceneWorksRevision: SCENEWORKS_REVISION, matrixSourceRevision,
-    inferenceRevision: INFERENCE_REVISION, provider: spec.target.provider, tier: spec.target.tier,
-    mode: spec.target.mode, overlay: spec.target.overlay, geometry: spec.target.geometry,
-    artifactRepository: artifact.repository, artifactResolvedRevision: artifact.resolvedRevision,
-    artifactVariant: artifact.variant, resolvedPathFingerprint: artifact.fingerprint,
-    rung: spec.rung, parameters: runtimeParameters(spec.cases[0].parameters),
-  };
-}
-
 function indentJson(value, spaces) {
   const pad = " ".repeat(spaces);
   return JSON.stringify(value, null, 2).split("\n").map((line, index) => index === 0 ? line : `${pad}${line}`).join("\n");
@@ -436,26 +424,30 @@ const specs = plan.providers.filter((spec) => spec.backend === "candle" && spec.
 if (specs.length !== 90) throw new Error(`expected 90 SC-16170 plan cases, found ${specs.length}`);
 const retainedRecords = existing.records.filter((record) => !(record.backend === "candle" && record.target?.modelId === "z_image"));
 if (process.argv.includes("--clear")) {
-  const bundle = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: retainedRecords };
+  const bundle = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: retainedRecords };
   validateBundle(bundle); await writeFile(EVIDENCE, `${JSON.stringify(bundle, null, 2)}\n`); await writeManifestBindings([]);
   console.log("removed SC-16170 promoted records and bindings"); process.exit(0);
 }
 const sources = await loadSources();
-const records = [...retainedRecords, ...specs.map((spec) => makeRecord(spec, matrixSourceRevision, sources))].sort((a, b) => a.id.localeCompare(b.id));
-const bundle = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, sourceSessions: sources.all.sort((a, b) => a.id.localeCompare(b.id)), records };
+// Schema v4 requires a measured loadShape on every record. These captures predate that axis, so
+// continue parsing every source session and constructing every historical case, but do not invent a
+// shape or publish ABI-1 bindings into the current authoritative bundle.
+const historicalRecords = specs.map((spec) => makeRecord(spec, matrixSourceRevision, sources));
+if (historicalRecords.length !== 90) throw new Error("SC-16170 historical record population changed");
+const bundle = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: retainedRecords };
 validateBundle(bundle);
-const bindings = specs.map((spec) => binding(spec, matrixSourceRevision));
+const bindings = [];
 const renderedEvidence = `${JSON.stringify(bundle, null, 2)}\n`;
 if (process.argv.includes("--write")) {
   await writeFile(EVIDENCE, renderedEvidence);
   await writeManifestBindings(bindings);
-  console.log(`wrote ${specs.length} SC-16170 records from ${sources.all.length} source sessions`);
+  console.log(`validated ${historicalRecords.length} historical SC-16170 cases from ${sources.all.length} source sessions; left unpromoted because loadShape was not measured`);
 } else {
   const checkedEvidence = await readFile(EVIDENCE, "utf8");
-  if (checkedEvidence !== renderedEvidence) throw new Error("checked-in SC-16170 evidence differs from raw source sessions; run with --write");
+  if (checkedEvidence !== renderedEvidence) throw new Error("checked-in evidence still contains untyped SC-16170 records; run with --write");
   const checkedManifest = await readFile(MANIFEST, "utf8");
   const manifestWithoutBindings = renderManifestBindings(checkedManifest, []);
   const expectedManifest = renderManifestBindings(manifestWithoutBindings, bindings);
-  if (checkedManifest !== expectedManifest) throw new Error("checked-in SC-16170 manifest bindings differ from raw source sessions; run with --write");
-  console.log(`checked ${specs.length} SC-16170 records and bindings against ${sources.all.length} committed source sessions`);
+  if (checkedManifest !== expectedManifest) throw new Error("checked-in manifest still contains ABI-1 SC-16170 bindings; run with --write");
+  console.log(`validated ${historicalRecords.length} historical SC-16170 cases from ${sources.all.length} committed source sessions; current bundle remains fail-closed`);
 }

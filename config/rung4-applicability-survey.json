@@ -353,8 +353,18 @@
         },
         "candle": {
           "structuralApplicability": "full",
-          "implementation": "none",
-          "summary": "Same uniform 60-block trunk; no Candle block-window path.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "qwen_image",
+            "qwen_image_edit_2511"
+          ],
+          "implementedTiers": ["bf16", "q4", "q8"],
+          "implementedOverlays": ["none"],
+          "strategyParameters": {
+            "transformerWindowSizes": [1, 2, 4, 8, 15, 30],
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "The Candle/CUDA provider reopens the uniform 60-block base/edit DiT from dense mmap tensors or content-addressed packed sidecars and materializes exact shared block windows. The head and tail remain resident. Adapter-bearing requests, including Lightning's built-in LoRA, retain the established additive/folded path and report rung 4 Missing.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -366,25 +376,44 @@
               "blocks": "5 (control route only)",
               "windowable": true,
               "entries": [
-                "qwen_image"
+                "qwen_image_control"
               ]
             }
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/lib.rs",
-              "reason": "The Candle Qwen-Image provider declares no memory_strategy_contract and carries no streamed-block loader."
+              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs",
+              "reason": "The Candle provider publishes the full base/edit ladder, exact candidate ranges and fingerprint, staged prerequisites, explicit PiD/control/adapter exclusions, and request cleanup behavior."
             },
             {
-              "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/control_transformer.rs",
-              "reason": "The Fun-Controlnet-Union route adds `QwenFunControlBranch { blocks: Vec<QwenTransformerBlock> }` — 5 FULL dual-stream blocks at `control_layers = [0, 12, 24, 36, 48]` — held in the heavy bundle alongside the 60-block base trunk for the whole denoise."
+              "source": "inference:crates/media/candle-gen/candle-gen-qwen-image/src/transformer.rs",
+              "reason": "Dense and packed loaders retain a static source and replay one exact `candle_gen::block_window::BlockPlan` window at a time, with cancellation checks, synchronization before release, and ragged-final-window parity coverage."
             }
           ],
-          "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Qwen-Image."
-          },
-          "findings": []
+            "requestPeak": {
+              "finding": "unmeasured",
+              "scopes": [
+                {
+                  "entries": ["qwen_image"],
+                  "tiers": ["q4"],
+                  "modes": ["text_to_image"],
+                  "overlays": ["none"],
+                  "finding": "does-not-move"
+                }
+              ],
+              "reason": "SC-15817's representative base-Q4 CUDA capture loaded the exact current artifact and measured the bounded-attention and window-1 transformer compositions at the same 29,700,915,200-byte request peak because conditioning remained dominant. The capture is candidate/gated conformance rather than promotion evidence; unmeasured sibling tiers, modes, and overlays still require their own calibration stories.",
+              "evidence": [
+                {
+                  "source": "docs/generated/qwen-candle-five-rung-sc-15817.json",
+                  "reason": "Schema-valid real-weight records bind all five rungs to the exact artifact, CUDA device, load shape, paired repository revisions, phase peaks, and passed loadability without promoting a fit."
+                }
+              ]
+            },
+          "findings": [
+            "Head-once/tail-tiled VAE decode exposes 768, 640, 512, 448, 384, 320, and 256 output-pixel tile edges at overlap 64. Overlap 96 remains only the rejected sub-512 experiment arm.",
+            "Lightning and all user-adapter requests preserve their pre-story semantics through the existing additive/folded path and do not inherit the no-overlay rung-4 claim.",
+            "The five-block control branch and PiD decoder remain explicit exclusions rather than being inferred from the family-level base implementation."
+          ]
         }
       }
     },

@@ -235,8 +235,8 @@ test("catalog-relative inventory guard rejects whole-scope loss without freezing
       cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
       sourceOverrides: {
         calibrationEvidence: JSON.stringify({
-          schemaVersion: 3,
-          harnessVersion: "sceneworks-memory-v4",
+          schemaVersion: 4,
+          harnessVersion: "sceneworks-memory-v5",
           records: [],
         }),
       },
@@ -855,9 +855,9 @@ test("a shipping control lane is declared, not inferred from having been measure
   );
   assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
 
-  // Declaring a lane must NOT fabricate evidence. The independently measured Z-Image control cells
-  // remain attached as history, but the typed load-shape ABI bump intentionally makes them stale;
-  // every declared control lane therefore stays unverified until a current ABI-2 capture exists.
+  // Declaring a lane must NOT fabricate evidence. The Z-Image captures predate the required typed
+  // load-shape axis and therefore remain in their raw source sessions rather than being attached to
+  // schema-v4 cells; every declared control lane stays unverified until a current capture exists.
   //
   // sc-16060: until the promotion producer existed this assertion was green for the trivial reason
   // that NO cell could hold `Verified` — `strategyStatus` never returned it and the cell copied that
@@ -866,19 +866,13 @@ test("a shipping control lane is declared, not inferred from having been measure
   // this test forbids is DECLARATION alone producing verification.
   const verifiedControl = control.filter((cell) => cell.state === "Verified");
   assert.equal(verifiedControl.length, 0);
-  const historicalZImageControl = control.filter(
+  const attachedZImageControl = control.filter(
     (cell) =>
       cell.modelId === "z_image" &&
       cell.backend === "candle" &&
       cell.evidence.historicalVerification.length > 0,
   );
-  assert.equal(historicalZImageControl.length, 30);
-  assert.ok(
-    historicalZImageControl.every(
-      (cell) => cell.evidence.currentEnvironmentVerification.length === 0,
-    ),
-    "historical ABI-1 evidence must never be promoted into current ABI-2 verification",
-  );
+  assert.equal(attachedZImageControl.length, 0, "untyped historical captures must not enter schema-v4 cells");
 });
 
 test("every advertised MLX and Candle control route must be declared (sc-16073)", async () => {

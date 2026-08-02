@@ -601,6 +601,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         height,
         batch: 1,
         frames: 1,
+        reference_count: 0,
     };
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
     if pixels > max_pixels {

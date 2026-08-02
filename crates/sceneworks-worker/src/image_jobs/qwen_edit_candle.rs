@@ -1,8 +1,9 @@
 #[cfg(test)]
 use super::standard_tier_subdir_gated;
 use super::{
-    consume_gen_events, drive_gen_items, gate_tier_key, gate_with_evict_reclaim,
-    installed_tier_keys, load_reference_image, non_empty, nvfp4_host_eligible, nvfp4_selected,
+    apply_candle_qwen_load_shape, apply_request_scoped_candle_residency, consume_gen_events,
+    drive_gen_items, gate_tier_key, gate_with_evict_reclaim, installed_tier_keys,
+    load_reference_image, load_spec, non_empty, nvfp4_host_eligible, nvfp4_selected,
     read_safetensors_header, requested_receipt_variant, resolve_adapters,
     resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_seed,
     standard_tier_subdir, start_gen_stream, tier_key_from_resolved_dir, vram_reject_tail_for_tier,
@@ -551,6 +552,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
     // warm-swap false-reject / needless sequential downtier; base.rs already gets it for free via the
     // evicting cache. Same treatment as `krea_control_candle.rs` (the other `start_gen_stream` lane).
     // The reclaimable high-water is still recorded after an admit (`note_loaded_peak` below).
+    let mut generation_memory: Option<gen_core::GenerationMemory> = None;
     let use_sequential = {
         // sc-13534: key the budget off the tier `resolve_qwen_edit_candle_base` ACTUALLY landed on, not
         // the bits the request asked for — this lane now grows the tier layout the old `nvfp4 = false`
@@ -594,6 +596,43 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
             crate::vram_gate::cuda_vram_cap_gb(),
         );
+        let quant = match tier {
+            "q4" => Some(gen_core::Quant::Q4),
+            "q8" => Some(gen_core::Quant::Q8),
+            _ => None,
+        };
+        let strategy_spec = apply_candle_qwen_load_shape(
+            QWEN_EDIT_CANDLE_ENGINE,
+            load_spec(qwen_base.clone(), quant, adapters.clone(), None),
+        );
+        if let Some(evaluation) = crate::candle_memory_strategy::evaluate_shared_image(
+            QWEN_EDIT_CANDLE_ENGINE,
+            &request.model,
+            &strategy_spec,
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            raw_budget,
+            needed,
+            gen_core::MemoryCacheState::Cold,
+        )? {
+            generation_memory = evaluation.memory;
+            raw_settings.insert(
+                "memoryStrategy".to_owned(),
+                Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+            );
+        }
         // sc-13960 two-pass: resolve the plan against raw free, then — only if reclaiming the pool would
         // change (improve) it — evict the resident generator and act on the reclaimed plan. The edit lane
         // is always sequential-capable (sc-10968 wired `QwenEdit::generate_sequential`).
@@ -677,6 +716,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             }
         }
     };
+    apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -711,6 +751,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         seed: seed as u64,
                         lightning,
                         stage_residency: use_sequential,
+                        memory: generation_memory,
                         cancel: cancel.clone(),
                     };
                     let result =
