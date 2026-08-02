@@ -14973,12 +14973,11 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     );
 
     // 4b. The `GatedInPreamble` arm tells the shared driver to stand down, so it is the obvious place a
-    //     future lane could hide an ungated route. Bound it three ways: exactly ONE conditioning handler
-    //     may use it, that handler must ALSO carry a live gate call of its own (asserted in step 3 via its
-    //     `admit_conditioning_paths(` marker), and it must name a gate module it really runs. Krea
-    //     pose-control is that lane — it gates in its preamble because its check must precede its own
-    //     `note_loaded_peak` (see `ConditioningAdmission::GatedInPreamble`). A SECOND lane claiming it is
-    //     either a second ordering constraint that deserves review, or the hatch being abused.
+    //     future lane could hide an ungated route. Bind it to the audited Krea conditioning handler:
+    //     if a handler uses it, that handler must ALSO carry a live gate call of its own (asserted in
+    //     step 3 via its `admit_conditioning_paths(` marker), and it must name a gate module it really
+    //     runs. Krea pose-control gates before its own `note_loaded_peak`; any other lane is a new
+    //     exemption and must fail review here.
     let opting_out: Vec<&str> = CONDITIONING
         .iter()
         .filter(|(_, _, source, _)| source.contains("ConditioningAdmission::GatedInPreamble"))
@@ -14987,9 +14986,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     assert_eq!(
         opting_out,
         vec!["KreaControl"],
-        "exactly one conditioning lane may declare GatedInPreamble (Krea pose-control, whose check must \
-         precede its own note_loaded_peak). Anything else here tells the shared driver to stand down \
-         without review (sc-16069)"
+        "only the audited Krea pose-control preamble may declare \
+         GatedInPreamble. Anything else tells the shared driver to stand down without review (sc-16069)"
     );
     let krea_source = CONDITIONING
         .iter()
@@ -15008,7 +15006,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
          seam — naming a gate it does not call would be an admission claim with nothing behind it \
          (sc-16069)"
     );
-
     // 5. Each direct-gate lane gates BEFORE it hands off to the load — a gate placed after the allocation
     //    begins is not a pre-flight check. Most lanes hand off via `start_gen_stream`; Krea pose-control
     //    hands off via `run_candle_strict_control`, so accept whichever the lane uses and require at least

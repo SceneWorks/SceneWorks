@@ -93,6 +93,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
     assert current_eligible == []
+    assert all(
+        run["record"]["target"]["modelId"] != "z_image"
+        for run in matrix["calibrationRuns"]
+    ), "captures without a measured loadShape must remain outside the schema-v4 bundle"
     historical_qwen = [
         run
         for run in matrix["calibrationRuns"]
@@ -265,11 +269,19 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_historical_records_do_not_promote_cells_to_dynamic_verification():
+def test_untyped_historical_z_image_records_remain_unattached_without_runtime_promotion():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
     assert verified == []
+    historical_z_image = [
+        cell
+        for cell in matrix["cells"]
+        if cell["modelId"] == "z_image"
+        and cell["backend"] == "candle"
+        and cell["evidence"]["historicalVerification"]
+    ]
+    assert historical_z_image == []
     historical_qwen_cells = [
         cell
         for cell in matrix["cells"]
@@ -461,6 +473,7 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         for row in rows
         if row["requestPeak"] == "moves"
     ] == [
+        (15510, "candle"),
         (15510, "mlx"),
         (15511, "mlx"),
         (15512, "mlx"),

@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 4,
   "harnessVersion": "sceneworks-memory-v5",
   "records": [
     {
@@ -5176,6 +5177,5 @@
         "tier": "bf16"
       }
     }
-  ],
-  "schemaVersion": 4
+  ]
 }

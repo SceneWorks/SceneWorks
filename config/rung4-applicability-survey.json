@@ -202,13 +202,15 @@
             "z_image_turbo"
           ],
           "implementedOverlays": [
-            "none"
+            "none",
+            "lora",
+            "control"
           ],
           "strategyParameters": {
             "transformerWindowSize": 1,
             "transformerWindowComponent": "Dit"
           },
-          "summary": "Candle now windows the 30-block packed or dense main DiT through the shared block-window primitive; the 2-block refiners remain resident. The bespoke control providers declare their constrained rungs Missing rather than inheriting the plain provider contract, and adapter-bearing loads keep lower rungs but do not advertise streamed blocks.",
+          "summary": "Candle windows the 30-block packed or dense main DiT and the 15-block Fun-Controlnet Union branch through the shared block-window primitive; each 2-block refiner remains resident. Packed-tier LoRA residual plans are retained and replayed onto every materialized main block, so none, LoRA, and strict-control overlays all expose the same request-scoped rung.",
           "blockStacks": [
             {
               "name": "noise_refiner",
@@ -247,7 +249,7 @@
           "evidence": [
             {
               "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs",
-              "reason": "The CUDA provider contract publishes the full ladder, exact tile/chunk/window candidate ranges, calibration identity, explicit PiD refusal, adapter exclusion for rung 4, and separate Missing contracts for the bespoke control routes."
+              "reason": "The CUDA provider contracts publish the full ladder, exact bounded-host-decode/chunk/window candidate ranges, one shared calibration identity, explicit PiD refusal, and overlay-compatible rung-4 support for both registered and bespoke control routes."
             },
             {
               "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/packed_dit.rs",
@@ -255,12 +257,20 @@
             },
             {
               "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/packed_tier_validate.rs",
-              "reason": "The ignored CUDA real-weight conformance exercises the representative Base Q4 provider across all five rungs with fixed seed and exact image equality; the packed-DiT production unit sweep covers every published transformer-window candidate, including a ragged tail."
+              "reason": "The ignored CUDA real-weight conformance covers packed q4/q8 base and Fun-Controlnet loading plus fixed-seed warm repeat, request-field steering, recoverable errors, and cancellation cleanup."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/sequential_vram_probe.rs",
+              "reason": "The fresh-process CUDA harness selects every rung, installed q4/q8/bf16 tier, optional deterministic LoRA overlay, and text-to-image or reference-driven style-variation mode while recording phase peaks and warm-repeat determinism."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/tests/control_vram_probe.rs",
+              "reason": "The strict-control CUDA harness drives the shipping Fun-Controlnet Union 2.1 checkpoint through every rung and installed tier, recording predecode/decode peaks and fixed-seed output."
             }
           ],
           "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "The MLX measurement is MLX's. Rung 3 already showed a cross-backend gap of roughly an order of magnitude on this ladder, so the MLX figures predict nothing here."
+            "finding": "moves",
+            "reason": "Fresh-process CUDA calibration on an RTX PRO 6000 Blackwell at 1024² moves the strict-control request envelope from resident 27.117/32.016/40.573 GB (q4/q8/bf16) to approximately 13.6/13.7/13.3 GB with one-block streaming; the denoise phase becomes bounded by a single materialized main/control block window."
           },
           "findings": []
         }

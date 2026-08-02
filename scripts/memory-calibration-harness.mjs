@@ -407,13 +407,114 @@ export function validateBundle(bundle) {
   if (bundle.schemaVersion !== 4 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
     fail("invalid bundle envelope");
   }
+  const sessions = new Map();
+  const inventoryInputs = new Map();
+  for (const session of bundle.sourceSessions ?? []) {
+    if (sessions.has(session.id)) fail(`duplicate source session ${session.id}`);
+    const requiresExactInputs = session.claims.some((claim) =>
+      ["loadability", "quality", "negative_mutation"].includes(claim));
+    if (requiresExactInputs && session.inputs.length === 0) {
+      fail(`${session.id}: artifact claims require exact inputs`);
+    }
+    if (session.target && requiresExactInputs) {
+      const hasBase = session.inputs.some((input) => input.role === "base" && input.variant === session.target.tier);
+      const hasOverlay = session.target.overlay === "control"
+        ? session.inputs.some((input) => input.role === "control")
+        : session.target.overlay === "lora"
+          ? session.inputs.some((input) => input.role === "adapter")
+          : true;
+      if (!hasBase || !hasOverlay) fail(`${session.id}: artifact claim is missing its exact tier/overlay inputs`);
+    }
+    sessions.set(session.id, session);
+    if (session.kind === "static_analysis" && !session.target) {
+      for (const input of session.inputs) {
+        const key = `${input.role}\0${input.variant}`;
+        const existing = inventoryInputs.get(key);
+        if (existing && !equal(existing, input)) fail(`inventory sessions disagree on exact ${input.role}/${input.variant} input identity`);
+        inventoryInputs.set(key, input);
+      }
+    }
+  }
   const ids = new Set();
   for (const record of bundle.records) {
     validateRecord(record);
     if (ids.has(record.id)) fail(`duplicate record ${record.id}`);
     ids.add(record.id);
+    const requiresDerivation = record.backend === "candle"
+      && record.target.modelId === "z_image"
+      && record.evidenceScope === "authoritative"
+      && record.status === "complete";
+    if (requiresDerivation && !record.derivation) fail(`${record.id}: missing source-session derivation`);
+    if (record.derivation) {
+      for (const [claim, reference] of Object.entries(record.derivation).filter(([key]) => key !== "justification")) {
+        const sourceClaim = claim === "negativeMutation" ? "negative_mutation" : claim;
+        for (const sessionId of reference.sourceSessionIds) {
+          const session = sessions.get(sessionId);
+          if (!session) fail(`${record.id}: missing source session ${sessionId}`);
+          if (!session.claims.includes(sourceClaim)) fail(`${record.id}: ${sessionId} does not claim ${sourceClaim}`);
+          if (requiresDerivation) validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs);
+          if (["memory", "quality", "overlay"].includes(claim)
+              && session.target && session.target.tier !== record.target.tier) {
+            fail(`${record.id}: ${claim} cannot cross precision tiers`);
+          }
+          if (claim === "memory" && session.target && session.target.rung !== record.strategy.rung) {
+            fail(`${record.id}: memory cannot cross ladder rungs`);
+          }
+          if (["quality", "overlay"].includes(claim) && reference.kind === "direct"
+              && session.target && session.target.overlay !== record.target.overlay) {
+            fail(`${record.id}: direct ${claim} cannot cross overlays`);
+          }
+        }
+      }
+      if (!["direct", "conservative_upper_bound"].includes(record.derivation.memory.kind)) {
+        fail(`${record.id}: invalid memory derivation kind`);
+      }
+      if (record.derivation.loadability.kind !== "direct") {
+        fail(`${record.id}: loadability must be direct`);
+      }
+      if (requiresDerivation) {
+        const exactInputs = new Map();
+        for (const sessionId of record.derivation.loadability.sourceSessionIds) {
+          for (const input of sessions.get(sessionId).inputs) {
+            const existing = exactInputs.get(input.role);
+            if (existing && !equal(existing, input)) {
+              fail(`${record.id}: loadability sources disagree on exact ${input.role} input identity`);
+            }
+            exactInputs.set(input.role, input);
+          }
+        }
+      }
+    }
   }
   return bundle;
+}
+
+function validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs) {
+  const fingerprint = record.loadability.resolvedPathFingerprint ?? "";
+  for (const input of session.inputs) {
+    const expectedInput = inventoryInputs.get(`${input.role}\0${input.variant}`);
+    if (!expectedInput) fail(`${record.id}: ${session.id} has no canonical ${input.role}/${input.variant} inventory`);
+    if (!equal(expectedInput, input)) fail(`${record.id}: ${session.id} input differs from its exact inventory identity`);
+    if (input.role === "base") {
+      if (input.repository !== record.artifact.repository
+          || input.resolvedRevision !== record.artifact.resolvedRevision) {
+        fail(`${record.id}: ${session.id} base input does not match record artifact identity`);
+      }
+      const expectedTier = session.target?.tier ?? record.target.tier;
+      if (input.variant !== expectedTier) fail(`${record.id}: ${session.id} base input has the wrong tier variant`);
+    }
+    const exactOverlaySource = (!session.target || session.target.overlay === record.target.overlay)
+      && ["quality", "loadability", "overlay"].includes(sourceClaim);
+    if (!exactOverlaySource) continue;
+    const token = input.role === "base"
+      ? `${input.repository}@${input.resolvedRevision}:${input.variant}`
+      : input.role === "control"
+        ? `+${input.repository}@${input.resolvedRevision}`
+        : `+lora@${input.resolvedRevision}`;
+    if (!fingerprint.includes(token)) {
+      fail(`${record.id}: ${session.id} input is absent from the record artifact fingerprint`);
+    }
+  }
 }
 
 export function evidenceSemantics(record, revisions) {
@@ -438,7 +539,18 @@ export function mergeBundles(left, right) {
     if (existing && !equal(existing, record)) fail(`conflicting record with exact identity ${record.id}`);
     records.set(record.id, record);
   }
-  return { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)) };
+  const sourceSessions = new Map((left.sourceSessions ?? []).map((session) => [session.id, session]));
+  for (const session of right.sourceSessions ?? []) {
+    const existing = sourceSessions.get(session.id);
+    if (existing && !equal(existing, session)) fail(`conflicting source session ${session.id}`);
+    sourceSessions.set(session.id, session);
+  }
+  return {
+    schemaVersion: 4,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: [...sourceSessions.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)),
+  };
 }
 
 export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE) {
@@ -645,7 +757,9 @@ export async function runProviderPlan({
     const after = await probeRepositories();
     if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
   };
-  const existing = resume ? validateBundle(resume) : { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [] };
+  const existing = resume
+    ? validateBundle(resume)
+    : { schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
   const selectedConfig = {
     ...config,
     providers: config.providers.filter(

@@ -1,0 +1,5 @@
+﻿ARTIFACT_JSON {"role":"control","path":"D:\\models\\sc-16095\\z-image-controlnet\\Z-Image-Fun-Controlnet-Union-2.1.safetensors","bytes":6712485600,"sha256":"2393b0c58c52a12134f6ffd96ff9b6ea3c80bb233665fb2c3b9aebcee71ae3e4","repository":"alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1","resolvedRevision":"755999a934909bd5832e20718bb7c639d2a63eb9","variant":"union-2.1","fileCount":1}
+FILE_JSON {"path":"Z-Image-Fun-Controlnet-Union-2.1.safetensors","bytes":6712485600,"sha256":"2393b0c58c52a12134f6ffd96ff9b6ea3c80bb233665fb2c3b9aebcee71ae3e4"}
+CAPTURED_AT 2026-08-02T02:51:03.1089716Z
+SCENEWORKS_BASELINE e87abd092f2e83452c0e527d69f85fc4d6465242
+INFERENCE_REVISION 65833f24409bce33c418499c2029bee76d842740

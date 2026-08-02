@@ -910,6 +910,17 @@ const BOOGU_MLX_TURNKEY_REVISION: &str = "a459e614d408bfdf57089c32cc3da706f5a017
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const IDEOGRAM_MLX_TURNKEY_REVISION: &str = "a3095855b8819dc0d6b067cb1354aaa7da189ff8";
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const ZIMAGE_MLX_TURNKEY_REPO: &str = "SceneWorks/z-image-mlx";
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const ZIMAGE_MLX_TURNKEY_REVISION: &str =
+    "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab";
 
 #[cfg(any(
     target_os = "macos",
@@ -948,9 +959,18 @@ fn pinned_turnkey_snapshot_for_request(
             boogu_model_subdir(&root, request)
         }
         "ideogram_4" | "ideogram_4_turbo" => ideogram_model_subdir(&root, request),
+        "z_image" => standard_tier_subdir(&root, request),
         _ => return None,
     };
-    let complete = if request.model.starts_with("boogu_") {
+    let complete = if request.model == "z_image" {
+        tier_key_from_resolved_dir(&selected).is_some()
+            && (selected
+                .join("transformer/diffusion_pytorch_model.safetensors")
+                .is_file()
+                || selected
+                    .join("transformer/diffusion_pytorch_model.safetensors.index.json")
+                    .is_file())
+    } else if request.model.starts_with("boogu_") {
         selected
             .join("transformer/diffusion_pytorch_model.safetensors")
             .is_file()
@@ -1049,6 +1069,13 @@ pub(crate) fn resolve_weights_dir(
             &repo,
             model.default_repo(),
             IDEOGRAM_MLX_TURNKEY_REVISION,
+        ),
+        "z_image" => pinned_turnkey_snapshot_for_request(
+            &settings.data_dir,
+            request,
+            &repo,
+            ZIMAGE_MLX_TURNKEY_REPO,
+            ZIMAGE_MLX_TURNKEY_REVISION,
         ),
         _ => None,
     };
@@ -2451,6 +2478,25 @@ fn resolve_tier_dir(request: &ImageRequest, settings: &Settings, tier: &str) -> 
     (tier_key_from_resolved_dir(&dir) == Some(tier_static_name(tier))).then_some(dir)
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn zimage_certified_artifact_path(settings: &Settings, weights_dir: &Path, tier: &str) -> bool {
+    let Some(root) = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        ZIMAGE_MLX_TURNKEY_REPO,
+        ZIMAGE_MLX_TURNKEY_REVISION,
+    ) else {
+        return false;
+    };
+    let expected = root.join(tier);
+    match (
+        std::fs::canonicalize(weights_dir),
+        std::fs::canonicalize(&expected),
+    ) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => weights_dir == expected,
+    }
+}
+
 /// The generation tiers (`bf16`/`q8`/`q4`) currently INSTALLED for `request`'s model, in DESCENDING
 /// fidelity (bf16 → q8 → q4). Each is confirmed by [`resolve_tier_dir`] (a forced-bits probe of the
 /// real family resolver), so the list is exactly what the loader could load. Empty for a model with no
@@ -2980,9 +3026,11 @@ pub(super) fn candle_adapter_resident_bytes(
     tier: &str,
     measured_source_bytes: u64,
 ) -> u64 {
-    // Krea keeps lazily merged adapter overlays on its resident host, including dense tiers. Other
-    // generic Candle providers fold dense factors and retain residuals only on packed tiers.
-    if engine_id.starts_with("krea_2_") || tier != "bf16" {
+    // Krea keeps lazily merged adapter overlays on its resident host. Z-Image likewise installs
+    // forward-time residuals for dense bf16 as well as packed tiers, so both families must reserve
+    // the exact adapter source bytes at every precision. Other generic Candle providers fold dense
+    // factors and retain residuals only on packed tiers.
+    if engine_id.starts_with("krea_2_") || engine_id.starts_with("z_image") || tier != "bf16" {
         measured_source_bytes
     } else {
         0
@@ -6411,6 +6459,11 @@ mod krea_turbo_memory_route_tests {
             (false, Some(321))
         );
         assert_eq!(candle_adapter_resident_bytes("krea_2_turbo", "bf16", 321), 321);
+        assert_eq!(candle_adapter_resident_bytes("z_image", "bf16", 321), 321);
+        assert_eq!(
+            candle_adapter_resident_bytes("z_image_control", "bf16", 321),
+            321
+        );
         assert_eq!(candle_adapter_resident_bytes("sdxl", "bf16", 321), 0);
         assert_eq!(candle_adapter_resident_bytes("sdxl", "q4", 321), 321);
 
@@ -7292,6 +7345,7 @@ async fn generate_candle_stream(
         engine_id,
         &request.model,
         &zimage_contract_spec,
+        zimage_certified_artifact_path(settings, &weights_dir, tier),
         &request.model_manifest_entry,
         tier,
         &request.mode,
@@ -7310,6 +7364,7 @@ async fn generate_candle_stream(
         hires_fix.is_some(),
         budget,
         needed,
+        adapter_resident_bytes,
         if reclaimable_gb > 0.0 {
             gen_core::MemoryCacheState::Warm
         } else {

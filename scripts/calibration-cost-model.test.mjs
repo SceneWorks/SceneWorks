@@ -517,7 +517,7 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.match(model.completedBaseline.note, /24 complete record\(s\) exist/);
   assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
-  assert.match(model.biggestUncertainties[0].why, /Only 5 of 53 catalog entries/);
+  assert.match(model.biggestUncertainties[0].why, /Only 6 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
   assert.doesNotMatch(
     allProse,

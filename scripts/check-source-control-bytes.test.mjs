@@ -44,6 +44,7 @@ const DECLARED_BINARY_EXTENSIONS = [
   ".ico",
   ".jpeg",
   ".jpg",
+  ".log",
   ".mov",
   ".mp4",
   ".onnx",

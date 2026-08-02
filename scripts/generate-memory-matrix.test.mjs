@@ -48,6 +48,29 @@ test("a comment-only manifest edit produces no generated matrix change", async (
   assert.deepEqual(withoutAnyComments, baseline);
 });
 
+test("self-stamped manifest matrix revisions do not rotate the source fingerprint", async () => {
+  const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
+  const manifest = await readFile(manifestUrl, "utf8");
+  const baseline = await buildMatrix();
+  const mutated = await buildMatrix({
+    sourceOverrides: {
+      manifest: manifest.replaceAll(
+        /"matrixSourceRevision":\s*"source-tree:[0-9a-f]{64}"/g,
+        `"matrixSourceRevision": "source-tree:${"f".repeat(64)}"`,
+      ),
+    },
+  });
+
+  assert.equal(
+    mutated.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+  );
+  assert.equal(
+    mutated.generatedFrom.sources.manifest.sha256,
+    baseline.generatedFrom.sources.manifest.sha256,
+  );
+});
+
 // The Rust/TOML half of the same principle (sc-16268). DERIVED from the generator's own
 // `SOURCE_PATHS` rather than mirrored, so dropping a source from the fingerprint cannot leave these
 // tests green — the tripwire's coverage is the thing under test.
@@ -210,6 +233,13 @@ test("catalog-relative inventory guard rejects whole-scope loss without freezing
       // Preserve the bespoke tier-override scope so its older, narrower guard does not mask the new
       // catalog-wide assertion. Every other Candle scope disappears from the real generator path.
       cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
+      sourceOverrides: {
+        calibrationEvidence: JSON.stringify({
+          schemaVersion: 4,
+          harnessVersion: "sceneworks-memory-v5",
+          records: [],
+        }),
+      },
     }),
     /:candle: catalog cross-product expects .* emitted 0/,
   );
@@ -825,18 +855,24 @@ test("a shipping control lane is declared, not inferred from having been measure
   );
   assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
 
-  // Declaring a lane must NOT fabricate evidence: these cells are honestly unverified.
+  // Declaring a lane must NOT fabricate evidence. The Z-Image captures predate the required typed
+  // load-shape axis and therefore remain in their raw source sessions rather than being attached to
+  // schema-v4 cells; every declared control lane stays unverified until a current capture exists.
   //
   // sc-16060: until the promotion producer existed this assertion was green for the trivial reason
   // that NO cell could hold `Verified` — `strategyStatus` never returned it and the cell copied that
   // verbatim. It now asserts something: a declared lane with no measurement stays unverified while a
   // measured one is promoted, and the sc-16060 tests below prove the promotion path is live. What
   // this test forbids is DECLARATION alone producing verification.
-  assert.equal(
-    control.filter((cell) => cell.state === "Verified").length,
-    0,
-    "declaring a lane must not manufacture verification — no overlay cell has been measured",
+  const verifiedControl = control.filter((cell) => cell.state === "Verified");
+  assert.equal(verifiedControl.length, 0);
+  const attachedZImageControl = control.filter(
+    (cell) =>
+      cell.modelId === "z_image" &&
+      cell.backend === "candle" &&
+      cell.evidence.historicalVerification.length > 0,
   );
+  assert.equal(attachedZImageControl.length, 0, "untyped historical captures must not enter schema-v4 cells");
 });
 
 test("every advertised MLX and Candle control route must be declared (sc-16073)", async () => {
@@ -907,7 +943,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
+    ["15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
   );
   assert.equal(
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")
@@ -987,16 +1023,28 @@ test("an implemented family is Implemented/unverified only where the provider ac
     "the published window size and default component scope travel with the cell",
   );
 
-  // The Candle half lands independently under SC-15815. It resolves Edit through Turbo, publishes
-  // the same default window/component shape, and refuses to promote adapter/control overlays.
-  const zImageCandle = implemented.filter(
-    (cell) => cell.backend === "candle" && cell.owningFamilyStory === 15815,
+  // The Candle half lands independently under SC-15815. Base Z-Image's SC-16170 certification adds
+  // adapter and strict-control overlays; Turbo/Edit retain their previously narrower plain surface.
+  const zImageCandle = matrix.cells.filter(
+    (cell) =>
+      cell.rung === "bounded_transformer_residency" &&
+      ["Implemented/unverified", "Verified"].includes(cell.state) &&
+      cell.backend === "candle" &&
+      cell.owningFamilyStory === 15815,
   );
   assert.deepEqual(
     [...new Set(zImageCandle.map((cell) => cell.modelId))].sort(),
     ["z_image", "z_image_edit", "z_image_turbo"],
   );
-  assert.ok(zImageCandle.every((cell) => cell.overlay === "none"));
+  assert.deepEqual(
+    [...new Set(zImageCandle.filter((cell) => cell.modelId === "z_image").map((cell) => cell.overlay))].sort(),
+    ["control", "lora", "none"],
+  );
+  assert.ok(
+    zImageCandle
+      .filter((cell) => cell.modelId === "z_image")
+      .every((cell) => ["control", "lora", "none"].includes(cell.overlay)),
+  );
   assert.ok(
     zImageCandle.every(
       (cell) =>
@@ -1014,11 +1062,13 @@ test("an implemented family is Implemented/unverified only where the provider ac
     assert.ok(cells.length > 0);
     assert.ok(
       cells.every((cell) =>
-        cell.overlay === "control"
-          ? cell.state === "Missing"
-          : cell.state === "Implemented/unverified",
+        cell.modelId === "z_image"
+          ? ["Implemented/unverified", "Verified"].includes(cell.state)
+          : cell.overlay === "control"
+            ? cell.state === "Missing"
+            : cell.state === "Implemented/unverified",
       ),
-      `${rung} must be explicit for plain/adapter loads without leaking to bespoke control`,
+      `${rung} must reach base control without leaking to the Turbo control route`,
     );
   }
 
@@ -1482,7 +1532,7 @@ test("every control-advertising family inventories its control-branch stack", as
   }
 });
 
-test("Z-Image Candle control does not inherit staged residency from the plain provider", async () => {
+test("only the independently wired base Z-Image Candle control route exposes staged residency", async () => {
   const matrix = await buildMatrix();
   const cells = matrix.cells.filter(
     (cell) =>
@@ -1493,9 +1543,11 @@ test("Z-Image Candle control does not inherit staged residency from the plain pr
   );
   assert.ok(cells.length > 0);
   assert.ok(
-    cells.every((cell) => cell.state === "Missing"),
-    "the bespoke eager control provider declares every constrained rung Missing",
+    cells
+      .filter((cell) => cell.modelId === "z_image")
+      .every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
   );
+  assert.ok(cells.filter((cell) => cell.modelId === "z_image_turbo").every((cell) => cell.state === "Missing"));
 });
 
 test("a survey verdict that reaches no cell is rejected, not silently carried", async () => {
@@ -1708,12 +1760,14 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.equal(
     shippedCell.state,
     "Implemented/unverified",
-    "the shipped Krea records are historical",
+    "the shipped Krea records are historical on the newly pinned inference revision",
   );
   assert.equal(
-    shipped.cells.filter((cell) => cell.state === "Verified").length,
+    shipped.cells.filter(
+      (cell) => cell.modelId === "qwen_image" && cell.backend === "mlx" && cell.state === "Verified",
+    ).length,
     0,
-    "the Qwen captures become historical when the inference runtime pin advances",
+    "an inference pin change must fail closed instead of carrying Qwen verification forward",
   );
 
   // MUTATION: the same two records, re-stamped onto the current pin. If the producer were absent —

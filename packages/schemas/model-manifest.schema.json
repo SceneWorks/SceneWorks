@@ -904,7 +904,7 @@
                         "fingerprint": { "type": "string", "minLength": 1 },
                         "tiers": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["bf16", "q4", "q8"] } },
                         "modes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-                        "overlays": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["none", "lora", "identity"] } },
+                        "overlays": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["none", "lora", "identity", "control"] } },
                         "engagedRungs": {
                           "type": "array",
                           "minItems": 1,
@@ -1009,6 +1009,10 @@
                   }
                 ],
                 "description": "Optional exact per-cell Candle/CUDA calibration bindings. The worker submits only exact authoritative packaged records to the shared selector; absence or any identity mismatch leaves optimized execution unavailable."
+              },
+              "memoryStrategyContract": {
+                "$ref": "#/properties/models/items/properties/mlx/properties/memoryStrategyContract",
+                "description": "Pinned Candle/CUDA provider capability declaration for static matrix inventory. Exact promoted runtime evidence remains owned by candle.calibrations."
               },
               "turboFit": {
                 "$ref": "#/$defs/kreaTurboFit",

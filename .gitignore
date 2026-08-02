@@ -57,6 +57,7 @@ cover/
 
 # Django stuff:
 *.log
+!docs/calibration/sc-16170/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

@@ -51,7 +51,6 @@ const ZIMAGE_CTRL_BASE_FILE: &str = "diffusion_pytorch_model.safetensors";
 #[cfg(test)]
 pub(super) const ZIMAGE_CTRL_BASE_REVISION: &str = "755999a934909bd5832e20718bb7c639d2a63eb9";
 /// The base Z-Image diffusers repo when the manifest omits `repo` (sc-8379).
-const ZIMAGE_CTRL_BASE_DEFAULT_REPO: &str = "Tongyi-MAI/Z-Image";
 /// ControlNet conditioning-scale default (the strict-pose tier).
 pub(super) const ZIMAGE_CTRL_DEFAULT_SCALE: f32 = 1.0;
 /// Base-mode (sc-8680) classifier-free guidance default — the undistilled base `z_image` runs real CFG;
@@ -90,21 +89,18 @@ pub(super) fn is_zimage_base_model(model: &str) -> bool {
     model == "z_image"
 }
 
-/// The default base diffusers repo for this control job's model — Turbo (`Tongyi-MAI/Z-Image-Turbo`) or
-/// the base undistilled `Tongyi-MAI/Z-Image` (sc-8379), selected by the request model id.
+/// Default base repository for this control job. The undistilled route uses the immutable
+/// `SceneWorks/z-image-mlx` tier matrix certified by SC-16170; Turbo keeps its own turnkey.
 pub(super) fn zimage_control_base_default_repo(model: &str) -> &'static str {
-    crate::engines::default_repo_for(model).unwrap_or_else(|| {
-        if is_zimage_base_model(model) {
-            ZIMAGE_CTRL_BASE_DEFAULT_REPO
-        } else {
-            ZIMAGE_CTRL_DEFAULT_REPO
-        }
-    })
+    if is_zimage_base_model(model) {
+        return super::ZIMAGE_MLX_TURNKEY_REPO;
+    }
+    crate::engines::default_repo_for(model).unwrap_or(ZIMAGE_CTRL_DEFAULT_REPO)
 }
 
-/// Resolve the Z-Image base (diffusers) snapshot: an explicit `modelPath` (advanced or manifest) → the
-/// HF cache snapshot for the manifest `repo` (default `Tongyi-MAI/Z-Image-Turbo`, or `Tongyi-MAI/Z-Image`
-/// for the base model, sc-8379). `None` ⇒ not present locally (the candle lane refuses the job; no
+/// Resolve the Z-Image base snapshot: an explicit `modelPath` (advanced or manifest) → the HF cache
+/// snapshot for the manifest `repo`; the base model resolves only its immutable certified snapshot.
+/// `None` ⇒ not present locally (the candle lane refuses the job; no
 /// fallback is attempted). Mirrors `resolve_kolors_control_base`.
 pub(super) fn resolve_zimage_control_base(
     request: &ImageRequest,
@@ -129,8 +125,17 @@ pub(super) fn resolve_zimage_control_base(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| zimage_control_base_default_repo(&request.model));
-    Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
-        .map(|root| standard_tier_subdir(&root, request)))
+    let snapshot = if is_zimage_base_model(&request.model) && repo == super::ZIMAGE_MLX_TURNKEY_REPO
+    {
+        crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            repo,
+            super::ZIMAGE_MLX_TURNKEY_REVISION,
+        )
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, repo)
+    };
+    Ok(snapshot.map(|root| standard_tier_subdir(&root, request)))
 }
 
 /// True when this is a candle-eligible Z-Image strict-control job: `z_image_turbo` or the base `z_image`
@@ -511,6 +516,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         use_pid,
         pid_output_tier(request),
     );
+
     let mut raw_settings = zimage_control_raw_settings(
         request,
         &repo,

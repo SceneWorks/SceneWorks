@@ -1456,6 +1456,26 @@ export const SOURCE_PATHS = Object.freeze({
   cargo: "Cargo.toml",
 });
 
+// `matrixSourceRevision` is generated provenance written back into the manifest's calibration
+// bindings. Including that value in the source-tree hash creates an impossible fixed point:
+// regenerating the matrix rotates the value, certification writes the new value into the
+// manifest, and the next regeneration rotates it again. Keep every binding field that affects
+// eligibility in the semantic hash, but replace only this self-stamped provenance value.
+function manifestRevisionBody(body) {
+  const parsed = JSON.parse(stripJsoncComments(body));
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (value === null || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        key === "matrixSourceRevision" ? "source-tree:<generated>" : visit(child),
+      ]),
+    );
+  };
+  return JSON.stringify(visit(parsed));
+}
+
 export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = {}) {
   const sourcePaths = SOURCE_PATHS;
   const sourceEntries = Object.entries(sourcePaths);
@@ -1484,7 +1504,12 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
   // TOML — so provenance is stable across semantically inert edits (sc-16129 did the manifest;
   // sc-16268 the rest). Parsing below still reads the raw `bodies`; only provenance reads these.
   const revisionBodies = Object.fromEntries(
-    sourceEntries.map(([name, relative]) => [name, semanticSourceBody(relative, bodies[name])]),
+    sourceEntries.map(([name, relative]) => [
+      name,
+      name === "manifest"
+        ? manifestRevisionBody(bodies[name])
+        : semanticSourceBody(relative, bodies[name]),
+    ]),
   );
   const images = manifest.models.filter((model) => model.type === "image");
   const manifestById = new Map(images.map((model) => [model.id, model]));

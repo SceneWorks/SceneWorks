@@ -47,6 +47,7 @@ fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
 fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
+        "style_variations" => (MemoryMode::ImageToImage, "style_variations"),
         "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
@@ -175,15 +176,20 @@ fn rung(value: &str) -> Option<StrategyRung> {
     }
 }
 
+fn evidence_provider(engine_id: &str) -> &str {
+    engine_id.strip_suffix("_control").unwrap_or(engine_id)
+}
+
 fn verified_candidates(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
-    provider: &str,
+    runtime_provider: &str,
     tier: &str,
     mode: &str,
     overlay: &str,
     geometry: MemoryGeometry,
 ) -> WorkerResult<Vec<MemoryEvidence>> {
+    let evidence_provider = evidence_provider(runtime_provider);
     let loaded = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "packaged memory-calibration evidence is invalid: {error}"
@@ -210,7 +216,7 @@ fn verified_candidates(
         let Some(item) = value.as_object() else {
             continue;
         };
-        if text(item, "provider") != Some(provider)
+        if text(item, "provider") != Some(evidence_provider)
             || text(item, "tier") != Some(tier)
             || text(item, "mode") != Some(mode)
             || text(item, "overlay") != Some(overlay)
@@ -251,7 +257,7 @@ fn verified_candidates(
         let query = EvidenceQuery {
             backend: CalibrationBackend::Candle,
             model_id: model_id.to_owned(),
-            provider: provider.to_owned(),
+            provider: evidence_provider.to_owned(),
             tier: tier.to_owned(),
             mode: mode.to_owned(),
             overlay: overlay.to_owned(),
@@ -276,7 +282,7 @@ fn verified_candidates(
         };
         candidates.push(MemoryEvidence {
             key: MemoryEvidenceKey {
-                resolved_route: provider.to_owned(),
+                resolved_route: runtime_provider.to_owned(),
                 backend: MemoryBackend::Candle,
                 tier: numeric_tier(tier).expect("validated numeric tier"),
                 mode: request_mode(mode).0,
@@ -305,11 +311,31 @@ fn verified_candidates(
                 RequiredNullable::Value(observed) => Some(observed.overall.device_bytes),
                 RequiredNullable::Null => None,
             },
-            parity: MemoryParityContract::Exact,
+            parity: if record.quality.maximum_error_threshold == Some(0.0)
+                && record.quality.mean_error_threshold == Some(0.0)
+            {
+                MemoryParityContract::Exact
+            } else {
+                MemoryParityContract::Tolerance {
+                    metric: "maximum normalized RGB8 error".to_owned(),
+                    maximum_error: record.quality.maximum_error_threshold.unwrap_or_default(),
+                }
+            },
             parity_result: MemoryParityResult::Passed,
         });
     }
     Ok(candidates)
+}
+
+fn account_for_runtime_overlay_bytes(
+    candidates: &mut [MemoryEvidence],
+    runtime_overlay_bytes: u64,
+) {
+    for candidate in candidates {
+        candidate.predicted_peak_bytes = candidate
+            .predicted_peak_bytes
+            .saturating_add(runtime_overlay_bytes);
+    }
 }
 
 fn memory_for_selection(
@@ -337,6 +363,7 @@ pub(crate) fn evaluate_shared_image(
     engine_id: &'static str,
     model_id: &str,
     spec: &LoadSpec,
+    artifact_is_certified: bool,
     manifest: &JsonObject<String, Value>,
     tier_key: &str,
     request_mode_value: &str,
@@ -347,11 +374,17 @@ pub(crate) fn evaluate_shared_image(
     has_phases: bool,
     budget: Option<VramBudget>,
     predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     if !matches!(
         engine_id,
-        "z_image" | "z_image_turbo" | "qwen_image" | "qwen_image_edit"
+        "z_image"
+            | "z_image_turbo"
+            | "z_image_control"
+            | "z_image_turbo_control"
+            | "qwen_image"
+            | "qwen_image_edit"
     ) {
         return Ok(None);
     }
@@ -424,15 +457,28 @@ pub(crate) fn evaluate_shared_image(
         parity_result: MemoryParityResult::NotRun,
     };
     let exact_overlay = overlay.unwrap_or("none");
-    let verified = verified_candidates(
-        manifest,
-        model_id,
-        engine_id,
-        tier_key,
-        mode_key,
-        exact_overlay,
-        geometry,
-    )?;
+    // Matrix/evidence overlays remain cells of the advertised base provider (`z_image` or
+    // `z_image_turbo`), while the runtime registers the strict-control implementation under a
+    // dedicated `_control` id. Query the packaged evidence by its catalog identity, then bind the
+    // returned candidate to the exact runtime route expected by the provider contract.
+    let mut verified = if artifact_is_certified {
+        verified_candidates(
+            manifest,
+            model_id,
+            engine_id,
+            tier_key,
+            mode_key,
+            exact_overlay,
+            geometry,
+        )?
+    } else {
+        Vec::new()
+    };
+    // Calibration records describe the certified overlay fixture. User-provided adapters can be
+    // larger, so every optimized candidate must reserve the bytes for the actual request before
+    // the common selector performs its fit check. The resident estimate already includes these
+    // bytes through `predicted_peak_gb_with_adapter_bytes` and must not be adjusted twice.
+    account_for_runtime_overlay_bytes(&mut verified, runtime_overlay_bytes);
     if let Some(exact) = verified.first() {
         resident
             .inference_revision
@@ -458,11 +504,6 @@ pub(crate) fn evaluate_shared_image(
             evidence,
         })
         .collect::<Vec<_>>();
-    let expected_revision = verified
-        .first()
-        .map_or(resident.inference_revision.as_str(), |item| {
-            item.inference_revision.as_str()
-        });
     let selected = crate::memory_strategy::select_strategy(
         RequestScope {
             resolved_route: engine_id,
@@ -471,7 +512,7 @@ pub(crate) fn evaluate_shared_image(
             mode: mode_key,
             overlay,
             geometry,
-            expected_inference_revision: expected_revision,
+            expected_inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
         },
         &contract,
         Some(Budget {
@@ -541,6 +582,20 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn strict_control_uses_the_advertised_base_provider_evidence_cell() {
+        assert_eq!(evidence_provider("z_image_control"), "z_image");
+        assert_eq!(evidence_provider("z_image_turbo_control"), "z_image_turbo");
+        assert_eq!(evidence_provider("z_image"), "z_image");
+    }
+
+    #[test]
+    fn style_variations_preserves_its_exact_evidence_key() {
+        let (mode, key) = request_mode("style_variations");
+        assert_eq!(mode, MemoryMode::ImageToImage);
+        assert_eq!(key, "style_variations");
+    }
+
+    #[test]
     fn edit_alias_enters_turbo_contract_as_an_edit_reference_scope() {
         let manifest = json!({
             "candle": {
@@ -562,6 +617,7 @@ mod tests {
             "z_image_turbo",
             "z_image_edit",
             &spec,
+            true,
             &manifest,
             "q4",
             "edit_image",
@@ -581,6 +637,7 @@ mod tests {
                 total_gb: 32.0,
             }),
             Some(8.0),
+            0,
             MemoryCacheState::Cold,
         )
         .unwrap()
@@ -606,6 +663,7 @@ mod tests {
             "z_image",
             "z_image",
             &spec,
+            true,
             &manifest,
             "q4",
             "text_to_image",
@@ -625,9 +683,48 @@ mod tests {
                 total_gb: 32.0,
             }),
             Some(8.0),
+            0,
             MemoryCacheState::Cold,
         )
         .unwrap();
         assert!(evaluation.is_none());
+    }
+
+    #[test]
+    fn optimized_candidates_reserve_the_actual_runtime_adapter_bytes() {
+        let mut evidence = MemoryEvidence {
+            key: MemoryEvidenceKey {
+                resolved_route: "z_image".to_owned(),
+                backend: gen_core::MemoryBackend::Candle,
+                tier: numeric_tier("q4").expect("q4 is a supported numeric tier"),
+                load_shape: gen_core::LoadShape::EagerMaterialization,
+                mode: gen_core::MemoryMode::TextToImage,
+                overlay: Some("lora".to_owned()),
+                geometry: MemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 1,
+                    frames: 1,
+                },
+                strategy: MemoryStrategy::BoundedTransformerResidency,
+                engaged_composition: vec![MemoryStrategy::BoundedTransformerResidency],
+                parameters: Default::default(),
+            },
+            conformance: MemoryConformanceState::Verified,
+            dimensions: MemoryEvidenceDimensions::VERIFIED,
+            calibration_abi: 1,
+            calibration_fingerprint: "fixture".to_owned(),
+            sceneworks_revision: "fixture".to_owned(),
+            inference_revision: "fixture".to_owned(),
+            harness_version: "fixture".to_owned(),
+            predicted_peak_bytes: 8 * 1024,
+            observed_peak_bytes: Some(8 * 1024),
+            parity: MemoryParityContract::Exact,
+            parity_result: MemoryParityResult::Passed,
+        };
+
+        account_for_runtime_overlay_bytes(std::slice::from_mut(&mut evidence), 512);
+
+        assert_eq!(evidence.predicted_peak_bytes, 8 * 1024 + 512);
     }
 }
