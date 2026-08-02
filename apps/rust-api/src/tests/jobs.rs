@@ -3588,6 +3588,113 @@ async fn bernini_video_modes_validate_required_media() {
     assert_eq!(ads2v_job["payload"]["referenceAssetIds"][0], "ref-1");
 }
 
+/// SCAIL-2 standalone character animation reaches the queue (GH #2074). `animate_character` was
+/// wired everywhere BUT this route's mode allow-list — catalog `capabilities`, `VIDEO_UI_MODES`,
+/// `video_mode_is_mlx_eligible`, the candle claim gate, the worker's `generate_scail2`, and the
+/// Video Studio mode picker all shipped it (sc-5448 / sc-5449), so the studio offered a mode the
+/// API answered with 400 "Unsupported video mode". The declaration being correct in every OTHER
+/// layer is exactly why nothing caught it; this test pins REACHABILITY, not declaration.
+///
+/// It also pins the required-media contract, which mirrors the worker's
+/// `resolve_scail2_conditioning`: a driving clip plus a character image (`referenceAssetIds[0]`
+/// preferred, `sourceAssetId` accepted) — both hard engine inputs, so an incomplete request is
+/// refused at enqueue instead of failing minutes into the render.
+#[tokio::test]
+async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2" }),
+    )
+    .await;
+
+    // The regression itself: a complete request is ACCEPTED, not "Unsupported video mode".
+    let (status, animate_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["ref-character"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // The base video type, which is what `video_job_is_mlx_eligible` gates on for this mode.
+    assert_eq!(animate_job["type"], "video_generate");
+    assert_eq!(animate_job["payload"]["mode"], "animate_character");
+    assert_eq!(animate_job["payload"]["sourceClipAssetId"], "clip-driving");
+    assert_eq!(
+        animate_job["payload"]["referenceAssetIds"][0],
+        "ref-character"
+    );
+
+    // The worker also accepts the i2v `sourceAssetId` as the character.
+    let (status, source_asset_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "sourceAssetId": "ref-character"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        source_asset_job["payload"]["sourceAssetId"],
+        "ref-character"
+    );
+
+    // No driving video, and no character image: each is refused on its own.
+    let incomplete = [
+        json!({ "referenceAssetIds": ["ref-character"] }),
+        json!({ "sourceClipAssetId": "clip-driving" }),
+    ];
+    for extra in incomplete {
+        let mut body = json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances"
+        });
+        let object = body.as_object_mut().unwrap();
+        for (key, value) in extra.as_object().unwrap() {
+            object.insert(key.clone(), value.clone());
+        }
+        let (status, _) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // An unknown mode still 400s — the allow-list widened by exactly one entry.
+    let (status, _) = request(
+        app,
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_creature",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["ref-character"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn person_tracking_routes_match_contracts() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
