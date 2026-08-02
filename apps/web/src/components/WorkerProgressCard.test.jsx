@@ -927,3 +927,87 @@ describe("useLiveJobElapsedSeconds keep-alive gating (sc-11961)", () => {
     expect(Number(container.querySelector("[data-testid='elapsed']").textContent)).toBe(8);
   });
 });
+
+// Live denoise preview (epic 16624, sc-16905): the card derives an interim thumbnail from the
+// worker-streamed result.previewFrame slot — no screen threads a prop for it.
+describe("live denoise preview", () => {
+  let api;
+
+  afterEach(() => {
+    api?.cleanup();
+    api = undefined;
+  });
+
+  const DATA_URL = "data:image/jpeg;base64,QUJD";
+  const previewJob = (status) => ({
+    id: "job-preview",
+    type: "image_generate",
+    status,
+    progress: 0.4,
+    attempts: 1,
+    startedAt: "2026-05-28T12:00:00Z",
+    payload: {},
+    result: { previewFrame: { imageIndex: 0, current: 8, total: 20, dataUrl: DATA_URL } },
+  });
+
+  it("shows the streamed frame as an interim cell while the job runs", () => {
+    api = render(
+      <WorkerProgressCard job={previewJob("running")} thumbnailsVariant="image-grid" />,
+      makeContext([]),
+    );
+    const cell = api.container.querySelector(".worker-progress-card__thumb-cell.interim");
+    expect(cell).not.toBeNull();
+    const img = cell.querySelector("img");
+    expect(img).not.toBeNull();
+    // The data URL must reach the <img> byte-identical: no API prefix, no media
+    // ticket, no thumbnail param (any of those would corrupt the base64 body).
+    expect(img.getAttribute("src")).toBe(DATA_URL);
+  });
+
+  it("never shows a frame on a terminal job, even when one survived in the record", () => {
+    api = render(
+      <WorkerProgressCard job={previewJob("canceled")} thumbnailsVariant="image-grid" />,
+      makeContext([]),
+    );
+    expect(api.container.querySelector(".worker-progress-card__thumb-cell.interim")).toBeNull();
+  });
+
+  it("an explicit interimThumbnailAssets prop keeps precedence over the derived frame", () => {
+    const explicit = [{ id: "explicit-1", type: "image", url: "/api/v1/files/e-1.png", __interim: true }];
+    api = render(
+      <WorkerProgressCard
+        job={previewJob("running")}
+        thumbnailsVariant="image-grid"
+        interimThumbnailAssets={explicit}
+      />,
+      makeContext([]),
+    );
+    const cells = api.container.querySelectorAll(".worker-progress-card__thumb-cell.interim");
+    expect(cells).toHaveLength(1);
+    expect(cells[0].querySelector("img")?.getAttribute("src") ?? "").not.toBe(DATA_URL);
+  });
+
+  it("final assets render alongside the live frame without colliding", () => {
+    const job = previewJob("running");
+    api = render(
+      <WorkerProgressCard
+        job={job}
+        thumbnailsVariant="image-grid"
+        thumbnailAssets={[{ id: "a-1", type: "image", url: "/api/v1/files/a-1.png" }]}
+      />,
+      makeContext([]),
+    );
+    const cells = api.container.querySelectorAll(".worker-progress-card__thumb-cell:not(.skeleton)");
+    expect(cells).toHaveLength(2);
+    expect(api.container.querySelectorAll(".worker-progress-card__thumb-cell.interim")).toHaveLength(1);
+  });
+
+  it("renders nothing extra for jobs without a streamed frame", () => {
+    const job = { ...previewJob("running"), result: {} };
+    api = render(
+      <WorkerProgressCard job={job} thumbnailsVariant="image-grid" />,
+      makeContext([]),
+    );
+    expect(api.container.querySelector(".worker-progress-card__thumb-cell.interim")).toBeNull();
+  });
+});

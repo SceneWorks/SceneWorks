@@ -240,6 +240,30 @@ function ProgressBar({ status, progress }) {
 // ships interimAssets is just empty.
 const THUMBNAIL_VARIANTS = new Set(["image-grid", "video-player", "audio-player", "small-row", "hidden"]);
 
+// Live denoise preview (epic 16624, sc-16905). Image workers stream a single latent-resolution
+// frame of the developing render as `result.previewFrame` (sc-16904: `{imageIndex, current,
+// total, dataUrl}`, single slot, replaced per progress POST and dropped when the image's final
+// asset lands). Shim it into the sc-2085 interim-thumbnail seam so every screen that renders this
+// card gets the live preview without threading a prop. The stable id keeps the grid cell in place
+// across frames (the <img> src just updates), and can never collide with a real asset id, so the
+// finals-supersede-interims dedupe in mergeThumbnails is untouched. Terminal jobs never show a
+// frame even if a stale one survived in the record (e.g. a failure between POSTs). Engines that
+// don't emit previews simply never produce the field — the card looks exactly as before.
+export function livePreviewInterimAssets(job) {
+  const frame = job?.result?.previewFrame;
+  if (!frame?.dataUrl || terminalStatuses.has(job.status)) {
+    return [];
+  }
+  return [
+    {
+      id: "live-denoise-preview",
+      type: "image",
+      url: frame.dataUrl,
+      __interim: true,
+    },
+  ];
+}
+
 function mergeThumbnails(finalAssets, interimAssets) {
   const finalArray = Array.isArray(finalAssets) ? finalAssets : [];
   const interimArray = Array.isArray(interimAssets) ? interimAssets : [];
@@ -737,7 +761,7 @@ export function WorkerProgressCard({
         variant={thumbnailsVariant}
         finalAssets={thumbnailAssets}
         thumbnailGroups={thumbnailGroups}
-        interimAssets={interimThumbnailAssets}
+        interimAssets={interimThumbnailAssets ?? livePreviewInterimAssets(job)}
         onThumbnailClick={onThumbnailClick}
         isRunning={!isTerminal}
         expectedCount={expectedThumbnailCount}
