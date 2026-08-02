@@ -58,10 +58,19 @@ on:
         type: boolean
         default: false
       provision_qwen_snapshot:
-        description: "Provision the exact public Qwen bf16 snapshot before calibration"
+        description: "Provision the exact public Qwen tier snapshot before calibration"
         required: false
         type: boolean
         default: false
+      qwen_tier:
+        description: "Exact Qwen artifact tier and calibration fixture to run"
+        required: false
+        type: choice
+        options:
+          - bf16
+          - q4
+          - q8
+        default: bf16
       inference_revision:
         description: "Exact 40-hex inference revision pinned by the adapter"
         required: false
@@ -166,6 +175,7 @@ jobs:
           INFERENCE_REVISION: ${{ inputs.inference_revision }}
           QWEN_REPOSITORY: ${{ inputs.qwen_repository }}
           QWEN_REVISION: ${{ inputs.qwen_revision }}
+          QWEN_TIER: ${{ inputs.qwen_tier }}
         run: |
           if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
             echo "inference_revision must be an exact lowercase 40-hex commit" >&2
@@ -177,6 +187,10 @@ jobs:
           fi
           if [[ "$QWEN_REPOSITORY" != "SceneWorks/qwen-image-mlx" ]]; then
             echo "qwen_repository must be the fixed SceneWorks/qwen-image-mlx calibration artifact" >&2
+            exit 1
+          fi
+          if [[ "$QWEN_TIER" != "bf16" && "$QWEN_TIER" != "q4" && "$QWEN_TIER" != "q8" ]]; then
+            echo "qwen_tier must be one of bf16, q4, or q8" >&2
             exit 1
           fi
           PIN="$(sed -nE 's/^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/\1/p' crates/sceneworks-memory-adapter/src/lib.rs)"
@@ -234,6 +248,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         env:
           QWEN_REVISION: ${{ inputs.qwen_revision }}
+          QWEN_TIER: ${{ inputs.qwen_tier }}
           HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
           HF_HUB_DISABLE_PROGRESS_BARS: "1"
           HF_HUB_DISABLE_TELEMETRY: "1"
@@ -272,7 +287,7 @@ jobs:
               repo_id="SceneWorks/qwen-image-mlx",
               repo_type="model",
               revision=os.environ["QWEN_REVISION"],
-              allow_patterns=["bf16/**"],
+              allow_patterns=[f"{os.environ['QWEN_TIER']}/**"],
               cache_dir=cache_dir,
               token=False,
               max_workers=4,
@@ -307,13 +322,20 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         env:
           QWEN_REVISION: ${{ inputs.qwen_revision }}
+          QWEN_TIER: ${{ inputs.qwen_tier }}
           QWEN_ROOT_OVERRIDE: ${{ secrets.SCENEWORKS_QWEN_IMAGE_ROOT }}
         run: |
-          if [[ -n "$QWEN_ROOT_OVERRIDE" ]]; then
-            QWEN_ROOT="$QWEN_ROOT_OVERRIDE"
-          else
-            QWEN_HF_ROOT="$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16"
-            QWEN_APP_ROOT="$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16"
+          EXPECTED_SUFFIX="/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/$QWEN_TIER"
+          QWEN_ROOT=""
+          if [[ -n "$QWEN_ROOT_OVERRIDE" && -d "$QWEN_ROOT_OVERRIDE" ]]; then
+            QWEN_OVERRIDE_ROOT="$(cd "$QWEN_ROOT_OVERRIDE" && pwd -P)"
+            if [[ "$QWEN_OVERRIDE_ROOT" == *"$EXPECTED_SUFFIX" ]]; then
+              QWEN_ROOT="$QWEN_OVERRIDE_ROOT"
+            fi
+          fi
+          if [[ -z "$QWEN_ROOT" ]]; then
+            QWEN_HF_ROOT="$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/$QWEN_TIER"
+            QWEN_APP_ROOT="$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/$QWEN_TIER"
             if [[ -d "$QWEN_HF_ROOT" ]]; then
               QWEN_ROOT="$QWEN_HF_ROOT"
             elif [[ -d "$QWEN_APP_ROOT" ]]; then
@@ -328,7 +350,6 @@ jobs:
             exit 1
           fi
           QWEN_ROOT="$(cd "$QWEN_ROOT" && pwd -P)"
-          EXPECTED_SUFFIX="/models--SceneWorks--qwen-image-mlx/snapshots/$QWEN_REVISION/bf16"
           if [[ "$QWEN_ROOT" != *"$EXPECTED_SUFFIX" ]]; then
             echo "the Qwen calibration root does not match the fixed repository and exact revision" >&2
             exit 1
@@ -375,14 +396,20 @@ jobs:
         env:
           SCENEWORKS_QWEN_IMAGE_REPOSITORY: ${{ inputs.qwen_repository }}
           SCENEWORKS_QWEN_IMAGE_REVISION: ${{ inputs.qwen_revision }}
+          QWEN_TIER: ${{ inputs.qwen_tier }}
         run: |
           printf '.calibration/\n' >> .git/info/exclude
           cargo build --release --locked -p sceneworks-memory-adapter \
             --features mlx --bin memory-mlx-adapter
+          if [[ "$QWEN_TIER" == "bf16" ]]; then
+            QWEN_SEED=15511
+          else
+            QWEN_SEED=16353
+          fi
           node scripts/memory-calibration-harness.mjs run \
             --config config/memory-calibration-plan.json \
             --backend mlx \
-            --fixture qwen-image-bf16-seed15511-step2 \
+            --fixture "qwen-image-${QWEN_TIER}-seed${QWEN_SEED}-step2" \
             --fresh-per-case \
             --provider-command '["target/release/memory-mlx-adapter"]' \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
@@ -394,7 +421,7 @@ jobs:
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: memory-mlx-evidence-${{ github.run_id }}
+          name: memory-mlx-evidence-${{ inputs.qwen_tier }}-${{ github.run_id }}
           path: ${{ runner.temp }}/memory-mlx-evidence.json
           if-no-files-found: error
       - name: Build and run the authoritative MLX five-rung reference

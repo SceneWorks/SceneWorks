@@ -161,7 +161,7 @@ cargo build --release -p sceneworks-memory-adapter \
 The MLX adapter requires:
 
 ```text
-SCENEWORKS_QWEN_IMAGE_ROOT=/absolute/path/to/Qwen-Image-snapshot
+SCENEWORKS_QWEN_IMAGE_ROOT=/absolute/path/to/Qwen-Image-tier-snapshot
 SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx
 SCENEWORKS_QWEN_IMAGE_REVISION=<resolved immutable artifact revision>
 # Optional explicit byte override. Otherwise the adapter uses the configured
@@ -170,8 +170,11 @@ SCENEWORKS_QWEN_IMAGE_REVISION=<resolved immutable artifact revision>
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<current host wired ceiling>
 ```
 
-The adapter canonicalizes the root and requires the fixed
-`/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16` suffix before loading.
+The adapter derives `bf16`, `q4`, or `q8` from the selected plan target, canonicalizes the root, and
+requires the matching fixed
+`/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/<tier>` suffix before loading. The
+fixture name must carry that same tier and the exact numeric seed, preventing a packed-tier record
+from being emitted against another tier's weights.
 It resolves the wired ceiling from the explicit override first, then the host's configured
 `iogpu.wired_limit_mb`, then the legacy `kern.memorystatus_wired_mem_limit` byte sysctl, and finally
 the untouched MLX default memory limit. MLX documents that default as 1.5 times Metal's recommended
@@ -187,6 +190,7 @@ NAX runner can execute the same adapter through a guarded manual dispatch:
 gh workflow run macos-mlx.yml --ref main \
   -f run_memory_calibration=true \
   -f provision_qwen_snapshot=false \
+  -f qwen_tier=bf16 \
   -f inference_revision=<exact-adapter-inference-pin> \
   -f qwen_repository=SceneWorks/qwen-image-mlx \
   -f qwen_revision=<exact-artifact-revision>
@@ -194,14 +198,15 @@ gh workflow run macos-mlx.yml --ref main \
 
 The runner resolves only the fixed `SceneWorks/qwen-image-mlx` artifact. Without an override it
 checks exactly two canonical locations, in order:
-`$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`,
+`$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/<tier>`,
 then
-`$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`.
+`$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/<tier>`.
 It does not scan other directories. The optional `SCENEWORKS_QWEN_IMAGE_ROOT` repository secret can
 override those locations when the runner cache lives elsewhere. The override is canonicalized and
-must still end in the fixed
-repository/exact-revision `/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/bf16`
-suffix. The dispatch validates but never prints the resolved path, checks out the exact inference
+used only when it ends in the selected tier's fixed
+repository/exact-revision `/models--SceneWorks--qwen-image-mlx/snapshots/<exact-revision>/<tier>`
+suffix; a stale override for another tier is ignored in favor of the canonical locations. The
+dispatch validates but never prints the resolved path, checks out the exact inference
 revision using `SCENEWORKS_INFERENCE_READ_TOKEN` when configured and the workflow's scoped token
 otherwise, builds the release adapter, runs the authoritative provider through the harness,
 schema-checks the raw bundle, and uploads it as a workflow artifact. The workflow
@@ -214,12 +219,12 @@ When both canonical roots are absent, explicitly set `provision_qwen_snapshot=tr
 calibration dispatch. Provisioning is rejected unless `run_memory_calibration=true`. That
 opt-in lane validates the self-hosted runner's Python 3.12 prerequisite, creates an isolated
 job-local virtual environment, and pins `huggingface_hub==0.36.0` to resumably and idempotently
-download only `bf16/**` from the fixed public `SceneWorks/qwen-image-mlx` repository at the exact
+download only `<tier>/**` from the fixed public `SceneWorks/qwen-image-mlx` repository at the exact
 `qwen_revision`. It uses no token and writes to the canonical SceneWorks application-data Hugging
 Face cache unless the fixed repository already exists in the standard Hugging Face cache; in that
 case it resumes there and reuses existing blobs. The pinned client always verifies and resumes the
-requested `bf16/**` files rather than treating a progressively created snapshot directory as
-complete. Progress and paths are not logged. Because the snapshot is approximately 57 GiB, only a
+requested `<tier>/**` files rather than treating a progressively created snapshot directory as
+complete. Progress and paths are not logged. Because the largest snapshot is approximately 57 GiB, only a
 provisioning dispatch receives the extended four-hour job timeout; ordinary MLX CI and
 non-provisioning calibration retain the 45-minute ceiling. A provisioning or calibration failure
 cannot upload a schema-checked evidence artifact.
@@ -288,11 +293,14 @@ Those raw tests must be parameterized/adapted to the JSON protocol so phase sync
 hardware probing, lifecycle injection, and record emission occur in the provider process. A raw
 green test log is not ingestible evidence.
 
-The Qwen plan has eleven authoritative records: resident, staged residency, seven overlap-64 decode
-edges (`768, 640, 512, 448, 384, 320, 256`), bounded attention, and window-1 transformer residency.
-Every record executes its own deterministic broad-bias mutation and may claim only its exact returned
-strategy tuple. The Krea plan likewise enumerates candidate tile, overlap, attention-chunk, and
-transformer-window combinations explicitly.
+The Qwen plan has fifteen authoritative records. BF16 retains the complete eleven-record ladder:
+resident, staged residency, seven overlap-64 decode edges (`768, 640, 512, 448, 384, 320, 256`),
+bounded attention, and window-1 transformer residency. Q4 and Q8 each add the exact whole-request
+bounded-attention versus window-1 transformer-residency pair required by SC-16353. BF16 uses seed
+15511; the two packed tiers use seed 16353 so their rung-3/rung-4 comparison shares the existing
+fully-resident and window-domain attribution fixture. Every record executes its own deterministic
+broad-bias mutation and may claim only its exact returned strategy tuple. The Krea plan likewise
+enumerates candidate tile, overlap, attention-chunk, and transformer-window combinations explicitly.
 
 ## Matrix promotion
 
