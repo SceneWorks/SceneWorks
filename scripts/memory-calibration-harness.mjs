@@ -22,6 +22,9 @@ const RUNGS = [
   "bounded_attention", "bounded_transformer_residency",
 ];
 const RUNG_SET = new Set(RUNGS);
+/// Persisted spellings of `gen_core::LoadShape`. Eager and deferred measurements are not
+/// interchangeable, so this is a receipt axis rather than a fingerprint naming convention.
+export const LOAD_SHAPES = ["eager_materialization", "deferred_materialization"];
 export const RUNG_REUSE_TOLERANCE = Object.freeze({
   absoluteBytes: 256 * 1024 * 1024,
   relative: 0.05,
@@ -853,12 +856,28 @@ export async function runProviderPlan({
       if (!equal(fragment.strategy, planned.strategy)) {
         fail(`${planned.logicalCaseId}: adapter measured strategy does not match planned strategy`);
       }
+      // The materialization shape is a RECEIPT field: the adapter attests what its run actually
+      // loaded under, and the plan only declares what that rung is expected to select. Taking
+      // `planned.loadShape` here would stamp every record with the plan's claim and make the field
+      // unfalsifiable — the same backfill sc-16482 forbids for historical receipts, applied
+      // silently to new ones. Cross-check instead, and fail closed on divergence.
+      if (!LOAD_SHAPES.includes(fragment.loadShape)) {
+        fail(
+          `${planned.logicalCaseId}: provider fragment must attest a loadShape (${LOAD_SHAPES.join("|")})`,
+        );
+      }
+      if (fragment.loadShape !== planned.loadShape) {
+        fail(
+          `${planned.logicalCaseId}: adapter measured loadShape ${fragment.loadShape} but the plan ` +
+            `declared ${planned.loadShape}`,
+        );
+      }
       const record = {
         ...fragment,
         logicalCaseId: planned.logicalCaseId,
         evidenceScope: planned.evidenceScope,
         backend: planned.backend,
-        loadShape: planned.loadShape,
+        loadShape: fragment.loadShape,
         repositories,
         hardware: probe.hardware,
         target: planned.target,

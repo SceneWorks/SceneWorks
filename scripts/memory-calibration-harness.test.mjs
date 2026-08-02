@@ -1063,6 +1063,50 @@ test("provider execution rejects an adapter-attested composition that differs fr
   );
 });
 
+test("the measured load shape is a receipt field, never copied from the plan", async () => {
+  // Before this, the runner wrote `loadShape: planned.loadShape` onto every record: the adapter was
+  // never asked, so the field recorded the plan's CLAIM rather than what the run did, and no
+  // divergence was detectable. That is the same backfill sc-16482 forbids for historical receipts,
+  // applied silently to new ones. These two properties pin the fix.
+  const provider = {
+    evidenceScope: "fixture",
+    backend: "candle",
+    target: complete().target,
+    rung: "bounded_decode",
+    engagedRungs: ["resident", "bounded_decode"],
+    calibrationFingerprint: "fixture-formula-v2",
+    loadShape: "eager_materialization",
+    fixture: "fixture-seed42",
+    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
+  };
+  const run = (fixture) =>
+    runProviderPlan({
+      config: { providers: [provider] },
+      providerCommand: [process.execPath, fileURLToPath(new URL(fixture, import.meta.url))],
+      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    });
+
+  // 1. An adapter that measured a different shape than the plan declared is rejected outright.
+  await assert.rejects(
+    run("./fixtures/memory-provider-load-shape-mismatch-fixture.mjs"),
+    /adapter measured loadShape deferred_materialization but the plan declared eager_materialization/,
+  );
+
+  // 2. An adapter that attests nothing is rejected too — otherwise "no opinion" would silently
+  //    become "whatever the plan said", which is the behaviour being removed.
+  await assert.rejects(
+    run("./fixtures/memory-provider-composition-mismatch-fixture.mjs"),
+    /adapter measured strategy does not match planned strategy|must attest a loadShape/,
+  );
+
+  // 3. The agreeing case records the ADAPTER's value. Identical to the plan's here by construction,
+  //    so this alone proves little — properties 1 and 2 are what make it meaningful.
+  const result = await run("./fixtures/memory-provider-fixture.mjs");
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].loadShape, "eager_materialization");
+});
+
 // SC-16211. The `harnessVersion` const is asserted twice in the schema and embedded in every emitted
 // record. Adding the required engaged-composition identity bumps it and MUST invalidate every v3
 // record rather than treating a missing load-shape identity as shape-agnostic.

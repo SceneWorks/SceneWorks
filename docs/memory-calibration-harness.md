@@ -83,6 +83,19 @@ baseline comparison, and a successful warm request.
 
 ## Commands
 
+`.tmp/` is gitignored on purpose. The runner stamps every record with the repositories' `dirty`
+state from `git status --porcelain`, which counts UNTRACKED paths, and `complete` evidence from a
+dirty repository is rejected. Writing captures anywhere else inside the repo therefore poisons the
+NEXT run — the first one looks fine because git does not report an empty directory and the output is
+only written at the end. Commit before capturing, and change nothing in either repository while a
+capture is running: the runner re-probes after every provider case and aborts if HEAD or dirty state
+moved.
+
+The `loadShape` on a record is the ADAPTER's attestation of what its run actually loaded under. The
+plan declares the shape a rung is expected to select and the runner cross-checks the two, but the
+planned value is never written onto a fragment: a receipt may only testify to its own run (sc-16482).
+An adapter that omits the field, or attests a shape the plan did not declare, fails the capture.
+
 Plan without hardware placeholders:
 
 ```text

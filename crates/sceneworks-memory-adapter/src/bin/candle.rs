@@ -468,6 +468,7 @@ fn pixel_error(
 fn preflight_fragment(
     request: &Value,
     strategy: &Value,
+    load_shape: LoadShape,
     blocker: String,
     measurement_name: &'static str,
     repository: &str,
@@ -492,7 +493,20 @@ fn preflight_fragment(
         },
     )?;
     fragment["strategy"] = strategy.clone();
+    fragment["loadShape"] = json!(load_shape_key(load_shape));
     Ok(fragment)
+}
+
+/// Persisted spelling of `gen_core::LoadShape` for the schema-v4 receipt field.
+///
+/// Callers pass the shape the run actually executed under — in practice
+/// `contract.calibration.load_shape` from the LOADED provider, never the plan's declared value and
+/// never a literal. A receipt may only testify to its own run (sc-16482).
+fn load_shape_key(load_shape: LoadShape) -> &'static str {
+    match load_shape {
+        LoadShape::EagerMaterialization => protocol::LOAD_SHAPE_EAGER,
+        LoadShape::DeferredMaterialization => protocol::LOAD_SHAPE_DEFERRED,
+    }
 }
 
 fn strategy_name(strategy: MemoryStrategy) -> &'static str {
@@ -935,6 +949,7 @@ fn run_five_rung_reference_loaded(
         },
     )?;
     fragment["strategy"] = strategy;
+    fragment["loadShape"] = json!(load_shape_key(calibration.load_shape));
     fragment["observedMemory"] = json!({
         "conditioning": cuda_phase_metrics(conditioning_bytes),
         "denoise": cuda_phase_metrics(denoise_bytes),
@@ -1152,6 +1167,7 @@ fn run(request: &Value) -> Result<Value, String> {
         return preflight_fragment(
             request,
             &strategy,
+            actual_calibration.load_shape,
             format!(
                 "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={actual_fingerprint} at {}",
                 protocol::INFERENCE_PIN
@@ -1166,6 +1182,7 @@ fn run(request: &Value) -> Result<Value, String> {
         return preflight_fragment(
             request,
             &strategy,
+            actual_calibration.load_shape,
             format!("pinned provider rejected planned parameters before load: {reason}"),
             "contractParameterRejection",
             &repository,
@@ -1176,6 +1193,7 @@ fn run(request: &Value) -> Result<Value, String> {
         return preflight_fragment(
             request,
             &strategy,
+            actual_calibration.load_shape,
             "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to the validated q4 snapshot".to_owned(),
             "missingWeights",
             &repository,
@@ -1499,6 +1517,7 @@ fn run(request: &Value) -> Result<Value, String> {
         },
     )?;
     fragment["strategy"] = strategy;
+    fragment["loadShape"] = json!(load_shape_key(actual_calibration.load_shape));
     fragment["observedMemory"] = json!({
         "conditioning": cuda_phase_metrics(conditioning_bytes),
         "denoise": cuda_phase_metrics(denoise_bytes),
