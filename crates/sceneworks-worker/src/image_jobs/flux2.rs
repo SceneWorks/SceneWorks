@@ -287,6 +287,7 @@ fn flux2_dev_edit_memory_context(
         },
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
         mode: gen_core::MemoryMode::Edit,
         has_reference: true,
         use_pid: false,

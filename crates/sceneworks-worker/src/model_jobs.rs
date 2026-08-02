@@ -5423,6 +5423,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             required_components: &["perth", "voice_embedding"],
+            control_kinds: None,
         }
     }
 
@@ -5581,6 +5582,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             required_components: &["bundle"],
+            control_kinds: None,
         };
         let manifest = json!({
             "id": "multi_model",
@@ -5638,6 +5640,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             required_components: &["voice_embedding"],
+            control_kinds: None,
         };
         let manifest = json!({
             "id": "trav_probe",
@@ -5858,6 +5861,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         };
         let components = resolve_co_requisites(
             &descriptor,
@@ -5883,6 +5887,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"],
+            control_kinds: None,
         }
     }
 
@@ -6013,6 +6018,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             required_components: &["codec"],
+            control_kinds: None,
         }
     }
 
@@ -6047,6 +6053,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &["text_encoder", "vae"],
+            control_kinds: None,
         }
     }
 
@@ -6258,6 +6265,7 @@ mod co_requisite_tests {
             modality: gen_core::Modality::Audio,
             capabilities: gen_core::Capabilities::default(),
             required_components: &["clip", "synchformer", "dit", "vae", "vocoder"],
+            control_kinds: None,
         }
     }
 

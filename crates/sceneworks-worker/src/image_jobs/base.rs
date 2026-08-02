@@ -3081,7 +3081,14 @@ mod measured_mlx_load_shape_tests {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("model.safetensors"), [0_u8; 8]).unwrap();
+            // A minimal VALID safetensors file carrying one f32 scalar: the asset-facts
+            // unification (inference PR #395) parses headers — and requires at least one tensor —
+            // when the provider contract is built, so a zero-filled stub now fails the lookup.
+            let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&0f32.to_le_bytes());
+            std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
         }
         std::fs::write(
             root.join("text_encoder/config.json"),
@@ -6253,6 +6260,11 @@ mod krea_turbo_memory_route_tests {
             .expect("Krea 2 Turbo manifest entry");
         model["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        // Same fixture surgery as the fingerprint line above: pin the opt-in to the CURRENT
+        // calibration ABI so these historical-curve selector tests keep exercising the verified
+        // ladder. The shipped manifest stays at its measured ABI (stale until sc-16915).
+        model["candle"]["turboFit"]["calibrationAbi"] =
+            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
         model
             .as_object()
             .expect("Krea 2 Turbo manifest object")
@@ -7598,10 +7610,26 @@ async fn generate_candle_stream(
             strategy = ?selection.strategy,
             "shared memory-strategy selection admitted"
         );
+        // The manifest turboFit block pins the calibration fingerprint but not the materialization
+        // shape; the provider's own identity is the source the safety check compares against.
+        let load_shape = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default())),
+            )
+            .ok()
+            .flatten()
+            .map(|contract| {
+                contract
+                    .calibration
+                    .as_ref()
+                    .map_or(contract.load_shape, |identity| identity.load_shape)
+            })?;
         Some(gen_core::MemoryRunContext {
             selection,
             calibration_abi,
             calibration_fingerprint,
+            load_shape,
             mode: gen_core::MemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,
