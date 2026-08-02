@@ -6260,6 +6260,11 @@ mod krea_turbo_memory_route_tests {
             .expect("Krea 2 Turbo manifest entry");
         model["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        // Same fixture surgery as the fingerprint line above: pin the opt-in to the CURRENT
+        // calibration ABI so these historical-curve selector tests keep exercising the verified
+        // ladder. The shipped manifest stays at its measured ABI (stale until sc-16915).
+        model["candle"]["turboFit"]["calibrationAbi"] =
+            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
         model
             .as_object()
             .expect("Krea 2 Turbo manifest object")

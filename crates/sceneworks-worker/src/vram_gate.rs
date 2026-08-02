@@ -1633,7 +1633,10 @@ mod tests {
             "candle": {
                 "vramGbByTier": { "q4": 30.0 },
                 "turboFit": {
-                    "calibrationAbi": 1,
+                    // The fixture opts in at the CURRENT calibration ABI: these tests pin the
+                    // verified selector ladder, not receipt provenance (production manifests stay
+                    // at their measured ABI and correctly degrade until sc-16915 re-collects).
+                    "calibrationAbi": gen_core::MEMORY_CALIBRATION_ABI,
                     "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
                     "sceneWorksRevision": "sc-15449-contract-v1",
                     "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
@@ -1784,6 +1787,11 @@ mod tests {
         let mut manifest = builtin_krea_turbo_manifest();
         manifest["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        // Same fixture surgery as the fingerprint line: pin the opt-in to the CURRENT calibration
+        // ABI so these tests keep exercising the verified ladder. The shipped manifest stays at
+        // its measured ABI and correctly degrades until sc-16915 re-collects.
+        manifest["candle"]["turboFit"]["calibrationAbi"] =
+            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
         manifest
     }
 
@@ -2170,7 +2178,7 @@ mod tests {
 
     #[test]
     fn builtin_krea_evidence_is_keyed_by_the_measured_engaged_composition() {
-        let manifest = builtin_krea_turbo_manifest();
+        let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
         let turbo_fit = manifest["candle"]["turboFit"]
             .as_object()
             .expect("Krea turbo fit");
