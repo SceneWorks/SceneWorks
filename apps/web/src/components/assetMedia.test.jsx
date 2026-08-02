@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AssetMedia, AssetThumbnail, MissingMedia, posterUrl, thumbnailUrl } from "./assetMedia.jsx";
+import { AssetMedia, AssetThumbnail, MissingMedia, assetUrl, posterUrl, thumbnailUrl } from "./assetMedia.jsx";
 
 const imageAsset = {
   id: "img",
@@ -192,5 +192,20 @@ describe("posterUrl poster-existence gating (sc-10468)", () => {
       projectId: "p1",
     };
     expect(posterUrl(asset)).toContain(".poster.jpg");
+  });
+});
+
+// Live denoise preview frames (sc-16905) arrive as complete data: URLs. Every URL producer must
+// pass them through byte-identical — an API prefix, media ticket, or thumbnail param anywhere in
+// the chain corrupts the base64 body.
+describe("data URL passthrough", () => {
+  const asset = { id: "live-denoise-preview", type: "image", url: "data:image/jpeg;base64,QUJD", __interim: true };
+
+  it("assetUrl returns the data URL unchanged", () => {
+    expect(assetUrl(asset)).toBe(asset.url);
+  });
+
+  it("thumbnailUrl returns the data URL unchanged (no thumbnail param, no ticket)", () => {
+    expect(thumbnailUrl(asset)).toBe(asset.url);
   });
 });
