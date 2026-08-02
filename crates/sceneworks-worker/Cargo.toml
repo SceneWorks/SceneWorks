@@ -11,6 +11,9 @@ publish = false
 # mutex can't stop two parallel installs from clobbering each other's manifest entry
 # (F-041 / sc-8843). Already the workspace's file-lock choice (apps/rust-api).
 fs2 = "0.4"
+# Inline `data:image/jpeg` preview frames in job progress (epic 16624, sc-16904): a ~128×128
+# per-step latent preview rides ProgressRequest.result as a data URL, so no file lifecycle.
+base64 = "0.22"
 futures-util = "0.3"
 glob = "0.3"
 # png to encode generated assets (epic 3018, sc-3020); jpeg/webp to decode reference/source

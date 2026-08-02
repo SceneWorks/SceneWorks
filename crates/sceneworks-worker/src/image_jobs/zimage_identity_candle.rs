@@ -260,45 +260,49 @@ pub(super) async fn generate_candle_zimage_identity_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = ZImageEditRequest {
-                    prompt,
-                    width,
-                    height,
-                    steps: steps as usize,
-                    strength,
-                    seed: seed as u64,
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &source, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Z-Image identity generation failed: {error}"
-                        )));
+            drive_gen_items_scored(
+                tx,
+                work,
+                move |_index, (seed, prompt), _preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                let (out_w, out_h, pixels) = (out.width, out.height, out.pixels);
-                // Score this finished image against the cached source embedding (sc-4411). Image build +
-                // pixel clone is paid ONLY when a scorer exists (a With-Character generation); non-frontal
-                // → honest detected:false N/A; `None` scorer ⇒ field omitted.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
-            })
+                    let req = ZImageEditRequest {
+                        prompt,
+                        width,
+                        height,
+                        steps: steps as usize,
+                        strength,
+                        seed: seed as u64,
+                        cancel: cancel.clone(),
+                    };
+                    let out = match model.generate(&req, &source, &mut *on_progress) {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Z-Image identity generation failed: {error}"
+                            )));
+                        }
+                    };
+                    let (out_w, out_h, pixels) = (out.width, out.height, out.pixels);
+                    // Score this finished image against the cached source embedding (sc-4411). Image build +
+                    // pixel clone is paid ONLY when a scorer exists (a With-Character generation); non-frontal
+                    // → honest detected:false N/A; `None` scorer ⇒ field omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 

@@ -6485,6 +6485,7 @@ name = "sceneworks-worker"
 version = "0.8.1"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "fs2",
  "futures-util",
  "glob",

@@ -317,55 +317,60 @@ pub(super) async fn generate_candle_krea_edit_stream(
         },
         move |(components, references), tx, cancel| {
             let (comps, edit, device) = components;
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                // One image per streamed item: `render_edit` batches on `count`, so pass `count = 1` and
-                // the item's seed. The image 1 / image 2 references are passed directly (not via
-                // `conditioning`) in fixed order.
-                let req = gen_core::GenerationRequest {
-                    prompt,
-                    // The worker's `negative_prompt` is a plain String; the engine wants `Option` (empty
-                    // ⇒ no user negative, the Raw CFG uncond branch falls back to "").
-                    negative_prompt: if negative.trim().is_empty() {
-                        None
-                    } else {
-                        Some(negative.clone())
-                    },
-                    width,
-                    height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    guidance: Some(guidance),
-                    text_style_gain,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let result = runtime_cuda::providers::krea::pipeline::render_edit(
-                    &comps,
-                    &edit,
-                    &req,
-                    &references,
-                    distilled,
-                    &device,
-                    &mut *on_progress,
-                );
-                let mut images = match result {
-                    Ok(images) => images,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Krea edit generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                let image = images
-                    .pop()
-                    .ok_or_else(|| WorkerError::Engine("Krea edit produced no image".to_owned()))?;
-                Ok(Some((seed, image.width, image.height, image.pixels)))
-            })
+                    // One image per streamed item: `render_edit` batches on `count`, so pass `count = 1` and
+                    // the item's seed. The image 1 / image 2 references are passed directly (not via
+                    // `conditioning`) in fixed order.
+                    let req = gen_core::GenerationRequest {
+                        prompt,
+                        // The worker's `negative_prompt` is a plain String; the engine wants `Option` (empty
+                        // ⇒ no user negative, the Raw CFG uncond branch falls back to "").
+                        negative_prompt: if negative.trim().is_empty() {
+                            None
+                        } else {
+                            Some(negative.clone())
+                        },
+                        width,
+                        height,
+                        count: 1,
+                        seed: Some(seed as u64),
+                        steps: Some(steps),
+                        guidance: Some(guidance),
+                        text_style_gain,
+                        preview,
+                        cancel: cancel.clone(),
+                        ..Default::default()
+                    };
+                    let result = runtime_cuda::providers::krea::pipeline::render_edit(
+                        &comps,
+                        &edit,
+                        &req,
+                        &references,
+                        distilled,
+                        &device,
+                        &mut *on_progress,
+                    );
+                    let mut images = match result {
+                        Ok(images) => images,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Krea edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    let image = images.pop().ok_or_else(|| {
+                        WorkerError::Engine("Krea edit produced no image".to_owned())
+                    })?;
+                    Ok(Some((seed, image.width, image.height, image.pixels)))
+                },
+            )
         },
     );
 

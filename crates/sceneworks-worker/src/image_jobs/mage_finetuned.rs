@@ -289,7 +289,7 @@ async fn generate_mage_finetuned_stream(
             })
         },
         move |model, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -301,6 +301,7 @@ async fn generate_mage_finetuned_stream(
                     seed: Some(seed as u64),
                     steps: Some(steps),
                     guidance: Some(guidance),
+                    preview,
                     cancel: cancel.clone(),
                     ..Default::default()
                 };
