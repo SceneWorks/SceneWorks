@@ -705,6 +705,8 @@ mod tests {
                     height: 1024,
                     batch: 1,
                     frames: 1,
+                    // Text-to-image fixture: no reference images (sc-17054).
+                    reference_count: 0,
                 },
                 strategy: MemoryStrategy::BoundedTransformerResidency,
                 engaged_composition: vec![MemoryStrategy::BoundedTransformerResidency],

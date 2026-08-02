@@ -543,6 +543,11 @@ impl CandleStrictControl for KreaStrictControl {
             tile_vae_decode: self.tile_vae_decode,
             stage_residency: self.stage_residency,
             cancel: cancel.clone(),
+            // Per-step latent-preview sink, new on this request in the `8ffa211a` inference pin
+            // (sc-17054). This route has no preview plumbing to hand it, and upstream documents the
+            // default inert sink as byte-identical to a render with no preview at all — so this
+            // holds current behaviour exactly. Feeding it is preview work, not a compile fix.
+            preview: Default::default(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
