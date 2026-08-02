@@ -539,7 +539,7 @@ async fn generate_krea_imported_stream(
                 edit_conditioning.unwrap_or_else(|| krea_imported_conditioning(img2img));
             #[cfg(not(target_os = "macos"))]
             let conditioning = krea_imported_conditioning(img2img);
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -567,6 +567,7 @@ async fn generate_krea_imported_stream(
                         None,
                         &enhance,
                         Some(hires_fix),
+                        preview,
                         &cancel,
                         on_progress,
                     )?;
@@ -581,6 +582,7 @@ async fn generate_krea_imported_stream(
                     steps: Some(steps),
                     sampler: Some(KREA_IMPORTED_SAMPLER.to_owned()),
                     conditioning: conditioning.clone(),
+                    preview,
                     cancel: cancel.clone(),
                     ..Default::default()
                 };

@@ -110,6 +110,7 @@ fn sensenova_edit_generate_one(
     img_cfg: f32,
     timestep_shift: f32,
     conditioning: Vec<Conditioning>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -124,6 +125,7 @@ fn sensenova_edit_generate_one(
         true_cfg: Some(img_cfg),
         scheduler_shift: Some(timestep_shift),
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -272,7 +274,7 @@ async fn generate_sensenova_edit_stream(
             drive_gen_items_scored(
                 tx,
                 seeds.into_iter().zip(prompts),
-                move |_index, (seed, prompt), on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     let (w, h, pixels) = sensenova_edit_generate_one(
                         generator,
                         &prompt,
@@ -284,6 +286,7 @@ async fn generate_sensenova_edit_stream(
                         img_cfg,
                         timestep_shift,
                         conditioning.clone(),
+                        preview,
                         &cancel,
                         on_progress,
                     )?;

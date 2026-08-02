@@ -181,6 +181,7 @@ fn qwen_control_generate_one(
     guidance: f32,
     conditioning: Vec<Conditioning>,
     use_pid: bool,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -195,6 +196,7 @@ fn qwen_control_generate_one(
         guidance: Some(guidance),
         use_pid,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -357,7 +359,7 @@ async fn generate_qwen_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -383,6 +385,7 @@ async fn generate_qwen_control_stream(
                     guidance,
                     conditioning,
                     use_pid,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;
@@ -669,6 +672,7 @@ fn qwen_edit_generate_one(
     sampler: Option<&str>,
     conditioning: Vec<Conditioning>,
     use_pid: bool,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -684,6 +688,7 @@ fn qwen_edit_generate_one(
         sampler: sampler.map(str::to_owned),
         use_pid,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -858,7 +863,7 @@ async fn generate_qwen_edit_stream(
             drive_gen_items_scored(
                 tx,
                 seeds.into_iter().zip(prompts),
-                move |index, (seed, prompt), on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     // Pose tier: pair the reference with this pose's DWPose whole-body skeleton
                     // (body + hands 21x2 + face 68 when the pose carries them — sc-6599) as a
                     // `[reference, skeleton]` multi-image set. Reference FIRST: the engine
@@ -902,6 +907,7 @@ async fn generate_qwen_edit_stream(
                         sampler,
                         conditioning,
                         use_pid,
+                        preview,
                         &cancel,
                         on_progress,
                     )?;

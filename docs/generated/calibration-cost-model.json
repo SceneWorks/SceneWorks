@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7d92f0594365aa5e492e69bdf8ac2b978f634e54ddb0489b03d89ce841f80b70",
-    "matrixRevision": "source-tree:e64a006f5f87a8ac9ff9819c0e75e7703f1eda9682a7ad3b70ce1c2a88d707bc",
-    "inferenceRevision": "12626a6c1d69d94f6505f3f9e8b9f601adc1dc63",
+    "sceneWorksRevision": "source-tree:97553e02ccd37c8e259f263fbb42faf2f32f3e59dfe8843e41f452c4cd0384eb",
+    "matrixRevision": "source-tree:2ba47081024535f519eca34a98625187e51a6338d35f4bb04219c26fe8fa97ad",
+    "inferenceRevision": "cc5b30a92ab5b0789afee71e38891aa15b8e5357",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "2fdad02f5bee5f82fa8eae9c4642997e6468c31e88f5cf29ef5cbb9bc5342337"
+        "sha256": "f3f967f24bc5d56d7ae374b28bebdf22c41915179bd65aa03f5f3bb57bb34150"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "f0692211286f7178c0807e411343e30f91a8fa3aa13933f564d9b432fc8c3fd5"
+        "sha256": "04893574bf3bd2ade88683afcafe33b087dacccf21e9b686c8bb91f49b97ebf0"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
@@ -43,11 +43,11 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "248c89989e1b6b8a1f8ef4579da8b39d694febe1aec0668ff039ba8fd1d9ed68"
+        "sha256": "abe3f173c53489d2372dd3ba18564e91d5342acf4de29506088722081dcd118d"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "5c9bd7f3fd60ece760108ed1b9f22965518a11b4d678adba05dc07ea620151bd"
+        "sha256": "44a6e69727a5279f552f6befb27a6eb68f56c3f828fe4c0b677898ead6c7588e"
       }
     }
   },

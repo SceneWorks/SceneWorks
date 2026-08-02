@@ -380,39 +380,43 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             Ok((model, gen_source, gen_mask))
         },
         move |(model, source, mask), tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = SdxlEditRequest {
-                    prompt,
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    strength,
-                    seed: seed as u64,
-                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above — the engine errors
-                    // if set without a loaded student, so `use_pid` is `pid_weights.is_some()`.
-                    use_pid,
-                    cancel: cancel.clone(),
-                };
-                let result = match &mask {
-                    Some(mask) => model.generate_masked(&req, &source, mask, &mut *on_progress),
-                    None => model.generate(&req, &source, &mut *on_progress),
-                };
-                let out = match result {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "SDXL edit generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), _preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
-            })
+                    let req = SdxlEditRequest {
+                        prompt,
+                        negative: negative.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        strength,
+                        seed: seed as u64,
+                        // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above — the engine errors
+                        // if set without a loaded student, so `use_pid` is `pid_weights.is_some()`.
+                        use_pid,
+                        cancel: cancel.clone(),
+                    };
+                    let result = match &mask {
+                        Some(mask) => model.generate_masked(&req, &source, mask, &mut *on_progress),
+                        None => model.generate(&req, &source, &mut *on_progress),
+                    };
+                    let out = match result {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "SDXL edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                },
+            )
         },
     );
 

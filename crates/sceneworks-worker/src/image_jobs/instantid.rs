@@ -1068,7 +1068,7 @@ async fn generate_instantid_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt, action), on_progress| {
+                move |_index, (seed, prompt, action), _preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }

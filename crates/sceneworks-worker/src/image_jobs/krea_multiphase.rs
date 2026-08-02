@@ -390,6 +390,7 @@ fn krea_multiphase_generate_one(
     guidance: Option<f32>,
     text_style_gain: Option<f32>,
     phases: Vec<gen_core::GenerationPhase>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -408,6 +409,7 @@ fn krea_multiphase_generate_one(
         guidance,
         text_style_gain,
         phases: Some(phases),
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -512,7 +514,7 @@ async fn generate_krea_multiphase_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -526,6 +528,7 @@ async fn generate_krea_multiphase_stream(
                     guidance,
                     text_style_gain,
                     phases.clone(),
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

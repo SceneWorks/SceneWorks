@@ -219,6 +219,7 @@ fn kolors_control_generate_one(
     sampler: Option<&str>,
     scheduler: Option<&str>,
     scheduler_shift: Option<f32>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -251,6 +252,7 @@ fn kolors_control_generate_one(
         scheduler: scheduler.map(str::to_owned),
         scheduler_shift,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -411,7 +413,7 @@ async fn generate_kolors_control_stream(
             let scorer = face_stack_dir
                 .as_ref()
                 .and_then(|dir| crate::face_likeness::build_face_likeness_scorer(dir, reference));
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let skeleton = crate::openpose_skeleton::draw_wholebody(
                     width,
                     height,
@@ -442,6 +444,7 @@ async fn generate_kolors_control_stream(
                     sampler.as_deref(),
                     scheduler.as_deref(),
                     scheduler_shift,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

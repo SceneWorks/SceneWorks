@@ -2165,6 +2165,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         }
     }
     fn stub_mlx_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
@@ -2187,6 +2188,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         }
     }
     fn stub_candle_load(
@@ -2210,6 +2212,7 @@ mod tests {
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
             required_components: &[],
+            control_kinds: None,
         }
     }
     fn stub_unknown_load(

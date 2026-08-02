@@ -287,6 +287,7 @@ fn flux2_dev_edit_memory_context(
         },
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
         mode: gen_core::MemoryMode::Edit,
         has_reference: true,
         use_pid: false,
@@ -328,6 +329,7 @@ fn flux2_edit_generate_one(
     image_guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
     enhance: &PromptEnhance,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -349,6 +351,7 @@ fn flux2_edit_generate_one(
         guidance,
         image_guidance,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -563,7 +566,7 @@ async fn generate_flux2_edit_stream(
             drive_gen_items_scored(
                 tx,
                 seeds.into_iter().zip(prompts),
-                move |index, (seed, prompt), on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     // Pose tier: pair this pose's DWPose whole-body skeleton (body + hands
                     // 21x2 + face 68 when the pose carries them — sc-6702) with the reference
                     // as a `[skeleton, reference]` multi-image set; else the plain reference
@@ -609,6 +612,7 @@ async fn generate_flux2_edit_stream(
                         image_guidance,
                         conditioning,
                         &enhance,
+                        preview,
                         &cancel,
                         on_progress,
                     )?;
@@ -791,6 +795,7 @@ fn flux2_control_generate_one(
     steps: u32,
     guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -803,6 +808,7 @@ fn flux2_control_generate_one(
         steps: Some(steps),
         guidance,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -994,7 +1000,7 @@ async fn generate_flux2_dev_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
                     user_control,
@@ -1020,6 +1026,7 @@ async fn generate_flux2_dev_control_stream(
                     steps,
                     guidance,
                     conditioning,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

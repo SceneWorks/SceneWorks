@@ -151,7 +151,7 @@ Existing test coverage:
 - `apps/web/src/main.test.jsx::reconstructs running image batch slots from partial asset records`
 - `apps/web/src/main.test.jsx::shows active training progress with live sample previews`
 
-A separate "per-denoising-step preview of a single image" (showing the partial latent at step N before the full image is saved) is **not** in scope. If we want that later it needs a decode-latent-to-jpeg call inside the diffusion loop and a transient storage slot — that's a polish slice for a future story, not part of sc-2085.
+**Per-denoising-step preview** (epic 16624, sc-16904/sc-16905 — the "later" this section used to defer): the engine projects the developing latent to a small RGB frame each step (gen-core `PreviewSink`, a cheap linear latent→RGB approximation, not a VAE decode), and the worker rides the latest frame on the existing per-step progress POST as `result.previewFrame` `{imageIndex, current, total, dataUrl}` — a single ~10 KB `data:image/jpeg` slot, replaced each tick and dropped when the image's final asset lands, so there is no file lifecycle. The card shims it into the sc-2085 interim seam itself (`livePreviewInterimAssets`), so every render site shows the live preview with no per-screen wiring; the interim cell's `dataUrl` updates in place under a stable key. Engines that don't emit (the candle lane today) never produce the field and the card is unchanged. Terminal jobs never show a frame even if a stale one survived in the snapshot.
 
 ## Job Title rules
 

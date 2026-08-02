@@ -5,6 +5,12 @@ import { API_BASE_URL, withMediaTicket } from "../api.js";
 // ticket (sc-8810) exactly once, and posterUrl can swap the file extension before
 // the query string exists.
 function bareAssetUrl(asset) {
+  // Inline payloads (the live denoise preview frame, sc-16905) are complete URLs already:
+  // no API prefix, and downstream no ticket or thumbnail params — appending either would
+  // corrupt the base64 body.
+  if (asset?.url?.startsWith("data:")) {
+    return asset.url;
+  }
   if (asset?.url) {
     return API_BASE_URL + asset.url;
   }
@@ -24,7 +30,8 @@ function bareAssetUrl(asset) {
 // media ticket so element-driven requests (<img>/<video>/<a download>) — which
 // cannot send the token header — still authenticate (sc-8810).
 export function assetUrl(asset) {
-  return withMediaTicket(bareAssetUrl(asset));
+  const bare = bareAssetUrl(asset);
+  return bare.startsWith("data:") ? bare : withMediaTicket(bare);
 }
 
 // Grid thumbnails use one bounded, server-cached representation. The API
@@ -37,6 +44,9 @@ export const ASSET_THUMBNAIL_SIZE = 384;
 function withThumbnailRequest(url) {
   if (!url) {
     return "";
+  }
+  if (url.startsWith("data:")) {
+    return url;
   }
   const thumbnail = new URL(url);
   thumbnail.searchParams.set("thumbnail", String(ASSET_THUMBNAIL_SIZE));
