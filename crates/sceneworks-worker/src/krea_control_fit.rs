@@ -593,7 +593,7 @@ fn fit_ladder_for_tier(
 /// packed tier (it reads `transformer/config.json`; "bind memory gates to loaded tiers"): a
 /// nonexistent root reads as dense, which mis-shapes the q4 composition (the non-q4
 /// attention/decode engagement exclusion would apply). Materialize the tier the test asks for.
-/// Ungated like its [`fit_ladder`] caller, which the plain lib target compiles too.
+#[cfg(any(test, doc))]
 fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract> {
     // One directory per CALL: parallel tests sharing a per-process path race between this
     // writer and the provider's reader, which surfaces as a spurious `Unknown` ladder verdict.
@@ -623,6 +623,7 @@ fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract
         .flatten()
 }
 
+#[cfg(any(test, doc))]
 pub(crate) fn fit_ladder(
     tier_key: &str,
     peak_gb: Option<f64>,
