@@ -1,0 +1,27 @@
+﻿
+running 1 test
+test measure_z_image_tier has been running for over 60 seconds
+sequential_vram_probe-ab088e7162d90042.exe : ZIMAGE_MUTATION tier=q8 policy=transformer kind=lora_vs_plain max_rgb8=45 
+mean_rgb8=1.700935
+At line:2 char:848
++ ... $rung.log"; & $exe --ignored --exact measure_z_image_tier --nocapture ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ZIMAGE_MUTATION...n_rgb8=1.700935:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ZIMAGE_PHASE tier=q8 policy=transformer repeat=0 phase=text peak_gb=7.654
+ZIMAGE_PHASE tier=q8 policy=transformer repeat=0 phase=denoise peak_gb=5.338
+ZIMAGE_PHASE tier=q8 policy=transformer repeat=0 phase=decode peak_gb=1.748
+ZIMAGE_SEAM tier=q8 policy=transformer x=384 local_delta_ratio=1.469
+ZIMAGE_SEAM tier=q8 policy=transformer x=768 local_delta_ratio=1.486
+ZIMAGE_VRAM provider=z_image tier=q8 mode=text_to_image policy=transformer gpu=0 1024x1024 steps=1 count=1 cold=true 
+repeats=1 | load-peak 0.5 GB | steady 0.5 GB | overall-peak 8.4 GB (baseline 0.0 GB)
+ZIMAGE_OUT C:\Users\Michael\AppData\Local\Temp\sc16170-6583-q8-lora-transformer.png
+test measure_z_image_tier ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 303.85s
+
+
+CAPTURED_AT 2026-08-02T02:45:43.0420938Z
+SCENEWORKS_BASELINE e87abd092f2e83452c0e527d69f85fc4d6465242
+INFERENCE_REVISION 65833f24409bce33c418499c2029bee76d842740

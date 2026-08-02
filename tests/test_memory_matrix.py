@@ -84,15 +84,31 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
-    assert len(evidence_ids) == len(calibration["records"]) == 24
+    assert len(evidence_ids) == len(calibration["records"]) == 114
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
-    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
+    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {
+        "current",
+        "historical",
+    }
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert current_eligible == []
+    assert len(current_eligible) == 90
+    assert all(run["binding"]["reasons"] == [] for run in current_eligible)
+    assert {run["record"]["target"]["modelId"] for run in current_eligible} == {
+        "z_image"
+    }
+    assert Counter(
+        run["record"]["strategy"]["rung"] for run in current_eligible
+    ) == {
+        "resident": 18,
+        "staged_residency": 18,
+        "bounded_decode": 18,
+        "bounded_attention": 18,
+        "bounded_transformer_residency": 18,
+    }
     historical_qwen = [
         run
         for run in matrix["calibrationRuns"]
@@ -264,11 +280,18 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_historical_records_do_not_promote_cells_to_dynamic_verification():
+def test_current_z_image_records_promote_only_their_exact_cells():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert verified == []
+    assert len(verified) == 90
+    assert {cell["modelId"] for cell in verified} == {"z_image"}
+    assert {cell["backend"] for cell in verified} == {"candle"}
+    assert Counter(cell["overlay"] for cell in verified) == {
+        "none": 30,
+        "lora": 30,
+        "control": 30,
+    }
     historical_qwen_cells = [
         cell
         for cell in matrix["cells"]
@@ -460,6 +483,7 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         for row in rows
         if row["requestPeak"] == "moves"
     ] == [
+        (15510, "candle"),
         (15510, "mlx"),
         (15511, "mlx"),
         (15512, "mlx"),

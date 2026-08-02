@@ -15,7 +15,7 @@ const MATRIX = path.join(ROOT, "docs/generated/memory-matrix.json");
 const SESSION_DIR = path.join(ROOT, "docs/calibration/sc-16170");
 
 const INFERENCE_REVISION = "65833f24409bce33c418499c2029bee76d842740";
-const SCENEWORKS_REVISION = "dda526776bffe856164a4991f67229159a06443b";
+const SCENEWORKS_REVISION = "e87abd092f2e83452c0e527d69f85fc4d6465242";
 const SESSION_PREFIX = "6583";
 const ARTIFACT_REVISION = "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab";
 const ARTIFACT_REPOSITORY = "SceneWorks/z-image-mlx";
@@ -38,17 +38,19 @@ const HARDWARE = {
 };
 const gb = (value) => Math.ceil(value * 1e9);
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
-const decodeLog = (bytes) => bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe
-  ? bytes.subarray(2).toString("utf16le")
-  : bytes.toString("utf8");
+const decodeLog = (bytes) => {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) return bytes.subarray(2).toString("utf16le");
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return bytes.subarray(3).toString("utf8");
+  return bytes.toString("utf8");
+};
 const phase = (value) => ({ activeBytes: value, allocatorBytes: value, deviceBytes: value, wiredBytes: value, reclaimableBytes: 0 });
 const rungName = (value) => ({ resident: "resident", staged: "staged_residency", decode: "bounded_decode", attention: "bounded_attention", transformer: "bounded_transformer_residency" })[value];
 const fileRung = (value) => ({ resident: "resident", staged_residency: "staged", bounded_decode: "decode", bounded_attention: "attention", bounded_transformer_residency: "transformer" })[value];
 
 const PREDICTED = {
-  q4: { resident: 27.2, staged_residency: 16.9, bounded_decode: 16.9, bounded_attention: 13.4, bounded_transformer_residency: 13.7 },
-  q8: { resident: 32.1, staged_residency: 19.9, bounded_decode: 19.9, bounded_attention: 16.1, bounded_transformer_residency: 13.8 },
-  bf16: { resident: 40.7, staged_residency: 25.4, bounded_decode: 25.4, bounded_attention: 21.5, bounded_transformer_residency: 13.4 },
+  q4: { resident: 27.2, staged_residency: 16.9, bounded_decode: 16.9, bounded_attention: 13.4, bounded_transformer_residency: 13.4 },
+  q8: { resident: 32.1, staged_residency: 19.9, bounded_decode: 19.9, bounded_attention: 16.1, bounded_transformer_residency: 13.4 },
+  bf16: { resident: 40.7, staged_residency: 25.4, bounded_decode: 25.4, bounded_attention: 21.5, bounded_transformer_residency: 13.2 },
 };
 
 function sourceId(source) {

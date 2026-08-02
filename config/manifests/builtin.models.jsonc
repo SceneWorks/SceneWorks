@@ -1564,6 +1564,2294 @@
             "overlays": ["none", "lora", "control"]
           }
         },
+        "calibrations": [
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q4+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q4",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q4+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q4+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "q8+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "q8",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "q8+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:q8+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "text_to_image",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "none",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab",
+            "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "lora",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+sc16170-rank1-lora",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "artifactVariant": "bf16+lora-rank1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+lora@sha256:cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "resident",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "staged_residency",
+            "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_decode",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_attention",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864
+            }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+            "sceneWorksRevision": "e87abd092f2e83452c0e527d69f85fc4d6465242",
+            "matrixSourceRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
+            "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+            "provider": "z_image",
+            "tier": "bf16",
+            "mode": "style_variations",
+            "overlay": "control",
+            "geometry": {
+              "width": 1024,
+              "height": 1024,
+              "batch": 1,
+              "frames": 1
+            },
+            "artifactRepository": "SceneWorks/z-image-mlx+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+            "artifactResolvedRevision": "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab+755999a934909bd5832e20718bb7c639d2a63eb9",
+            "artifactVariant": "bf16+control-union-2.1",
+            "resolvedPathFingerprint": "SceneWorks/z-image-mlx@c74f74c2ad193294fc9ff3f8a5be71daa00d22ab:bf16+alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1@755999a934909bd5832e20718bb7c639d2a63eb9",
+            "rung": "bounded_transformer_residency",
+            "parameters": {
+              "decodeTileEdge": 512,
+              "decodeOverlap": 128,
+              "attentionChunkSize": 67108864,
+              "transformerWindowSize": 1
+            }
+          }
+        ],
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "z_image",

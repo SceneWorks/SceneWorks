@@ -1,0 +1,173 @@
+﻿cargo :    Compiling candle-gen-z-image v0.0.0 
+(C:\Users\Michael\AppData\Local\Temp\codex-sc-16170-inference\crates\media\candle-gen\candle-gen-z-image)
+At line:2 char:149
++ ... cycle.log'; cargo test --locked -p candle-gen-z-image --lib --tests 2 ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ca...le-gen-z-image):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.28s
+     Running unittests src\lib.rs (target\debug\deps\candle_gen_z_image-a9eb8a7e14b1b19c.exe)
+
+running 102 tests
+test adapters::tests::classify_lora_resolves_bare_peft_and_kohya ... ok
+test adapters::tests::loha_and_untagged_lokr_are_detected ... ok
+test adapters::tests::merge_lokr_folds_kron_delta ... ok
+test adapters::tests::merge_lora_bare_folds_expected_delta ... ok
+test adapters::tests::merge_lora_file_unresolvable_key_merges_nothing ... ok
+test adapters::tests::merge_lora_honors_lora_adapter_metadata_alpha ... ok
+test adapters::tests::merge_skips_conv_shaped_lora ... ok
+test adapters::tests::resolve_lora_matches_fold_on_dense ... ok
+test adapters::tests::roundtrip_trainer_peft_file_merges ... ok
+test base::tests::base_descriptor_advertises_cfg_surface ... ok
+test base::tests::base_differs_from_turbo_only_in_cfg ... ok
+test base::tests::base_registers_and_resolves_as_candle ... ok
+test base::tests::load_rejects_single_file_source ... ok
+test base::tests::load_rejects_unwired_surfaces ... ok
+test base::tests::validate_accepts_cfg_and_reference_and_rejects_unsupported ... ok
+test base_img2img_validate::real_weight_base_img2img ... ignored, real-weight GPU validation; set ZIMG_BASE_SNAPSHOT/ZIMG_BASE_SRC/ZIMG_BASE_OUT
+test comfyui::tests::combined_checkpoint_splits_both_prefix_families ... ok
+test comfyui::tests::dit_rejects_wrongly_shaped_qkv ... ok
+test comfyui::tests::dit_renames_norms_out_and_head_wrappers ... ok
+test comfyui::tests::dit_splits_fused_qkv_into_thirds ... ok
+test comfyui::tests::fp8_normalization_applies_scalar_scale_and_drops_companions ... ok
+test comfyui::tests::vae_decoder_up_blocks_are_reversed ... ok
+test comfyui::tests::vae_encoder_down_blocks_map_without_reversal ... ok
+test comfyui::tests::vae_mid_block_and_attention_names ... ok
+test comfyui::tests::vae_squeezes_conv1x1_attention_weight_to_linear ... ok
+test comfyui::tests::vae_top_level_conv_and_norm ... ok
+test common::tests::encode_ids_shapes_and_dtype ... ok
+test common::tests::preprocess_resize_and_normalize ... ok
+test common::tests::seed_noise_is_deterministic ... ok
+test common::tests::tokenizer_config_is_the_shared_policy ... ok
+test control::tests::base_mode_constants_and_scheduler ... ok
+test control::tests::base_mode_step_and_guidance_resolution ... ok
+test control::tests::control_file_resolution ... ok
+test control::tests::control_file_resolution_prefers_union_over_tile_lite ... ok
+test control::tests::control_file_score_orders_union_first ... ok
+test control::tests::control_preprocess_shape_and_range ... ok
+test control::tests::request_defaults ... ok
+test control::tests::vace_injection_places ... ok
+test control_validate::real_weight_control ... ignored, real-weight GPU validation; set ZIMG_CTRL_BASE/ZIMG_CTRL_NET/ZIMG_CTRL_POSE/ZIMG_CTRL_OUT
+test control_validate::real_weight_control_base ... ignored, real-weight GPU validation (base mode); set ZIMG_CTRL_BASE/ZIMG_CTRL_NET/ZIMG_CTRL_POSE/ZIMG_CTRL_OUT
+test dit::parity_tests::lora_host_visits_every_attention_projection ... ok
+test dit::parity_tests::vendored_dit_matches_stock_forward ... ok
+test edit::tests::init_time_step_is_fork_convention ... ok
+test edit::tests::request_defaults ... ok
+test edit::tests::schedule_start_index_and_sigma ... ok
+test edit::tests::source_preprocess_shape_and_range ... ok
+test edit_validate::real_weight_edit ... ignored, real-weight GPU validation; set ZIMG_EDIT_BASE/ZIMG_EDIT_SRC/ZIMG_EDIT_OUT
+test explicit_registry_tests::explicit_catalog_has_stable_surface ... ok
+test memory_strategy::tests::adapters_preserve_the_full_streamed_transformer_ladder ... ok
+test memory_strategy::tests::block_materialization_reports_device_format_transfer_for_dense_and_packed_snapshots ... ok
+test memory_strategy::tests::control_routes_publish_the_full_executable_ladder ... ok
+test memory_strategy::tests::packed_q4_and_q8_snapshots_bind_weights_free_admission_to_the_detected_tier ... ok
+test memory_strategy::tests::plain_contract_is_conformant_and_exposes_every_candidate_range ... ok
+test memory_strategy::tests::request_scope_applies_exact_parameters_and_finishes_once ... ok
+test memory_strategy::tests::rung_four_selection_maps_every_engaged_control_and_preserves_the_window ... ok
+test memory_strategy::tests::stale_fingerprint_and_pid_optimized_routes_are_rejected_before_execution ... ok
+test memory_strategy::tests::tier_admission_does_not_advance_phase_or_pid_policy_beyond_begin_request ... ok
+test packed_dit::parity_tests::attention_query_chunking_matches_the_unbounded_forward ... ok
+test packed_dit::parity_tests::constrained_request_cancel_stops_inside_the_packed_dit_as_typed_canceled ... ok
+test packed_dit::parity_tests::install_additive_lora_on_vendored_dit_applies_and_shifts ... ok
+test packed_dit::parity_tests::install_additive_rejects_off_surface_and_loha ... ok
+test packed_dit::parity_tests::streamed_q4_projection_uses_byte_exact_device_format_sidecar ... ok
+test packed_dit::parity_tests::streamed_q8_projection_uses_byte_exact_device_format_sidecar ... ok
+test packed_dit::parity_tests::streamed_window_rejects_zero_and_preserves_typed_cancellation ... ok
+test packed_dit::parity_tests::streamed_windows_match_resident_forward_including_ragged_tail ... ok
+test packed_dit::parity_tests::vendored_dense_dit_matches_stock_forward ... ok
+test packed_te::parity_tests::vendored_dense_te_matches_stock_forward ... ok
+test pipeline::tests::base_constants_match_the_model_card ... ok
+test pipeline::tests::base_schedule_applies_shift_six ... ok
+test pipeline::tests::bounded_host_transfer_uses_spatial_rows_and_reassembles_exactly ... ok
+test pipeline::tests::component_is_packed_detects_quantization_block ... ok
+test pipeline::tests::constrained_request_pipeline_seam_returns_typed_canceled_without_output ... ok
+test pipeline::tests::empty_uncond_tokenizes_via_chat_template ... ignored, needs Z_IMAGE_SNAPSHOT/Z_IMAGE_BASE_SNAPSHOT for tokenizer.json (no GPU); run with --ignored
+test pipeline::tests::flow_match_schedule_keeps_timestep_and_sigma_consistent ... ok
+test pipeline::tests::img2img_reduced_schedule_indices ... ok
+test pipeline::tests::init_time_step_is_the_fork_convention ... ok
+test pipeline::tests::parity_defaults_match_mlx_provider ... ok
+test pipeline::tests::resolve_reference_picks_single_ref_and_strength ... ok
+test pipeline::tests::streamed_sidecar_preparation_preserves_typed_cancellation ... ok
+test pipeline::tests::the_production_geometry_plans_the_shared_rung3_boundary ... ok
+test pipeline::tests::three_stage_runner_cleans_up_on_phase_error ... ok
+test pipeline::tests::three_stage_runner_cleans_up_when_decode_is_canceled ... ok
+test pipeline::tests::three_stage_runner_drops_each_model_before_loading_the_next ... ok
+test quant::tests::dequant_packed_to_dense_matches_grid ... ok
+test quant::tests::embedding_detect_fires_and_matches_grid ... ok
+test quant::tests::linear_detect_fires_on_to_out_remap_and_leaves_dense_unchanged ... ok
+test tests::accel_attn_toggle_roundtrips ... ok
+test tests::comfyui_descriptor_does_not_advertise_sequential_offload ... ok
+test tests::descriptor_advertises_only_wired_txt2img_surface ... ok
+test tests::load_rejects_single_file_source ... ok
+test tests::load_rejects_unwired_surfaces ... ok
+test tests::request_staging_is_active_and_honors_pre_cancel_before_load ... ok
+test tests::request_staging_rejects_pid_explicitly_before_load ... ok
+test tests::validate_accepts_txt2img_and_rejects_unsupported ... ok
+test tests::z_image_registers_and_resolves_as_candle ... ok
+test training::tests::backward_reaches_lora_factors ... ok
+test training::tests::build_batch_math ... ok
+test training::tests::dense_and_checkpoint_grads_match ... ok
+test training::tests::one_optimizer_step_descends ... ok
+test training::tests::trainer_registers_and_resolves_as_candle ... ok
+test training::tests::validate_rejects_bad_requests ... ok
+test turbo_img2img_validate::real_weight_turbo_img2img ... ignored, real-weight GPU validation; set ZIMG_TURBO_SNAPSHOT/ZIMG_TURBO_SRC/ZIMG_TURBO_OUT
+
+test result: ok. 96 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests\comfyui_real_weights.rs (target\debug\deps\comfyui_real_weights-f50c3d639d3e66a0.exe)
+
+running 1 test
+test comfyui_zimage_renders_in_place ... ignored, needs the ComfyUI Z-Image files + a resident tokenizer snapshot + a CUDA GPU; run --release --features cuda --ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\conformance.rs (target\debug\deps\conformance-bde845d428e7b05b.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\control_vram_probe.rs (target\debug\deps\control_vram_probe-ae08233d51253a37.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\packed_tier_validate.rs (target\debug\deps\packed_tier_validate-b117bea1b29d619e.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\request_scoped_residency_shape.rs 
+(target\debug\deps\request_scoped_residency_shape-368a7aabbc68a793.exe)
+
+running 2 tests
+test mutating_the_request_bit_changes_component_loads ... ok
+test one_warm_candle_owner_serves_warm_staged_warm_requests ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\sequential_vram_probe.rs (target\debug\deps\sequential_vram_probe-8e63df626d524c43.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\trainer_conformance.rs (target\debug\deps\trainer_conformance-f8727f6f7d2802c3.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\trainer_e2e.rs (target\debug\deps\trainer_e2e-f151255015682653.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+CAPTURED_AT 2026-08-02T02:51:28.5770376Z
+SCENEWORKS_BASELINE e87abd092f2e83452c0e527d69f85fc4d6465242
+INFERENCE_REVISION 65833f24409bce33c418499c2029bee76d842740

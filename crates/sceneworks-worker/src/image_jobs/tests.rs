@@ -87,6 +87,7 @@ impl HiresProbeGenerator {
                 modality: gen_core::Modality::Image,
                 capabilities: Default::default(),
                 required_components: &[],
+                control_kinds: None,
             },
             requests: Default::default(),
         }
@@ -14934,12 +14935,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     );
 
     // 4b. The `GatedInPreamble` arm tells the shared driver to stand down, so it is the obvious place a
-    //     future lane could hide an ungated route. Bound it three ways: exactly ONE conditioning handler
+    //     future lane could hide an ungated route. Bind it to the two audited conditioning handlers:
     //     may use it, that handler must ALSO carry a live gate call of its own (asserted in step 3 via its
     //     `admit_conditioning_paths(` marker), and it must name a gate module it really runs. Krea
-    //     pose-control is that lane — it gates in its preamble because its check must precede its own
-    //     `note_loaded_peak` (see `ConditioningAdmission::GatedInPreamble`). A SECOND lane claiming it is
-    //     either a second ordering constraint that deserves review, or the hatch being abused.
+    //     pose-control gates before its own `note_loaded_peak`; Z-Image uses this arm only after the
+    //     revision-bound memory selector admits an optimized strict-control request. A third lane is a
+    //     new exemption and must fail review here.
     let opting_out: Vec<&str> = CONDITIONING
         .iter()
         .filter(|(_, _, source, _)| source.contains("ConditioningAdmission::GatedInPreamble"))
@@ -14947,10 +14948,9 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         .collect();
     assert_eq!(
         opting_out,
-        vec!["KreaControl"],
-        "exactly one conditioning lane may declare GatedInPreamble (Krea pose-control, whose check must \
-         precede its own note_loaded_peak). Anything else here tells the shared driver to stand down \
-         without review (sc-16069)"
+        vec!["ZimageControl", "KreaControl"],
+        "only the audited Z-Image memory selector and Krea pose-control preamble may declare \
+         GatedInPreamble. Anything else tells the shared driver to stand down without review (sc-16069)"
     );
     let krea_source = CONDITIONING
         .iter()
@@ -14968,6 +14968,17 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "krea_control_candle.rs must actually call `krea_control_fit`'s runtime-aware shared-selector \
          seam — naming a gate it does not call would be an admission claim with nothing behind it \
          (sc-16069)"
+    );
+    let zimage_source = CONDITIONING
+        .iter()
+        .find(|(route, ..)| *route == "ZimageControl")
+        .expect("ZimageControl row")
+        .2;
+    assert!(
+        zimage_source.contains("gate: \"z_image_control_memory_strategy\"")
+            && zimage_source.contains("crate::candle_memory_strategy::evaluate_z_image("),
+        "Z-Image may stand the shared floor down only after its revision-bound memory selector \
+         admits an optimized strict-control request"
     );
 
     // 5. Each direct-gate lane gates BEFORE it hands off to the load — a gate placed after the allocation

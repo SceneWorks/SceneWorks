@@ -1,0 +1,23 @@
+﻿
+running 1 test
+test measure_z_image_base_control_tier has been running for over 60 seconds
+control_vram_probe-1fdd9d9912340c18.exe : ZIMAGE_CONTROL_PHASE tier=q8 strategy=staged repeat=0 phase=predecode 
+peak_gb=19.802
+At line:2 char:888
++ ... $rung.log"; & $exe --ignored --exact measure_z_image_base_control_tie ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ZIMAGE_CONTROL_... peak_gb=19.802:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ZIMAGE_CONTROL_PHASE tier=q8 strategy=staged repeat=0 phase=decode peak_gb=15.876
+ZIMAGE_CONTROL_VRAM tier=q8 strategy=staged gpu=0 1024x1024 steps=1 guidance=4 control_scale=1 count=1 cold=true 
+repeats=1 | load-peak 0.5 GB | steady 0.5 GB | overall-peak 19.8 GB (baseline 0.0 GB)
+ZIMAGE_CONTROL_OUT C:\Users\Michael\AppData\Local\Temp\sc16170-6583-q8-control-staged.png
+test measure_z_image_base_control_tier ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 99.26s
+
+
+CAPTURED_AT 2026-08-02T02:19:13.6595696Z
+SCENEWORKS_BASELINE e87abd092f2e83452c0e527d69f85fc4d6465242
+INFERENCE_REVISION 65833f24409bce33c418499c2029bee76d842740
