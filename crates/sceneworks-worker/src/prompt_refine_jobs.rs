@@ -2327,10 +2327,7 @@ mod tests {
             .filter(|r| {
                 let caps = (r.descriptor)().capabilities;
                 (!reqs.vision || caps.supports_vision)
-                    && reqs
-                        .constraints
-                        .iter()
-                        .all(|c| caps.supports_constraint(*c))
+                    && reqs.constraints.iter().all(|c| caps.supports_constraint(c))
             })
             .map(|r| (r.descriptor)().id)
             .collect();
@@ -2419,9 +2416,7 @@ mod tests {
             .filter(|r| (r.can_load)(&spec))
             .filter(|r| {
                 let caps = (r.descriptor)().capabilities;
-                reqs.constraints
-                    .iter()
-                    .all(|c| caps.supports_constraint(*c))
+                reqs.constraints.iter().all(|c| caps.supports_constraint(c))
             })
             .map(|r| (r.descriptor)().id)
             .collect();

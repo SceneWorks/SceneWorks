@@ -444,9 +444,10 @@ fn fit_ladder_for_tier(
         MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: KREA_CONTROL_ROUTE.to_owned(),
-                backend: "candle".to_owned(),
+                backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
-                mode: "pose_control".to_owned(),
+                load_shape: contract.load_shape,
+                mode: crate::memory_strategy::memory_mode_from_mode_key("pose_control"),
                 overlay: Some(overlay.clone()),
                 geometry: measured_geometry,
                 strategy: selection.strategy,
