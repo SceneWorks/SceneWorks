@@ -681,9 +681,10 @@ mod tests {
         let mut evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: "z_image".to_owned(),
-                backend: "candle".to_owned(),
+                backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier("q4").expect("q4 is a supported numeric tier"),
-                mode: "text_to_image".to_owned(),
+                load_shape: gen_core::LoadShape::EagerMaterialization,
+                mode: gen_core::MemoryMode::TextToImage,
                 overlay: Some("lora".to_owned()),
                 geometry: MemoryGeometry {
                     width: 1024,

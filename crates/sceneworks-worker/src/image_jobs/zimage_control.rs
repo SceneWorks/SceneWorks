@@ -138,24 +138,6 @@ pub(super) fn resolve_zimage_control_base(
     Ok(snapshot.map(|root| standard_tier_subdir(&root, request)))
 }
 
-fn zimage_control_base_is_certified(settings: &Settings, base: &Path, tier: &str) -> bool {
-    let Some(root) = crate::model_jobs::huggingface_pinned_snapshot_dir(
-        &settings.data_dir,
-        super::ZIMAGE_MLX_TURNKEY_REPO,
-        super::ZIMAGE_MLX_TURNKEY_REVISION,
-    ) else {
-        return false;
-    };
-    let expected = root.join(tier);
-    match (
-        std::fs::canonicalize(base),
-        std::fs::canonicalize(&expected),
-    ) {
-        (Ok(actual), Ok(expected)) => actual == expected,
-        _ => base == expected,
-    }
-}
-
 /// True when this is a candle-eligible Z-Image strict-control job: `z_image_turbo` or the base `z_image`
 /// (sc-8379) with a non-empty `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::zimage_control_candle_eligible` so the worker and router agree.
@@ -240,15 +222,12 @@ async fn ensure_zimage_control_weights(
     settings: &Settings,
     job: &JobSnapshot,
     request: &ImageRequest,
-) -> WorkerResult<(PathBuf, bool)> {
+) -> WorkerResult<PathBuf> {
     let (repo, file) = zimage_control_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_ZIMAGE") {
         let p = PathBuf::from(p);
         if p.is_file() {
-            // An environment override is intentionally supported for resident execution, but it
-            // has not passed the pinned Hugging Face revision/LFS verification below. Do not let
-            // it borrow optimized memory evidence minted for the certified checkpoint.
-            return Ok((p, false));
+            return Ok(p);
         }
     }
     let engine_id = if is_zimage_base_model(&request.model) {
@@ -262,7 +241,7 @@ async fn ensure_zimage_control_weights(
     {
         let f = snapshot.join(&file);
         if f.is_file() {
-            return Ok((f, true));
+            return Ok(f);
         }
     }
     let client = crate::downloads::streaming_download_client();
@@ -283,7 +262,7 @@ async fn ensure_zimage_control_weights(
     // moving under us can't swap the ControlNet checkpoint (sc-9879). Registered overlays carry their
     // own immutable pin.
     ensure_hf_cached_file(&context, &repo, &revision, &file, &dst).await?;
-    Ok((dst, true))
+    Ok(dst)
 }
 
 /// Flat telemetry recorded on candle Z-Image control assets. `guidance` is recorded only for the base
@@ -343,11 +322,6 @@ pub(super) struct ZImageStrictControl {
     /// AND the PiD + Gemma snapshots are cached (Z-Image is the FLUX.1 latent space → `zimage-turbo` alias).
     /// Threaded into `with_pid` at load; `use_pid` on the request is `is_some()`. `None` ⇒ native VAE decode.
     pid: Option<gen_core::PidWeights>,
-    /// Request-scoped lifecycle selected from revision-bound control calibration evidence.
-    memory: gen_core::GenerationMemory,
-    /// An optimized selection already passed the measured selector, replacing the legacy resident
-    /// co-residency floor in the shared strict-control driver.
-    memory_gate_selected: bool,
 }
 
 #[cfg(test)]
@@ -376,8 +350,6 @@ pub(super) fn zimage_strict_control_test_fixture(
             ZIMAGE_CTRL_ENGINE_ID
         },
         pid: None,
-        memory: Default::default(),
-        memory_gate_selected: false,
     }
 }
 
@@ -412,11 +384,6 @@ impl CandleStrictControl for ZImageStrictControl {
     /// The Z-Image base snapshot + the Fun-ControlNet overlay, plus the PiD decoder pair when this
     /// generation opted in — every path [`Self::load`] holds co-resident (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
-        if self.memory_gate_selected {
-            return ConditioningAdmission::GatedInPreamble {
-                gate: "z_image_control_memory_strategy",
-            };
-        }
         let mut overlays = vec![self.controlnet.as_path()];
         overlays.extend(crate::conditioning_fit::pid_paths(self.pid.as_ref()));
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
@@ -439,7 +406,7 @@ impl CandleStrictControl for ZImageStrictControl {
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
         };
-        let model = ZImageControl::load_with_memory(&paths, self.memory).map_err(|error| {
+        let model = ZImageControl::load(&paths).map_err(|error| {
             WorkerError::Engine(format!("Z-Image strict-pose control load failed: {error}"))
         })?;
         // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND the snapshots are cached.
@@ -476,7 +443,6 @@ impl CandleStrictControl for ZImageStrictControl {
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.pid.is_some(),
-            memory: self.memory,
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -508,8 +474,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         let label = if is_base { "Z-Image" } else { "Z-Image-Turbo" };
         WorkerError::InvalidPayload(format!("Z-Image base ({label}) weights not found"))
     })?;
-    let (controlnet, controlnet_is_certified) =
-        ensure_zimage_control_weights(api, settings, job, request).await?;
+    let controlnet = ensure_zimage_control_weights(api, settings, job, request).await?;
 
     let steps = zimage_control_steps(request);
     let control_scale = advanced::f32_clamped(
@@ -552,62 +517,6 @@ pub(super) async fn generate_candle_zimage_control_stream(
         pid_output_tier(request),
     );
 
-    // The bespoke strict-control route enters the same revision-bound selector as the registered
-    // Z-Image routes. The load spec names the exact base tier and Fun-ControlNet overlay so evidence
-    // cannot leak across precision or overlay cells.
-    let tier = super::gate_tier_key(
-        false,
-        &base,
-        &request.advanced,
-        &request.model_manifest_entry,
-        false,
-    );
-    let mut contract_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
-        .with_control(gen_core::WeightsSource::File(controlnet.clone()));
-    contract_spec = match tier {
-        "q4" => contract_spec.with_quant(gen_core::Quant::Q4),
-        "q8" => contract_spec.with_quant(gen_core::Quant::Q8),
-        _ => contract_spec,
-    };
-    if let Some(pid) = pid_weights.as_ref() {
-        contract_spec = contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
-    }
-    let budget = crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await;
-    let resident_peak = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
-    let memory_evaluation = if controlnet_is_certified {
-        crate::candle_memory_strategy::evaluate_z_image(
-            engine_id,
-            &request.model,
-            &contract_spec,
-            zimage_control_base_is_certified(settings, &base, tier),
-            &request.model_manifest_entry,
-            tier,
-            &request.mode,
-            Some("control"),
-            gen_core::MemoryGeometry {
-                width,
-                height,
-                batch: 1,
-                frames: 1,
-            },
-            true,
-            use_pid,
-            false,
-            budget,
-            resident_peak,
-            0,
-            gen_core::MemoryCacheState::Cold,
-        )?
-    } else {
-        None
-    };
-    let (memory, memory_gate_selected) = match memory_evaluation {
-        Some(evaluation) => (
-            evaluation.memory.unwrap_or_default(),
-            evaluation.context.selection.strategy != gen_core::MemoryStrategy::Resident,
-        ),
-        None => (Default::default(), false),
-    };
     let mut raw_settings = zimage_control_raw_settings(
         request,
         &repo,
@@ -633,8 +542,6 @@ pub(super) async fn generate_candle_zimage_control_stream(
         negative_prompt,
         engine_id,
         pid: pid_weights,
-        memory,
-        memory_gate_selected,
     };
 
     run_candle_strict_control(
