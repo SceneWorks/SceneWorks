@@ -587,14 +587,13 @@ fn fit_ladder_for_tier(
     }
 }
 
-#[cfg(any(test, doc))]
 /// Registered control contract for a tier, resolved through a minimal ON-DISK snapshot.
 ///
 /// Since the pin at cc5b30a9 the provider binds its rung composition to the snapshot's ACTUAL
 /// packed tier (it reads `transformer/config.json`; "bind memory gates to loaded tiers"): a
 /// nonexistent root reads as dense, which mis-shapes the q4 composition (the non-q4
 /// attention/decode engagement exclusion would apply). Materialize the tier the test asks for.
-#[cfg(any(test, doc))]
+/// Ungated like its [`fit_ladder`] caller, which the plain lib target compiles too.
 fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract> {
     // One directory per CALL: parallel tests sharing a per-process path race between this
     // writer and the provider's reader, which surfaces as a spurious `Unknown` ladder verdict.
