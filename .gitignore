@@ -291,3 +291,8 @@ build.bat
 # One-off Shortcut migration run state (sc-15812)
 .shortcut-split-state.json
 .shortcut-split-plan.json
+
+# Memory-calibration capture scratch (docs/memory-calibration-harness.md). MUST stay ignored: the
+# harness derives each record's `dirty` flag from `git status --porcelain`, which counts untracked
+# paths, and complete evidence from a dirty repository is rejected outright.
+.tmp/

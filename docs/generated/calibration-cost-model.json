@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:28c6cd7622bfcf31f7a2bf969730bf9a60842252f3e78fe05157dacc3b22805a",
+    "sceneWorksRevision": "source-tree:d9c7c50c379147b58f7dea3b9ac57dda008758d244809d9970f91b79d4b746d1",
     "matrixRevision": "source-tree:1ee586981d6402615671b8473ca272b554d939ec2695f1b2ecf39619d9b3d59f",
     "inferenceRevision": "942fcb44a68e39ffbb15d7a716ae3e766636ebd7",
     "sources": {
@@ -15,7 +15,7 @@
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "16b30bf6950311bc9380f1a99f6a753e0fa62c26f466abf1b614aa76f79cad96"
+        "sha256": "41fb587c15ea34886c99335f5657e9d187071e844894703483f70ff8e7275f7a"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
@@ -43,11 +43,11 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "115b4637d8feb7f7c95fb23dccd934e8f246e2d6e35b1012791c5d8a1be0e716"
+        "sha256": "fa14300eac874b295ceb666e2589e8006a8bd733cf9b20f047db7f5e684f85ad"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "2caa869bbe6be872ff783ebbe39af2fe0ac3da9a2fcd12700200ed4f44313c74"
+        "sha256": "65fa4cdc523835517929de952e113d33b191b6fb77ecbfdc7d9fcdb99021a703"
       }
     }
   },

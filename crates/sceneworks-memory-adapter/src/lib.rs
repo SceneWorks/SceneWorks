@@ -14,6 +14,11 @@ pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
+/// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
+/// materialization shape its run actually used; the harness rejects a fragment that omits it, and
+/// never backfills the field from the plan (sc-16482) — a receipt may only testify to its own run.
+pub const LOAD_SHAPE_EAGER: &str = "eager_materialization";
+pub const LOAD_SHAPE_DEFERRED: &str = "deferred_materialization";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferencePhase {
