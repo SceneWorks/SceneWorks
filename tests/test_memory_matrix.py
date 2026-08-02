@@ -155,6 +155,7 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
             {
                 "evidenceScope": "fixture",
                 "backend": "candle",
+                "loadShape": "eager_materialization",
                 "target": {
                     "provider": "krea_2_turbo",
                     "modelId": "krea_2_turbo",
