@@ -88,6 +88,7 @@ impl HiresProbeGenerator {
                 capabilities: Default::default(),
                 control_kinds: None,
                 required_components: &[],
+                control_kinds: None,
             },
             requests: Default::default(),
         }
@@ -168,6 +169,7 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             true_cfg: None,
             provider_reference_strength: 0.3,
         }),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |event| progress.push(event),
     )
@@ -2355,6 +2357,7 @@ fn sensenova_it2i_real_weights_generates_one_image() {
         1.0,       // image CFG (edit default)
         3.0,       // timestep shift
         build_edit_conditioning(std::slice::from_ref(&reference)),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -2423,6 +2426,7 @@ fn sensenova_fast_batch_releases_cache_between_images() {
             1.0,       // image CFG
             3.0,       // timestep shift
             conditioning.clone(),
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
         )
@@ -2690,6 +2694,7 @@ fn bernini_image_t2i_real_weights_generates_one_image() {
         Some(4.0),
         "t2i",
         Vec::new(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -2743,6 +2748,7 @@ fn bernini_image_i2i_real_weights_generates_one_image() {
         Some(4.0),
         "i2i",
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3461,6 +3467,7 @@ fn smoke_generate_one(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -3645,6 +3652,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_p| {},
     )
@@ -3934,6 +3942,7 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -4006,6 +4015,7 @@ fn boogu_q4_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -4074,6 +4084,7 @@ fn klein_tier_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -4134,6 +4145,7 @@ fn ideogram_4_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -4292,6 +4304,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -4349,6 +4362,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -4722,6 +4736,7 @@ fn smoke_generate_one_true_cfg(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -5081,6 +5096,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -5156,6 +5172,7 @@ fn sc3031_ab_dump_pose() {
         seed,
         steps,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -5381,6 +5398,7 @@ fn zimage_control_real_weights_generates_one_pose() {
         42,
         8,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -5443,6 +5461,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
             50,
             4.0,
             conditioning,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -5531,6 +5550,7 @@ fn qwen_control_real_weights_generates_one_pose() {
         4.0,
         conditioning,
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -6084,6 +6104,7 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
         8,
         Some(4.0), // dev embedded guidance
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -6161,6 +6182,7 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
             28,
             Some(3.5), // dev embedded guidance
             conditioning,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
         )
@@ -6450,6 +6472,7 @@ fn flux2_edit_real_weights_generates_one_image() {
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -9048,6 +9071,7 @@ fn qwen_edit_real_weights_generates_one_image() {
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -9114,6 +9138,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
         Some("lightning"),
         build_edit_conditioning(std::slice::from_ref(&reference)),
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -9207,6 +9232,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         None,
         conditioning,
         &PromptEnhance::default(),
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
             if let gen_core::Progress::Step { current, .. } = p {
@@ -9341,6 +9367,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
                 None,
                 conditioning,
                 &PromptEnhance::default(),
+                gen_core::PreviewSink::default(),
                 &cancel,
                 &mut |p| {
                     if let gen_core::Progress::Step { current, .. } = p {
@@ -10010,6 +10037,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             None,
             None,
             &enhance,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -10203,6 +10231,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             None,
             None,
             &enhance,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
         )
@@ -10328,6 +10357,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             None,
             None,
             &enhance,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -10529,6 +10559,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             None,
             None,
             &enhance,
+            gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
                 if let gen_core::Progress::Step { current, .. } = p {
@@ -11300,6 +11331,7 @@ fn matrix_flux1_render(
         28,
         Some(3.5),
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -11446,6 +11478,7 @@ fn matrix_flux2_render(
         8,
         Some(4.0),
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -11585,6 +11618,7 @@ fn matrix_zimage_turbo_render(
         42,
         8,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -11725,6 +11759,7 @@ fn matrix_zimage_base_render(
         50,
         4.0,
         conditioning,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -11866,6 +11901,7 @@ fn matrix_qwen_render(
         4.0,
         conditioning,
         false,
+        gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -13006,6 +13042,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
             steps,
             conditioning,
             None,
+            gen_core::PreviewSink::default(),
             &CancelFlag::new(),
             &mut |_| {},
             None,
@@ -14447,6 +14484,7 @@ fn sc_8253_8278_identity_angle_ab() {
                         strength: None,
                     }],
                     &PromptEnhance::default(),
+                    gen_core::PreviewSink::default(),
                     &cancel,
                     &mut |_| {},
                 )
@@ -14999,5 +15037,110 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "candle conditioning route {route} ({file}) gates AFTER it hands off to the load — the check \
              must be PRE-flight (sc-16069)"
         );
+    }
+}
+
+/// Live denoise preview plumbing (epic 16624, sc-16904). Gated like `stream.rs`/`base.rs`, which
+/// define the seam under test.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod preview_stream_tests {
+    use super::*;
+
+    fn frame(current: u32, total: u32) -> gen_core::PreviewFrame {
+        gen_core::PreviewFrame {
+            current,
+            total,
+            image: gen_core::Image {
+                width: 2,
+                height: 2,
+                pixels: vec![128_u8; 2 * 2 * 3],
+            },
+        }
+    }
+
+    /// The sink runs synchronously on the denoise thread, so a momentarily full channel must DROP
+    /// the frame (latest-wins downstream), never block. A `blocking_send` regression here would
+    /// deadlock this single-threaded test instead of failing an assertion.
+    #[test]
+    fn preview_sink_drops_frames_on_a_full_channel_without_blocking() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(1);
+        let sink = preview_sink_for(&tx, 0);
+        assert!(sink.is_active(), "an attached sink must advertise itself");
+        sink.emit(frame(1, 4));
+        sink.emit(frame(2, 4));
+        match rx.try_recv().expect("first frame queued") {
+            GenEvent::Preview { index, frame } => {
+                assert_eq!(index, 0);
+                assert_eq!(frame.current, 1);
+            }
+            other => panic!("expected a preview event, got {}", gen_event_name(&other)),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the second frame must be dropped when the channel is full, not queued or blocked on"
+        );
+    }
+
+    fn gen_event_name(event: &GenEvent) -> &'static str {
+        match event {
+            GenEvent::Step { .. } => "Step",
+            GenEvent::Decoding { .. } => "Decoding",
+            GenEvent::Loading { .. } => "Loading",
+            GenEvent::Preview { .. } => "Preview",
+            GenEvent::Image { .. } => "Image",
+        }
+    }
+
+    #[test]
+    fn preview_frame_encodes_as_a_decodable_jpeg_data_url() {
+        let data_url = encode_preview_data_url(&frame(3, 8)).expect("frame encodes");
+        let payload = data_url
+            .strip_prefix("data:image/jpeg;base64,")
+            .expect("data URL carries the jpeg media type");
+        use base64::Engine as _;
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .expect("payload is valid base64");
+        let decoded = image::load_from_memory(&jpeg).expect("payload is a decodable JPEG");
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+    }
+
+    /// The frame rides `result.previewFrame` as a single slot on the EXISTING streaming result —
+    /// `result` is replaced wholesale per accepted POST, so a result built without the slot (the
+    /// final/terminal posts) is what clears it. Both halves are pinned here.
+    #[test]
+    fn streaming_result_carries_the_preview_slot_and_omits_it_when_cleared() {
+        let plan = ImagePlan::new(&request(
+            json!({ "projectId": "p", "prompt": "x", "count": 1 }),
+        ));
+        let slot = PreviewSlot {
+            index: 0,
+            current: 5,
+            total: 20,
+            data_url: "data:image/jpeg;base64,QQ==".to_owned(),
+        };
+        let with = streaming_result_with_preview(&plan, &[], Some(&slot));
+        let frame = with
+            .get("previewFrame")
+            .and_then(Value::as_object)
+            .expect("previewFrame block present");
+        assert_eq!(frame.get("imageIndex").and_then(Value::as_u64), Some(0));
+        assert_eq!(frame.get("current").and_then(Value::as_u64), Some(5));
+        assert_eq!(frame.get("total").and_then(Value::as_u64), Some(20));
+        assert_eq!(
+            frame.get("dataUrl").and_then(Value::as_str),
+            Some("data:image/jpeg;base64,QQ==")
+        );
+
+        let without = streaming_result_with_preview(&plan, &[], None);
+        assert!(
+            !without.contains_key("previewFrame"),
+            "a result built with no live slot must omit the key entirely"
+        );
+        // Every other key matches the plain streaming result — the preview is strictly additive.
+        assert_eq!(without, streaming_result(&plan, &[]));
     }
 }

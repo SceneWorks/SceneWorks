@@ -47,6 +47,7 @@ use serde_json::{Map as JsonObject, Value};
 
 use crate::fit_gate::resolve_offload;
 pub(crate) use crate::fit_gate::FitDecision;
+use crate::memory_strategy::memory_mode_from_mode_key;
 use crate::model_jobs::ResolvedArtifactProvenance;
 use crate::{WorkerError, WorkerResult};
 
@@ -424,6 +425,9 @@ impl MlxCalibrationBinding {
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
             .ok_or_else(|| format!("mlx.calibrations[{index}].abi must be a u32"))?;
+        // ABI 2 keys receipts by the typed materialization shape, so the opt-in must declare the
+        // shape its receipts were measured under. ABI-1 opt-ins predate the axis; they are stale on
+        // the ABI check alone, so the placeholder value is never compared.
         let load_shape = match calibration.get("loadShape").and_then(Value::as_str) {
             Some("eager_materialization") => LoadShapeKey::EagerMaterialization,
             Some("deferred_materialization") => LoadShapeKey::DeferredMaterialization,
@@ -677,15 +681,6 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     }
 }
 
-fn memory_mode_from_key(mode: &str) -> MemoryMode {
-    match mode {
-        "text_to_image" => MemoryMode::TextToImage,
-        "image_to_image" => MemoryMode::ImageToImage,
-        "edit" => MemoryMode::Edit,
-        other => MemoryMode::Other(other.to_owned()),
-    }
-}
-
 /// Translate a selection into the engine's per-rung engagement knobs.
 ///
 /// SC-15805: this asks the contract which rungs the selection ENGAGES rather than re-deriving the
@@ -712,7 +707,7 @@ fn memory_for_selection(
 fn resident_evidence(
     contract: &MemoryProviderContract,
     tier: MemoryNumericTier,
-    mode: MemoryMode,
+    mode: &str,
     overlay: Option<&str>,
     geometry: MemoryGeometry,
     predicted_peak_bytes: u64,
@@ -729,7 +724,7 @@ fn resident_evidence(
             backend: gen_core::MemoryBackend::Mlx,
             tier,
             load_shape: contract.load_shape,
-            mode,
+            mode: memory_mode_from_mode_key(mode),
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: selection.strategy,
@@ -898,7 +893,6 @@ fn packaged_admission_route(
     inputs: &MlxRequestInputs,
     mode_key: &str,
     budget: MemoryBudget,
-    load_shape: gen_core::LoadShape,
 ) -> WorkerResult<AdmissionRoute> {
     if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
         return Err(WorkerError::InvalidPayload(format!(
@@ -924,7 +918,7 @@ fn packaged_admission_route(
             });
         }
     };
-    evidence_admission_route(&bundle, plan, inputs, mode_key, budget, load_shape)
+    evidence_admission_route(&bundle, plan, inputs, mode_key, budget)
 }
 
 fn evidence_admission_route(
@@ -933,7 +927,6 @@ fn evidence_admission_route(
     inputs: &MlxRequestInputs,
     mode_key: &str,
     budget: MemoryBudget,
-    load_shape: gen_core::LoadShape,
 ) -> WorkerResult<AdmissionRoute> {
     if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
         return Err(WorkerError::InvalidPayload(format!(
@@ -1062,8 +1055,10 @@ fn evidence_admission_route(
                         resolved_route: plan.engine_id.to_owned(),
                         backend: gen_core::MemoryBackend::Mlx,
                         tier: plan.tier,
-                        load_shape,
-                        mode: memory_mode_from_key(mode_key),
+                        load_shape: crate::memory_strategy::load_shape_from_receipt(
+                            record.load_shape,
+                        ),
+                        mode: memory_mode_from_mode_key(mode_key),
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
                         strategy: evidence_strategy(binding.rung),
@@ -1299,6 +1294,9 @@ fn evaluate_request_with_budget_using_bundle(
             },
         );
         fallback_contract.asset_facts.base_bytes = plan.asset_bytes;
+        // PR #395 (asset-facts unification) requires base_bytes to equal the sum of the base
+        // component bytes. The legacy fallback has only the summed on-disk figure — no per-component
+        // split — so carry the whole sum on the transformer axis rather than fail conformance.
         fallback_contract.asset_facts.transformer_bytes = plan.asset_bytes;
         &fallback_contract
     };
@@ -1325,15 +1323,8 @@ fn evaluate_request_with_budget_using_bundle(
         .map_or(0, |identity| identity.abi);
     let mut admission = if plan.tier.component_precision_floors.is_empty() {
         match evidence_bundle {
-            Some(bundle) => evidence_admission_route(
-                bundle,
-                plan,
-                inputs,
-                mode_key,
-                budget,
-                contract.load_shape,
-            )?,
-            None => packaged_admission_route(plan, inputs, mode_key, budget, contract.load_shape)?,
+            Some(bundle) => evidence_admission_route(bundle, plan, inputs, mode_key, budget)?,
+            None => packaged_admission_route(plan, inputs, mode_key, budget)?,
         }
     } else {
         // Persisted calibration bindings currently identify only the coarse tier token (for
@@ -1452,7 +1443,7 @@ fn evaluate_request_with_budget_using_bundle(
     let (resident_selection, resident) = resident_evidence(
         contract,
         plan.tier,
-        mode.clone(),
+        mode_key,
         inputs.overlay.as_deref(),
         geometry,
         predicted_peak_bytes,
@@ -2573,8 +2564,10 @@ fn generic_mlx_shared_observation(
             resolved_route: "generic_mlx_cold_load".into(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
+            // The generic estimator models the historical bulk cold load; no generic route
+            // defers transformer materialization.
             load_shape: gen_core::LoadShape::EagerMaterialization,
-            mode: MemoryMode::Other("image_generation".into()),
+            mode: memory_mode_from_mode_key("image_generation"),
             overlay: Some("resolved_load_spec".into()),
             geometry,
             strategy: MemoryStrategy::Resident,
@@ -3136,7 +3129,7 @@ mod tests {
                 quant: Some(gen_core::Quant::Q4),
                 component_precision_floors: &[],
             },
-            MemoryMode::TextToImage,
+            "text_to_image",
             None,
             MemoryGeometry {
                 width: 1024,
@@ -3252,7 +3245,7 @@ mod tests {
         );
         contract.calibration = Some(MemoryCalibrationIdentity::new(
             MAGE_CALIBRATION_FINGERPRINT,
-            contract.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
         ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
         contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
@@ -3519,7 +3512,7 @@ mod tests {
         contract.provider_id = "krea_2_turbo_control".to_owned();
         contract.calibration = Some(MemoryCalibrationIdentity::new(
             "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            contract.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
         ));
         let bounded_decode = contract
             .strategies
@@ -3561,7 +3554,7 @@ mod tests {
         );
         contract.calibration = Some(MemoryCalibrationIdentity::new(
             "fixture-formula-v2",
-            contract.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
         ));
         contract.asset_facts.base_bytes = gib_to_bytes(3.0);
         contract.asset_facts.transformer_bytes = gib_to_bytes(3.0);
@@ -3619,8 +3612,11 @@ mod tests {
         }
     }
 
-    /// Test-only migration for selector coverage while the production schema-v3 bundle correctly
-    /// remains stale under ABI 2. Delete once the packaged evidence is recollected under schema v4.
+    /// TEST-ONLY schema shim: the packaged bundle is still the schema-v3 / ABI-1 collection, which
+    /// v4 deliberately classifies stale in production. Its rows WERE measured eager (their
+    /// fingerprints say so); migrating them in fixture space keeps the selector-behavior coverage
+    /// alive. DELETE when the bundle is re-collected under the v4 harness; the sceneworks-core
+    /// `real_packaged_bundle...` test pins the production staleness.
     fn packaged_bundle_migrated_to_v4_for_tests() -> EvidenceBundle {
         let mut raw: Value = serde_json::from_str(
             sceneworks_core::memory_calibration::PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
@@ -4034,8 +4030,7 @@ mod tests {
                 &unavailable,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0),
-                gen_core::LoadShape::EagerMaterialization,
+                fixture_budget(8.0)
             )
             .expect("an unproven opt-in must degrade, never refuse")
             .path,
@@ -4063,8 +4058,7 @@ mod tests {
             &malformed,
             &fixture_inputs(1024, 1024),
             "text_to_image",
-            fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
+            fixture_budget(8.0)
         )
         .expect_err("a malformed present opt-in must not collapse to packaged-empty legacy")
         .to_string()
@@ -4215,8 +4209,7 @@ mod tests {
                 &q4_plan,
                 &fixture_inputs(512, 512),
                 "text_to_image",
-                fixture_budget(8.0),
-                gen_core::LoadShape::EagerMaterialization,
+                fixture_budget(8.0)
             )
             .expect("the second exact cell is independently selectable")
             .path,
@@ -4248,8 +4241,7 @@ mod tests {
                 &q4,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0),
-                gen_core::LoadShape::EagerMaterialization,
+                fixture_budget(8.0)
             )
             .expect("q4 packed artifact is independently verified")
             .path,
@@ -4296,8 +4288,7 @@ mod tests {
                 &wrong_variant,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0),
-                gen_core::LoadShape::EagerMaterialization,
+                fixture_budget(8.0)
             )
             .expect("unverified artifact variant uses legacy")
             .fallback_reason,
@@ -4346,8 +4337,7 @@ mod tests {
                 &q8,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0),
-                gen_core::LoadShape::EagerMaterialization,
+                fixture_budget(8.0)
             )
             .expect("q8 record is selected independently of q4")
             .path,
@@ -4448,7 +4438,6 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("an uncalibrated model uses legacy");
         assert_eq!(route.path, AdmissionPath::Legacy);
@@ -4463,7 +4452,6 @@ mod tests {
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("an uncovered geometry uses legacy");
         assert_eq!(uncovered.path, AdmissionPath::Legacy);
@@ -4483,7 +4471,6 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("fingerprint drift uses legacy");
         assert_eq!(drifted.path, AdmissionPath::Legacy);
@@ -4498,7 +4485,6 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("the exact covered cell fits its captured safe envelope");
         assert_eq!(covered.path, AdmissionPath::Evidence);
@@ -4658,7 +4644,6 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("target-tier mismatch falls back");
         assert_eq!(
@@ -4679,7 +4664,6 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("artifact mismatch falls back as drift");
         assert_eq!(
@@ -4698,7 +4682,6 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("provider mismatch falls back as drift");
         assert_eq!(
@@ -4725,7 +4708,6 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
         .expect("covered route")
         .evidence
@@ -4830,10 +4812,16 @@ mod tests {
         let contract = generator.contract.as_mut().expect("fixture contract");
         contract.provider_id = KREA_CONTROL_ROUTE.to_owned();
         contract.load_shape = LoadShape::DeferredMaterialization;
+        // ABI 2: the calibration identity, every receipt, and the binding must carry the same
+        // materialization shape as the contract or eligibility fails closed.
         contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
             "fixture-formula-v2",
             LoadShape::DeferredMaterialization,
         ));
+        for record in &mut bundle.records {
+            record.load_shape =
+                sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        }
         contract.lifecycle.transformer_window_materialization = true;
         let transformer = contract
             .strategies
@@ -4911,8 +4899,6 @@ mod tests {
         for record in &mut bundle.records {
             record.target.provider = KREA_CONTROL_ROUTE.to_owned();
             record.target.model_id = "krea_2_turbo".to_owned();
-            record.load_shape =
-                sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
         }
 
         for (total_gib, expected) in [
@@ -4981,14 +4967,18 @@ mod tests {
 
     #[test]
     fn packaged_bundle_without_an_exact_record_is_a_normal_legacy_reason_not_drift() {
+        // The packaged evidence is still the schema-v3 / ABI-1 collection, which schema v4
+        // deliberately classifies as a stale bundle (sc-16583's typed load-shape axis): the route
+        // degrades to legacy with `StaleBundle`, not a hard error and not drift. Once the bundle is
+        // re-collected under the v4 harness this reverts to the `NoRecord` distinction for an
+        // uncovered fixture.
         let route = packaged_admission_route(
             &fixture_plan(),
             &fixture_inputs(1024, 1024),
             "text_to_image",
             fixture_budget(8.0),
-            gen_core::LoadShape::EagerMaterialization,
         )
-        .expect("the promoted bundle is valid even when this fixture has no exact record");
+        .expect("a stale promoted bundle degrades, never errors");
         assert_eq!(route.path, AdmissionPath::Legacy);
         assert_eq!(
             route.fallback_reason,
@@ -5845,7 +5835,7 @@ mod tests {
         );
         contract.calibration = Some(MemoryCalibrationIdentity::new(
             MAGE_CALIBRATION_FINGERPRINT,
-            contract.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
         ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
         contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
@@ -5889,8 +5879,8 @@ mod tests {
                 resolved_route: "mage_flow".to_owned(),
                 backend: gen_core::MemoryBackend::Mlx,
                 tier: plan.tier,
-                load_shape: contract.load_shape,
-                mode: MemoryMode::Edit,
+                load_shape: gen_core::LoadShape::EagerMaterialization,
+                mode: memory_mode_from_mode_key("edit"),
                 overlay: inputs.overlay.clone(),
                 geometry: MemoryGeometry {
                     width: 1024,
@@ -7162,7 +7152,6 @@ mod tests {
                         &fixture_inputs(1024, 1024),
                         "text_to_image",
                         fixture_budget(128.0),
-                        gen_core::LoadShape::EagerMaterialization,
                     ),
                 )
             });

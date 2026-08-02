@@ -11,15 +11,22 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
-/// Schema v4 adds the required per-record `loadShape` axis. Older packaged evidence remains
-/// parseable but stale, so consumers fall back until it is recollected under the typed shape ABI.
+/// Schema v4 adds the required per-record `loadShape` axis. v3 bundles (including the currently
+/// packaged production evidence, whose records were measured before the shape was typed) load as
+/// `BundleLoad::Stale` and every consumer falls back to the legacy admission path until the
+/// evidence is re-collected under the new harness.
 pub const MEMORY_CALIBRATION_SCHEMA_VERSION: u32 = 4;
-pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v4";
+pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// ABI paired by the manifest/query side of the reader.
 ///
-/// The evidence schema deliberately stays at v2: callers must supply the manifest's ABI together
-/// with its fingerprint. Exact source revisions remain captured provenance; the ABI/fingerprint
-/// pair owns SceneWorks invalidation without rewriting the already-promoted producer contract.
+/// Callers must supply the manifest's ABI together with its fingerprint. Exact source revisions
+/// remain captured provenance; the ABI/fingerprint pair owns SceneWorks invalidation without
+/// rewriting the already-promoted producer contract.
+///
+/// ABI 2 tracks `gen_core::MEMORY_CALIBRATION_ABI` (sc-16583): calibration identities, run
+/// contexts, evidence keys, and therefore these receipts are keyed by the typed materialization
+/// [`LoadShapeKey`]. ABI-1 records are intentionally stale — eager and deferred measurements are
+/// not interchangeable. A worker-side lockstep test asserts this constant equals gen-core's.
 pub const MEMORY_CALIBRATION_ABI: u32 = 2;
 pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
     include_str!("../../../docs/generated/memory-calibration-evidence.json");
@@ -46,6 +53,9 @@ pub struct EvidenceRecord {
     pub target: Target,
     pub fixture: String,
     pub strategy: Strategy,
+    /// Exact intra-phase materialization shape this record was measured under (schema v4 /
+    /// calibration ABI 2). Mirrors `gen_core::LoadShape`; this crate keeps its own spelling
+    /// because it deliberately has no gen-core dependency.
     pub load_shape: LoadShapeKey,
     pub sweep: Sweep,
     pub scenarios: Vec<Scenario>,
@@ -60,6 +70,8 @@ pub struct EvidenceRecord {
     pub harness_version: String,
 }
 
+/// Materialization shape a record was measured under. The two spellings are the persisted-JSON
+/// forms of `gen_core::LoadShape`'s variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadShapeKey {
@@ -476,6 +488,8 @@ pub fn load_packaged_bundle() -> Result<BundleLoad, BundleLoadError> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalibrationBinding {
     pub abi: u32,
+    /// Materialization shape the manifest's opt-in claims its receipts were measured under.
+    /// Compared record-by-record; a mismatch is [`StaleEvidenceReason::LoadShape`].
     pub load_shape: LoadShapeKey,
     pub fingerprint: String,
     pub scene_works_revision: String,
@@ -1471,14 +1485,14 @@ mod tests {
             },
             "calibrationFingerprint": "fixture-formula-v2",
             "capturedAt": "2026-07-28T12:00:00Z",
-            "harnessVersion": "sceneworks-memory-v4"
+            "harnessVersion": "sceneworks-memory-v5"
         })
     }
 
     fn bundle(record: Value) -> String {
         json!({
             "schemaVersion": 4,
-            "harnessVersion": "sceneworks-memory-v4",
+            "harnessVersion": "sceneworks-memory-v5",
             "records": [record]
         })
         .to_string()
@@ -1582,11 +1596,15 @@ mod tests {
     }
 
     #[test]
-    fn real_packaged_bundle_loads_promoted_records_and_unrelated_target_stays_unknown() {
-        assert_eq!(
-            load_packaged_bundle().expect("compiled bundle must parse"),
-            BundleLoad::Stale(StaleBundleReason::SchemaVersion { found: Some(3) })
-        );
+    fn packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out() {
+        // SC-15817 migrates the packaged protocol before the per-entry calibration stories run.
+        // An empty current bundle yields Unknown for every query instead of accepting stale,
+        // pre-loadShape evidence as a claimed fit.
+        let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
+        };
+        assert!(bundle.records.is_empty());
     }
 
     #[test]
@@ -1610,10 +1628,13 @@ mod tests {
             .as_object_mut()
             .expect("fixture object")
             .remove("loadShape");
-        assert!(matches!(
-            load_bundle(&bundle(missing_load_shape)),
-            Err(BundleLoadError::Json(_))
-        ));
+        assert!(
+            matches!(
+                load_bundle(&bundle(missing_load_shape)),
+                Err(BundleLoadError::Json(_))
+            ),
+            "a v4 record without its measured loadShape must fail to parse, not default"
+        );
         let mut record_stale = complete_record();
         record_stale["harnessVersion"] = json!("old-record");
         assert_eq!(
@@ -1623,7 +1644,7 @@ mod tests {
             })
         );
         assert!(matches!(
-            load_bundle(r#"{"harnessVersion":"sceneworks-memory-v4","records":[]}"#),
+            load_bundle(r#"{"harnessVersion":"sceneworks-memory-v5","records":[]}"#),
             Err(BundleLoadError::Json(_))
         ));
         let mut missing_record_harness = complete_record();

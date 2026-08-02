@@ -2153,6 +2153,7 @@ mod tests {
             capabilities: gen_core::Capabilities::default(),
             control_kinds: None,
             required_components: &[],
+            control_kinds: None,
         }
     }
 
@@ -2229,6 +2230,7 @@ mod tests {
             },
             control_kinds: None,
             required_components: &[],
+            control_kinds: None,
         }
     }
 
@@ -2886,6 +2888,7 @@ mod tests {
             },
             control_kinds: None,
             required_components: &[],
+            control_kinds: None,
         }
     }
 

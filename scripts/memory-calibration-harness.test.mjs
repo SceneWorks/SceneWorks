@@ -45,6 +45,7 @@ function complete(overrides = {}) {
     status: "complete",
     evidenceScope: "fixture",
     backend: "candle",
+    loadShape: "eager_materialization",
     repositories: {
       sceneWorks: {
         revision: "a".repeat(40),
@@ -236,7 +237,7 @@ test("a singleton production parameter domain is valid complete evidence", () =>
   };
   record.id = recordId(record);
   assert.equal(validateBundle({
-    schemaVersion: 3,
+    schemaVersion: 4,
     harnessVersion: HARNESS_VERSION,
     records: [record],
   }).records[0], record);
@@ -250,13 +251,13 @@ test("merge is commutative and rejects conflicting exact-identity captures", () 
   });
   second.logicalCaseId = logicalCaseId(second);
   second.id = recordId(second);
-  const a = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [first] };
-  const b = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [second] };
+  const a = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [first] };
+  const b = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [second] };
   assert.equal(canonicalJson(mergeBundles(a, b)), canonicalJson(mergeBundles(b, a)));
   const conflict = structuredClone(first);
   conflict.capturedAt = "2026-07-28T14:00:00Z";
   assert.throws(
-    () => mergeBundles(a, { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [conflict] }),
+    () => mergeBundles(a, { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [conflict] }),
     /conflicting record/,
   );
 });
@@ -270,8 +271,8 @@ test("fresh and reused rung captures use a committed absolute-or-relative tolera
       reusedRecord.observedMemory[phaseName][metric] += withinTolerance;
     }
   }
-  const fresh = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [freshRecord] };
-  const reused = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [reusedRecord] };
+  const fresh = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [freshRecord] };
+  const reused = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [reusedRecord] };
   assert.equal(compareRungReuse(fresh, reused).verdict, "amortizable");
 
   reusedRecord.observedMemory.conditioning.activeBytes += 1;
@@ -365,7 +366,9 @@ test("matrix binding rejects batch and frame mismatches even when width and heig
 test("Qwen plan covers every ladder rung and all seven production decode edges", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const cases = expandPlan(config);
-  const qwen = cases.filter((item) => item.target.provider === "qwen_image");
+  const qwen = cases.filter(
+    (item) => item.target.provider === "qwen_image" && item.backend === "mlx",
+  );
   assert.equal(qwen.length, 11);
   assert.ok(qwen.every((item) => item.expectedResult === "passed" && !item.negative));
   assert.deepEqual(
@@ -511,9 +514,9 @@ test("provider execution requires one backend-specific hardware probe", async ()
 test("one exact Qwen completion suppresses only its own ladder case", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
-  validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [record] });
+  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
   const qwenRemaining = expandPlan(config, [record]).filter(
-    (item) => item.target.provider === "qwen_image",
+    (item) => item.target.provider === "qwen_image" && item.backend === "mlx",
   );
   assert.equal(qwenRemaining.length, 10);
   assert.equal(
@@ -530,7 +533,7 @@ test("one exact Qwen completion suppresses only its own ladder case", async () =
 });
 
 test("runtime bundle validation matches schema closure for malformed gated and nested values", () => {
-  const valid = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [complete()] };
+  const valid = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [complete()] };
   validateBundle(valid);
   const mutations = [
     (bundle) => (bundle.unexpected = true),
@@ -573,7 +576,7 @@ test("gated real-adapter diagnostics are closed, typed, and never promote eviden
     const invalid = structuredClone(record);
     mutate(invalid);
     assert.throws(
-      () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [invalid] }),
+      () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [invalid] }),
       /schema validation failed/,
     );
   }
@@ -605,7 +608,7 @@ test("parameterless strategies use a truthful degenerate sweep instead of a fabr
   invalid.logicalCaseId = logicalCaseId(invalid);
   invalid.id = recordId(invalid);
   assert.throws(
-    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [invalid] }),
+    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [invalid] }),
     /parameterized complete strategy must sweep at least one axis/,
   );
 });
@@ -615,6 +618,7 @@ test("executable runner handles fragmented responses across provider processes",
     providers: [{
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung: "bounded_decode",
       engagedRungs: ["resident", "bounded_decode"],
@@ -659,6 +663,7 @@ test("runner batches one target's five rungs into one attested model load", asyn
     providers: rungs.map(([rung, engagedRungs]) => ({
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung,
       engagedRungs,
@@ -694,6 +699,7 @@ test("runner flags provide explicit fresh and experimental batch controls", asyn
     providers: ["resident", "bounded_decode"].map((rung) => ({
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung,
       engagedRungs: rung === "resident" ? ["resident"] : ["resident", "bounded_decode"],
@@ -734,6 +740,7 @@ test("provider reuse assessment records whether a batch can be measured", async 
     providers: [{
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung: "resident",
       engagedRungs: ["resident"],
@@ -760,6 +767,7 @@ test("a completed sweep retires its other parameter points before another spawn"
     providers: [{
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung: "bounded_decode",
       engagedRungs: ["resident", "bounded_decode"],
@@ -792,6 +800,7 @@ test("provider execution can select every rung sharing one reproducible fixture"
   const provider = {
     evidenceScope: "fixture",
     backend: "candle",
+    loadShape: "eager_materialization",
     target: complete().target,
     calibrationFingerprint: "fixture-formula-v2",
     fixture: "fresh-five-rung-fixture",
@@ -833,6 +842,7 @@ test("provider early exit is rejected without an unhandled stdin EPIPE", async (
     providers: [{
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung: "bounded_decode",
       engagedRungs: ["resident", "bounded_decode"],
@@ -860,6 +870,7 @@ test("expected-failure plan case produces a resumable negative record, never a c
     providers: [{
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung: "bounded_decode",
       engagedRungs: ["resident", "bounded_decode"],
@@ -890,6 +901,7 @@ test("provider execution rejects an adapter-attested composition that differs fr
     providers: [{
       evidenceScope: "fixture",
       backend: "candle",
+      loadShape: "eager_materialization",
       target: complete().target,
       rung: "bounded_decode",
       engagedRungs: ["resident", "bounded_decode"],
@@ -917,11 +929,11 @@ test("provider execution rejects an adapter-attested composition that differs fr
 
 // SC-16211. The `harnessVersion` const is asserted twice in the schema and embedded in every emitted
 // record. Adding the required engaged-composition identity bumps it and MUST invalidate every v3
-// record rather than treating a missing composition as composition-agnostic.
-const PRIOR_HARNESS_VERSION = "sceneworks-memory-v3";
+// record rather than treating a missing load-shape identity as shape-agnostic.
+const PRIOR_HARNESS_VERSION = "sceneworks-memory-v4";
 
 test("pre-composition evidence is rejected as stale by the schema and harness gates", () => {
-  assert.equal(HARNESS_VERSION, "sceneworks-memory-v4");
+  assert.equal(HARNESS_VERSION, "sceneworks-memory-v5");
   assert.notEqual(HARNESS_VERSION, PRIOR_HARNESS_VERSION);
 
   // A genuine prior-vintage record: every field populated, and its deterministic id recomputed over
@@ -945,7 +957,7 @@ test("pre-composition evidence is rejected as stale by the schema and harness ga
 
   // 3. a stale record cannot be smuggled in under a current envelope either.
   assert.throws(
-    () => validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [stale] }),
+    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [stale] }),
     /schema validation failed/,
   );
 
@@ -953,7 +965,7 @@ test("pre-composition evidence is rejected as stale by the schema and harness ga
   //    above are caused by the version bump and by nothing else.
   const current = complete();
   assert.equal(validateRecord(current), current);
-  validateBundle({ schemaVersion: 3, harnessVersion: HARNESS_VERSION, records: [current] });
+  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [current] });
 });
 
 test("the promoted evidence bundle carries the current harnessVersion", async () => {

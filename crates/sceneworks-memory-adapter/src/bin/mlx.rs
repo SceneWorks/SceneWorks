@@ -523,6 +523,8 @@ fn krea_context(
         },
         calibration_abi: MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: fingerprint.to_owned(),
+        // This harness loads the provider with a default-shaped spec, and the MLX providers mint
+        // their calibration identity from `spec.load_shape` — so the handshake shape is eager.
         load_shape: LoadShape::EagerMaterialization,
         mode: MemoryMode::TextToImage,
         has_reference: false,
@@ -587,7 +589,7 @@ fn scoped_generate(
         request
             .memory
             .get_or_insert_with(Default::default)
-            .authorize_calibration_fault(phase);
+            .calibration_error_phase = Some(phase);
     }
     scope
         .enter_phase(MemoryPhase::Conditioning)
@@ -1716,7 +1718,6 @@ fn qwen_provider_request(width: u32, height: u32) -> GenerationRequest {
 fn qwen_provider_context(
     selection: MemorySelection,
     fingerprint: &str,
-    load_shape: LoadShape,
     width: u32,
     height: u32,
     total_bytes: u64,
@@ -1726,7 +1727,9 @@ fn qwen_provider_context(
         selection,
         calibration_abi: MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: fingerprint.to_owned(),
-        load_shape,
+        // Same eager handshake as `krea_context`: the qwen spec this harness loads is
+        // default-shaped, so the provider identity's load shape is eager.
+        load_shape: LoadShape::EagerMaterialization,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -1834,7 +1837,6 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     let context = qwen_provider_context(
         selection,
         calibration.fingerprint.as_str(),
-        calibration.load_shape,
         width,
         height,
         hardware_bytes,

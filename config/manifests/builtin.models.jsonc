@@ -1952,11 +1952,11 @@
         "memoryStrategyCapabilities": {
           "bounded_decode": {
             "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
-            "overlays": ["none", "lora"]
+            "overlays": ["none"]
           },
           "bounded_attention": {
             "parameters": { "attentionChunkSize": 67108864 },
-            "overlays": ["none", "lora"]
+            "overlays": ["none"]
           },
           "bounded_transformer_residency": {
             "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },

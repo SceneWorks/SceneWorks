@@ -733,36 +733,40 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             Ok((model, reference))
         },
         move |(model, reference), tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = QwenEditRequest {
-                    prompt,
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    seed: seed as u64,
-                    lightning,
-                    stage_residency: use_sequential,
-                    memory: generation_memory,
-                    cancel: cancel.clone(),
-                };
-                let result =
-                    model.generate(&req, std::slice::from_ref(&reference), &mut *on_progress);
-                let out = match result {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Qwen edit generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), _preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
-            })
+                    let req = QwenEditRequest {
+                        prompt,
+                        negative: negative.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        seed: seed as u64,
+                        lightning,
+                        stage_residency: use_sequential,
+                        memory: generation_memory,
+                        cancel: cancel.clone(),
+                    };
+                    let result =
+                        model.generate(&req, std::slice::from_ref(&reference), &mut *on_progress);
+                    let out = match result {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Qwen edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                },
+            )
         },
     );
 

@@ -6,9 +6,37 @@
 
 use gen_core::{
     MemoryCleanupSemantics, MemoryEvidence, MemoryEvidenceDimension, MemoryEvidenceVerdict,
-    MemoryGeometry, MemoryNumericTier, MemoryProviderContract, MemorySelection, MemoryStrategy,
-    MemoryStrategySupport,
+    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryProviderContract, MemorySelection,
+    MemoryStrategy, MemoryStrategySupport,
 };
+
+/// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
+/// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
+/// deliberately has no gen-core dependency.
+pub(crate) fn load_shape_from_receipt(
+    key: sceneworks_core::memory_calibration::LoadShapeKey,
+) -> gen_core::LoadShape {
+    match key {
+        sceneworks_core::memory_calibration::LoadShapeKey::EagerMaterialization => {
+            gen_core::LoadShape::EagerMaterialization
+        }
+        sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization => {
+            gen_core::LoadShape::DeferredMaterialization
+        }
+    }
+}
+
+/// Typed [`MemoryMode`] for a canonical worker mode-key label, `as_key(from(key)) == key` for every
+/// input, so evidence written before sc-16583 typed the field compares identically. Shared by the
+/// MLX fit gate and the candle memory-strategy lane, which key evidence cells by the same labels.
+pub(crate) fn memory_mode_from_mode_key(key: &str) -> MemoryMode {
+    match key {
+        "text_to_image" => MemoryMode::TextToImage,
+        "image_to_image" => MemoryMode::ImageToImage,
+        "edit" => MemoryMode::Edit,
+        other => MemoryMode::Other(other.to_owned()),
+    }
+}
 
 /// Execute one provider request through the adopted safety/lifecycle seam. A created scope receives
 /// exactly one explicit terminal outcome; its Drop remains only a panic/unwind backstop.
@@ -193,7 +221,6 @@ fn candidate_exclusion(
     }
     let key = &candidate.evidence.key;
     if key.backend.as_key() != request.backend
-        || key.load_shape != contract.load_shape
         || key.mode.as_key() != request.mode
         || key.overlay.as_deref() != request.overlay
         || key.geometry != request.geometry
@@ -505,11 +532,17 @@ mod tests {
         }
     }
 
+    /// `sceneworks-core`'s receipt layer deliberately has no gen-core dependency, so its
+    /// calibration ABI is a separate constant that must move in lockstep with gen-core's on every
+    /// inference pin bump. A skew silently downgrades every calibrated admission to the legacy
+    /// path (receipts verified against one ABI, provider identities minted under the other).
     #[test]
     fn receipt_layer_calibration_abi_tracks_gen_core() {
         assert_eq!(
             sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
-            gen_core::MEMORY_CALIBRATION_ABI
+            gen_core::MEMORY_CALIBRATION_ABI,
+            "bump sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI (and migrate the \
+             receipt schema) together with the inference pin"
         );
     }
 
@@ -1325,6 +1358,9 @@ mod tests {
                 parameters: Default::default(),
                 tier: tier(),
             },
+            // sc-16590 hardened the handshake: with a calibration identity on the contract, the
+            // context must match its abi, fingerprint, and load shape exactly or the provider
+            // safety check rejects before generate.
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: FP.to_owned(),
             load_shape: LoadShape::DeferredMaterialization,

@@ -355,53 +355,57 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             // `IpAdapterKolors::generate` takes `&mut self` (it sets the IP image tokens on the UNet
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;
-            drive_gen_items_scored(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = IpAdapterKolorsRequest {
-                    prompt,
-                    negative: negative_prompt.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    ip_adapter_scale: ip_scale,
-                    seed: seed as u64,
-                    sampler: sampler.clone(),
-                    scheduler: scheduler.clone(),
-                    cancel: cancel.clone(),
-                };
-                let out = match model.generate(&req, &reference, &mut *on_progress) {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Kolors IP-Adapter generation failed: {error}"
-                        )));
+            drive_gen_items_scored(
+                tx,
+                work,
+                move |_index, (seed, prompt), _preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                // Score this finished image against the cached source embedding (sc-4411). Clone paid
-                // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out.width,
-                            height: out.height,
-                            pixels: out.pixels.clone(),
-                        },
-                        Some(likeness_source_ref.as_str()),
-                    )
-                });
-                Ok(Some((
-                    seed,
-                    out.width,
-                    out.height,
-                    out.pixels,
-                    face_likeness,
-                )))
-            })
+                    let req = IpAdapterKolorsRequest {
+                        prompt,
+                        negative: negative_prompt.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        ip_adapter_scale: ip_scale,
+                        seed: seed as u64,
+                        sampler: sampler.clone(),
+                        scheduler: scheduler.clone(),
+                        cancel: cancel.clone(),
+                    };
+                    let out = match model.generate(&req, &reference, &mut *on_progress) {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "Kolors IP-Adapter generation failed: {error}"
+                            )));
+                        }
+                    };
+                    // Score this finished image against the cached source embedding (sc-4411). Clone paid
+                    // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out.width,
+                                height: out.height,
+                                pixels: out.pixels.clone(),
+                            },
+                            Some(likeness_source_ref.as_str()),
+                        )
+                    });
+                    Ok(Some((
+                        seed,
+                        out.width,
+                        out.height,
+                        out.pixels,
+                        face_likeness,
+                    )))
+                },
+            )
         },
     );
 

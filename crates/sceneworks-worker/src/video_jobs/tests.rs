@@ -1797,6 +1797,7 @@ impl ArmProbe {
                     capabilities: gen_core::Capabilities::default(),
                     control_kinds: None,
                     required_components: &[],
+                    control_kinds: None,
                 },
                 request: seen_request,
                 adapter_reports,
