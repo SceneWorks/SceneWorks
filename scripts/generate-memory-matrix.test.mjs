@@ -445,12 +445,27 @@ test("Krea bounded-decode and bounded-attention matrix identities match their cu
 });
 
 test("Qwen MLX static ladder contracts expose every shipped entry without claiming verification", async () => {
+  const manifest = JSON.parse(stripJsoncComments(await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  )));
   const matrix = await buildMatrix();
   const qwenEntries = [
     "qwen_image",
     "qwen_image_edit_2511",
     "qwen_image_edit_2511_lightning",
   ];
+  for (const modelId of qwenEntries) {
+    const implementations = manifest.models.find((model) => model.id === modelId)
+      .mlx.memoryStrategyContract.implementations;
+    assert.ok(
+      implementations.every(
+        (implementation) =>
+          implementation.fingerprint === "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      ),
+      `${modelId} must keep load shape separate from the provider content fingerprint`,
+    );
+  }
   const boundedRungs = [
     "bounded_decode",
     "bounded_attention",
