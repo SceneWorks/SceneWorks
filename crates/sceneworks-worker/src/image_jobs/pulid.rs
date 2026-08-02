@@ -411,7 +411,7 @@ async fn generate_pulid_flux_stream(
                 }
                 _ => None,
             };
-            drive_gen_items_scored(tx, seeds, move |_index, seed, on_progress| {
+            drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -435,6 +435,7 @@ async fn generate_pulid_flux_stream(
                         image: reference.clone(),
                         strength: Some(id_weight),
                     }],
+                    preview,
                     cancel: cancel.clone(),
                     ..Default::default()
                 };

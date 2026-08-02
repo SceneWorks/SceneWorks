@@ -123,6 +123,7 @@ fn bernini_image_generate_one(
     guidance: Option<f32>,
     task: &'static str,
     conditioning: Vec<Conditioning>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -139,6 +140,7 @@ fn bernini_image_generate_one(
         // A single still: `frames == 1` makes the engine return `GenerationOutput::Images`.
         frames: Some(1),
         video_mode: Some(task.to_owned()),
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -255,7 +257,7 @@ async fn generate_bernini_image_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+            drive_gen_items(tx, seeds, move |_index, seed, preview, on_progress| {
                 let (out_w, out_h, pixels) = bernini_image_generate_one(
                     generator,
                     &prompt,
@@ -267,6 +269,7 @@ async fn generate_bernini_image_stream(
                     guidance,
                     task,
                     conditioning.clone(),
+                    preview,
                     &cancel,
                     on_progress,
                 )?;
@@ -566,7 +569,7 @@ async fn generate_candle_bernini_image_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+            drive_gen_items(tx, seeds, move |_index, seed, preview, on_progress| {
                 let (out_w, out_h, pixels) = bernini_image_generate_one(
                     generator,
                     &prompt,
@@ -578,6 +581,7 @@ async fn generate_candle_bernini_image_stream(
                     guidance,
                     task,
                     conditioning.clone(),
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

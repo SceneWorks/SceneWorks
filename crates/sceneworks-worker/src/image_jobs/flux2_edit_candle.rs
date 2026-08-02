@@ -352,34 +352,38 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             Ok((model, references))
         },
         move |(model, references), tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let req = Flux2EditRequest {
-                    prompt,
-                    negative: negative.clone(),
-                    width,
-                    height,
-                    steps: steps as usize,
-                    guidance,
-                    seed: seed as u64,
-                    // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
-                    use_pid,
-                    cancel: cancel.clone(),
-                };
-                let result = model.generate(&req, &references, &mut *on_progress);
-                let out = match result {
-                    Ok(out) => out,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "FLUX.2 edit generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), _preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                Ok(Some((seed, out.width, out.height, out.pixels)))
-            })
+                    let req = Flux2EditRequest {
+                        prompt,
+                        negative: negative.clone(),
+                        width,
+                        height,
+                        steps: steps as usize,
+                        guidance,
+                        seed: seed as u64,
+                        // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
+                        use_pid,
+                        cancel: cancel.clone(),
+                    };
+                    let result = model.generate(&req, &references, &mut *on_progress);
+                    let out = match result {
+                        Ok(out) => out,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "FLUX.2 edit generation failed: {error}"
+                            )));
+                        }
+                    };
+                    Ok(Some((seed, out.width, out.height, out.pixels)))
+                },
+            )
         },
     );
 

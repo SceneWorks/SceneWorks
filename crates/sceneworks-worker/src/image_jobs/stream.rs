@@ -11,6 +11,13 @@ enum GenEvent {
         index: usize,
         phase: LoadPhase,
     },
+    /// One latent-resolution preview frame of image `index`'s developing render (epic 16624,
+    /// sc-16904). Forwarded from a [`gen_core::PreviewSink`] by [`preview_sink_for`]; engines
+    /// that don't emit previews simply never produce this variant.
+    Preview {
+        index: usize,
+        frame: gen_core::PreviewFrame,
+    },
     Image {
         index: usize,
         seed: i64,
@@ -33,6 +40,23 @@ type GeneratedImage = (i64, u32, u32, Vec<u8>);
 /// four angle-set lanes — InstantID, FLUX.2 edit, Qwen-Edit, SenseNova-U1) can attach a per-image
 /// score without disturbing the shared [`GeneratedImage`] tuple every other generator returns.
 type ScoredGeneratedImage = (i64, u32, u32, Vec<u8>, Option<JsonObject>);
+
+/// Per-image preview sink for a [`GenerationRequest`](gen_core::GenerationRequest) (sc-16904).
+///
+/// `PreviewSink::emit` runs synchronously on the denoise thread, so the closure must never block:
+/// `try_send` drops the frame when the channel is momentarily full. The consumer keeps only the
+/// latest frame per job (single-slot, latest-wins), so a dropped intermediate frame is invisible.
+/// Contrast with [`send_gen_progress`]'s `blocking_send`, which is correct for `Progress` events
+/// (they are load-bearing for cancel polling) but would stall the GPU here.
+fn preview_sink_for(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+) -> gen_core::PreviewSink {
+    let tx = tx.clone();
+    gen_core::PreviewSink::new(move |frame| {
+        let _ = tx.try_send(GenEvent::Preview { index, frame });
+    })
+}
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     let event = match progress {
@@ -89,12 +113,18 @@ fn drive_gen_items<I, Item, F>(
 ) -> WorkerResult<()>
 where
     I: IntoIterator<Item = Item>,
-    F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<GeneratedImage>>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<GeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
-        let Some(image) = generate(index, item, &mut on_progress)? else {
+        let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
+        else {
             break;
         };
         if !send_generated_image(&tx, index, image) {
@@ -134,12 +164,18 @@ fn drive_gen_items_scored<I, Item, F>(
 ) -> WorkerResult<()>
 where
     I: IntoIterator<Item = Item>,
-    F: FnMut(usize, Item, &mut dyn FnMut(Progress)) -> WorkerResult<Option<ScoredGeneratedImage>>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<ScoredGeneratedImage>>,
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
-        let Some(image) = generate(index, item, &mut on_progress)? else {
+        let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
+        else {
             break;
         };
         if !send_scored_generated_image(&tx, index, image) {
