@@ -510,12 +510,12 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.equal(model.completedBaseline.completeRecords, 114);
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    90,
-    "the complete SC-16170 Z-Image matrix is current and matrix-eligible",
+    0,
+    "the ABI-1 SC-16170 measurements remain complete history but cannot authorize ABI-2 runtime admission",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
   assert.match(model.completedBaseline.note, /114 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /90 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 4 of 53 catalog entries/);
   const allProse = JSON.stringify(model);

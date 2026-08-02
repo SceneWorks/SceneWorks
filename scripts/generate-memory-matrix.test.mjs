@@ -855,8 +855,9 @@ test("a shipping control lane is declared, not inferred from having been measure
   );
   assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
 
-  // Declaring a lane must NOT fabricate evidence: only the independently measured Z-Image control
-  // cells may be Verified; every other declared control lane stays unverified.
+  // Declaring a lane must NOT fabricate evidence. The independently measured Z-Image control cells
+  // remain attached as history, but the typed load-shape ABI bump intentionally makes them stale;
+  // every declared control lane therefore stays unverified until a current ABI-2 capture exists.
   //
   // sc-16060: until the promotion producer existed this assertion was green for the trivial reason
   // that NO cell could hold `Verified` — `strategyStatus` never returned it and the cell copied that
@@ -864,10 +865,19 @@ test("a shipping control lane is declared, not inferred from having been measure
   // measured one is promoted, and the sc-16060 tests below prove the promotion path is live. What
   // this test forbids is DECLARATION alone producing verification.
   const verifiedControl = control.filter((cell) => cell.state === "Verified");
-  assert.equal(verifiedControl.length, 30);
+  assert.equal(verifiedControl.length, 0);
+  const historicalZImageControl = control.filter(
+    (cell) =>
+      cell.modelId === "z_image" &&
+      cell.backend === "candle" &&
+      cell.evidence.historicalVerification.length > 0,
+  );
+  assert.equal(historicalZImageControl.length, 30);
   assert.ok(
-    verifiedControl.every((cell) => cell.modelId === "z_image" && cell.backend === "candle"),
-    "declaration alone must not manufacture verification for an unmeasured control lane",
+    historicalZImageControl.every(
+      (cell) => cell.evidence.currentEnvironmentVerification.length === 0,
+    ),
+    "historical ABI-1 evidence must never be promoted into current ABI-2 verification",
   );
 });
 

@@ -40,12 +40,14 @@ use gen_core::{
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
-    EvidenceVerdict, Geometry as CalibrationGeometry, StaleEvidenceReason, StrategyRung,
+    EvidenceVerdict, Geometry as CalibrationGeometry, LoadShapeKey, StaleEvidenceReason,
+    StrategyRung,
 };
 use serde_json::{Map as JsonObject, Value};
 
 use crate::fit_gate::resolve_offload;
 pub(crate) use crate::fit_gate::FitDecision;
+use crate::memory_strategy::memory_mode_from_mode_key;
 use crate::model_jobs::ResolvedArtifactProvenance;
 use crate::{WorkerError, WorkerResult};
 
@@ -337,8 +339,9 @@ impl MlxCalibrationBinding {
     }
 
     fn parse(calibration: &Value, index: usize) -> Result<Self, String> {
-        const CALIBRATION_FIELDS: [&str; 16] = [
+        const CALIBRATION_FIELDS: [&str; 17] = [
             "abi",
+            "loadShape",
             "fingerprint",
             "sceneWorksRevision",
             "matrixSourceRevision",
@@ -417,13 +420,33 @@ impl MlxCalibrationBinding {
                     format!("mlx.calibrations[{index}].geometry.{name} must be a positive u32")
                 })
         };
+        let abi = calibration
+            .get("abi")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("mlx.calibrations[{index}].abi must be a u32"))?;
+        // ABI 2 keys receipts by the typed materialization shape, so the opt-in must declare the
+        // shape its receipts were measured under. ABI-1 opt-ins predate the axis; they are stale on
+        // the ABI check alone, so the placeholder value is never compared.
+        let load_shape = match calibration.get("loadShape").and_then(Value::as_str) {
+            Some("eager_materialization") => LoadShapeKey::EagerMaterialization,
+            Some("deferred_materialization") => LoadShapeKey::DeferredMaterialization,
+            Some(other) => {
+                return Err(format!(
+                    "mlx.calibrations[{index}].loadShape {other:?} is not a known materialization shape"
+                ))
+            }
+            None if abi >= 2 => {
+                return Err(format!(
+                    "mlx.calibrations[{index}].loadShape is required at calibration ABI {abi}"
+                ))
+            }
+            None => LoadShapeKey::EagerMaterialization,
+        };
         Ok(Self {
             query: CalibrationBinding {
-                abi: calibration
-                    .get("abi")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| u32::try_from(value).ok())
-                    .ok_or_else(|| format!("mlx.calibrations[{index}].abi must be a u32"))?,
+                abi,
+                load_shape,
                 fingerprint: text("fingerprint")?,
                 scene_works_revision: text("sceneWorksRevision")?,
                 matrix_source_revision: text("matrixSourceRevision")?,
@@ -698,9 +721,10 @@ fn resident_evidence(
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
             resolved_route: contract.provider_id.clone(),
-            backend: "mlx".to_owned(),
+            backend: gen_core::MemoryBackend::Mlx,
             tier,
-            mode: mode.to_owned(),
+            load_shape: contract.load_shape,
+            mode: memory_mode_from_mode_key(mode),
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: selection.strategy,
@@ -1029,9 +1053,12 @@ fn evidence_admission_route(
                 let memory_evidence = MemoryEvidence {
                     key: MemoryEvidenceKey {
                         resolved_route: plan.engine_id.to_owned(),
-                        backend: "mlx".to_owned(),
+                        backend: gen_core::MemoryBackend::Mlx,
                         tier: plan.tier,
-                        mode: mode_key.to_owned(),
+                        load_shape: crate::memory_strategy::load_shape_from_receipt(
+                            record.load_shape,
+                        ),
+                        mode: memory_mode_from_mode_key(mode_key),
                         overlay: inputs.overlay.clone(),
                         geometry: request_geometry(inputs),
                         strategy: evidence_strategy(binding.rung),
@@ -1267,6 +1294,10 @@ fn evaluate_request_with_budget_using_bundle(
             },
         );
         fallback_contract.asset_facts.base_bytes = plan.asset_bytes;
+        // PR #395 (asset-facts unification) requires base_bytes to equal the sum of the base
+        // component bytes. The legacy fallback has only the summed on-disk figure — no per-component
+        // split — so carry the whole sum on the transformer axis rather than fail conformance.
+        fallback_contract.asset_facts.transformer_bytes = plan.asset_bytes;
         &fallback_contract
     };
     if plan.engine_id.starts_with("mage_flow")
@@ -1647,6 +1678,7 @@ fn evaluate_request_with_budget_using_bundle(
             selection,
             calibration_abi,
             calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
+            load_shape: contract.load_shape,
             mode,
             has_reference: inputs.has_reference,
             use_pid: inputs.use_pid,
@@ -2530,9 +2562,12 @@ fn generic_mlx_shared_observation(
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
             resolved_route: "generic_mlx_cold_load".into(),
-            backend: "mlx".into(),
+            backend: gen_core::MemoryBackend::Mlx,
             tier,
-            mode: "image_generation".into(),
+            // The generic estimator models the historical bulk cold load; no generic route
+            // defers transformer materialization.
+            load_shape: gen_core::LoadShape::EagerMaterialization,
+            mode: memory_mode_from_mode_key("image_generation"),
             overlay: Some("resolved_load_spec".into()),
             geometry,
             strategy: MemoryStrategy::Resident,
@@ -3208,8 +3243,12 @@ mod tests {
                 cache_eviction: true,
             },
         );
-        contract.calibration = Some(MemoryCalibrationIdentity::new(MAGE_CALIBRATION_FINGERPRINT));
+        contract.calibration = Some(MemoryCalibrationIdentity::new(
+            MAGE_CALIBRATION_FINGERPRINT,
+            gen_core::LoadShape::EagerMaterialization,
+        ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+        contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
         contract
     }
 
@@ -3255,6 +3294,7 @@ mod tests {
         MlxCalibrationBinding {
             query: CalibrationBinding {
                 abi: sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+                load_shape: sceneworks_core::memory_calibration::LoadShapeKey::EagerMaterialization,
                 fingerprint: "fixture-formula-v2".to_owned(),
                 scene_works_revision: "a".repeat(40),
                 matrix_source_revision: "source-tree:1111111".to_owned(),
@@ -3287,6 +3327,7 @@ mod tests {
     fn fixture_calibration_json(tier: &str, variant: &str) -> Value {
         serde_json::json!({
             "abi": sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+            "loadShape": "eager_materialization",
             "fingerprint": "fixture-formula-v2",
             "sceneWorksRevision": "a".repeat(40),
             "matrixSourceRevision": "source-tree:1111111",
@@ -3369,14 +3410,7 @@ mod tests {
     }
 
     fn packaged_krea_plan() -> MlxRequestPlan {
-        let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
-            .expect("packaged calibration bundle parses")
-        {
-            BundleLoad::Ready(bundle) => bundle,
-            BundleLoad::Stale(reason) => {
-                panic!("packaged Krea evidence must be current: {reason:?}")
-            }
-        };
+        let bundle = packaged_bundle_migrated_to_v4_for_tests();
         let records = bundle
             .records
             .iter()
@@ -3418,6 +3452,7 @@ mod tests {
             .map(|record| MlxCalibrationBinding {
                 query: CalibrationBinding {
                     abi: sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
+                    load_shape: record.load_shape,
                     fingerprint: record.calibration_fingerprint.clone(),
                     scene_works_revision: "sc-16099-contract-v1".to_owned(),
                     matrix_source_revision: record
@@ -3477,6 +3512,7 @@ mod tests {
         contract.provider_id = "krea_2_turbo_control".to_owned();
         contract.calibration = Some(MemoryCalibrationIdentity::new(
             "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
+            gen_core::LoadShape::EagerMaterialization,
         ));
         let bounded_decode = contract
             .strategies
@@ -3516,8 +3552,12 @@ mod tests {
                 cache_eviction: true,
             },
         );
-        contract.calibration = Some(MemoryCalibrationIdentity::new("fixture-formula-v2"));
+        contract.calibration = Some(MemoryCalibrationIdentity::new(
+            "fixture-formula-v2",
+            gen_core::LoadShape::EagerMaterialization,
+        ));
         contract.asset_facts.base_bytes = gib_to_bytes(3.0);
+        contract.asset_facts.transformer_bytes = gib_to_bytes(3.0);
         contract.lifecycle = MemoryLifecycleCapabilities {
             phases: vec![
                 MemoryPhase::Conditioning,
@@ -3569,6 +3609,28 @@ mod tests {
                 control_kinds: None,
             },
             contract: Some(contract),
+        }
+    }
+
+    /// TEST-ONLY schema shim: the packaged bundle is still the schema-v3 / ABI-1 collection, which
+    /// v4 deliberately classifies stale in production. Its rows WERE measured eager (their
+    /// fingerprints say so); migrating them in fixture space keeps the selector-behavior coverage
+    /// alive. DELETE when the bundle is re-collected under the v4 harness; the sceneworks-core
+    /// `real_packaged_bundle...` test pins the production staleness.
+    fn packaged_bundle_migrated_to_v4_for_tests() -> EvidenceBundle {
+        let mut raw: Value = serde_json::from_str(
+            sceneworks_core::memory_calibration::PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        )
+        .unwrap();
+        raw["schemaVersion"] = serde_json::json!(4);
+        for record in raw["records"].as_array_mut().unwrap() {
+            record["loadShape"] = serde_json::json!("eager_materialization");
+        }
+        match sceneworks_core::memory_calibration::load_bundle(&raw.to_string()).unwrap() {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => {
+                panic!("test-migrated packaged bundle is stale: {reason:?}")
+            }
         }
     }
 
@@ -3820,7 +3882,7 @@ mod tests {
         inputs.overlay = Some("control:1".to_owned());
 
         for (budget_gib, expected) in [(128.0, "896x896"), (83.0, "768x768")] {
-            let error = evaluate_request_with_budget(
+            let error = evaluate_request_with_budget_using_bundle(
                 &generator,
                 &plan,
                 &inputs,
@@ -3830,6 +3892,7 @@ mod tests {
                 gib_to_bytes(130.0),
                 0,
                 &[],
+                Some(&packaged_bundle_migrated_to_v4_for_tests()),
             )
             .expect_err("the independent legacy estimate must refuse before provider render");
             let message = error.to_string();
@@ -3842,7 +3905,7 @@ mod tests {
         let mut exact_896 = inputs.clone();
         exact_896.width = 896;
         exact_896.height = 896;
-        let message = evaluate_request_with_budget(
+        let message = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &exact_896,
@@ -3852,6 +3915,7 @@ mod tests {
             gib_to_bytes(130.0),
             0,
             &[],
+            Some(&packaged_bundle_migrated_to_v4_for_tests()),
         )
         .expect_err("the exact 896 cell exceeds 83 GiB including its captured foreign reserve")
         .to_string();
@@ -3865,8 +3929,11 @@ mod tests {
             .contract
             .as_mut()
             .expect("Krea contract")
-            .calibration = Some(MemoryCalibrationIdentity::new("mutated-loaded-provider"));
-        let message = evaluate_request_with_budget(
+            .calibration = Some(MemoryCalibrationIdentity::new(
+            "mutated-loaded-provider",
+            gen_core::LoadShape::EagerMaterialization,
+        ));
+        let message = evaluate_request_with_budget_using_bundle(
             &mismatched,
             &plan,
             &inputs,
@@ -3876,6 +3943,7 @@ mod tests {
             gib_to_bytes(130.0),
             0,
             &[],
+            Some(&packaged_bundle_migrated_to_v4_for_tests()),
         )
         .expect_err("the mismatched loaded provider still refuses on the independent estimate")
         .to_string();
@@ -3894,7 +3962,7 @@ mod tests {
             .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
             .expect("bounded decode capability");
         bounded_decode.support = gen_core::MemoryStrategySupport::Missing;
-        let message = evaluate_request_with_budget(
+        let message = evaluate_request_with_budget_using_bundle(
             &mismatched,
             &plan,
             &inputs,
@@ -3904,6 +3972,7 @@ mod tests {
             gib_to_bytes(130.0),
             0,
             &[],
+            Some(&packaged_bundle_migrated_to_v4_for_tests()),
         )
         .expect_err("the composition-mismatched provider still refuses on the independent estimate")
         .to_string();
@@ -4743,6 +4812,16 @@ mod tests {
         let contract = generator.contract.as_mut().expect("fixture contract");
         contract.provider_id = KREA_CONTROL_ROUTE.to_owned();
         contract.load_shape = LoadShape::DeferredMaterialization;
+        // ABI 2: the calibration identity, every receipt, and the binding must carry the same
+        // materialization shape as the contract or eligibility fails closed.
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "fixture-formula-v2",
+            LoadShape::DeferredMaterialization,
+        ));
+        for record in &mut bundle.records {
+            record.load_shape =
+                sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        }
         contract.lifecycle.transformer_window_materialization = true;
         let transformer = contract
             .strategies
@@ -4814,6 +4893,8 @@ mod tests {
         ));
         for binding in &mut calibration.bindings {
             binding.provider = KREA_CONTROL_ROUTE.to_owned();
+            binding.query.load_shape =
+                sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
         }
         for record in &mut bundle.records {
             record.target.provider = KREA_CONTROL_ROUTE.to_owned();
@@ -4886,15 +4967,23 @@ mod tests {
 
     #[test]
     fn packaged_bundle_without_an_exact_record_is_a_normal_legacy_reason_not_drift() {
+        // The packaged evidence is still the schema-v3 / ABI-1 collection, which schema v4
+        // deliberately classifies as a stale bundle (sc-16583's typed load-shape axis): the route
+        // degrades to legacy with `StaleBundle`, not a hard error and not drift. Once the bundle is
+        // re-collected under the v4 harness this reverts to the `NoRecord` distinction for an
+        // uncovered fixture.
         let route = packaged_admission_route(
             &fixture_plan(),
             &fixture_inputs(1024, 1024),
             "text_to_image",
             fixture_budget(8.0),
         )
-        .expect("the promoted bundle is valid even when this fixture has no exact record");
+        .expect("a stale promoted bundle degrades, never errors");
         assert_eq!(route.path, AdmissionPath::Legacy);
-        assert_eq!(route.fallback_reason, Some(LegacyAdmissionReason::NoRecord));
+        assert_eq!(
+            route.fallback_reason,
+            Some(LegacyAdmissionReason::StaleBundle)
+        );
     }
 
     /// SC-15805: `memory_for_selection` is the live MLX memory-admission seam — the
@@ -5466,6 +5555,7 @@ mod tests {
             let contract = generator.contract.as_mut().expect("fixture contract");
             let phases = contract.lifecycle.phases.clone();
             contract.asset_facts.base_bytes = BASE_SOURCE_BYTES;
+            contract.asset_facts.transformer_bytes = BASE_SOURCE_BYTES;
             contract.asset_facts.overlay_bytes = CONTROL_RESIDENT_BYTES;
             contract.formula = MemoryFormulaKind::ComponentPhaseEnvelope {
                 phases,
@@ -5743,8 +5833,12 @@ mod tests {
                 cache_eviction: true,
             },
         );
-        contract.calibration = Some(MemoryCalibrationIdentity::new(MAGE_CALIBRATION_FINGERPRINT));
+        contract.calibration = Some(MemoryCalibrationIdentity::new(
+            MAGE_CALIBRATION_FINGERPRINT,
+            gen_core::LoadShape::EagerMaterialization,
+        ));
         contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+        contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
         contract.lifecycle.decode_tiling = true;
         contract.strategies = MemoryStrategy::ALL
             .into_iter()
@@ -5783,9 +5877,10 @@ mod tests {
         let evidence = MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: "mage_flow".to_owned(),
-                backend: "mlx".to_owned(),
+                backend: gen_core::MemoryBackend::Mlx,
                 tier: plan.tier,
-                mode: "edit".to_owned(),
+                load_shape: gen_core::LoadShape::EagerMaterialization,
+                mode: memory_mode_from_mode_key("edit"),
                 overlay: inputs.overlay.clone(),
                 geometry: MemoryGeometry {
                     width: 1024,

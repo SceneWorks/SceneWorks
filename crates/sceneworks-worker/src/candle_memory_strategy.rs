@@ -12,7 +12,7 @@ use gen_core::{
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceQuery, EvidenceVerdict,
-    Geometry as CalibrationGeometry, QualityResult, RequiredNullable, StrategyRung,
+    Geometry as CalibrationGeometry, LoadShapeKey, QualityResult, RequiredNullable, StrategyRung,
 };
 use serde_json::{Map as JsonObject, Value};
 
@@ -142,8 +142,20 @@ fn text<'a>(object: &'a JsonObject<String, Value>, key: &str) -> Option<&'a str>
 }
 
 fn binding(object: &JsonObject<String, Value>) -> Option<CalibrationBinding> {
+    let abi = u32::try_from(object.get("abi")?.as_u64()?).ok()?;
+    // ABI 2 keys receipts by the typed materialization shape; the opt-in must declare the shape its
+    // receipts were measured under. ABI-1 opt-ins predate the axis and are stale on the ABI check
+    // alone, so the placeholder value is never compared.
+    let load_shape = match object.get("loadShape").and_then(Value::as_str) {
+        Some("eager_materialization") => LoadShapeKey::EagerMaterialization,
+        Some("deferred_materialization") => LoadShapeKey::DeferredMaterialization,
+        Some(_) => return None,
+        None if abi >= 2 => return None,
+        None => LoadShapeKey::EagerMaterialization,
+    };
     Some(CalibrationBinding {
-        abi: u32::try_from(object.get("abi")?.as_u64()?).ok()?,
+        abi,
+        load_shape,
         fingerprint: text(object, "fingerprint")?.to_owned(),
         scene_works_revision: text(object, "sceneWorksRevision")?.to_owned(),
         matrix_source_revision: text(object, "matrixSourceRevision")?.to_owned(),
@@ -269,9 +281,10 @@ fn verified_candidates(
         candidates.push(MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: runtime_provider.to_owned(),
-                backend: "candle".to_owned(),
+                backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier(tier).expect("validated numeric tier"),
-                mode: mode.to_owned(),
+                load_shape: crate::memory_strategy::load_shape_from_receipt(record.load_shape),
+                mode: crate::memory_strategy::memory_mode_from_mode_key(mode),
                 overlay: (overlay != "none").then(|| overlay.to_owned()),
                 geometry,
                 strategy: selected_strategy,
@@ -401,9 +414,10 @@ pub(crate) fn evaluate_z_image(
     let mut resident = MemoryEvidence {
         key: MemoryEvidenceKey {
             resolved_route: engine_id.to_owned(),
-            backend: "candle".to_owned(),
+            backend: gen_core::MemoryBackend::Candle,
             tier,
-            mode: mode_key.to_owned(),
+            load_shape: contract.load_shape,
+            mode: crate::memory_strategy::memory_mode_from_mode_key(mode_key),
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: MemoryStrategy::Resident,
@@ -524,6 +538,7 @@ pub(crate) fn evaluate_z_image(
             selection,
             calibration_abi: selected_evidence.calibration_abi,
             calibration_fingerprint: selected_evidence.calibration_fingerprint.clone(),
+            load_shape: contract.load_shape,
             mode,
             has_reference,
             use_pid,

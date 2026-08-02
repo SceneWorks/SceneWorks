@@ -264,43 +264,50 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
             Ok(model)
         },
         move |model, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
-                if cancel.is_cancelled() {
-                    return Ok(None);
-                }
-                let request = GenerationRequest {
-                    prompt,
-                    negative_prompt: negative_prompt.clone(),
-                    width,
-                    height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    guidance,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let output = match model.generate(&request, &mut *on_progress) {
-                    Ok(output) => output,
-                    Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "ComfyUI Qwen-Image generation failed: {error}"
-                        )));
+            drive_gen_items(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, on_progress| {
+                    if cancel.is_cancelled() {
+                        return Ok(None);
                     }
-                };
-                match output {
-                    GenerationOutput::Images(mut images) => {
-                        let image = images.pop().ok_or_else(|| {
-                            WorkerError::Engine("ComfyUI Qwen-Image produced no image".to_owned())
-                        })?;
-                        Ok(Some((seed, image.width, image.height, image.pixels)))
+                    let request = GenerationRequest {
+                        prompt,
+                        negative_prompt: negative_prompt.clone(),
+                        width,
+                        height,
+                        count: 1,
+                        seed: Some(seed as u64),
+                        steps: Some(steps),
+                        guidance,
+                        preview,
+                        cancel: cancel.clone(),
+                        ..Default::default()
+                    };
+                    let output = match model.generate(&request, &mut *on_progress) {
+                        Ok(output) => output,
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => {
+                            return Err(WorkerError::Engine(format!(
+                                "ComfyUI Qwen-Image generation failed: {error}"
+                            )));
+                        }
+                    };
+                    match output {
+                        GenerationOutput::Images(mut images) => {
+                            let image = images.pop().ok_or_else(|| {
+                                WorkerError::Engine(
+                                    "ComfyUI Qwen-Image produced no image".to_owned(),
+                                )
+                            })?;
+                            Ok(Some((seed, image.width, image.height, image.pixels)))
+                        }
+                        _ => Err(WorkerError::Engine(
+                            "ComfyUI Qwen-Image returned non-image output".to_owned(),
+                        )),
                     }
-                    _ => Err(WorkerError::Engine(
-                        "ComfyUI Qwen-Image returned non-image output".to_owned(),
-                    )),
-                }
-            })
+                },
+            )
         },
     );
 

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "harnessVersion": "sceneworks-memory-v4",
   "records": [
     {
@@ -50,7 +50,10 @@
       "fixture": "fixture-seed42",
       "strategy": {
         "rung": "bounded_decode",
-        "engagedRungs": ["resident", "bounded_decode"],
+        "engagedRungs": [
+          "resident",
+          "bounded_decode"
+        ],
         "parameters": {
           "decodeTileEdge": 512,
           "decodeOverlap": 128
@@ -60,7 +63,9 @@
         "axes": [
           {
             "parameter": "decodeTileEdge",
-            "testedValues": [512]
+            "testedValues": [
+              512
+            ]
           }
         ],
         "cases": [
@@ -195,7 +200,8 @@
       },
       "calibrationFingerprint": "fixture-formula-v2",
       "capturedAt": "2026-07-28T12:00:00Z",
-      "harnessVersion": "sceneworks-memory-v4"
+      "harnessVersion": "sceneworks-memory-v4",
+      "loadShape": "eager_materialization"
     }
   ]
 }

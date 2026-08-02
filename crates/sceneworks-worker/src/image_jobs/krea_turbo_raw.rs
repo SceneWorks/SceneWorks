@@ -135,6 +135,7 @@ fn krea_turbo_on_raw_generate_one(
     seed: i64,
     steps: u32,
     text_style_gain: Option<f32>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -150,6 +151,7 @@ fn krea_turbo_on_raw_generate_one(
         // CFG off — the turbo generator is single-forward; a guidance scale would be rejected.
         guidance: None,
         text_style_gain,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -250,7 +252,7 @@ async fn generate_krea_turbo_on_raw_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -262,6 +264,7 @@ async fn generate_krea_turbo_on_raw_stream(
                     seed,
                     steps,
                     text_style_gain,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

@@ -107,6 +107,7 @@ fn krea_edit_generate_one(
     guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
     text_style_gain: Option<f32>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -121,6 +122,7 @@ fn krea_edit_generate_one(
         guidance,
         conditioning,
         text_style_gain,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -236,7 +238,7 @@ async fn generate_krea_edit_stream(
         spec,
         format!("{engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -252,6 +254,7 @@ async fn generate_krea_edit_stream(
                     guidance,
                     conditioning,
                     text_style_gain,
+                    preview,
                     &cancel,
                     on_progress,
                 )?;

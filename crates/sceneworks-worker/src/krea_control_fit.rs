@@ -444,9 +444,10 @@ fn fit_ladder_for_tier(
         MemoryEvidence {
             key: MemoryEvidenceKey {
                 resolved_route: KREA_CONTROL_ROUTE.to_owned(),
-                backend: "candle".to_owned(),
+                backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
-                mode: "pose_control".to_owned(),
+                load_shape: contract.load_shape,
+                mode: crate::memory_strategy::memory_mode_from_mode_key("pose_control"),
                 overlay: Some(overlay.clone()),
                 geometry: measured_geometry,
                 strategy: selection.strategy,
@@ -586,6 +587,42 @@ fn fit_ladder_for_tier(
     }
 }
 
+/// Registered control contract for a tier, resolved through a minimal ON-DISK snapshot.
+///
+/// Since the pin at cc5b30a9 the provider binds its rung composition to the snapshot's ACTUAL
+/// packed tier (it reads `transformer/config.json`; "bind memory gates to loaded tiers"): a
+/// nonexistent root reads as dense, which mis-shapes the q4 composition (the non-q4
+/// attention/decode engagement exclusion would apply). Materialize the tier the test asks for.
+#[cfg(any(test, doc))]
+fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract> {
+    // One directory per CALL: parallel tests sharing a per-process path race between this
+    // writer and the provider's reader, which surfaces as a spurious `Unknown` ladder verdict.
+    static SNAPSHOT_SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let serial = SNAPSHOT_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "sw-krea-control-fit-{}-{serial}-{tier_key}",
+        std::process::id()
+    ));
+    let transformer = root.join("transformer");
+    std::fs::create_dir_all(&transformer).ok()?;
+    let config = match tier_key {
+        "q4" => Some(r#"{"quantization":{"bits":4,"group_size":64}}"#),
+        "q8" => Some(r#"{"quantization":{"bits":8,"group_size":64}}"#),
+        _ => None,
+    };
+    if let Some(text) = config {
+        std::fs::write(transformer.join("config.json"), text).ok()?;
+    }
+    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(root));
+    if let Some(quant) = quant_for_tier_key(tier_key) {
+        spec = spec.with_quant(quant);
+    }
+    crate::inference_runtime::media()
+        .memory_strategy_contract(KREA_CONTROL_ROUTE, &spec)
+        .ok()
+        .flatten()
+}
+
 #[cfg(any(test, doc))]
 pub(crate) fn fit_ladder(
     tier_key: &str,
@@ -596,16 +633,7 @@ pub(crate) fn fit_ladder(
     chunk_attn_save_gb: Option<f64>,
     evidence_is_current: bool,
 ) -> KreaControlFit {
-    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
-        "/nonexistent/krea-control-test".into(),
-    ));
-    if let Some(quant) = quant_for_tier_key(tier_key) {
-        spec = spec.with_quant(quant);
-    }
-    let contract = crate::inference_runtime::media()
-        .memory_strategy_contract(KREA_CONTROL_ROUTE, &spec)
-        .ok()
-        .flatten();
+    let contract = registered_contract_for_tier(tier_key);
     fit_ladder_for_tier(
         contract.as_ref(),
         tier_key,
@@ -660,16 +688,7 @@ pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
     budget: Option<crate::vram_gate::VramBudget>,
     adapter_bytes: u64,
 ) -> KreaControlFit {
-    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
-        "/nonexistent/krea-control-test".into(),
-    ));
-    if let Some(quant) = quant_for_tier_key(tier_key) {
-        spec = spec.with_quant(quant);
-    }
-    let contract = crate::inference_runtime::media()
-        .memory_strategy_contract(KREA_CONTROL_ROUTE, &spec)
-        .ok()
-        .flatten();
+    let contract = registered_contract_for_tier(tier_key);
     fit_ladder_for_entry_with_runtime(
         manifest_entry,
         tier_key,

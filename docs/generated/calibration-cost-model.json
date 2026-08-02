@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:70cb0b14a5f8aa0c2dc1a95155f8514d99112fb8f569389b5bfae087b1532ee6",
-    "matrixRevision": "source-tree:8187d16f5e35d14d4360b13667d61593c332b903f3d90d1fdb8f24686409169e",
-    "inferenceRevision": "65833f24409bce33c418499c2029bee76d842740",
+    "sceneWorksRevision": "source-tree:07dd93b384cf0da2fc3ea48ccda854c679e630733f500162d1ae75cc02191a5c",
+    "matrixRevision": "source-tree:4bf5ccfa7f875d8942f1a3bbea5cd2389bcb718e62b4e72d76ba9ed9ba632077",
+    "inferenceRevision": "cc5b30a92ab5b0789afee71e38891aa15b8e5357",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "b11f758d03086683a913011bc92106c92c929d22d538d72ee70e0900a1a5d8bc"
+        "sha256": "83e4a9b47f9f85b16bcdb1a36e28164cd82e3338f6fe253ea6ae064329722026"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "cd615c921e3eb076d299e4b2dc821e6d320a7ba8bfc9bc0cf13a0b28a66f2769"
+        "sha256": "2e679e92ac2860e3cadfc8a22e9bac6f9eecdb928e32921bd91afb1fb86abfc4"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -35,19 +35,19 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "f0692211286f7178c0807e411343e30f91a8fa3aa13933f564d9b432fc8c3fd5"
+        "sha256": "04893574bf3bd2ade88683afcafe33b087dacccf21e9b686c8bb91f49b97ebf0"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "b1828cdfd5fdf35772352b714ea1b83d22c61660db71562bc52ec3564a80359f"
+        "sha256": "c7da263b72c4548454b7df8b0a63092b9a7d70055910e32c4e991753779079b5"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "248c89989e1b6b8a1f8ef4579da8b39d694febe1aec0668ff039ba8fd1d9ed68"
+        "sha256": "abe3f173c53489d2372dd3ba18564e91d5342acf4de29506088722081dcd118d"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "fb05d042796d8c13acca0dd113f09aab2a4f5212fbda05aed6a25d9886c5fdd7"
+        "sha256": "6207079215d82fbf8aa7189f5d8314c77e8241c90390592f3bc656acc30a9cc8"
       }
     }
   },
@@ -64,9 +64,9 @@
     },
     "completeRecords": 114,
     "matrixSummaryCalibrationRuns": 114,
-    "matrixSummaryCurrentCalibrationRuns": 90,
-    "verifiedCells": 90,
-    "note": "114 complete record(s) exist in the evidence bundle; the matrix reports 90 current calibration run(s) and 90 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "matrixSummaryCurrentCalibrationRuns": 0,
+    "verifiedCells": 0,
+    "note": "114 complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -370,22 +370,20 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2658,
+      "Implemented/unverified": 2748,
       "Missing": 4606,
-      "Structurally N/A": 6,
-      "Verified": 90
+      "Structurally N/A": 6
     },
     "byBackend": {
       "candle": 2740,
       "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 796,
+      "Implemented/unverified @ candle": 886,
       "Implemented/unverified @ mlx": 1862,
       "Missing @ candle": 1848,
       "Missing @ mlx": 2758,
-      "Structurally N/A @ candle": 6,
-      "Verified @ candle": 90
+      "Structurally N/A @ candle": 6
     },
     "byRung": {
       "bounded_attention": 1472,

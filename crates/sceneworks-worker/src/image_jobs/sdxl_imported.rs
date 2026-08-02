@@ -304,7 +304,7 @@ async fn generate_sdxl_imported_stream(
             })
         },
         move |model, tx, cancel| {
-            drive_gen_items(tx, work, move |_index, (seed, prompt), on_progress| {
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -332,6 +332,7 @@ async fn generate_sdxl_imported_stream(
                         None,
                         &enhance,
                         Some(hires_fix),
+                        preview,
                         &cancel,
                         on_progress,
                     )?;
@@ -351,6 +352,7 @@ async fn generate_sdxl_imported_stream(
                     scheduler_shift,
                     guidance_method: guidance_method.clone(),
                     use_pid,
+                    preview,
                     cancel: cancel.clone(),
                     ..Default::default()
                 };

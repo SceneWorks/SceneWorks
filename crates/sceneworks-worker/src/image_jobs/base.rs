@@ -3129,7 +3129,14 @@ mod measured_mlx_load_shape_tests {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("model.safetensors"), [0_u8; 8]).unwrap();
+            // A minimal VALID safetensors file carrying one f32 scalar: the asset-facts
+            // unification (inference PR #395) parses headers — and requires at least one tensor —
+            // when the provider contract is built, so a zero-filled stub now fails the lookup.
+            let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&0f32.to_le_bytes());
+            std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
         }
         std::fs::write(
             root.join("text_encoder/config.json"),
@@ -3912,6 +3919,9 @@ fn generate_one(
     memory: Option<gen_core::GenerationMemory>,
     memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
+    // Live denoise preview (epic 16624, sc-16904): forwarded frames reach the job's progress
+    // stream. Inert for engines that don't emit; the default sink costs one branch per step.
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -3955,6 +3965,7 @@ fn generate_one(
         text_style_gain,
         memory,
         conditioning,
+        preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
@@ -4048,6 +4059,7 @@ fn generate_one_with_hires(
     memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
     hires_fix: Option<HiresFixPlan>,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -4074,6 +4086,7 @@ fn generate_one_with_hires(
             memory,
             memory_strategy_context,
             enhance,
+            preview,
             cancel,
             on_progress,
         );
@@ -4111,6 +4124,7 @@ fn generate_one_with_hires(
         memory,
         memory_strategy_context,
         enhance,
+        preview.clone(),
         cancel,
         &mut first_progress,
     )?;
@@ -4158,6 +4172,7 @@ fn generate_one_with_hires(
         memory,
         memory_strategy_context,
         enhance,
+        preview,
         cancel,
         &mut second_progress,
     )
@@ -5602,7 +5617,7 @@ async fn generate_stream(
                 external_committed_bytes
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, seeds, move |_index, seed, on_progress| {
+            drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
                 let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
                     generator,
                     &mlx_request_plan,
@@ -5641,6 +5656,7 @@ async fn generate_stream(
                         Some(&memory_evaluation.context),
                         &enhance,
                         hires_fix,
+                        preview.clone(),
                         &cancel,
                         on_progress,
                     )
@@ -6301,6 +6317,11 @@ mod krea_turbo_memory_route_tests {
             .expect("Krea 2 Turbo manifest entry");
         model["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        // Same fixture surgery as the fingerprint line above: pin the opt-in to the CURRENT
+        // calibration ABI so these historical-curve selector tests keep exercising the verified
+        // ladder. The shipped manifest stays at its measured ABI (stale until sc-16915).
+        model["candle"]["turboFit"]["calibrationAbi"] =
+            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
         model
             .as_object()
             .expect("Krea 2 Turbo manifest object")
@@ -7653,10 +7674,26 @@ async fn generate_candle_stream(
             strategy = ?selection.strategy,
             "shared memory-strategy selection admitted"
         );
+        // The manifest turboFit block pins the calibration fingerprint but not the materialization
+        // shape; the provider's own identity is the source the safety check compares against.
+        let load_shape = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default())),
+            )
+            .ok()
+            .flatten()
+            .map(|contract| {
+                contract
+                    .calibration
+                    .as_ref()
+                    .map_or(contract.load_shape, |identity| identity.load_shape)
+            })?;
         Some(gen_core::MemoryRunContext {
             selection,
             calibration_abi,
             calibration_fingerprint,
+            load_shape,
             mode: gen_core::MemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,
@@ -7755,7 +7792,7 @@ async fn generate_candle_stream(
         spec,
         format!("candle {engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, on_progress| {
+            drive_gen_items(tx, seeds, move |_index, seed, preview, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires(
                         generator,
@@ -7794,6 +7831,7 @@ async fn generate_candle_stream(
                         memory_strategy_context.as_ref(),
                         &enhance,
                         hires_fix,
+                        preview.clone(),
                         &cancel,
                         on_progress,
                     )
@@ -8058,6 +8096,60 @@ fn build_image_metrics(
     image_settings_metrics(request, effective_steps, None, None, None, image_count)
 }
 
+/// Latest per-step preview frame for the in-flight image (epic 16624, sc-16904). One slot,
+/// latest-wins: `ProgressRequest.result` is replaced wholesale on every accepted POST, so the
+/// frame rides the existing per-step update and is never accumulated. Cleared when its image's
+/// final asset lands (`GenEvent::Image`), and absent from the terminal result by construction.
+struct PreviewSlot {
+    index: usize,
+    current: u32,
+    total: u32,
+    data_url: String,
+}
+
+/// Encode one latent-resolution preview frame (~128×128 RGB8) as a `data:image/jpeg` URL,
+/// ~10 KB at quality 70. Decorative by contract: any failure drops the frame, never the job.
+fn encode_preview_data_url(frame: &gen_core::PreviewFrame) -> Option<String> {
+    use base64::Engine as _;
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut std::io::Cursor::new(&mut jpeg), 70)
+        .encode(
+            &frame.image.pixels,
+            frame.image.width,
+            frame.image.height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .inspect_err(|error| {
+            tracing::debug!(%error, "preview frame JPEG encode failed; dropping frame");
+        })
+        .ok()?;
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&jpeg)
+    ))
+}
+
+/// [`streaming_result`] plus the current preview frame, when one is live.
+fn streaming_result_with_preview(
+    plan: &ImagePlan,
+    asset_writes: &[Value],
+    preview: Option<&PreviewSlot>,
+) -> JsonObject {
+    let mut result = streaming_result(plan, asset_writes);
+    if let Some(slot) = preview {
+        result.insert(
+            "previewFrame".to_owned(),
+            json!({
+                "imageIndex": slot.index,
+                "current": slot.current,
+                "total": slot.total,
+                "dataUrl": slot.data_url,
+            }),
+        );
+    }
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn consume_gen_events(
     api: &ApiClient,
@@ -8156,6 +8248,8 @@ async fn consume_gen_events_with_disclosure(
     // Effective denoise step count (sc-10406): the Step event's `total` is the
     // resolved step count, so a default run reports real steps, not the sparse payload.
     let mut effective_steps: Option<u32> = None;
+    // Live denoise preview (sc-16904): the latest frame rides the next progress POST.
+    let mut latest_preview: Option<PreviewSlot> = None;
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -8203,7 +8297,11 @@ async fn consume_gen_events_with_disclosure(
                             &format!("Image {}/{total} — step {current}/{step_total}.", index + 1),
                             auto_tier_streaming,
                         ),
-                        Some(streaming_result(plan, asset_writes)),
+                        Some(streaming_result_with_preview(
+                            plan,
+                            asset_writes,
+                            latest_preview.as_ref(),
+                        )),
                         backend,
                     ),
                 )
@@ -8220,7 +8318,11 @@ async fn consume_gen_events_with_disclosure(
                         ProgressStage::Generating,
                         step_fraction(index, 1, 1, total_u32),
                         &format!("Image {}/{total} — decoding.", index + 1),
-                        Some(streaming_result(plan, asset_writes)),
+                        Some(streaming_result_with_preview(
+                            plan,
+                            asset_writes,
+                            latest_preview.as_ref(),
+                        )),
                         backend,
                     ),
                 )
@@ -8249,6 +8351,26 @@ async fn consume_gen_events_with_disclosure(
                 )
                 .await?;
             }
+            GenEvent::Preview { index, frame } => {
+                mark_started(index);
+                // Encode off the async runtime thread (parity with the asset write, sc-8909).
+                // No POST here: the frame rides the NEXT Step/Decoding update, so preview traffic
+                // adds zero requests to the existing per-step cadence.
+                let encoded = tokio::task::spawn_blocking(move || {
+                    let data_url = encode_preview_data_url(&frame)?;
+                    Some(PreviewSlot {
+                        index,
+                        current: frame.current,
+                        total: frame.total,
+                        data_url,
+                    })
+                })
+                .await
+                .map_err(|error| crate::task_join_error("preview frame encode task", error))?;
+                if let Some(slot) = encoded {
+                    latest_preview = Some(slot);
+                }
+            }
             GenEvent::Image {
                 index,
                 seed,
@@ -8258,6 +8380,15 @@ async fn consume_gen_events_with_disclosure(
                 face_likeness,
             } => {
                 phase_timer.mark_item_done(Instant::now());
+                // The finished asset supersedes its interim preview: drop the slot before this
+                // arm's result POST so the replaced `result` no longer carries the frame (a later
+                // image in the batch starts its own stream).
+                if latest_preview
+                    .as_ref()
+                    .is_some_and(|slot| slot.index == index)
+                {
+                    latest_preview = None;
+                }
                 // The identity-likeness post-pass (sc-4409) scores each image on the blocking thread
                 // and hands the pre-built `faceLikeness` block back through the event. Attach it to a
                 // PER-IMAGE clone of the shared raw settings under the sidecar key so each angle's
@@ -8352,7 +8483,11 @@ async fn consume_gen_events_with_disclosure(
         // (`jobs_store::update_job_progress`), so it lands exactly as the worker process
         // returns to its claim loop — the next queued job waits only until the GPU is
         // genuinely free, and the UI shows "Cancelling…" until completion (sc-5515).
-        // result=None lets `coalesce` keep any partial images already streamed.
+        // The explicit streaming result keeps the partial images already streamed (it IS
+        // that fact set; `persist_reported_assets` re-injects the derived asset keys) while
+        // dropping any in-flight `previewFrame` from the stored result — a canceled job must
+        // not carry a stale interim frame (sc-16904). Before previews this posted result=None
+        // for the same partial-image outcome via `coalesce`.
         let message = "Image generation canceled by user.";
         update_job(
             api,
@@ -8362,7 +8497,7 @@ async fn consume_gen_events_with_disclosure(
                 ProgressStage::Canceled,
                 1.0,
                 message,
-                None,
+                Some(streaming_result(plan, asset_writes)),
                 backend,
             ),
         )

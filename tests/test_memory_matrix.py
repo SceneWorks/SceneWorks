@@ -86,22 +86,27 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     evidence_ids = {record["id"] for record in calibration["records"]}
     assert len(evidence_ids) == len(calibration["records"]) == 114
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
-    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {
-        "current",
-        "historical",
-    }
+    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert len(current_eligible) == 90
-    assert all(run["binding"]["reasons"] == [] for run in current_eligible)
-    assert {run["record"]["target"]["modelId"] for run in current_eligible} == {
+    assert current_eligible == []
+    historical_z_image = [
+        run
+        for run in matrix["calibrationRuns"]
+        if run["semantics"] == "historical"
+        and run["record"]["target"]["modelId"] == "z_image"
+        and run["binding"]["eligible"]
+    ]
+    assert len(historical_z_image) == 90
+    assert all(run["binding"]["reasons"] == [] for run in historical_z_image)
+    assert {run["record"]["target"]["modelId"] for run in historical_z_image} == {
         "z_image"
     }
     assert Counter(
-        run["record"]["strategy"]["rung"] for run in current_eligible
+        run["record"]["strategy"]["rung"] for run in historical_z_image
     ) == {
         "resident": 18,
         "staged_residency": 18,
@@ -280,14 +285,25 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_current_z_image_records_promote_only_their_exact_cells():
+def test_historical_z_image_records_remain_attached_without_runtime_promotion():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert len(verified) == 90
-    assert {cell["modelId"] for cell in verified} == {"z_image"}
-    assert {cell["backend"] for cell in verified} == {"candle"}
-    assert Counter(cell["overlay"] for cell in verified) == {
+    assert verified == []
+    historical_z_image = [
+        cell
+        for cell in matrix["cells"]
+        if cell["modelId"] == "z_image"
+        and cell["backend"] == "candle"
+        and cell["evidence"]["historicalVerification"]
+    ]
+    assert len(historical_z_image) == 90
+    assert all(cell["state"] == "Implemented/unverified" for cell in historical_z_image)
+    assert all(
+        cell["evidence"]["currentEnvironmentVerification"] == []
+        for cell in historical_z_image
+    )
+    assert Counter(cell["overlay"] for cell in historical_z_image) == {
         "none": 30,
         "lora": 30,
         "control": 30,

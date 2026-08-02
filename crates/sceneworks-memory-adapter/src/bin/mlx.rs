@@ -523,6 +523,9 @@ fn krea_context(
         },
         calibration_abi: MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: fingerprint.to_owned(),
+        // This harness loads the provider with a default-shaped spec, and the MLX providers mint
+        // their calibration identity from `spec.load_shape` — so the handshake shape is eager.
+        load_shape: LoadShape::EagerMaterialization,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -854,6 +857,7 @@ fn run_z_image_reference_loaded(
         selection,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
+        load_shape: calibration.load_shape,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
@@ -1723,6 +1727,9 @@ fn qwen_provider_context(
         selection,
         calibration_abi: MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: fingerprint.to_owned(),
+        // Same eager handshake as `krea_context`: the qwen spec this harness loads is
+        // default-shaped, so the provider identity's load shape is eager.
+        load_shape: LoadShape::EagerMaterialization,
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,

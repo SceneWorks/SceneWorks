@@ -45,7 +45,6 @@ const decodeLog = (bytes) => {
 };
 const phase = (value) => ({ activeBytes: value, allocatorBytes: value, deviceBytes: value, wiredBytes: value, reclaimableBytes: 0 });
 const rungName = (value) => ({ resident: "resident", staged: "staged_residency", decode: "bounded_decode", attention: "bounded_attention", transformer: "bounded_transformer_residency" })[value];
-const fileRung = (value) => ({ resident: "resident", staged_residency: "staged", bounded_decode: "decode", bounded_attention: "attention", bounded_transformer_residency: "transformer" })[value];
 
 const PREDICTED = {
   q4: { resident: 27.2, staged_residency: 16.9, bounded_decode: 16.9, bounded_attention: 13.4, bounded_transformer_residency: 13.4 },

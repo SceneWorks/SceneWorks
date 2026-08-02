@@ -228,7 +228,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
-            drive_gen_items_scored(tx, poses, move |_index, pose, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, _preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
