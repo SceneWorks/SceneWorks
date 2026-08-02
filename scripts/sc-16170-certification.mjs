@@ -14,14 +14,17 @@ const MANIFEST = path.join(ROOT, "config/manifests/builtin.models.jsonc");
 const MATRIX = path.join(ROOT, "docs/generated/memory-matrix.json");
 const SESSION_DIR = path.join(ROOT, "docs/calibration/sc-16170");
 
-const INFERENCE_REVISION = "7410dea8364f184dbbb07a37c77c1c00e6039a23";
+const INFERENCE_REVISION = "65833f24409bce33c418499c2029bee76d842740";
 const SCENEWORKS_REVISION = "dda526776bffe856164a4991f67229159a06443b";
+const SESSION_PREFIX = "6583";
 const ARTIFACT_REVISION = "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab";
 const ARTIFACT_REPOSITORY = "SceneWorks/z-image-mlx";
 const CONTROL_REPOSITORY = "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1";
 const CONTROL_REVISION = "755999a934909bd5832e20718bb7c639d2a63eb9";
 const LORA_SHA256 = "cd248717d74f77dce1964680ce7764c45c3648571d09d11ff550b59862bc7072";
-const FINGERPRINT = "z-image-cuda-base-control-host-decode-streamed-blocks-v1";
+const BASE_FINGERPRINT = "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2";
+const CONTROL_FINGERPRINT = "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2";
+const SC16170_FINGERPRINTS = new Set([BASE_FINGERPRINT, CONTROL_FINGERPRINT]);
 const INVENTORY_EXPECTATIONS = {
   q4: { role: "base", bytes: 9298919117, sha256: "a05de90591f2255bfeac50f5dd04a2862ae6c19f377c680adb1383fd3852ec34", repository: ARTIFACT_REPOSITORY, resolvedRevision: ARTIFACT_REVISION, variant: "q4" },
   q8: { role: "base", bytes: 16762077820, sha256: "27d1a1d479cd8fd8afb9995a84de0bf615cc08d32b827149b599ecd7b978e530", repository: ARTIFACT_REPOSITORY, resolvedRevision: ARTIFACT_REVISION, variant: "q8" },
@@ -282,7 +285,7 @@ function makeRecord(spec, matrixSourceRevision, sources) {
 function binding(spec, matrixSourceRevision) {
   const artifact = artifactFor(spec.target.tier, spec.target.overlay);
   return {
-    abi: 1, fingerprint: FINGERPRINT, sceneWorksRevision: SCENEWORKS_REVISION, matrixSourceRevision,
+    abi: 1, fingerprint: spec.calibrationFingerprint, sceneWorksRevision: SCENEWORKS_REVISION, matrixSourceRevision,
     inferenceRevision: INFERENCE_REVISION, provider: spec.target.provider, tier: spec.target.tier,
     mode: spec.target.mode, overlay: spec.target.overlay, geometry: spec.target.geometry,
     artifactRepository: artifact.repository, artifactResolvedRevision: artifact.resolvedRevision,
@@ -325,7 +328,7 @@ async function loadSources() {
   const loraQuality = new Map();
   const baseInventory = new Map();
   for (const tier of ["q4", "q8", "bf16"]) {
-    const filename = `7410-${tier}-base-inventory.log`;
+    const filename = `${SESSION_PREFIX}-${tier}-base-inventory.log`;
     if (!files.has(filename)) throw new Error(`missing ${filename}`);
     const bytes = await readFile(path.join(SESSION_DIR, filename));
     const input = artifactInventory(decodeLog(bytes), filename);
@@ -338,7 +341,7 @@ async function loadSources() {
     loaded.id = loaded.session.id; loaded.input = input; all.push(loaded.session); baseInventory.set(tier, loaded);
   }
   const loadSharedInventory = async (name) => {
-    const filename = `7410-${name}-inventory.log`;
+    const filename = `${SESSION_PREFIX}-${name}-inventory.log`;
     if (!files.has(filename)) throw new Error(`missing ${filename}`);
     const bytes = await readFile(path.join(SESSION_DIR, filename));
     const input = artifactInventory(decodeLog(bytes), filename);
@@ -354,7 +357,7 @@ async function loadSources() {
   for (const tier of ["q4", "q8", "bf16"]) {
     for (const shortRung of ["resident", "staged", "decode", "attention", "transformer"]) {
       const rung = rungName(shortRung);
-      const filename = `7410-${tier}-control-${shortRung}.log`;
+      const filename = `${SESSION_PREFIX}-${tier}-control-${shortRung}.log`;
       if (!files.has(filename)) throw new Error(`missing ${filename}`);
       const loaded = await readSession(filename, {
         kind: "physical_cuda", command: `control_vram_probe tier=${tier} rung=${shortRung} 1024x1024 steps=1`,
@@ -364,7 +367,7 @@ async function loadSources() {
       });
       loaded.filename = filename; loaded.observed = physicalMemory(loaded.text, filename); loaded.id = loaded.session.id;
       all.push(loaded.session); controlPhysical.set(`${tier}/${rung}`, loaded);
-      const qualityFilename = `7410-${tier}-control-${shortRung}-quality.log`;
+      const qualityFilename = `${SESSION_PREFIX}-${tier}-control-${shortRung}-quality.log`;
       if (!files.has(qualityFilename)) throw new Error(`missing ${qualityFilename}`);
       const quality = await readSession(qualityFilename, {
         kind: "comparison", command: `compare resident and ${shortRung} fixed-seed control PNGs`,
@@ -375,7 +378,7 @@ async function loadSources() {
       quality.filename = qualityFilename; quality.id = quality.session.id;
       qualityMetrics(quality.text, qualityFilename); all.push(quality.session); controlQuality.set(`${tier}/${rung}`, quality);
     }
-    const styleFilename = `7410-${tier}-style-resident.log`;
+    const styleFilename = `${SESSION_PREFIX}-${tier}-style-resident.log`;
     const style = await readSession(styleFilename, {
       kind: "physical_cuda", command: `sequential_vram_probe tier=${tier} style_variations resident 1024x1024 steps=1`,
       target: { tier, mode: "style_variations", overlay: "none", rung: "resident" },
@@ -386,7 +389,7 @@ async function loadSources() {
     all.push(style.session); stylePhysical.set(tier, style);
     for (const shortRung of ["resident", "transformer"]) {
       const rung = rungName(shortRung);
-      const filename = `7410-${tier}-lora-${shortRung}.log`;
+      const filename = `${SESSION_PREFIX}-${tier}-lora-${shortRung}.log`;
       const lora = await readSession(filename, {
         kind: "physical_cuda", command: `sequential_vram_probe tier=${tier} lora ${shortRung} 1024x1024 steps=1`,
         target: { tier, mode: "text_to_image", overlay: "lora", rung },
@@ -396,7 +399,7 @@ async function loadSources() {
       mutationMetrics(lora.text, filename); lora.filename = filename; lora.id = lora.session.id;
       all.push(lora.session); loraPhysical.set(`${tier}/${rung}`, lora);
     }
-    const filename = `7410-${tier}-lora-transformer-quality.log`;
+    const filename = `${SESSION_PREFIX}-${tier}-lora-transformer-quality.log`;
     const quality = await readSession(filename, {
       kind: "comparison", command: `compare resident and transformer fixed-seed LoRA PNGs`,
       target: { tier, mode: "text_to_image", overlay: "lora", rung: "bounded_transformer_residency" },
@@ -406,7 +409,7 @@ async function loadSources() {
     qualityMetrics(quality.text, filename); quality.filename = filename; quality.id = quality.session.id;
     all.push(quality.session); loraQuality.set(tier, quality);
   }
-  const lifecycleLoaded = await readSession("7410-inference-lifecycle.log", {
+  const lifecycleLoaded = await readSession(`${SESSION_PREFIX}-inference-lifecycle.log`, {
     kind: "unit_test", command: "cargo test --locked -p candle-gen-z-image --lib --tests",
     claims: ["lifecycle", "overlay"],
   });
@@ -428,9 +431,9 @@ const plan = JSON.parse(await readFile(PLAN, "utf8"));
 const existing = JSON.parse(await readFile(EVIDENCE, "utf8"));
 const matrix = JSON.parse(await readFile(MATRIX, "utf8"));
 const matrixSourceRevision = matrix.generatedFrom.sceneWorksRevision;
-const specs = plan.providers.filter((spec) => spec.backend === "candle" && spec.target?.modelId === "z_image" && spec.calibrationFingerprint === FINGERPRINT);
+const specs = plan.providers.filter((spec) => spec.backend === "candle" && spec.target?.modelId === "z_image" && SC16170_FINGERPRINTS.has(spec.calibrationFingerprint));
 if (specs.length !== 90) throw new Error(`expected 90 SC-16170 plan cases, found ${specs.length}`);
-const retainedRecords = existing.records.filter((record) => !(record.backend === "candle" && record.target?.modelId === "z_image" && record.calibrationFingerprint === FINGERPRINT));
+const retainedRecords = existing.records.filter((record) => !(record.backend === "candle" && record.target?.modelId === "z_image"));
 if (process.argv.includes("--clear")) {
   const bundle = { schemaVersion: 3, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: retainedRecords };
   validateBundle(bundle); await writeFile(EVIDENCE, `${JSON.stringify(bundle, null, 2)}\n`); await writeManifestBindings([]);

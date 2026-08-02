@@ -81,14 +81,25 @@ pub(crate) fn merge_credentials(
     by_host.into_values().collect()
 }
 
-/// Worker credentials from the server/Docker file store (`<config>/credentials.json`)
-/// overlaid with the `SCENEWORKS_CREDENTIALS` env (desktop injection / operator
-/// override). Same parser for both (the file carries an extra `label` the worker
-/// ignores). Picked up at startup, so changing credentials needs a worker restart —
-/// consistent with the desktop, which already re-injects on restart.
-pub(crate) fn load_worker_credentials(config_dir: &Path) -> Vec<WorkerCredential> {
-    let file = config_dir.join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
+/// Worker credentials from the server/Docker file store overlaid with the
+/// `SCENEWORKS_CREDENTIALS` env (desktop injection / operator override). Same parser
+/// for both (the file carries an extra `label` the worker ignores). Picked up at
+/// startup, so changing credentials needs a worker restart — consistent with the
+/// desktop, which already re-injects on restart.
+///
+/// Reads `credentials_dir` first and falls back to the pre-sc-16540
+/// `<config>/credentials.json`. The fallback is not just for un-upgraded installs: the
+/// rust-api owns the migration and a worker can start before it has run (compose
+/// gates on the API's health check, but a worker-only deployment does not), so without
+/// it a worker could come up credential-less for one restart cycle.
+pub(crate) fn load_worker_credentials(
+    credentials_dir: &Path,
+    config_dir: &Path,
+) -> Vec<WorkerCredential> {
+    let file = credentials_dir.join(sceneworks_core::credentials::CREDENTIALS_FILENAME);
+    let legacy = sceneworks_core::credentials::legacy_credentials_file(config_dir);
     let file_credentials = std::fs::read_to_string(&file)
+        .or_else(|_| std::fs::read_to_string(&legacy))
         .ok()
         .map(|body| parse_credentials_env(&body))
         .unwrap_or_default();

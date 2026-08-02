@@ -622,7 +622,7 @@ mod tests {
         assert!(evaluation.context.has_reference);
         assert_eq!(
             evaluation.context.calibration_fingerprint,
-            "z-image-cuda-base-control-host-decode-streamed-blocks-v1"
+            "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2"
         );
         assert!(evaluation.memory.is_none());
     }

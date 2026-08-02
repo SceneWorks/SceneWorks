@@ -242,7 +242,10 @@ apps/desktop/cuda/
 #
 # Written to the config-dir ROOT (all named in crates/sceneworks-core/src/app_paths.rs, except
 # credentials.json which is crates/sceneworks-core/src/credentials.rs):
-#   credentials.json   download tokens — a SECRET; the store is created 0600 and must never be committed
+#   credentials.json   download tokens — a SECRET. Since sc-16540 the store lives OUTSIDE the
+#                      config dir (see sceneworks_core::credentials::resolve_credentials_dir);
+#                      this entry still covers the pre-migration file, which the rust-api moves
+#                      on first start but which exists until then.
 #   gpu_memory_limit   live desktop -> worker memory-cap handoff, a bare decimal byte count (sc-7824)
 #   gpu_telemetry.json MLX worker memory telemetry for the Settings readout (sc-7825)
 #   ui-preferences.json durable UI preference store written by PUT /api/v1/ui-preferences

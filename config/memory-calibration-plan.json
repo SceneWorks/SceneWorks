@@ -737,7 +737,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -768,7 +768,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -800,7 +800,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -836,7 +836,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -874,7 +874,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -909,7 +909,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -940,7 +940,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -972,7 +972,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -1008,7 +1008,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -1046,7 +1046,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -1081,7 +1081,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -1112,7 +1112,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -1144,7 +1144,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -1180,7 +1180,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -1218,7 +1218,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -1253,7 +1253,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -1284,7 +1284,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -1316,7 +1316,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -1352,7 +1352,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -1390,7 +1390,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -1425,7 +1425,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -1456,7 +1456,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -1488,7 +1488,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -1524,7 +1524,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -1562,7 +1562,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -1597,7 +1597,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -1628,7 +1628,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -1660,7 +1660,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -1696,7 +1696,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -1734,7 +1734,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q4-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -1769,7 +1769,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -1800,7 +1800,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -1832,7 +1832,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -1868,7 +1868,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -1906,7 +1906,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -1941,7 +1941,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -1972,7 +1972,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -2004,7 +2004,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -2040,7 +2040,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -2078,7 +2078,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -2113,7 +2113,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -2144,7 +2144,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -2176,7 +2176,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -2212,7 +2212,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -2250,7 +2250,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -2285,7 +2285,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -2316,7 +2316,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -2348,7 +2348,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -2384,7 +2384,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -2422,7 +2422,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -2457,7 +2457,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -2488,7 +2488,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -2520,7 +2520,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -2556,7 +2556,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -2594,7 +2594,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -2629,7 +2629,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -2660,7 +2660,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -2692,7 +2692,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -2728,7 +2728,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -2766,7 +2766,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-q8-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -2801,7 +2801,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -2832,7 +2832,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -2864,7 +2864,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -2900,7 +2900,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -2938,7 +2938,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-none-seed16170",
       "cases": [
         {
@@ -2973,7 +2973,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -3004,7 +3004,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -3036,7 +3036,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -3072,7 +3072,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -3110,7 +3110,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-lora-seed16170",
       "cases": [
         {
@@ -3145,7 +3145,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -3176,7 +3176,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -3208,7 +3208,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -3244,7 +3244,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -3282,7 +3282,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-text_to_image-control-seed16170",
       "cases": [
         {
@@ -3317,7 +3317,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -3348,7 +3348,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -3380,7 +3380,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -3416,7 +3416,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -3454,7 +3454,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-none-seed16170",
       "cases": [
         {
@@ -3489,7 +3489,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -3520,7 +3520,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -3552,7 +3552,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -3588,7 +3588,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -3626,7 +3626,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-lora-seed16170",
       "cases": [
         {
@@ -3661,7 +3661,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -3692,7 +3692,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -3724,7 +3724,7 @@
         "staged_residency",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -3760,7 +3760,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-control-seed16170",
       "cases": [
         {
@@ -3798,7 +3798,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-blocks-v1",
+      "calibrationFingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
       "fixture": "sc-16170-z-image-bf16-1024-style_variations-control-seed16170",
       "cases": [
         {

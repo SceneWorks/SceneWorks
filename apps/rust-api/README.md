@@ -13,6 +13,13 @@ The API uses these compose contracts:
   unauthenticated and logs a startup warning.
 - `SCENEWORKS_DATA_DIR=/sceneworks/data` maps to `${SCENEWORKS_DATA_BIND:-./data}`.
 - `SCENEWORKS_CONFIG_DIR=/sceneworks/config` maps writable to `${SCENEWORKS_CONFIG_BIND:-./config}` for user manifests.
+- `SCENEWORKS_CREDENTIALS_DIR=/sceneworks/credentials` maps writable to
+  `${SCENEWORKS_CREDENTIALS_BIND:-~/.sceneworks/credentials}` and holds the `0600`
+  `credentials.json` written by Settings → Service credentials. Kept off the config
+  bind on purpose (sc-16540): that one defaults to the repo checkout, and the store is
+  plaintext tokens. Outside Docker the variable is normally unset and the store
+  resolves to the OS app-config dir; set it only to pin the store to a specific volume.
+  An existing `<config>/credentials.json` is migrated here automatically on first start.
 - `SCENEWORKS_JOBS_DB_PATH=/sceneworks/data/cache/jobs.db` stores queue state on the existing data bind mount.
 - `SCENEWORKS_ACCESS_TOKEN`, `SCENEWORKS_CORS_ORIGINS`, and `SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE` are honored by the Rust API.
 
