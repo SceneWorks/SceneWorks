@@ -414,10 +414,10 @@ catalog entries and future tiers rather than a known shipping hole.
 `config/memory-calibration-plan.json` contains two same-target reference ladders used for the
 fresh/reused decision:
 
-- MLX/Metal: `z_image_turbo`, q4, 768×768 text-to-image, no overlay, seed 16402, two steps. Rungs 0–3
-  use the eager provider fingerprint; rung 4 uses the provider-required deferred-materialization
-  fingerprint. This is intentional provenance, not permission to compare eager measurements against
-  deferred cells as one calibration population.
+- MLX/Metal: `z_image_turbo`, q4, 768×768 text-to-image, no overlay, seed 16402, two steps. All five
+  rungs use the provider's shape-independent content fingerprint. Rungs 0–3 require the typed
+  `eager_materialization` load shape and rung 4 requires `deferred_materialization`; the load-shape
+  receipt, not a suffix on the fingerprint, keeps those calibration populations distinct.
 - Candle/CUDA: `krea_2_turbo`, q4, 1024×1024 text-to-image, no overlay, seed 16402, two steps. The
   provider-owned compositions for rungs 2–4 include staged residency because those controls execute
   through Krea's physical three-stage loader; the plain staged rung uses its one-boundary residency
@@ -429,11 +429,11 @@ record fragments, and attests `modelLoads: 1`. A comparison passes only when eve
 allocator, device, wired, and reclaimable metric is within the larger of 256 MiB and 5% of its fresh
 value. The authoritative CUDA comparison returned `unable_to_amortize`, so the shipped plan keeps
 Candle fresh-per-case rather than changing the recorded peaks. MLX also remains fresh-per-case:
-rungs 0–3 require the eager calibration fingerprint while rung 4
-requires the deferred fingerprint, so one loaded Z-Image generator cannot preserve all five
-calibrated identities. `assess-reuse` reads both identities from the pinned provider contracts for
-the exact eager and deferred load specs and rejects any plan mismatch; it does not trust the plan's
-strings as capability evidence. The structured verdict records this backend as
+rungs 0–3 require an eager load while rung 4 requires a deferred load, so one loaded Z-Image
+generator cannot preserve all five typed load-shape identities even though their content fingerprint
+is the same. `assess-reuse` reads both identities from the pinned provider contracts for the exact
+eager and deferred load specs and rejects any plan mismatch; it does not trust the plan's strings as
+capability evidence. The structured verdict records this backend as
 `unable_to_amortize`; it is not treated as a failed measurement or silently averaged.
 
 Two denoise steps are load-bearing for phase measurement: providers with an explicit loading boundary

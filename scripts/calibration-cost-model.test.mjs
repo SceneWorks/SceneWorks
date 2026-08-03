@@ -507,20 +507,20 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
 
 test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
-  assert.equal(model.completedBaseline.completeRecords, 28);
+  assert.equal(model.completedBaseline.completeRecords, 33);
   // "Runtime-current" is measured against the SHIPPED inference pin. sc-16353's four exact Qwen
   // Q4/Q8 rung records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so they are
-  // historical and nothing is runtime-current until they are re-measured. The record COUNT below is
-  // what keeps this honest rather than vacuous: the bundle still holds all 28 complete records, so a
-  // zero here means "superseded pin", not "evidence lost".
+  // historical. SC-15510's five exact Z-Image records were captured at that current pin, so they —
+  // and only they — remain runtime-current. The record count keeps the distinction from collapsing:
+  // the bundle still retains 28 historical records alongside the five current ones.
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    0,
-    "an inference pin bump supersedes every runtime-current calibration run until it is re-measured",
+    5,
+    "only the five current-pin Z-Image calibration runs remain runtime-current",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
-  assert.match(model.completedBaseline.note, /28 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /33 complete record\(s\) exist/);
+  assert.match(model.completedBaseline.note, /5 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 6 of 53 catalog entries/);
   const allProse = JSON.stringify(model);

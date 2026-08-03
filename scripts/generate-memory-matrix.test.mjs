@@ -558,6 +558,120 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
 });
 
+test("Z-Image MLX static contracts cover every bounded rung through the actual provider", async () => {
+  const manifest = JSON.parse(stripJsoncComments(await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  )));
+  const matrix = await buildMatrix();
+  const zImageIds = ["z_image", "z_image_edit", "z_image_turbo"];
+  const boundedRungs = [
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const bounded = matrix.cells.filter(
+    (cell) =>
+      zImageIds.includes(cell.modelId) &&
+      cell.backend === "mlx" &&
+      boundedRungs.includes(cell.rung),
+  );
+
+  assert.ok(bounded.length > 0);
+  assert.deepEqual([...new Set(bounded.map((cell) => cell.modelId))].sort(), zImageIds);
+  assert.ok(
+    bounded.every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
+    "a shipped Z-Image MLX rung may not remain Missing once its provider contract is exported",
+  );
+  assert.ok(
+    bounded.every((cell) =>
+      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
+      (
+        cell.evidence.staticImplementation.some((entry) =>
+          entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+        ) ||
+        (
+          cell.state === "Verified" &&
+          cell.evidence.staticImplementation.some((entry) =>
+            entry.source.includes("mlx_fit_gate.rs#evidence_admission_route"),
+          ) &&
+          cell.evidence.currentEnvironmentVerification.length === 1
+        )
+      ),
+    ),
+    "every bounded cell must name the pinned MLX provider contract and its calibration ABI",
+  );
+
+  const turboContract = manifest.models.find((model) => model.id === "z_image_turbo")
+    .mlx.memoryStrategyContract;
+  assert.equal(turboContract.provider, "z_image_turbo");
+  assert.ok(
+    bounded
+      .filter((cell) => cell.modelId === "z_image_edit")
+      .every((cell) => cell.resolvedRoute === "z_image_turbo"),
+    "the edit catalog entry must inherit the Turbo provider contract, not invent a provider",
+  );
+
+  for (const cell of bounded) {
+    const ranges = cell.strategyParameters.publishedRanges;
+    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512]);
+    assert.deepEqual(ranges.decodeOverlaps, [256, 64]);
+    if (cell.rung !== "bounded_decode") {
+      assert.deepEqual(ranges.attentionChunkSizes, [67108864]);
+    }
+    if (cell.rung === "bounded_transformer_residency") {
+      assert.deepEqual(ranges.transformerWindowSizes, [1]);
+      assert.deepEqual(ranges.transformerWindowComponents, ["Dit", "TextEncoder", "Both"]);
+      assert.deepEqual(cell.engagedRungs, [
+        "resident",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+      ]);
+    }
+  }
+
+  // Shared implementation does not certify the catalog siblings. Only their own exact evidence can
+  // lift them out of Implemented/unverified.
+  assert.ok(
+    bounded
+      .filter((cell) => cell.modelId !== "z_image_turbo")
+      .every((cell) => cell.state === "Implemented/unverified"),
+  );
+
+  const allZImageMlx = matrix.cells.filter(
+    (cell) => zImageIds.includes(cell.modelId) && cell.backend === "mlx",
+  );
+  const verified = allZImageMlx.filter((cell) => cell.state === "Verified");
+  assert.deepEqual(
+    verified.map((cell) => cell.id).sort(),
+    [
+      "bounded_attention",
+      "bounded_decode",
+      "bounded_transformer_residency",
+      "resident",
+      "staged_residency",
+    ].map((rung) => `z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:${rung}`).sort(),
+    "only the five exact q4 Turbo base-provider records may be promoted",
+  );
+  assert.ok(
+    verified.every((cell) =>
+      cell.evidence.currentEnvironmentVerification.length === 1 &&
+      cell.evidence.currentEnvironmentVerification[0].geometry === "768x768"
+    ),
+    "every promoted Z-Image cell must cite its exact authoritative Metal capture",
+  );
+  assert.ok(
+    allZImageMlx
+      .filter((cell) => cell.state !== "Verified")
+      .every((cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.evidence.currentEnvironmentVerification.length === 0
+      ),
+    "unmeasured Z-Image sibling tuples must remain implemented but unverified",
+  );
+});
+
 test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
   const record = {
     backend: "mlx",
@@ -893,6 +1007,18 @@ test("a shipping control lane is declared, not inferred from having been measure
     "both exact Krea control geometries remain attached as history until rerun on the new runtime",
   );
 
+  for (const [modelId, provider] of [
+    ["z_image", "z_image_control"],
+    ["z_image_turbo", "z_image_turbo_control"],
+  ]) {
+    const cells = control.filter((cell) => cell.modelId === modelId && cell.backend === "mlx");
+    assert.ok(cells.length > 0, `${modelId}/mlx must expose its shipping control lane`);
+    assert.ok(
+      cells.every((cell) => cell.resolvedRoute === provider),
+      `${modelId}/mlx control cells must target the registered ${provider} provider`,
+    );
+  }
+
   // Every declared lane is represented on every backend the entry advertises — the declaration is what
   // generates cells now, so a lane can be unmeasured without being invisible.
   for (const id of CONTROL_LANE_MODELS) {
@@ -912,9 +1038,9 @@ test("a shipping control lane is declared, not inferred from having been measure
   );
   assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
 
-  // Declaring a lane must NOT fabricate evidence. The Z-Image captures predate the required typed
-  // load-shape axis and therefore remain in their raw source sessions rather than being attached to
-  // schema-v4 cells; every declared control lane stays unverified until a current capture exists.
+  // Declaring a lane must NOT fabricate evidence. The current Z-Image captures measure the base
+  // no-overlay provider, so none may attach to the distinct control providers; every declared
+  // control lane stays unverified until a current control capture exists.
   //
   // sc-16060: until the promotion producer existed this assertion was green for the trivial reason
   // that NO cell could hold `Verified` — `strategyStatus` never returned it and the cell copied that
@@ -929,7 +1055,7 @@ test("a shipping control lane is declared, not inferred from having been measure
       cell.backend === "candle" &&
       cell.evidence.historicalVerification.length > 0,
   );
-  assert.equal(attachedZImageControl.length, 0, "untyped historical captures must not enter schema-v4 cells");
+  assert.equal(attachedZImageControl.length, 0, "base evidence must not attach to control cells");
 });
 
 test("every advertised MLX and Candle control route must be declared (sc-16073)", async () => {

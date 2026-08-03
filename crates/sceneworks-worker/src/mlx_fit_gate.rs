@@ -3100,6 +3100,109 @@ mod tests {
     }
 
     #[test]
+    fn shipped_z_image_manifest_admits_all_five_current_exact_mlx_ladder_rungs() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin model manifest parses");
+        let z_image = manifest["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["id"] == "z_image_turbo"))
+            .and_then(Value::as_object)
+            .expect("shipped z_image_turbo manifest entry");
+        let bindings = MlxCalibrationBinding::from_manifest(z_image)
+            .expect("Z-Image calibration bindings are valid")
+            .expect("Z-Image declares exact MLX calibration bindings");
+
+        assert_eq!(bindings.len(), 5);
+        assert!(bindings.iter().all(|binding| {
+            binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
+                && binding.provider == "z_image_turbo"
+                && binding.tier == "q4"
+                && binding.mode == "text_to_image"
+                && binding.overlay == "none"
+                && binding.geometry
+                    == CalibrationGeometry {
+                        width: 768,
+                        height: 768,
+                        batch: 1,
+                        frames: 1,
+                    }
+                && binding.query.inference_revision
+                    == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+        }));
+        assert!(bindings.iter().all(|binding| {
+            binding.query.load_shape
+                == if binding.rung == StrategyRung::BoundedTransformerResidency {
+                    LoadShapeKey::DeferredMaterialization
+                } else {
+                    LoadShapeKey::EagerMaterialization
+                }
+        }));
+
+        let resolved_binding = &bindings[0].query;
+        let resolved = ResolvedArtifactProvenance {
+            identity: crate::model_jobs::ResolvedArtifactIdentity {
+                repository: resolved_binding.artifact_repository.clone(),
+                revision: resolved_binding.artifact_resolved_revision.clone(),
+                variant: resolved_binding.artifact_variant.clone(),
+                fingerprint: resolved_binding.resolved_path_fingerprint.clone(),
+            },
+            fixed_artifact_tier: Some("q4".to_owned()),
+        };
+        let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+            "/packaged/z-image-turbo-mlx/q4",
+        )))
+        .with_quant(gen_core::Quant::Q4);
+        let plan = MlxRequestPlan::for_spec_and_manifest(
+            "z_image_turbo",
+            "z_image_turbo",
+            &spec,
+            Some(z_image),
+            Some(resolved),
+        );
+        let route = packaged_admission_route(
+            &plan,
+            &fixture_inputs(768, 768),
+            "text_to_image",
+            fixture_budget(128.0),
+        )
+        .expect("the shipped manifest and packaged bundle must admit Z-Image");
+
+        assert_eq!(route.path, AdmissionPath::Evidence);
+        assert_eq!(route.fallback_reason, None);
+        assert_eq!(route.evidence.len(), 5);
+        let mut record_ids = route
+            .evidence
+            .iter()
+            .map(|candidate| candidate.record_id.as_str())
+            .collect::<Vec<_>>();
+        record_ids.sort_unstable();
+        assert_eq!(
+            record_ids,
+            [
+                "imc-6c1321a632cf8ba19ec3",
+                "imc-7f0855d89b197e74aad7",
+                "imc-83885e42f05bcc3881d2",
+                "imc-adcb1c7d1cc0cffeea73",
+                "imc-e99ffcdc141cc6ca5d60",
+            ]
+        );
+        assert_eq!(
+            route
+                .evidence
+                .iter()
+                .filter(|candidate| {
+                    candidate.evidence.key.load_shape
+                        == gen_core::LoadShape::DeferredMaterialization
+                })
+                .count(),
+            1,
+            "only rung 4 uses deferred materialization",
+        );
+    }
+
+    #[test]
     fn resident_evidence_is_keyed_by_the_live_contract_composition() {
         use gen_core::{MemoryPrerequisiteScope, MemoryStrategyPrerequisite};
 

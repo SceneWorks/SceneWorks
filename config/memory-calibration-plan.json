@@ -30,7 +30,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3-eager",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -62,7 +62,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3-eager",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -94,7 +94,7 @@
         "resident",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3-eager",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -130,7 +130,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3-eager",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -168,7 +168,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3-deferred",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
