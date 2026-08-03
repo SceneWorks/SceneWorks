@@ -357,7 +357,8 @@ pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictContr
 impl QwenStrictControl {
     /// Build this lane's bespoke request. Split out of [`CandleStrictControl::generate_one`] so the
     /// preview wiring is reachable without a loaded provider — see
-    /// `qwen_fun_control_request_carries_the_live_preview_sink`.
+    /// `candle_strict_control_requests_carry_the_live_preview_sink` in `image_jobs::tests`, which
+    /// calls this and asserts an emitted frame reaches the sink the driver supplied.
     ///
     /// `preview` is the job's live sink and is **cloned onto the request**, never defaulted (epic 16948,
     /// sc-16962). Qwen-Image emits per-step latent previews from t2i, edit and `control_fun` as of

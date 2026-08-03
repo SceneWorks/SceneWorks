@@ -776,10 +776,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         // sequence inside the predict closure and narrowed straight back off, so the
                         // sampler's running latent never carries a reference token.
                         //
-                        // This closure used to bind `_preview` and drop it. `Default::default()` would
-                        // compile and ship an inert sink: green, and no previews on this lane. The
-                        // `preview_wiring_guard` tests in `candle_strict_control` read this source and
-                        // fail on exactly that.
+                        // This closure used to bind `_preview` and drop it. `Default::default()` — or
+                        // `..Default::default()`, which reads more innocent and does the same thing —
+                        // would compile and ship an inert sink: green, and no previews on this lane.
+                        // `crate::candle_preview_wiring_tests` reads this source and fails on both.
                         preview,
                     };
                     let result =

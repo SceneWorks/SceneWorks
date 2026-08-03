@@ -484,7 +484,8 @@ pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictContr
 impl KreaStrictControl {
     /// Build this lane's bespoke request. Split out of [`CandleStrictControl::generate_one`] so the
     /// preview wiring is reachable without a loaded 20 GB provider — see
-    /// `krea_control_request_carries_the_live_preview_sink`.
+    /// `candle_strict_control_requests_carry_the_live_preview_sink` in `image_jobs::tests`, which
+    /// calls this and asserts an emitted frame reaches the sink the driver supplied.
     ///
     /// `preview` is the job's live sink and is **cloned onto the request**, never defaulted (epic 16948,
     /// sc-16962). Krea 2 emits per-step latent previews from every render route as of inference

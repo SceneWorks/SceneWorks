@@ -28,7 +28,12 @@
 //! 2. **No** file under `src/image_jobs/` binds `preview` to a `::default()` expression — a sweep, not
 //!    a list, so the eight remaining Tier 1 family stories (sc-16953…sc-16959) are covered the day
 //!    their upstream field appears rather than needing this guard amended.
-//! 3. The worker closures that receive the live sink actually bind it, instead of discarding it as
+//! 3. No bespoke `*Request` literal hides `preview` behind a struct-update (`..Default::default()`)
+//!    entry. This is the *same* defect as 2 wearing the spelling a developer actually reaches for
+//!    first: when an exhaustive literal gains one field upstream, `..Default::default()` is the
+//!    shortest way to make the build green, and it produces an identical inert sink. Rule 2 alone
+//!    cannot see it — the entry's field name parses as `..Default`, which never equals `preview`.
+//! 4. The worker closures that receive the live sink actually bind it, instead of discarding it as
 //!    `_preview`.
 
 use std::path::{Path, PathBuf};
@@ -48,6 +53,23 @@ const WIRED_LANES: &[(&str, &str)] = &[
 /// Files that thread the sink from a `drive_gen_items*` closure into a bespoke provider. Each must
 /// BIND the closure's preview parameter; `_preview` means the sink is being dropped on the floor.
 const SINK_CONSUMERS: &[&str] = &["candle_strict_control.rs", "qwen_edit_candle.rs"];
+
+/// `*Request` types under `src/image_jobs/` that are **not** bespoke by-name provider requests, and
+/// are therefore exempt from the struct-update rule in
+/// [`no_bespoke_candle_request_hides_its_preview_behind_a_rest_init`].
+///
+/// * `gen_core::GenerationRequest` is the *registry-driven* request. The registry threads the job's
+///   sink onto it once for every family that renders through `dyn Generator` (`base.rs` sets
+///   `preview` explicitly alongside its `..Default::default()`), which is precisely why the bespoke
+///   lanes are the ones that need guarding. The rest-inits that omit `preview` are deliberate:
+///   `detail.rs`'s per-tile refinement pass renders tiles, not the image the card shows.
+/// * `ImageRequest` is SceneWorks' own JSON job payload. It carries no `preview` field and no engine
+///   ever reads one off it; the `fn request(..) -> ImageRequest` test helpers in the lane files are
+///   all it names.
+///
+/// This list is deliberately tiny and deliberately by name. The regression being prevented is a
+/// developer reaching for `..Default::default()` at a call site, not a developer editing this list.
+const NON_BESPOKE_REQUESTS: &[&str] = &["GenerationRequest", "ImageRequest"];
 
 fn image_jobs_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/image_jobs")
@@ -95,6 +117,67 @@ fn collapse(text: &str) -> String {
 fn is_default_expression(value: &str) -> bool {
     let value = collapse(value).replace(' ', "");
     value.ends_with("::default()") || value == "Default::default()"
+}
+
+/// The field name a top-level struct-literal entry binds. `preview: sink.clone()` and the shorthand
+/// `preview` both yield `preview`; a struct-update entry yields the nonsense `..Default`, which is
+/// exactly why [`is_rest_init`] has to exist alongside this.
+fn field_name(field: &str) -> &str {
+    field
+        .split_once(':')
+        .map(|(name, _)| name)
+        .unwrap_or(field)
+        .trim()
+}
+
+/// The value a top-level struct-literal entry binds. Field shorthand (`preview,`) forwards the
+/// binding in scope, so the entry is its own value.
+fn field_value(field: &str) -> &str {
+    field
+        .split_once(':')
+        .map(|(_, value)| value)
+        .unwrap_or(field)
+        .trim()
+}
+
+/// Whether `field` is a struct-update entry (`..Default::default()`, `..Foo::default()`, `..base`)
+/// rather than a named field.
+///
+/// Any spelling counts, not just `::default()`. A rest-init of any kind silently supplies every
+/// field the literal does not name, so `..some_prebuilt_request` hides an inert `preview` exactly as
+/// thoroughly as `..Default::default()` does — and reads more innocent.
+fn is_rest_init(field: &str) -> bool {
+    field.trim_start().starts_with("..")
+}
+
+/// Brace blocks in `code` that name a **bespoke** provider request — a `*Request` type the worker
+/// invokes by name, so the registry cannot thread the job's sink onto it.
+fn bespoke_request_blocks(code: &str) -> Vec<(String, Vec<String>)> {
+    brace_blocks(code)
+        .into_iter()
+        .filter(|(name, _)| {
+            name.ends_with("Request") && !NON_BESPOKE_REQUESTS.contains(&name.as_str())
+        })
+        .collect()
+}
+
+/// Bespoke request literals in `code` that name no `preview` field and fill the gap with a
+/// struct-update entry, rendered for a failure message.
+///
+/// The judgment lives here rather than inline in the test so
+/// [`preview_binding_parser_recognises_the_shapes_it_must_judge`] can exercise the same code path on
+/// hand-written snippets. A rule that is only ever run over a clean tree proves nothing.
+fn rest_init_offenders(code: &str) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for (literal, fields) in bespoke_request_blocks(code) {
+        if fields.iter().any(|field| field_name(field) == "preview") {
+            continue;
+        }
+        for field in fields.iter().filter(|field| is_rest_init(field)) {
+            offenders.push(format!("{literal} {{ {} }}", collapse(field)));
+        }
+    }
+    offenders
 }
 
 /// Every `TypeName { .. }` brace block in `code`, as `(type name, top-level field entries)`.
@@ -191,10 +274,7 @@ fn preview_bindings(code: &str, literal: &str) -> Vec<String> {
     struct_literal_fields(code, literal)
         .into_iter()
         .flatten()
-        .filter(|field| {
-            let head = field.split(':').next().unwrap_or_default().trim();
-            head == "preview"
-        })
+        .filter(|field| field_name(field) == "preview")
         .collect()
 }
 
@@ -254,19 +334,16 @@ fn no_candle_image_lane_defaults_its_preview_sink() {
     for (file, code) in image_jobs_sources() {
         for (literal, fields) in brace_blocks(&code) {
             for field in fields {
-                let (name, value) = match field.split_once(':') {
-                    Some((name, value)) => (name.trim().to_owned(), value.trim().to_owned()),
-                    // Field shorthand (`preview,`) — the binding in scope, never a default.
-                    None => (field.trim().to_owned(), field.trim().to_owned()),
-                };
-                if name != "preview" {
+                // Field shorthand (`preview,`) is its own value — the binding in scope, never a default.
+                if field_name(&field) != "preview" {
                     continue;
                 }
                 swept += 1;
-                if is_default_expression(&value) {
+                let value = field_value(&field);
+                if is_default_expression(value) {
                     offenders.push(format!(
                         "src/image_jobs/{file}: {literal} {{ preview: {} }}",
-                        collapse(&value)
+                        collapse(value)
                     ));
                 }
             }
@@ -284,6 +361,56 @@ fn no_candle_image_lane_defaults_its_preview_sink() {
         offenders.is_empty(),
         "a candle image lane binds its preview sink to the inert default, so that lane renders with \
          no live preview:\n  {}\nPass the live sink from the `drive_gen_items*` closure instead.",
+        offenders.join("\n  ")
+    );
+}
+
+/// The other half of the sweep: a bespoke request may not fill `preview` from a struct-update entry.
+///
+/// [`no_candle_image_lane_defaults_its_preview_sink`] only inspects fields the literal NAMES, so it
+/// reads `Flux2ControlRequest { ..Default::default(), prompt }` as clean — the entry's field name
+/// parses as `..Default`, never `preview`. That is not a hypothetical spelling: when sc-16953…
+/// sc-16959 add `preview` to their own request structs upstream, these exhaustive literals stop
+/// compiling, and `..Default::default()` is the shortest edit that makes them compile again. It ships
+/// an inert sink identical to `preview: Default::default()`, and nothing else here would be red.
+///
+/// The three already-wired lanes are covered by the `bindings.len() == 1` count in
+/// [`bespoke_candle_requests_bind_a_live_preview_sink`] — reverting one of THOSE to a rest-init drops
+/// the count to zero. This test covers the twelve lanes that are not wired yet, which is the entire
+/// population the sweep was built for.
+#[test]
+fn no_bespoke_candle_request_hides_its_preview_behind_a_rest_init() {
+    let mut offenders = Vec::new();
+    let mut inspected = 0usize;
+    for (file, code) in image_jobs_sources() {
+        // `tests.rs` is the crate's test corpus, not a shipping lane. Its provider requests are
+        // fixtures whose preview is legitimately inert — `InstantIdRequest { ..InstantIdRequest::
+        // default() }` in the real-weight angle harness, for one — and no user ever sees a card for
+        // them. The lanes a family story actually edits all live in their own files.
+        if file == "tests.rs" {
+            continue;
+        }
+        inspected += bespoke_request_blocks(&code).len();
+        offenders.extend(
+            rest_init_offenders(&code)
+                .into_iter()
+                .map(|offender| format!("src/image_jobs/{file}: {offender}")),
+        );
+    }
+    // A sweep that inspected nothing is indistinguishable from a clean sweep. Each wired lane's
+    // literal is itself a bespoke `*Request` block, so fewer than that many means the scan broke.
+    assert!(
+        inspected >= WIRED_LANES.len(),
+        "the rest-init sweep inspected only {inspected} bespoke `*Request` blocks under \
+         src/image_jobs/, expected at least {} — the source scan is broken, not the lanes",
+        WIRED_LANES.len()
+    );
+    assert!(
+        offenders.is_empty(),
+        "a bespoke candle request fills `preview` from a struct-update entry instead of naming it, \
+         so that lane ships an inert sink and renders with no live preview:\n  {}\nWhen an \
+         exhaustive literal stops compiling because upstream added `preview`, the fix is to pass the \
+         live sink from the `drive_gen_items*` closure — not to absorb the new field into a default.",
         offenders.join("\n  ")
     );
 }
@@ -355,4 +482,39 @@ fn preview_binding_parser_recognises_the_shapes_it_must_judge() {
         swept,
         vec!["Krea2ControlRequest::preview: Default::default()"]
     );
+
+    // Struct-update init. `..Default::default()` arrives as a top-level entry whose field NAME parses
+    // as `..Default`, so every named-field check reads this literal as clean while it ships the same
+    // inert sink as `preview: Default::default()`. This exact snippet was mutated into an unlisted
+    // lane during review and all four guards stayed green.
+    let rest_init = "Flux2ControlRequest { ..Default::default(), prompt: p.clone() }";
+    assert!(
+        preview_bindings(rest_init, "Flux2ControlRequest").is_empty(),
+        "the named-field parse must NOT see a preview binding here — that blindness is the hole"
+    );
+    assert_eq!(field_name("..Default::default()"), "..Default");
+    assert!(is_rest_init("..Default::default()"));
+    assert!(is_rest_init("..Flux2ControlRequest::default()"));
+    // Any struct-update spelling hides the field, not just the `::default()` family.
+    assert!(is_rest_init("..prebuilt"));
+    assert!(!is_rest_init("preview: preview.clone()"));
+    assert_eq!(
+        rest_init_offenders(rest_init),
+        vec!["Flux2ControlRequest { ..Default::default() }"],
+        "an unlisted bespoke lane that absorbs the new `preview` field into a rest-init must be an \
+         offender"
+    );
+
+    // Naming `preview` next to a rest-init is the CORRECT shape — the other fields are genuinely
+    // defaulted and the sink is genuinely live — so it must not be flagged.
+    assert!(rest_init_offenders(
+        "Flux2ControlRequest { preview: preview.clone(), ..Default::default() }"
+    )
+    .is_empty());
+    // The registry-driven request threads its sink through `base.rs`; the tile-refinement pass in
+    // `detail.rs` omits it on purpose. Neither is a bespoke by-name lane.
+    assert!(rest_init_offenders("GenerationRequest { prompt, ..Default::default() }").is_empty());
+    assert!(rest_init_offenders("ImageRequest { model, ..Default::default() }").is_empty());
+    // A rest-init with no `preview` in a non-request literal is none of this guard's business.
+    assert!(rest_init_offenders("Sampling { steps, ..Default::default() }").is_empty());
 }
