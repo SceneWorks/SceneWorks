@@ -20,7 +20,8 @@
 # PATH the configuring shell happened to have. Configure from a shell without
 # ~/.cargo/bin and every job dies at `cargo build` with "command not found" — while the
 # runner still shows healthy/idle in the Actions UI. This script writes `.path`
-# explicitly and verifies cargo/node resolve through it.
+# explicitly and verifies that every tool the build shells out to — cargo, node, and
+# cmake — resolves through it.
 #
 # A LaunchAgent (user session) is also correct rather than a LaunchDaemon: Metal work
 # needs a real logged-in GUI session, so the box must be logged in and not asleep.
@@ -254,6 +255,18 @@ preflight() {
     bad "no cargo/rustc found on PATH or in ~/.cargo/bin. Install rustup (https://rustup.rs); rust-toolchain.toml pins stable."
   fi
 
+  # MLX is a CMake project, and `pmetal-mlx-sys`'s build.rs shells out to `cmake` by name.
+  # Missing, the lane fails at "failed to run custom build command for pmetal-mlx-sys ...
+  # failed to execute command: No such file or directory (os error 2)" — which reads as a
+  # broken dependency rather than an unprovisioned host. nax-macos-2 lost three runs to
+  # exactly that on 2026-08-03. No version floor: cmake 4.x builds MLX without hitting a
+  # `cmake_minimum_required` compatibility wall, so any Homebrew cmake is fine.
+  if command -v cmake >/dev/null 2>&1; then
+    ok "cmake $(cmake --version 2>/dev/null | head -1 | awk '{print $3}') at $(command -v cmake)"
+  else
+    bad "no cmake on PATH; MLX builds through CMake and pmetal-mlx-sys's build.rs invokes it directly, so every job would die in that dependency's build script. Install it: brew install cmake"
+  fi
+
   if command -v node >/dev/null 2>&1; then
     local node_major
     node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
@@ -404,7 +417,7 @@ Refusing to unpack. If you intentionally bumped RUNNER_VERSION, update RUNNER_SH
 
 # `config.sh` snapshots the configuring shell's PATH into `.path`, and bin/runsvc.sh
 # makes that file the ONLY PATH the launchd service ever sees. Ensure the directories the
-# lane actually needs are in it, and prove cargo/node resolve through it.
+# lane actually needs are in it, and prove the build's tools resolve through it.
 repair_runner_path() {
   local path_file="${RUNNER_DIR}/.path"
   # Derive the directories from where the tools ACTUALLY are rather than assuming
@@ -413,7 +426,7 @@ repair_runner_path() {
   # version-pinned, so it would break on the next node upgrade even if hardcoded once.
   local wanted="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   local tool tool_path
-  for tool in cargo node npm rustc; do
+  for tool in cargo node npm rustc cmake; do
     tool_path="$(command -v "$tool" 2>/dev/null || true)"
     [[ -n "$tool_path" ]] && wanted="$(dirname "$tool_path"):${wanted}"
   done
@@ -441,8 +454,14 @@ repair_runner_path() {
   # healthy and idle in the Actions UI while failing every job at `cargo build`. A box
   # that cannot build is worse than no box, because its failures look like code
   # regressions and it consumes the scheduling slot either way.
+  #
+  # The list must cover every tool the BUILD shells out to, not just the ones the workflow
+  # names in a `run:` step. Checking cargo and node alone is how nax-macos-2 shipped
+  # provisioned-and-green on 2026-08-03 and then failed three `nax-worker` runs inside
+  # `pmetal-mlx-sys`'s build script, which invokes `cmake` — the exact failure this guard
+  # exists to prevent, one indirection down.
   local missing=""
-  for tool in cargo node; do
+  for tool in cargo node cmake; do
     if ! PATH="$merged" command -v "$tool" >/dev/null 2>&1; then
       missing="${missing:+${missing}, }${tool}"
     fi
@@ -451,9 +470,10 @@ repair_runner_path() {
     die "'${missing}' does not resolve through ${path_file}.
 bin/runsvc.sh gives the launchd service no PATH except this file, so the runner would come
 up healthy and fail every job at the build step. Not starting the service. Install the
-missing tool, or pass its directory on PATH when re-running this script."
+missing tool (cmake: brew install cmake), or pass its directory on PATH when re-running
+this script."
   fi
-  ok "cargo and node both resolve through .path"
+  ok "cargo, node, and cmake all resolve through .path"
 }
 
 install_runner() {
