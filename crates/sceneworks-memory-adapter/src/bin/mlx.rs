@@ -37,6 +37,13 @@ const KREA_MEAN_THRESHOLD: f64 = 5e-3;
 // than half an integer level on average; the mandatory broad-bias mutation must breach both.
 const QWEN_MAX_THRESHOLD: f64 = 48.0 / 255.0;
 const QWEN_MEAN_THRESHOLD: f64 = 0.5 / 255.0;
+// Z-Image's production 768px VAE tile measured 48/255 maximum and 2.82/255 mean
+// error against the exact untiled q4 decode. The provider's real-weight candidate
+// sweep places the seam-free cutoff at 56/255, between the published and rejected
+// domains; keep a separate 4/255 mean bound so a broad low-amplitude drift cannot
+// pass on the maximum alone.
+const Z_IMAGE_MAX_THRESHOLD: f64 = 56.0 / 255.0;
+const Z_IMAGE_MEAN_THRESHOLD: f64 = 4.0 / 255.0;
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
@@ -330,6 +337,40 @@ mod tests {
     }
 
     #[test]
+    fn z_image_complete_sweep_verifies_only_the_exact_executed_case() {
+        let request = json!({
+            "planned": {
+                "strategy": {
+                    "parameters": { "decodeTileEdge": 768, "decodeOverlap": 64 }
+                }
+            }
+        });
+        let sweep = z_image_complete_sweep(&request).unwrap();
+        assert_eq!(sweep["rangeVerified"], true);
+        assert_eq!(sweep["cases"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sweep["cases"][0]["parameters"],
+            request["planned"]["strategy"]["parameters"]
+        );
+    }
+
+    #[test]
+    fn z_image_parity_envelope_accepts_published_decode_and_rejects_mutation() {
+        assert!(z_image_quality_passes(48.0 / 255.0, 2.82 / 255.0));
+        assert!(!z_image_quality_passes(57.0 / 255.0, 2.82 / 255.0));
+        assert!(!z_image_quality_passes(48.0 / 255.0, 4.01 / 255.0));
+
+        let baseline = Image {
+            width: 1,
+            height: 1,
+            pixels: vec![10, 20, 30],
+        };
+        let mutated = qwen_negative_mutation(&baseline);
+        let (maximum, mean) = image_max_mean_abs(&mutated, &baseline).unwrap();
+        assert!(!z_image_quality_passes(maximum, mean));
+    }
+
+    #[test]
     fn qwen_parity_envelope_accepts_measured_chunking_and_rejects_mutation() {
         let measured_maximum = 43.0 / 255.0;
         let measured_mean = 0.113 / 255.0;
@@ -462,6 +503,10 @@ fn qwen_negative_mutation(image: &Image) -> Image {
 
 fn qwen_quality_passes(maximum: f64, mean: f64) -> bool {
     maximum <= QWEN_MAX_THRESHOLD && mean <= QWEN_MEAN_THRESHOLD
+}
+
+fn z_image_quality_passes(maximum: f64, mean: f64) -> bool {
+    maximum <= Z_IMAGE_MAX_THRESHOLD && mean <= Z_IMAGE_MEAN_THRESHOLD
 }
 
 fn fixed_pose_control_image(width: u32, height: u32) -> Image {
@@ -924,6 +969,29 @@ fn load_z_image_generator(
     Ok((repository, revision, generator))
 }
 
+fn z_image_request(width: u32, height: u32) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(16402),
+        // The first Step callback closes the conservative conditioning envelope; the second
+        // step then supplies a real denoise-only interval before Decoding.
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+fn z_image_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // Each plan row is one exact production parameter tuple. Marking this exact tuple's range
+    // verified does not promote sibling tuples: the generated matrix still requires a matching
+    // manifest calibration binding for each cell.
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
 fn run_z_image_reference_loaded(
     request: &Value,
     generator: &dyn Generator,
@@ -971,7 +1039,7 @@ fn run_z_image_reference_loaded(
         mode: MemoryMode::TextToImage,
         has_reference: false,
         use_pid: false,
-        has_phases: false,
+        has_phases: true,
         geometry: MemoryGeometry {
             width,
             height,
@@ -988,7 +1056,7 @@ fn run_z_image_reference_loaded(
         },
         predicted_peak_bytes: 1,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: format!("sc-16402@{}", protocol::INFERENCE_PIN),
+        evidence_revision: format!("sc-15510@{}", protocol::INFERENCE_PIN),
     };
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
@@ -1003,19 +1071,9 @@ fn run_z_image_reference_loaded(
     let pre_rung_active = get_active_memory() as u64;
     let pre_rung_cache = get_cache_memory() as u64;
     let peak_after_reset = get_peak_memory() as u64;
-    one_image(scoped_generate(
+    let selected = one_image(scoped_generate(
         generator,
-        GenerationRequest {
-            prompt: "a photorealistic red apple on a wooden table, studio lighting".to_owned(),
-            width,
-            height,
-            count: 1,
-            seed: Some(16402),
-            // The first Step callback closes the conservative conditioning envelope; the second
-            // step then supplies a real denoise-only interval before Decoding.
-            steps: Some(2),
-            ..Default::default()
-        },
+        z_image_request(width, height),
         &context,
         None,
         &mut |progress| match progress {
@@ -1039,65 +1097,211 @@ fn run_z_image_reference_loaded(
         );
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let blocker = concat!(
-        "five-rung oracle capture measures exact per-rung memory and strategy identity for ",
-        "sc-16059; it intentionally remains gated because this run does not repeat the full ",
-        "promotion-quality, negative-mutation, and lifecycle scenario suite"
-    );
-    let artifact = json!({
-        "repository": repository,
-        "resolvedRevision": revision,
-        "variant": "q4",
-    });
-    let mut fragment = protocol::plain_gated_fragment(
-        request,
-        Z_IMAGE_PLAIN_EXECUTION_PATH,
-        protocol::PlainGatedFragment {
-            artifact,
-            sweep: protocol::reference_sweep(request, "passed")?,
-            blocker,
-            quality: json!({ "result": "not_run" }),
-            negative_mutation: Value::Null,
-            loadability: json!({
-                "result": "passed",
-                "resolvedPathFingerprint": format!("{repository}@{revision}:q4"),
-            }),
-            diagnostics: protocol::diagnostics(
-                "memory-mlx-adapter:z-image-five-rung-reference",
-                "executed",
-                [blocker.to_owned()],
-                [
-                    ("preRungActiveAfterClear", "bytes", pre_rung_active),
-                    ("preRungCacheAfterClear", "bytes", pre_rung_cache),
-                    ("peakAfterReset", "bytes", peak_after_reset),
-                    ("conditioningActivePeak", "bytes", conditioning.active),
-                    ("denoiseActivePeak", "bytes", denoise.active),
-                    ("decodeActivePeak", "bytes", decode.active),
-                    (
-                        "overallAllocatorEnvelope",
-                        "bytes",
-                        overall.allocator_bytes(),
-                    ),
-                ],
-            ),
-        },
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Z-Image provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Z-Image provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-z-image-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Z-Image provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&z_image_request(width, height), &mut |_| {})
+            .map_err(|error| format!("generate unselected Z-Image reference: {error}"))?,
     )?;
-    fragment["strategy"] = strategy;
-    fragment["loadShape"] = json!(load_shape_key(load_shape));
-    fragment["observedMemory"] = json!({
-        "conditioning": conditioning.json(),
-        "denoise": denoise.json(),
-        "decode": decode.json(),
-        "overall": overall.json(),
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if !z_image_quality_passes(maximum_error, mean_error) {
+        return Err(format!(
+            "Z-Image selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let warm = one_image(scoped_generate(
+        generator,
+        z_image_request(width, height),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (warm_maximum, warm_mean) = image_max_mean_abs(&selected, &warm)?;
+    if !z_image_quality_passes(warm_maximum, warm_mean) {
+        return Err("Z-Image warm repeat changed the deterministic output".to_owned());
+    }
+
+    let cancelled = z_image_request(width, height);
+    let cancel_signal = cancelled.cancel.clone();
+    let cancel_during_decode = selection.strategy == MemoryStrategy::BoundedDecode;
+    let mut cancel_triggered = false;
+    let cancel_error = scoped_generate(generator, cancelled, &context, None, &mut |progress| {
+        if cancel_triggered {
+            return;
+        }
+        match progress {
+            Progress::Step { current: 1, .. } if !cancel_during_decode => {
+                cancel_triggered = true;
+                cancel_signal.cancel();
+            }
+            Progress::Decoding if cancel_during_decode => {
+                cancel_triggered = true;
+                let signal = cancel_signal.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    signal.cancel();
+                });
+            }
+            _ => {}
+        }
+    })
+    .expect_err("in-flight Z-Image cancellation must fail");
+    if !cancel_triggered {
+        return Err("Z-Image cancellation probe never reached the active rung boundary".to_owned());
+    }
+    if !cancel_error.to_ascii_lowercase().contains("cancel") {
+        return Err(format!(
+            "Z-Image cancellation returned the wrong error: {cancel_error}"
+        ));
+    }
+    let cancel_recovery = one_image(scoped_generate(
+        generator,
+        z_image_request(width, height),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (cancel_maximum, cancel_mean) = image_max_mean_abs(&selected, &cancel_recovery)?;
+    if !z_image_quality_passes(cancel_maximum, cancel_mean) {
+        return Err("Z-Image cancellation cleanup changed the warm follow-up".to_owned());
+    }
+
+    let injected_phase = if selection.strategy == MemoryStrategy::BoundedDecode {
+        MemoryPhase::Decode
+    } else {
+        MemoryPhase::Denoise
+    };
+    let injected = scoped_generate(
+        generator,
+        z_image_request(width, height),
+        &context,
+        Some(injected_phase),
+        &mut |_| {},
+    )
+    .expect_err("injected Z-Image error must fail");
+    if !injected.contains("injected memory-strategy calibration error") {
+        return Err(format!(
+            "Z-Image error injection returned the wrong error: {injected}"
+        ));
+    }
+    let error_recovery = one_image(scoped_generate(
+        generator,
+        z_image_request(width, height),
+        &context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let (recovery_maximum, recovery_mean) = image_max_mean_abs(&selected, &error_recovery)?;
+    if !z_image_quality_passes(recovery_maximum, recovery_mean) {
+        return Err("Z-Image error cleanup changed the warm follow-up".to_owned());
+    }
+
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if z_image_quality_passes(mutated_maximum, mutated_mean) {
+        return Err(
+            "Z-Image output mutation did not breach the production parity envelope".to_owned(),
+        );
+    }
+
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": "q4",
+        },
+        "sweep": z_image_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "the authoritative Z-Image target has no overlay" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "same seed, conditioning, sampling, precision, and loaded provider; selected rung versus unselected request",
+            "identicalInputs": true,
+            "identicalLatents": false,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": Z_IMAGE_MAX_THRESHOLD,
+            "meanErrorThreshold": Z_IMAGE_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:q4"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:z-image-shared-ladder",
+            "executed",
+            [],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("peakAfterReset", "bytes", peak_after_reset),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
     });
-    fragment["diagnostics"]["measurements"]
-        .as_array_mut()
-        .ok_or_else(|| "Z-Image diagnostics.measurements must be an array".to_owned())?
-        .push(json!({
-            "name": "loadShapeDeferred",
-            "unit": "count",
-            "value": u64::from(load_shape == LoadShape::DeferredMaterialization),
-        }));
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, Z_IMAGE_PLAIN_EXECUTION_PATH)?;
     Ok(fragment)
 }
 
