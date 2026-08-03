@@ -2269,6 +2269,11 @@
       "missingRequiredFiles": [],
       "name": "Z-Image Turbo",
       "paths": {},
+      "preview": {
+        "byBackend": {
+          "candle": false
+        }
+      },
       "removable": false,
       "repairAvailable": false,
       "type": "image",

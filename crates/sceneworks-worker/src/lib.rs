@@ -132,6 +132,13 @@ use api_client::*;
 // person_replace pattern); the stub test still exercises it on every target.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod engines;
+// Stage 1 of the engine-capability pipeline (sc-16965, epic 16948): the weights-free dumper that
+// turns the LINKED provider registry into checked-in, per-backend facts files that stage 2's
+// generator + vitest drift guard read on every PR. `pub` because `src/bin/dump-engine-capabilities`
+// is a separate crate and can only reach the public surface. All-targets on purpose: the
+// empty-registry refusal is the whole point of the module, so it must compile — and be unit-tested —
+// on the lanes that link no engines at all.
+pub mod engine_capability_facts;
 mod gpu;
 use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

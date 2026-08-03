@@ -250,6 +250,60 @@ function regenerateCalibrationCostModel() {
   });
 }
 
+// `config/engine-capabilities/capabilities.<backend>.json` is keyed to the pin exactly like the
+// licence audit above: each file stamps `generatedFrom.inferenceRevision`, and it is a dump of
+// `Capabilities.supports_preview` read off the LINKED provider registry at that revision (sc-16965,
+// epic 16948). A bump can move any descriptor's flag — every remaining family story in that epic
+// flips more of them — so the checked-in dumps go stale by construction.
+//
+// Like the licence audit, and unlike the memory matrix, this CANNOT be regenerated blindly from
+// here: the dumper needs a lane that actually links engines (macOS for mlx,
+// `--features backend-candle` off-Mac for candle), which a bump does not otherwise require and
+// which no single host can supply for both backends. So verify, and let the remediation text name
+// the exact invocation. Fail-closed on purpose: the pins are already written by now, so the bump is
+// genuinely incomplete until the dumps are refreshed and the stage-2 artifacts regenerated.
+//
+// Downstream cascade, same shape as memory-matrix -> calibration-cost-model: re-dumping a facts file
+// makes `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
+// stale, and `apps/web/src/data/previewSupportCatalog.test.js` (web vitest, every PR) fails until
+// `npm run gen:preview-support` is re-run.
+function verifyEngineCapabilityFacts(sha) {
+  const dir = join(repoRoot, "config/engine-capabilities");
+  let names;
+  try {
+    names = readdirSync(dir).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
+  } catch {
+    names = [];
+  }
+  if (names.length === 0) {
+    throw new Error(
+      `no engine-capability facts under ${dir}. Dump them on a lane that links engines: ` +
+        "`cargo run -p sceneworks-worker --bin dump-engine-capabilities --features backend-candle` " +
+        "(off-Mac) or the same command with no features (macOS), then re-run " +
+        "`npm run gen:preview-support` from apps/web.",
+    );
+  }
+  const stale = [];
+  for (const name of names) {
+    const facts = JSON.parse(readFileSync(join(dir, name), "utf8"));
+    const revision = facts?.generatedFrom?.inferenceRevision;
+    if (revision !== sha) stale.push(`${name} (dumped at ${revision ?? "unknown"})`);
+  }
+  if (stale.length) {
+    throw new Error(
+      `engine-capability facts are stale for ${sha}:\n  ${stale.join("\n  ")}\n` +
+        "Each file must be re-dumped on the lane that owns it — one file per backend, so no lane " +
+        "overwrites another's:\n" +
+        "  macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
+        "  off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
+        "--no-default-features --features backend-candle\n" +
+        "then regenerate the derived catalog: (cd apps/web && npm run gen:preview-support). " +
+        "The pin itself is already written.",
+    );
+  }
+  console.log(`OK: ${names.length} engine-capability facts file(s) dumped at ${sha}`);
+}
+
 function verifyNoSkew() {
   // gen-core: reuse the repo's own CI-wired guard verbatim.
   console.log("$ bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle");
@@ -469,6 +523,10 @@ function main() {
   // Downstream of the matrix, so it must follow it — see the note on the function.
   regenerateCalibrationCostModel();
   verifyLicenseAudit();
+  // Beside the licence re-scan for the same reason: both are pin-keyed artifacts that need an input
+  // this script cannot synthesize (a local inference clone / a lane that links engines), so both
+  // fail closed here rather than in parity CI ten minutes later. sc-16965.
+  verifyEngineCapabilityFacts(sha);
   console.log("bump-inference: done");
 }
 
