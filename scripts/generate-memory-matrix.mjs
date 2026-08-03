@@ -361,7 +361,7 @@ function sortedUnique(values) {
 // accident. The first promoted cell would have silently dropped out of those counts. Coverage
 // surfaces must go through here rather than re-spelling the comparison.
 export function isImplemented(state) {
-  return state === "Implemented/unverified" || state === "Verified";
+  return ["Implemented/unverified", "Runtime verified", "Verified"].includes(state);
 }
 
 function calibrationAbiVersion(provider) {
@@ -418,6 +418,7 @@ function runtimeStrategyParameters(parameters) {
         "decodeOverlap",
         "attentionChunkSize",
         "transformerWindowSize",
+        "transformerWindowComponent",
       ].includes(key),
     ),
   );
@@ -429,7 +430,7 @@ function canonicalParameters(parameters) {
 
 export function calibrationBinding(record, cell) {
   const reasons = [];
-  if (record.status !== "complete") reasons.push("record-not-complete");
+  if (!["complete", "runtime_complete"].includes(record.status)) reasons.push("record-not-complete");
   if (record.quality.result !== "passed") reasons.push("quality-not-passed");
   if (record.sweep.rangeVerified !== true) reasons.push("range-not-verified");
   if (record.calibrationFingerprint !== cell.calibrationFingerprint) reasons.push("fingerprint-mismatch");
@@ -439,8 +440,16 @@ export function calibrationBinding(record, cell) {
     reasons.push("composition-mismatch");
   }
   if (
-    JSON.stringify(canonicalParameters(record.strategy.parameters)) !==
-    JSON.stringify(canonicalParameters(runtimeStrategyParameters(cell.strategyParameters)))
+    JSON.stringify(canonicalParameters(runtimeStrategyParameters(record.strategy.parameters))) !==
+    JSON.stringify(canonicalParameters((() => {
+      const parameters = runtimeStrategyParameters(cell.strategyParameters);
+      // Older records predate this exact string axis. Preserve their historical binding behavior,
+      // while new records that carry the component must match it exactly.
+      if (!Object.hasOwn(record.strategy.parameters, "transformerWindowComponent")) {
+        delete parameters.transformerWindowComponent;
+      }
+      return parameters;
+    })()))
   ) reasons.push("strategy-parameters-mismatch");
   const resolution = `${record.target.geometry.width}x${record.target.geometry.height}`;
   if (!cell.geometryEnvelope.resolutions?.includes(resolution)) reasons.push("geometry-out-of-envelope");
@@ -1447,10 +1456,14 @@ function validateMatrix(
         `${cell.id}: rung4Survey must be present on exactly the bounded_transformer_residency cells`,
       );
     }
-    if (cell.state === "Verified") {
+    if (["Verified", "Runtime verified"].includes(cell.state)) {
       const dynamic = cell.evidence.currentEnvironmentVerification;
       if (!dynamic.length || !cell.calibrationFingerprint) {
-        throw new Error(`${cell.id}: unsupported Full/Verified claim`);
+        throw new Error(`${cell.id}: unsupported dynamic verification claim`);
+      }
+      const requiredStatus = cell.state === "Verified" ? "complete" : "runtime_complete";
+      if (!dynamic.some((evidence) => evidence.recordStatus === requiredStatus)) {
+        throw new Error(`${cell.id}: ${cell.state} lacks a ${requiredStatus} record`);
       }
     }
     // SC-16060. The two claims are independent, and the invariants that keep them from silently
@@ -1696,6 +1709,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                   geometry: `${record.target.geometry.width}x${record.target.geometry.height}`,
                   capturedAt: record.capturedAt,
                   harnessVersion: record.harnessVersion,
+                  recordStatus: record.status,
                   engagedRungs: record.strategy.engagedRungs,
                   ...(Number.isFinite(overall) ? { observedPeakGb: overall / 1024 ** 3 } : {}),
                   ...(requiredHostBytes !== null ? { requiredHostBytes } : {}),
@@ -1738,7 +1752,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                   evidenceSemantics(record, {
                     sceneWorks: sceneWorksRevision,
                     inference: pin,
-                  }) === "current" && record.status === "complete",
+                  }) === "current" && ["complete", "runtime_complete"].includes(record.status),
+              );
+              const currentFullRuns = currentRuns.filter((record) => record.status === "complete");
+              const currentRuntimeRuns = currentRuns.filter(
+                (record) => record.status === "runtime_complete",
               );
               // SC-16060. Characterization counts every geometry bound to this cell — the
               // manifest-declared captures AND the eligible bundle records — because
@@ -1760,9 +1778,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
               // `Structurally N/A` has nothing to measure, so neither may be lifted by evidence.
               const state =
                 status.state === "Implemented/unverified" &&
-                  currentRuns.length > 0 &&
+                  currentFullRuns.length > 0 &&
                   (!status.requiresCurrentCalibrationBinding || status.evidenceAdmissionCurrent)
                   ? "Verified"
+                  : status.state === "Implemented/unverified" &&
+                      currentRuntimeRuns.length > 0 &&
+                      (!status.requiresCurrentCalibrationBinding || status.evidenceAdmissionCurrent)
+                    ? "Runtime verified"
                   : status.state;
               const cell = {
                 id: [model.id, provider, backend, tier, mode, overlay, rung].join(":"),
@@ -1926,7 +1948,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     // (`sceneWorksRevision` / `inferenceRevision`), which is the copy the only real consumer
     // (`scripts/memory-calibration-harness.mjs`) has always read. A reader written against 2 that
     // dereferences `cell.evidenceRevision.sceneWorks` now throws, so this takes a new version.
-    schemaVersion: 5,
+    schemaVersion: 6,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,
@@ -1964,6 +1986,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
         definition:
           "Implemented AND carrying at least one eligible current-environment calibration record. " +
           "Says nothing about geometry coverage — read `memoryCharacterization` for that.",
+      },
+      {
+        state: "Runtime verified",
+        definition:
+          "Implemented and production-admissible for an exact base-only coordinate through a " +
+          "current runtime_complete record. This is intentionally below Full Verified: lifecycle " +
+          "recovery and measured negative-mutation coverage remain owned by the catalog story.",
       },
       {
         state: "Implemented/unverified",
@@ -2010,6 +2039,12 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
       mlxStagedStaticCoverageDenominator: EXPECTED_IMAGE_COUNT,
       fullModels: 0,
       calibrationRuns: calibrationBundle.records.length,
+      calibrationRunsByStatus: {
+        complete: calibrationBundle.records.filter((record) => record.status === "complete").length,
+        runtimeComplete: calibrationBundle.records.filter(
+          (record) => record.status === "runtime_complete",
+        ).length,
+      },
       currentCalibrationRuns: cells.reduce(
         (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
         0,
@@ -2050,8 +2085,11 @@ function renderMarkdown(matrix) {
     `- Cells: ${matrix.summary.cells}`,
     `- MLX staged-residency static coverage: ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}`,
     `- Full models: ${matrix.summary.fullModels}`,
+    `- Full complete calibration records: ${matrix.summary.calibrationRunsByStatus.complete}`,
+    `- Base-only runtime-complete calibration records: ${matrix.summary.calibrationRunsByStatus.runtimeComplete}`,
     "",
     "Static capability is never promoted to dynamic verification. Generated cells contain separate declared, historical, current-environment, loadability, and strategy-parameter evidence arrays.",
+    "`Runtime verified` means the exact base-only coordinate is production-admissible from current runtime evidence; it is deliberately not Full `Verified`, which additionally requires the catalog story's lifecycle and negative-mutation signoff.",
     "",
     "One row per (catalog entry, backend): ownership is backend-scoped, so a single row per entry could only name one backend's stories (SC-15812).",
     "",
@@ -2067,15 +2105,17 @@ function renderMarkdown(matrix) {
           cell.rung === "staged_residency" &&
           isImplemented(cell.state),
       );
-      const stagedState = matrix.cells.find(
+      const stagedCells = matrix.cells.filter(
         (cell) =>
           cell.modelId === model.id &&
           cell.backend === backend &&
-          cell.rung === "staged_residency" &&
-          cell.state === "Verified",
-      )
+          cell.rung === "staged_residency",
+      );
+      const stagedState = stagedCells.some((cell) => cell.state === "Verified")
         ? "Verified"
-        : "Implemented/unverified";
+        : stagedCells.some((cell) => cell.state === "Runtime verified")
+          ? "Runtime verified"
+          : "Implemented/unverified";
       lines.push(
         `| \`${model.id}\` | ${backend} | \`${model.resolvedRoute}\` (${model.routeKind}) | SC-${model.owningFamilyStories[backend]} | SC-${model.owningModelStories[backend]} | ${staged ? stagedState : "Missing"} |`,
       );

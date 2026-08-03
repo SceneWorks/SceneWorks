@@ -334,7 +334,7 @@ fn verified_candidates(
                 MemoryParityContract::Exact
             } else {
                 MemoryParityContract::Tolerance {
-                    metric: "maximum normalized RGB8 error".to_owned(),
+                    metric: "maximum RGB8 channel error".to_owned(),
                     maximum_error: record.quality.maximum_error_threshold.unwrap_or_default(),
                 }
             },
@@ -675,6 +675,86 @@ mod tests {
             "ip_adapter",
             geometry,
         ));
+    }
+
+    #[test]
+    fn flux1_base_bindings_are_current_selectable_and_overlay_free() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .expect("embedded model manifest");
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
+        let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+        let models = root["models"].as_array().expect("models array");
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+
+        for (model_id, provider) in [("flux_schnell", "flux1_schnell"), ("flux_dev", "flux1_dev")] {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .expect("FLUX model");
+            let manifest = model.as_object().expect("model object");
+            let bindings = manifest["candle"]["calibrations"]
+                .as_array()
+                .expect("calibration bindings");
+            assert_eq!(bindings.len(), 5);
+            assert!(bindings.iter().all(|binding| binding["overlay"] == "none"));
+
+            let candidates = verified_candidates(
+                manifest,
+                model_id,
+                provider,
+                "q4",
+                "text_to_image",
+                "none",
+                geometry,
+            )
+            .expect("packaged FLUX evidence");
+            assert_eq!(candidates.len(), 5);
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.key.strategy)
+                    .collect::<Vec<_>>(),
+                vec![
+                    MemoryStrategy::Resident,
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedDecode,
+                    MemoryStrategy::BoundedAttention,
+                    MemoryStrategy::BoundedTransformerResidency,
+                ]
+            );
+            assert!(matches!(candidates[0].parity, MemoryParityContract::Exact));
+            assert!(matches!(candidates[1].parity, MemoryParityContract::Exact));
+            assert!(candidates[2..].iter().all(|candidate| matches!(
+                candidate.parity,
+                MemoryParityContract::Tolerance { .. }
+            )));
+
+            for overlay in ["identity", "control"] {
+                assert!(verified_candidates(
+                    manifest,
+                    model_id,
+                    provider,
+                    "q4",
+                    "character_image",
+                    overlay,
+                    MemoryGeometry {
+                        reference_count: 1,
+                        ..geometry
+                    },
+                )
+                .expect("uncertified overlay query")
+                .is_empty());
+            }
+        }
     }
 
     #[test]

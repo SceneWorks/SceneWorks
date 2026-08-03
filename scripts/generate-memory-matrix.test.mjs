@@ -210,7 +210,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix();
-  assert.equal(matrix.schemaVersion, 5);
+  assert.equal(matrix.schemaVersion, 6);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
