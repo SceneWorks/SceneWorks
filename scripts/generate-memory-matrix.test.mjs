@@ -444,7 +444,7 @@ test("Krea bounded-decode and bounded-attention matrix identities match their cu
   }
 });
 
-test("Qwen MLX static ladder contracts expose every shipped entry without claiming verification", async () => {
+test("Qwen MLX static ladder contracts expose every shipped entry and promote only exact evidence", async () => {
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
@@ -486,13 +486,36 @@ test("Qwen MLX static ladder contracts expose every shipped entry without claimi
   assert.ok(
     cells.every(
       (cell) =>
-        cell.state === "Implemented/unverified" &&
-        cell.evidence.currentEnvironmentVerification.length === 0 &&
         cell.strategyParameters.publishedRanges.decodeTileEdges.join(",") ===
           "768,640,512,448,384,320,256" &&
         cell.strategyParameters.publishedRanges.decodeOverlaps.join(",") === "64",
     ),
-    "a static production contract inventories the ladder but cannot promote any sibling to Verified",
+    "the static production contract must inventory the complete shipped ladder",
+  );
+  const verified = cells.filter((cell) => cell.state === "Verified");
+  assert.deepEqual(
+    verified.map((cell) => cell.id).sort(),
+    [
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
+    ],
+    "current evidence must promote only its exact entry, tier, mode, overlay, and rung",
+  );
+  assert.ok(
+    verified.every((cell) => cell.evidence.currentEnvironmentVerification.length === 1),
+    "every Verified Qwen cell must carry its exact dynamic evidence",
+  );
+  assert.ok(
+    cells
+      .filter((cell) => cell.state !== "Verified")
+      .every(
+        (cell) =>
+          cell.state === "Implemented/unverified" &&
+          cell.evidence.currentEnvironmentVerification.length === 0,
+      ),
+    "unmeasured siblings must remain unverified",
   );
   assert.ok(
     cells
@@ -1732,9 +1755,9 @@ const KREA_CONTROL_CELL =
   "krea_2_turbo:krea_2_turbo_control:mlx:q4:text_to_image:control:bounded_decode";
 
 /// The shipped bundle re-stamped onto the current inference pin. Both shipped records are
-/// `historical` — their inference revision predates the pin — which is why the real catalog has zero
-/// Verified cells. Promotion is a property of CURRENT evidence, so a test of the producer has to
-/// supply some; anything less tests the absence.
+/// `historical` — their inference revision predates the pin. Promotion is a property of CURRENT
+/// evidence, so the fixture restamps only Krea records; current Qwen records remain independently
+/// bound to the checked-in runtime pin.
 async function currentEvidenceFixture({ keepGeometries = null } = {}) {
   const [bundle, cargo] = await Promise.all([
     readFile(new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url), "utf8"),
@@ -1779,6 +1802,23 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   );
   assert.equal(
     shipped.cells.filter(
+      (cell) => cell.modelId === "qwen_image" && cell.backend === "mlx" && cell.state === "Verified",
+    ).length,
+    4,
+    "the exact current Qwen Q4/Q8 rung pairs must promote only their four cells",
+  );
+
+  const cargo = await readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8");
+  const staleQwen = await buildMatrix({
+    sourceOverrides: {
+      cargo: cargo.replace(
+        /(candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*")[0-9a-f]+(")/,
+        `$1${"0".repeat(40)}$2`,
+      ),
+    },
+  });
+  assert.equal(
+    staleQwen.cells.filter(
       (cell) => cell.modelId === "qwen_image" && cell.backend === "mlx" && cell.state === "Verified",
     ).length,
     0,
