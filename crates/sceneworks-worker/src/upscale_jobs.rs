@@ -54,10 +54,10 @@ use image::RgbImage;
 // Real-ESRGAN runs via `ort`: the CoreML EP on macOS (sc-3489) and the CUDA EP off-Mac on the
 // candle GPU-worker lane (sc-5499, the same pattern sc-5496 brought off-Mac for DWPose). `Session` /
 // `Tensor` are shared; only the execution provider is cfg-split in `build_session`.
-#[cfg(not(target_os = "macos"))]
-use ort::execution_providers::CUDAExecutionProvider;
 #[cfg(target_os = "macos")]
-use ort::execution_providers::CoreMLExecutionProvider;
+use ort::ep::CoreML;
+#[cfg(not(target_os = "macos"))]
+use ort::ep::CUDA;
 use ort::session::Session;
 use ort::value::Tensor;
 use serde_json::{json, Value};
@@ -246,7 +246,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
         #[cfg(target_os = "macos")]
         {
             b = b
-                .with_execution_providers([CoreMLExecutionProvider::default().build()])
+                .with_execution_providers([CoreML::default().build()])
                 .map_err(ort_err)?;
         }
         #[cfg(not(target_os = "macos"))]
@@ -267,9 +267,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
             // honestly, instead of onnxruntime silently CPU-executing while we claim CUDA
             // (mirrors `pose_jobs::build_session`, sc-5496).
             b = b
-                .with_execution_providers([CUDAExecutionProvider::default()
-                    .build()
-                    .error_on_failure()])
+                .with_execution_providers([CUDA::default().build().error_on_failure()])
                 .map_err(ort_err)?;
         }
     }

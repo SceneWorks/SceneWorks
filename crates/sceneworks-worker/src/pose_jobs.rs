@@ -32,10 +32,10 @@ use crate::asset_media::resolve_asset_media;
 use crate::downloads::{ensure_cached_file, verify_file_sha256, DownloadContext};
 use crate::image_sampling::sample_rgb_bilinear;
 use image::RgbImage;
-#[cfg(not(target_os = "macos"))]
-use ort::execution_providers::CUDAExecutionProvider;
 #[cfg(target_os = "macos")]
-use ort::execution_providers::CoreMLExecutionProvider;
+use ort::ep::CoreML;
+#[cfg(not(target_os = "macos"))]
+use ort::ep::CUDA;
 use ort::session::Session;
 use ort::value::Tensor;
 use serde_json::{json, Value};
@@ -489,7 +489,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
         #[cfg(target_os = "macos")]
         {
             b = b
-                .with_execution_providers([CoreMLExecutionProvider::default().build()])
+                .with_execution_providers([CoreML::default().build()])
                 .map_err(ort_err)?;
         }
         #[cfg(not(target_os = "macos"))]
@@ -506,9 +506,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
             // "cpu"` honestly, instead of onnxruntime silently CPU-executing while we
             // still claim CUDA.
             b = b
-                .with_execution_providers([CUDAExecutionProvider::default()
-                    .build()
-                    .error_on_failure()])
+                .with_execution_providers([CUDA::default().build().error_on_failure()])
                 .map_err(ort_err)?;
         }
     }

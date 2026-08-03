@@ -110,7 +110,7 @@ runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "bf06bb5
 # `download-binaries` fetches a CUDA-enabled onnxruntime at build time so dev runs + the candle packager
 # have a dylib to stage. `zip` unpacks the openmmlab weight bundles (download-on-first-use parity with
 # rtmlib), shared with the Mac path — optional + candle-gated off-Mac for the same reason as `ort`.
-ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic", "download-binaries"], optional = true }
+ort = { version = "=2.0.0-rc.13", features = ["cuda", "load-dynamic", "download-binaries"], optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [lints]
