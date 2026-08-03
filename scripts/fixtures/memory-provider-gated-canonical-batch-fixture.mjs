@@ -1,3 +1,4 @@
+import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
 
 let body = "";
@@ -32,6 +33,26 @@ if (request.action === "run_batch") {
     process.stderr.write(`fixture refuses partial rung batch ${JSON.stringify(actualRungs)}`);
     process.exit(1);
   }
+}
+
+const stateFile = process.argv[2];
+const failAfter = process.argv[3] === undefined ? null : Number(process.argv[3]);
+let capturedAt = "2026-08-03T12:00:00Z";
+if (stateFile) {
+  let state;
+  try {
+    state = JSON.parse(await readFile(stateFile, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    state = { successfulInvocations: 0 };
+  }
+  if (Number.isInteger(failAfter) && state.successfulInvocations >= failAfter) {
+    process.stderr.write(`fixture fails after ${failAfter} successful invocations`);
+    process.exit(1);
+  }
+  state.successfulInvocations += 1;
+  capturedAt = `2026-08-03T12:00:${String(state.successfulInvocations).padStart(2, "0")}Z`;
+  await writeFile(stateFile, JSON.stringify(state));
 }
 
 const phase = (value) => ({
@@ -89,7 +110,7 @@ const fragment = (planned) => {
         { name: "overallDevicePeakDelta", value: 200, unit: "bytes" },
       ],
     },
-    capturedAt: "2026-08-03T12:00:00Z",
+    capturedAt,
   };
 };
 

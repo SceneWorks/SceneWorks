@@ -845,7 +845,7 @@ test("runner batches one target's five rungs into one attested model load", asyn
   assert.equal(expandPlan(config, result.records).length, 0);
 });
 
-test("gated Qwen batch persists the canonical five rungs then serializes all remaining sweep points", async () => {
+function qwenGatedBatchConfig() {
   const target = {
     ...complete().target,
     modelId: "qwen_image",
@@ -865,7 +865,7 @@ test("gated Qwen batch persists the canonical five rungs then serializes all rem
     ...decode(512),
     attentionChunkSize: 67_108_864,
   };
-  const config = {
+  return {
     providers: [
       {
         ...shared,
@@ -908,6 +908,10 @@ test("gated Qwen batch persists the canonical five rungs then serializes all rem
       },
     ],
   };
+}
+
+test("gated Qwen batch persists the canonical five rungs then serializes all remaining sweep points", async () => {
+  const config = qwenGatedBatchConfig();
   assert.equal(expandPlan(config).length, 16);
 
   const invocations = [];
@@ -955,6 +959,110 @@ test("gated Qwen batch persists the canonical five rungs then serializes all rem
   );
   assert.equal(validateBundle(JSON.parse(await readFile(output, "utf8"))).records.length, 16);
   assert.deepEqual(await readdir(outputDir), ["evidence.json"]);
+});
+
+test("gated Qwen resume continues after failure without repeating provenance-matched attempts", async () => {
+  const config = qwenGatedBatchConfig();
+  const cleanRepo = await cleanFixtureRepo();
+  const outputDir = await mkdtemp(path.join(tmpdir(), "memory-harness-resume-"));
+  const output = path.join(outputDir, "evidence.json");
+  const state = path.join(outputDir, "provider-state.json");
+  const fixture = fileURLToPath(new URL(
+    "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
+    import.meta.url,
+  ));
+  const firstInvocations = [];
+  await assert.rejects(
+    runProviderPlan({
+      config,
+      providerCommand: [process.execPath, fixture, state, "4"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      forceBatchRungs: true,
+      onProviderInvocation: (invocation) => firstInvocations.push(invocation),
+      onProviderCheckpoint: (checkpoint) => atomicWrite(output, checkpoint),
+    }),
+    /fixture fails after 4 successful invocations/,
+  );
+  assert.deepEqual(
+    firstInvocations.map(({ action, cases }) => [action, cases.length]),
+    [["run_batch", 5], ...Array.from({ length: 4 }, () => ["run", 1])],
+  );
+
+  const checkpoint = validateBundle(JSON.parse(await readFile(output, "utf8")));
+  assert.equal(checkpoint.records.length, 8);
+  const checkpointLogicalIds = new Set(checkpoint.records.map((record) => record.logicalCaseId));
+  const resumedInvocations = [];
+  const resumed = await runProviderPlan({
+    config,
+    providerCommand: [process.execPath, fixture, state],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    resume: checkpoint,
+    forceBatchRungs: true,
+    onProviderInvocation: (invocation) => resumedInvocations.push(invocation),
+    onProviderCheckpoint: (nextCheckpoint) => atomicWrite(output, nextCheckpoint),
+  });
+
+  assert.deepEqual(
+    resumedInvocations.map(({ action, cases }) => [action, cases.length]),
+    Array.from({ length: 8 }, () => ["run", 1]),
+  );
+  const resumedLogicalIds = resumedInvocations.flatMap(({ cases }) =>
+    cases.map((planned) => planned.logicalCaseId)
+  );
+  assert.ok(resumedLogicalIds.every((logicalId) => !checkpointLogicalIds.has(logicalId)));
+  assert.equal(new Set([...checkpointLogicalIds, ...resumedLogicalIds]).size, 16);
+  assert.equal(resumed.records.length, 16);
+  assert.equal(new Set(resumed.records.map((record) => record.id)).size, 16);
+  assert.ok(resumed.records.every((record) => record.id === recordId(record)));
+  assert.equal(new Set(resumed.records.map((record) => record.capturedAt)).size, 12);
+  for (const prior of checkpoint.records) {
+    assert.deepEqual(resumed.records.find((record) => record.id === prior.id), prior);
+  }
+  assert.equal(
+    expandPlan(config, resumed.records).length,
+    16,
+    "operational attempt resume must not turn gated receipts into completion evidence",
+  );
+  assert.equal(validateBundle(JSON.parse(await readFile(output, "utf8"))).records.length, 16);
+  assert.ok((await readdir(outputDir)).every((name) => !name.includes(".tmp-")));
+});
+
+test("operational resume does not suppress an attempt from mismatched hardware provenance", async () => {
+  const config = { providers: [qwenGatedBatchConfig().providers[0]] };
+  const cleanRepo = await cleanFixtureRepo();
+  const fixtureCommand = [
+    process.execPath,
+    fileURLToPath(new URL(
+      "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
+      import.meta.url,
+    )),
+  ];
+  const first = await runProviderPlan({
+    config,
+    providerCommand: fixtureCommand,
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+  });
+  const stale = structuredClone(first);
+  stale.records[0].hardware.driverVersion = "stale-driver";
+  stale.records[0].id = recordId(stale.records[0]);
+  validateBundle(stale);
+
+  const invocations = [];
+  const resumed = await runProviderPlan({
+    config,
+    providerCommand: fixtureCommand,
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    resume: stale,
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+  });
+  assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run", 1]]);
+  assert.equal(resumed.records.length, 2);
+  assert.equal(new Set(resumed.records.map((record) => record.logicalCaseId)).size, 1);
+  assert.equal(new Set(resumed.records.map((record) => record.id)).size, 2);
 });
 
 test("runner flags provide explicit fresh and experimental batch controls", async () => {

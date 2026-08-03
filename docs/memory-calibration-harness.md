@@ -42,6 +42,13 @@ matrix evidence. Merge is commutative and
 stable-sorted. Different content with the same resolved identity is rejected instead of using
 arrival order or timestamp. Writes use a same-directory temporary file and rename.
 
+Provider resume also tracks attempted work, independently of evidence completion. A gated or
+candidate record suppresses a repeated operational attempt only when its logical case, harness
+version, repository receipts (including source-tree and dirty state), and hardware probe exactly
+match the new run. Stale or foreign-provenance records remain scheduled. This lets a checkpointed
+GPU sweep continue after failure without treating its non-authoritative records as complete or
+eligible for runtime promotion.
+
 ## Provider protocol
 
 `run` executes the provider command, supplied as a JSON argv array. It sends one JSON request on

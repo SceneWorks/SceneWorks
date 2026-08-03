@@ -632,6 +632,16 @@ function completedLogicalIds(record) {
   );
 }
 
+function operationallyAttemptedLogicalIds(records, repositories, hardware) {
+  return new Set(records
+    .filter((record) =>
+      record.harnessVersion === HARNESS_VERSION &&
+      equal(record.repositories, repositories) &&
+      equal(record.hardware, hardware)
+    )
+    .map((record) => record.logicalCaseId));
+}
+
 export function expandPlan(config, completed = []) {
   object(config, "plan config");
   const completedLogical = new Set(
@@ -786,9 +796,9 @@ export async function runProviderPlan({
   });
   const allExpanded = applyExecutionPolicy(expandPlan(selectedConfig));
   const expanded = applyExecutionPolicy(expandPlan(selectedConfig, existing.records));
-  const cases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
-  if (cases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
-  const backends = new Set(cases.map((planned) => planned.backend));
+  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
+  if (selectedCases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
+  const backends = new Set(selectedCases.map((planned) => planned.backend));
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
@@ -798,6 +808,15 @@ export async function runProviderPlan({
     canonicalJson({ action: "probe", repositories }),
   ));
   await assertRepositoriesStable();
+  // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
+  // plan cases or promote matrix cells. Resume has a narrower operational concern. A prior receipt
+  // proves that its exact logical case was already attempted only when the harness, both repository
+  // receipts (including matrix source identity/dirty state), and hardware probe all match this run.
+  // Stale or foreign receipts therefore remain scheduled, while a failed multi-invocation capture
+  // can continue without repeating expensive GPU work or colliding on a fresh capturedAt value.
+  const attempted = operationallyAttemptedLogicalIds(existing.records, repositories, probe.hardware);
+  const cases = selectedCases.filter((planned) => !attempted.has(planned.logicalCaseId));
+  if (cases.length === 0) return existing;
   const incoming = [];
   let remaining = cases;
   const sameBatch = (left, right) =>
