@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:99fafe34e6db2964f2a4153574fbe3d88cc5495720e6579b82e91986da45ef9e",
-    "matrixRevision": "source-tree:5332dd4efcd56e4a9110a354ce00a7987dacc7d89d2034744fc6f4566f77a1e1",
+    "sceneWorksRevision": "source-tree:12309890cb32167530feaf63b7e23cd18ff743d249533b533ed52148f511ff8a",
+    "matrixRevision": "source-tree:ad24feb7fdc76a413c4cbb9e4d4027a15214925e7ebd886284dfc91787226f1e",
     "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "e910d154aaf2df9a17df5a9c8631d961896a3c998a05f3b30bf7daa17c2b5d41"
+        "sha256": "097e08c84c8f78016d5370d4596e4a3c85be1958473a83e1ffb92d0a7ebfa927"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "82c409bb7d0582d1e8b71f836d20f03155639ff8adaee8db11c6032420d74f9e"
+        "sha256": "95c4c806eb7555fe6f8d40853ff957d11bc2d2a659ec43273b4bd65bd0e33ce4"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "bf55d3fc1b40e26077bf3c1b3d577cc30d816852fb4bc7a3b878f2104a31a077"
+        "sha256": "70c75c62f57260ce45250a2f0d4d6d9ceb70ab0d8d9a16a416f169c546bd2c9a"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -370,8 +370,8 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2796,
-      "Missing": 4558,
+      "Implemented/unverified": 2892,
+      "Missing": 4462,
       "Structurally N/A": 6
     },
     "byBackend": {
@@ -380,9 +380,9 @@
     },
     "byStateAndBackend": {
       "Implemented/unverified @ candle": 934,
-      "Implemented/unverified @ mlx": 1862,
+      "Implemented/unverified @ mlx": 1958,
       "Missing @ candle": 1800,
-      "Missing @ mlx": 2758,
+      "Missing @ mlx": 2662,
       "Structurally N/A @ candle": 6
     },
     "byRung": {

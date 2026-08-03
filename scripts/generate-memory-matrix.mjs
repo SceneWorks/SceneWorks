@@ -1107,7 +1107,15 @@ function strategyStatus({
   rung4Survey,
   manifestById,
 }) {
-  const staticMemoryContract = model[backend]?.memoryStrategyContract;
+  // `z_image_edit` is a catalog alias, not an inference provider. Its MLX jobs resolve to the
+  // `z_image_turbo` descriptor and therefore must consume that provider's static contract just as
+  // they already inherit its backend scope. Keeping the declaration on the real provider prevents
+  // the catalog alias from becoming a second, independently drifting implementation claim.
+  const declaredModel =
+    model.id === "z_image_edit" && route.engine === "z_image_turbo"
+      ? manifestById.get("z_image_turbo")
+      : model;
+  const staticMemoryContract = declaredModel[backend]?.memoryStrategyContract;
   const staticRung4Verdict = rung === "bounded_transformer_residency"
     ? rung4Survey.get(`${familyGroup(model.id)}:${backend}`)
     : null;
@@ -1176,10 +1184,6 @@ function strategyStatus({
       engagedRungs: staticImplementation.engagedRungs,
     };
   }
-  const declaredModel =
-    model.id === "z_image_edit" && route.engine === "z_image_turbo"
-      ? manifestById.get("z_image_turbo")
-      : model;
   const staticCapability = declaredModel[backend]?.memoryStrategyCapabilities?.[rung];
   if (staticCapability?.overlays?.includes(overlay)) {
     return {

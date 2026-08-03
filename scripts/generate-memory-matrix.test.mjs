@@ -558,6 +558,79 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
 });
 
+test("Z-Image MLX static contracts cover every bounded rung through the actual provider", async () => {
+  const manifest = JSON.parse(stripJsoncComments(await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  )));
+  const matrix = await buildMatrix();
+  const zImageIds = ["z_image", "z_image_edit", "z_image_turbo"];
+  const boundedRungs = [
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const bounded = matrix.cells.filter(
+    (cell) =>
+      zImageIds.includes(cell.modelId) &&
+      cell.backend === "mlx" &&
+      boundedRungs.includes(cell.rung),
+  );
+
+  assert.ok(bounded.length > 0);
+  assert.deepEqual([...new Set(bounded.map((cell) => cell.modelId))].sort(), zImageIds);
+  assert.ok(
+    bounded.every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
+    "a shipped Z-Image MLX rung may not remain Missing once its provider contract is exported",
+  );
+  assert.ok(
+    bounded.every((cell) =>
+      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
+      cell.evidence.staticImplementation.some((entry) =>
+        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+      ),
+    ),
+    "every bounded cell must name the pinned MLX provider contract and its calibration ABI",
+  );
+
+  const turboContract = manifest.models.find((model) => model.id === "z_image_turbo")
+    .mlx.memoryStrategyContract;
+  assert.equal(turboContract.provider, "z_image_turbo");
+  assert.ok(
+    bounded
+      .filter((cell) => cell.modelId === "z_image_edit")
+      .every((cell) => cell.resolvedRoute === "z_image_turbo"),
+    "the edit catalog entry must inherit the Turbo provider contract, not invent a provider",
+  );
+
+  for (const cell of bounded) {
+    const ranges = cell.strategyParameters.publishedRanges;
+    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512]);
+    assert.deepEqual(ranges.decodeOverlaps, [256, 64]);
+    if (cell.rung !== "bounded_decode") {
+      assert.deepEqual(ranges.attentionChunkSizes, [67108864]);
+    }
+    if (cell.rung === "bounded_transformer_residency") {
+      assert.deepEqual(ranges.transformerWindowSizes, [1]);
+      assert.deepEqual(ranges.transformerWindowComponents, ["Dit", "TextEncoder", "Both"]);
+      assert.deepEqual(cell.engagedRungs, [
+        "resident",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency",
+      ]);
+    }
+  }
+
+  // Shared implementation does not certify the catalog siblings. Only their own exact evidence can
+  // lift them out of Implemented/unverified.
+  assert.ok(
+    bounded
+      .filter((cell) => cell.modelId !== "z_image_turbo")
+      .every((cell) => cell.state === "Implemented/unverified"),
+  );
+});
+
 test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
   const record = {
     backend: "mlx",

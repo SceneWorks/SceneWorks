@@ -1379,6 +1379,50 @@
         // (z_image_turbo is already registered) — it makes the standard q4/q8/bf16 turnkey routing
         // catalog-declared, so a future quant-matrix model can opt in from the manifest alone.
         "standardTierLayout": true,
+        // SC-15510: pinned export of the shared contract implemented by mlx-gen-z-image. The
+        // declaration inventories capability and candidate domains only; exact entry/tier/geometry
+        // evidence remains separate and cannot make either the base or edit sibling Verified.
+        // `z_image_edit` is a catalog alias of this provider, so the matrix resolves its edit modes
+        // here rather than duplicating an independently drifting provider declaration on the alias.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "z-image-mlx-independent-materialization-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations", "edit_image", "image_to_image"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "z-image-mlx-independent-materialization-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations", "edit_image", "image_to_image"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "z-image-mlx-independent-materialization-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations", "edit_image", "image_to_image"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
+        },
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
@@ -1537,6 +1581,45 @@
         "minMemoryGb": 48,
         // q4/ default tier (sc-8670); q8/ + bf16/ hosted + selectable via advanced.mlxQuantize.
         "quantize": 4,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "z-image-mlx-independent-materialization-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "z-image-mlx-independent-materialization-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "z-image-mlx-independent-materialization-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora", "control"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
+        },
         "limits": {
           "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"],
           "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform"]
