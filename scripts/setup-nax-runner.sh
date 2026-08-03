@@ -62,9 +62,8 @@ MIN_NODE_MAJOR="20"
 
 # The OTHER half of what `nax` means, and the one a version check cannot see. MLX's
 # `is_nax_available()` requires macOS >= 26.2 AND a GPU architecture generation >= 17,
-# which is Apple M5 or newer. (MLX asks for 18 rather than 17 on one architecture class;
-# `is_nax_available()` in the vendored MLX is the authority — the gate below is a
-# deliberately conservative proxy for it, since this script cannot run MLX to ask.)
+# which is Apple M5 or newer. MLX's higher `>= 18` branch is the phone architecture class,
+# so for Mac hardware gen >= 17 is not an approximation — M5 is exactly the floor.
 #
 # Why this is a HARD gate rather than a warning: `nax_guard` has no hardware gate of its
 # own (crates/sceneworks-worker/tests/nax_guard.rs — it is a pure numeric SDPA comparison
@@ -328,6 +327,20 @@ preflight() {
   else
     if gh api "orgs/${ORG}/actions/runners" >/dev/null 2>&1; then
       ok "can read runners for org ${ORG}"
+      # Verify the runner GROUP exists before we get as far as config.sh. A wrong or
+      # renamed group is not caught until registration, where it surfaces as a config.sh
+      # failure after the package has already been downloaded and unpacked. Needs the same
+      # scope the listing above already required, so it costs nothing extra.
+      local group_names
+      if group_names="$(gh api "orgs/${ORG}/actions/runner-groups" --paginate --jq '.runner_groups[].name' 2>/dev/null)"; then
+        if printf '%s\n' "$group_names" | grep -Fxq "$RUNNER_GROUP"; then
+          ok "runner group '${RUNNER_GROUP}' exists"
+        else
+          bad "runner group '${RUNNER_GROUP}' does not exist in org ${ORG}. Available: $(printf '%s' "$group_names" | tr '\n' ' '). Pass --group with one of those."
+        fi
+      else
+        warn "could not list runner groups; '${RUNNER_GROUP}' is unverified and config.sh will fail at registration if it is wrong"
+      fi
     else
       # Note the scope split: `manage_runners:org` mints registration tokens but cannot
       # list runners, and listing is what powers the name-collision guard that protects

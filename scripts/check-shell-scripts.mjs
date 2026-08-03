@@ -7,13 +7,15 @@
 //
 // TWO CHECKS, because one alone is not enough:
 //
-//  1. `bash -n` on every script. Catches outright syntax errors.
+//  1. `bash -n`, run under BOTH the ambient bash and — when it exists and is old enough —
+//     /bin/bash. That second pass is the point: macOS ships bash 3.2.57 at /bin/bash and
+//     has since 2007, but a developer with Homebrew bash earlier on PATH gets 5.x from
+//     plain `bash`, and CI's ubuntu is 5.x too. So without naming the interpreter
+//     explicitly, the 3.2 parse never actually happens anywhere and the "portable" claim
+//     rests entirely on the regexes below.
 //
-//  2. A scan for bash-4-only constructs. This is the part `bash -n` CANNOT do here: this
-//     gate runs on ubuntu-latest, whose bash is 5.x, so a bash-4 idiom parses cleanly in
-//     CI and then explodes on a developer's or self-hosted runner's Mac. macOS ships bash
-//     3.2.57 as /bin/bash (it has not shipped a newer GPL-licensed bash since 2007), and
-//     `#!/usr/bin/env bash` resolves to exactly that on a stock Mac.
+//  2. A scan for bash-4-only constructs. This is the part no `bash -n` can do in CI: on
+//     ubuntu a bash-4 idiom parses cleanly and then explodes on a Mac.
 //
 // SCRIPTS ARE CLASSIFIED BY WHERE THEY RUN, because a single rule cannot be right for
 // both. `docker/runpod-entrypoint.sh` legitimately uses `[[ -v VAR ]]` (bash 4.2): it only
@@ -23,12 +25,17 @@
 // run on CI's ubuntu it accepts a bash-4 idiom in a macOS-only script. Both directions are
 // wrong, so the classification below is what makes the gate mean the same thing anywhere.
 //
+// DISCOVERY IS EXTENSION-BASED: `git ls-files '*.sh'`. A shell script without a `.sh`
+// extension (or an inline `run:` block in a workflow) is out of scope and unchecked. That
+// is a deliberate boundary, not an oversight — stated here so nobody assumes the gate is
+// exhaustive over shell in this repo.
+//
 // KNOWN GAP, stated rather than papered over: the specific bug that motivated this gate —
 // expanding an empty array as "${a[@]}" under `set -u`, which is an "unbound variable"
 // error on bash 3.2 but fine on bash 4.4+ — is not statically detectable without real
 // dataflow analysis, since whether the array is ever empty depends on runtime branches.
-// The idiom scan below cannot see it. Running a script's own `--check`/`--self-test` on a
-// macOS lane is what actually catches that class.
+// The idiom scan cannot see it, and `bash -n` cannot either (it is valid syntax). Running a
+// script's own `--check`/`--self-test` under a real 3.2 is what catches that class.
 //
 // Usage:
 //   node scripts/check-shell-scripts.mjs
@@ -40,18 +47,37 @@ import path from "node:path";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 
-// Constructs that are bash 4+ only and therefore fail on macOS's /bin/bash 3.2. Each entry
-// is zero-false-positive by construction: these are syntax, not naming.
+// Strip a trailing/whole-line shell comment so the rules below only ever see CODE.
+//
+// Every rule used to carry its own `^[^#]*` prefix guard, and four of seven were missing
+// it — so a comment *warning against* an idiom flagged as a use of it. That is a live
+// hazard in this repo specifically, whose scripts carry long explanatory comments; a note
+// reading "use ${name+x}, not [[ -v name ]]" would have reddened CI. Doing it once, here,
+// means a new rule cannot forget the guard.
+//
+// `#` only opens a comment at line start or after whitespace. That distinction matters:
+// splitting on a bare `#` would truncate `${path#/prefix}` mid-expansion.
+//
+// Tradeoff, deliberate: an idiom appearing AFTER a `#` on a code line is not seen, so a
+// contrived `printf '%s' "$x" # ${v^^}` is missed. Preferring false negatives to false
+// positives is the right way round for a gate that can block a merge.
+function codePortion(line) {
+  const match = /(?:^|\s)#/.exec(line);
+  return match ? line.slice(0, match.index) : line;
+}
+
+// Constructs that are bash 4+ only and therefore fail on macOS's /bin/bash 3.2. These match
+// against codePortion(line), never the raw line.
 const BASH4_ONLY = [
   {
     // `declare -A` / `local -A` — associative arrays landed in bash 4.0.
-    pattern: /^[^#]*\b(?:declare|local|typeset)\s+-[A-Za-z]*A[A-Za-z]*\b/,
+    pattern: /\b(?:declare|local|typeset)\s+-[A-Za-z]*A[A-Za-z]*\b/,
     what: "associative array (declare/local -A)",
     since: "bash 4.0",
   },
   {
     // `mapfile` / `readarray` — bash 4.0.
-    pattern: /^[^#]*\b(?:mapfile|readarray)\b/,
+    pattern: /\b(?:mapfile|readarray)\b/,
     what: "mapfile/readarray",
     since: "bash 4.0",
   },
@@ -74,16 +100,15 @@ const BASH4_ONLY = [
     since: "bash 4.0",
   },
   {
-    // ${v:offset:len} on arrays is fine; negative substring `${v: -1}` is 3.2-safe too.
-    // `shopt -s globstar` (**) is bash 4.0.
-    pattern: /^[^#]*\bshopt\s+-s\s+globstar\b/,
+    // `shopt -s globstar` (**) — bash 4.0.
+    pattern: /\bshopt\s+-s\s+globstar\b/,
     what: "globstar",
     since: "bash 4.0",
   },
   {
     // `[[ -v name ]]` — bash 4.2. On 3.2 this is not merely unsupported, it is a SYNTAX
     // error ("conditional binary operator expected"), so it kills the whole script rather
-    // than one branch. The 3.2-safe form is `[[ -n "${name+x}" ]]`.
+    // than one branch. The 3.2-safe form uses the ${name+x} set-test.
     pattern: /\[\[\s+-v\s/,
     what: "[[ -v name ]] variable-set test",
     since: "bash 4.2",
@@ -100,10 +125,19 @@ const LINUX_ONLY = new Set([
   "docker/runpod-entrypoint.sh",
 ]);
 
-function localBashMajor() {
-  const result = spawnSync("bash", ["-c", "echo $BASH_VERSINFO"], { encoding: "utf8" });
+function bashMajorOf(binary) {
+  const result = spawnSync(binary, ["-c", "echo $BASH_VERSINFO"], { encoding: "utf8" });
+  if (result.error || result.status !== 0) return null;
   const major = Number.parseInt((result.stdout || "").trim(), 10);
-  return Number.isFinite(major) ? major : 0;
+  return Number.isFinite(major) ? major : null;
+}
+
+// The interpreter that can actually reject bash-4 syntax, if this host has one. Returns null
+// on Linux CI (where /bin/bash is 5.x), in which case the 3.2 parse simply does not run and
+// the summary says so rather than implying coverage it does not have.
+function legacyBash() {
+  const major = bashMajorOf("/bin/bash");
+  return major !== null && major < 4 ? { binary: "/bin/bash", major } : null;
 }
 
 function trackedShellScripts() {
@@ -117,10 +151,10 @@ function trackedShellScripts() {
 
 function scanForBash4(relativePath, body) {
   const problems = [];
-  const lines = body.split("\n");
-  for (const [index, line] of lines.entries()) {
+  for (const [index, line] of body.split("\n").entries()) {
+    const code = codePortion(line);
     for (const rule of BASH4_ONLY) {
-      if (rule.pattern.test(line)) {
+      if (rule.pattern.test(code)) {
         problems.push(
           `${relativePath}:${index + 1} uses ${rule.what} (${rule.since}), which fails on ` +
             `macOS's /bin/bash 3.2: ${line.trim()}`,
@@ -131,22 +165,20 @@ function scanForBash4(relativePath, body) {
   return problems;
 }
 
-function parseCheck(relativePath) {
-  const result = spawnSync("bash", ["-n", path.join(ROOT, relativePath)], {
-    encoding: "utf8",
-  });
+function parseCheck(relativePath, binary, label) {
+  const result = spawnSync(binary, ["-n", path.join(ROOT, relativePath)], { encoding: "utf8" });
   if (result.error) {
-    throw new Error(`could not run \`bash -n\` for ${relativePath}: ${result.error.message}`);
+    throw new Error(`could not run \`${binary} -n\` for ${relativePath}: ${result.error.message}`);
   }
   if (result.status !== 0) {
-    return [`${relativePath} failed \`bash -n\`:\n${(result.stderr || "").trim()}`];
+    return [`${relativePath} failed \`${binary} -n\` (${label}):\n${(result.stderr || "").trim()}`];
   }
   return [];
 }
 
 function selfTest() {
-  // Prove the idiom scan actually fires, so a green gate is not a gate that scans nothing.
-  const cases = [
+  // Prove the idiom scan fires, so a green gate is not a gate that scans nothing.
+  const positive = [
     ["declare -A map", "associative array"],
     ["  local -A thing", "associative array"],
     ["mapfile -t lines < file", "mapfile"],
@@ -154,31 +186,55 @@ function selfTest() {
     ["cmd &>> log.txt", "&>>"],
     ["  ;;&", ";;& case fallthrough"],
     ["shopt -s globstar", "globstar"],
+    ["if [[ -v name ]]; then", "[[ -v ]]"],
   ];
-  for (const [line, expected] of cases) {
-    const found = scanForBash4("self-test.sh", line);
-    if (found.length === 0) {
+  for (const [line, expected] of positive) {
+    if (scanForBash4("self-test.sh", line).length === 0) {
       throw new Error(`self-test: expected to flag ${expected} in: ${line}`);
     }
   }
-  // And that it does NOT fire on 3.2-safe equivalents, including a commented-out idiom.
-  const safe = [
-    'declare -a list',
+
+  // EVERY idiom must be comment-immune, not just the two that happened to carry a prefix
+  // guard. The previous self-test asserted comment-immunity using `# declare -A map` alone
+  // — one of the three rules that already had the guard — and therefore reported
+  // confidence it had not earned while four rules false-positived on comments.
+  const negative = [
+    "# declare -A map",
+    "# mapfile is bash 4.0",
+    "# use ${v^^} instead of tr on bash 4",
+    "# never write cmd &>> log.txt here",
+    "  # ;;& is a bash 4 fallthrough",
+    "# shopt -s globstar is bash 4",
+    "# [[ -v name ]] is bash 4.2; use ${name+x} instead",
+    'cmd run   # and never [[ -v x ]] here either',
+    // 3.2-safe code that must not trip anything.
+    "declare -a list",
     'local -r frozen="x"',
     'printf "%s" "${name}"',
-    'cmd >log.txt 2>&1',
-    'cmd &> log.txt',
-    '# declare -A map',
+    "cmd >log.txt 2>&1",
+    "cmd &> log.txt",
     'value="${a[@]+"${a[@]}"}"',
     'echo "${path%/*}"',
+    // `#` inside a parameter expansion is NOT a comment — must still be scanned, and must
+    // not be truncated in a way that hides a later idiom on the same line.
+    'echo "${path#/prefix}"',
   ];
-  for (const line of safe) {
+  for (const line of negative) {
     const found = scanForBash4("self-test.sh", line);
     if (found.length > 0) {
       throw new Error(`self-test: false positive on 3.2-safe line: ${line}\n  ${found[0]}`);
     }
   }
-  console.log(`SceneWorks shell-script gate self-test passed (${cases.length} positive, ${safe.length} negative).`);
+
+  // And prove the comment stripper does not swallow a real idiom that precedes a comment.
+  if (scanForBash4("self-test.sh", 'x="${v^^}"   # normalize').length === 0) {
+    throw new Error("self-test: comment stripping hid a real idiom on a code line");
+  }
+
+  console.log(
+    `SceneWorks shell-script gate self-test passed ` +
+      `(${positive.length} positive, ${negative.length} negative, 1 mixed).`,
+  );
 }
 
 if (process.argv.includes("--self-test")) {
@@ -191,20 +247,40 @@ if (scripts.length === 0) {
   throw new Error("no tracked *.sh files found — the discovery glob is probably wrong");
 }
 
-const bashMajor = localBashMajor();
+// A LINUX_ONLY entry that matches nothing is a silent lie: it exempts no file while implying
+// it does, and it skews the summary count. Usually it means the file was renamed or deleted.
+const staleExemptions = [...LINUX_ONLY].filter((entry) => !scripts.includes(entry));
+if (staleExemptions.length > 0) {
+  console.error(
+    `SceneWorks shell-script check FAILED: LINUX_ONLY lists ${staleExemptions.length} path(s) ` +
+      `that match no tracked file — remove or correct them:\n`,
+  );
+  for (const entry of staleExemptions) console.error(`  - ${entry}`);
+  process.exit(1);
+}
+
+const ambient = { binary: "bash", major: bashMajorOf("bash") };
+const legacy = legacyBash();
 const problems = [];
-const skipped = [];
+let portableCount = 0;
 
 for (const relativePath of scripts) {
   const linuxOnly = LINUX_ONLY.has(relativePath);
+  if (!linuxOnly) portableCount += 1;
 
-  // `bash -n` uses whatever bash is on this host. For a container-only script that is
-  // allowed to use bash-4 syntax, a 3.2 host would report a spurious syntax error — so
-  // only trust the parse for those when the local bash can actually represent them.
-  if (linuxOnly && bashMajor < 4) {
-    skipped.push(`${relativePath} (container-only; local bash ${bashMajor}.x cannot parse bash 4+ syntax)`);
+  // The ambient bash parse. For a container-only script allowed to use bash-4 syntax, a 3.x
+  // ambient bash would report a spurious syntax error — only trust it when it can represent
+  // the syntax.
+  if (linuxOnly && (ambient.major ?? 0) < 4) {
+    // Skipped; reported in the summary.
   } else {
-    problems.push(...parseCheck(relativePath));
+    problems.push(...parseCheck(relativePath, ambient.binary, `bash ${ambient.major ?? "?"}.x`));
+  }
+
+  // The parse that makes the portability claim real. Only portable scripts, and only when a
+  // genuine 3.x interpreter exists on this host.
+  if (!linuxOnly && legacy) {
+    problems.push(...parseCheck(relativePath, legacy.binary, `legacy bash ${legacy.major}.x`));
   }
 
   if (!linuxOnly) {
@@ -218,11 +294,13 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-for (const note of skipped) {
-  console.log(`  (parse skipped) ${note}`);
-}
-const portable = scripts.length - LINUX_ONLY.size;
+console.log(
+  legacy
+    ? `  legacy parse: ${legacy.binary} (bash ${legacy.major}.x) — bash-3.2 syntax verified directly`
+    : `  legacy parse: SKIPPED (no bash 3.x at /bin/bash; ambient is ${ambient.major ?? "?"}.x) — ` +
+      `portability rests on the ${BASH4_ONLY.length} idiom rules alone`,
+);
 console.log(
   `SceneWorks shell-script check passed (${scripts.length} scripts; ` +
-    `${portable} held to bash-3.2 portability, ${LINUX_ONLY.size} container-only).`,
+    `${portableCount} held to bash-3.2 portability, ${scripts.length - portableCount} container-only).`,
 );
