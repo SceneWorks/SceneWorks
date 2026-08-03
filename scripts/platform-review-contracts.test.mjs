@@ -400,6 +400,30 @@ test("Krea lifecycle cleanup uses the established warm follow-up peak contract",
   );
 });
 
+test("Z-Image cleanup attestation bounds retained bytes and recovery peaks against a clean warm control", async () => {
+  const adapter = await source(
+    "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+  );
+  assert.match(
+    adapter,
+    /LifecycleMemoryBounds::from_clean_warm\(\s*lifecycle_clean_warm_peak,\s*lifecycle_clean_post_cleanup/,
+  );
+  assert.match(adapter, /lifecycle_bounds\.allows_retained\(cancel_post_cleanup\)/);
+  assert.match(adapter, /lifecycle_bounds\.allows_retained\(error_post_cleanup\)/);
+  assert.match(adapter, /lifecycle_bounds\.allows_warm_peak\(cancel_recovery_peak\)/);
+  assert.match(adapter, /lifecycle_bounds\.allows_warm_peak\(error_recovery_peak\)/);
+  for (const measurement of [
+    "lifecycleCleanWarmPeak",
+    "lifecycleCleanPostCleanupActive",
+    "lifecycleCleanPostCleanupCache",
+    "lifecycleMaximumFaultPostCleanupActive",
+    "lifecycleMaximumFaultPostCleanupCache",
+    "lifecycleMaximumRecoveryPeak",
+  ]) {
+    assert.match(adapter, new RegExp(`"${measurement}", "bytes"`), measurement);
+  }
+});
+
 test("the Rust gate verifies the generated docs derived from Rust sources", async () => {
   // sc-16268: `check:memory-matrix`, `check:calibration-cost-model` and `check:tier-integrity` all
   // read Rust sources, but lived only in `npm run check` — so a Rust-only change passed the gate

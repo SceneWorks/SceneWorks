@@ -2031,20 +2031,20 @@ mod tests {
     fn packaged_bundle_uses_the_current_schema_before_entry_calibration_fans_out() {
         // SC-15817 migrates the packaged protocol before the per-entry calibration stories run.
         // Existing MLX measurements remain available as history under their truthful load shapes;
-        // their old inference revisions cannot become a current fit. The new gated Candle
-        // five-rung conformance capture is published separately from runtime admission.
+        // their old inference revisions cannot become a current fit. SC-15510 adds four eager and
+        // one deferred current-pin Z-Image records without rewriting that historical provenance.
         let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
         };
-        assert_eq!(bundle.records.len(), 28);
+        assert_eq!(bundle.records.len(), 33);
         assert_eq!(
             bundle
                 .records
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
                 .count(),
-            24
+            28
         );
         assert_eq!(
             bundle
@@ -2052,7 +2052,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            4
+            5
         );
     }
 
