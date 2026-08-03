@@ -1384,7 +1384,8 @@
         // every sibling tier, mode, overlay, geometry, and parameter tuple Implemented/unverified.
         "calibrations": [
           {
-            "abi": 1,
+            "abi": 3,
+            "loadShape": "eager_materialization",
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
             "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
@@ -1398,7 +1399,8 @@
             "rung": "resident", "parameters": {}
           },
           {
-            "abi": 1,
+            "abi": 3,
+            "loadShape": "eager_materialization",
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
             "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
@@ -1412,7 +1414,8 @@
             "rung": "staged_residency", "parameters": {}
           },
           {
-            "abi": 1,
+            "abi": 3,
+            "loadShape": "eager_materialization",
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
             "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
@@ -1426,7 +1429,8 @@
             "rung": "bounded_decode", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
           },
           {
-            "abi": 1,
+            "abi": 3,
+            "loadShape": "eager_materialization",
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
             "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
@@ -1440,7 +1444,8 @@
             "rung": "bounded_attention", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }
           },
           {
-            "abi": 1,
+            "abi": 3,
+            "loadShape": "deferred_materialization",
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
             "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",

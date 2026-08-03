@@ -371,6 +371,30 @@ mod tests {
     }
 
     #[test]
+    fn z_image_cleanup_bounds_reject_retained_memory_and_warm_peak_mutations() {
+        let clean = AllocatorState {
+            active: 1_000,
+            cache: 200,
+        };
+        let bounds = LifecycleMemoryBounds::from_clean_warm(10_000, clean);
+        assert_eq!(bounds.tolerance_bytes, 200);
+        assert!(bounds.allows_retained(AllocatorState {
+            active: 1_200,
+            cache: 400,
+        }));
+        assert!(bounds.allows_warm_peak(10_200));
+        assert!(!bounds.allows_retained(AllocatorState {
+            active: 1_201,
+            cache: 400,
+        }));
+        assert!(!bounds.allows_retained(AllocatorState {
+            active: 1_200,
+            cache: 401,
+        }));
+        assert!(!bounds.allows_warm_peak(10_201));
+    }
+
+    #[test]
     fn qwen_parity_envelope_accepts_measured_chunking_and_rejects_mutation() {
         let measured_maximum = 43.0 / 255.0;
         let measured_mean = 0.113 / 255.0;
@@ -758,6 +782,58 @@ struct PhaseMemory {
     cache: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AllocatorState {
+    active: u64,
+    cache: u64,
+}
+
+impl AllocatorState {
+    fn capture_current() -> Self {
+        Self {
+            active: get_active_memory() as u64,
+            cache: get_cache_memory() as u64,
+        }
+    }
+}
+
+/// Bounds lifecycle cleanup against a successful warm request on the same loaded provider. The 2%
+/// allowance is the established real-weight Krea cleanup contract: it absorbs Metal allocator
+/// jitter without allowing fault-path retention to scale with another request working set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LifecycleMemoryBounds {
+    clean_warm_peak: u64,
+    clean_post_cleanup: AllocatorState,
+    tolerance_bytes: u64,
+}
+
+impl LifecycleMemoryBounds {
+    fn from_clean_warm(clean_warm_peak: u64, clean_post_cleanup: AllocatorState) -> Self {
+        Self {
+            clean_warm_peak,
+            clean_post_cleanup,
+            tolerance_bytes: clean_warm_peak / 50,
+        }
+    }
+
+    fn allows_warm_peak(self, peak: u64) -> bool {
+        peak <= self.clean_warm_peak.saturating_add(self.tolerance_bytes)
+    }
+
+    fn allows_retained(self, retained: AllocatorState) -> bool {
+        retained.active
+            <= self
+                .clean_post_cleanup
+                .active
+                .saturating_add(self.tolerance_bytes)
+            && retained.cache
+                <= self
+                    .clean_post_cleanup
+                    .cache
+                    .saturating_add(self.tolerance_bytes)
+    }
+}
+
 impl PhaseMemory {
     fn allocator_bytes(self) -> u64 {
         self.active.saturating_add(self.cache)
@@ -1136,6 +1212,12 @@ fn run_z_image_reference_loaded(
             "Z-Image selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
         ));
     }
+    // Establish the cleanup oracle on this exact loaded provider before injecting either fault.
+    // `clear_cache` is the same explicit retained-buffer release used by the production stream and
+    // the pinned Krea lifecycle harness; live model weights remain active, so the post-cleanup
+    // snapshot still catches fault-owned arrays that escaped their request scope.
+    clear_cache();
+    reset_peak_memory();
     let warm = one_image(scoped_generate(
         generator,
         z_image_request(width, height),
@@ -1143,10 +1225,23 @@ fn run_z_image_reference_loaded(
         None,
         &mut |_| {},
     )?)?;
+    let lifecycle_clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let lifecycle_clean_post_cleanup = AllocatorState::capture_current();
+    let lifecycle_bounds = LifecycleMemoryBounds::from_clean_warm(
+        lifecycle_clean_warm_peak,
+        lifecycle_clean_post_cleanup,
+    );
     let (warm_maximum, warm_mean) = image_max_mean_abs(&selected, &warm)?;
     if !z_image_quality_passes(warm_maximum, warm_mean) {
         return Err("Z-Image warm repeat changed the deterministic output".to_owned());
     }
+
+    let mut lifecycle_max_fault_active = 0_u64;
+    let mut lifecycle_max_fault_cache = 0_u64;
+    let mut lifecycle_max_recovery_active = 0_u64;
+    let mut lifecycle_max_recovery_cache = 0_u64;
+    let mut lifecycle_max_recovery_peak = 0_u64;
 
     let cancelled = z_image_request(width, height);
     let cancel_signal = cancelled.cancel.clone();
@@ -1181,6 +1276,19 @@ fn run_z_image_reference_loaded(
             "Z-Image cancellation returned the wrong error: {cancel_error}"
         ));
     }
+    clear_cache();
+    let cancel_post_cleanup = AllocatorState::capture_current();
+    lifecycle_max_fault_active = lifecycle_max_fault_active.max(cancel_post_cleanup.active);
+    lifecycle_max_fault_cache = lifecycle_max_fault_cache.max(cancel_post_cleanup.cache);
+    if !lifecycle_bounds.allows_retained(cancel_post_cleanup) {
+        return Err(format!(
+            "Z-Image cancellation retained active/cache bytes {:?} above the clean warm cleanup {:?} plus {} bytes",
+            cancel_post_cleanup,
+            lifecycle_clean_post_cleanup,
+            lifecycle_bounds.tolerance_bytes,
+        ));
+    }
+    reset_peak_memory();
     let cancel_recovery = one_image(scoped_generate(
         generator,
         z_image_request(width, height),
@@ -1188,6 +1296,27 @@ fn run_z_image_reference_loaded(
         None,
         &mut |_| {},
     )?)?;
+    let cancel_recovery_peak = get_peak_memory() as u64;
+    lifecycle_max_recovery_peak = lifecycle_max_recovery_peak.max(cancel_recovery_peak);
+    if !lifecycle_bounds.allows_warm_peak(cancel_recovery_peak) {
+        return Err(format!(
+            "Z-Image cancellation left the warm follow-up peak at {cancel_recovery_peak} bytes, above the clean warm control {lifecycle_clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let cancel_recovery_post_cleanup = AllocatorState::capture_current();
+    lifecycle_max_recovery_active =
+        lifecycle_max_recovery_active.max(cancel_recovery_post_cleanup.active);
+    lifecycle_max_recovery_cache =
+        lifecycle_max_recovery_cache.max(cancel_recovery_post_cleanup.cache);
+    if !lifecycle_bounds.allows_retained(cancel_recovery_post_cleanup) {
+        return Err(format!(
+            "Z-Image cancellation warm follow-up retained active/cache bytes {:?} above the clean warm cleanup {:?} plus {} bytes",
+            cancel_recovery_post_cleanup,
+            lifecycle_clean_post_cleanup,
+            lifecycle_bounds.tolerance_bytes,
+        ));
+    }
     let (cancel_maximum, cancel_mean) = image_max_mean_abs(&selected, &cancel_recovery)?;
     if !z_image_quality_passes(cancel_maximum, cancel_mean) {
         return Err("Z-Image cancellation cleanup changed the warm follow-up".to_owned());
@@ -1211,6 +1340,19 @@ fn run_z_image_reference_loaded(
             "Z-Image error injection returned the wrong error: {injected}"
         ));
     }
+    clear_cache();
+    let error_post_cleanup = AllocatorState::capture_current();
+    lifecycle_max_fault_active = lifecycle_max_fault_active.max(error_post_cleanup.active);
+    lifecycle_max_fault_cache = lifecycle_max_fault_cache.max(error_post_cleanup.cache);
+    if !lifecycle_bounds.allows_retained(error_post_cleanup) {
+        return Err(format!(
+            "Z-Image injected error retained active/cache bytes {:?} above the clean warm cleanup {:?} plus {} bytes",
+            error_post_cleanup,
+            lifecycle_clean_post_cleanup,
+            lifecycle_bounds.tolerance_bytes,
+        ));
+    }
+    reset_peak_memory();
     let error_recovery = one_image(scoped_generate(
         generator,
         z_image_request(width, height),
@@ -1218,6 +1360,27 @@ fn run_z_image_reference_loaded(
         None,
         &mut |_| {},
     )?)?;
+    let error_recovery_peak = get_peak_memory() as u64;
+    lifecycle_max_recovery_peak = lifecycle_max_recovery_peak.max(error_recovery_peak);
+    if !lifecycle_bounds.allows_warm_peak(error_recovery_peak) {
+        return Err(format!(
+            "Z-Image injected error left the warm follow-up peak at {error_recovery_peak} bytes, above the clean warm control {lifecycle_clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let error_recovery_post_cleanup = AllocatorState::capture_current();
+    lifecycle_max_recovery_active =
+        lifecycle_max_recovery_active.max(error_recovery_post_cleanup.active);
+    lifecycle_max_recovery_cache =
+        lifecycle_max_recovery_cache.max(error_recovery_post_cleanup.cache);
+    if !lifecycle_bounds.allows_retained(error_recovery_post_cleanup) {
+        return Err(format!(
+            "Z-Image injected-error warm follow-up retained active/cache bytes {:?} above the clean warm cleanup {:?} plus {} bytes",
+            error_recovery_post_cleanup,
+            lifecycle_clean_post_cleanup,
+            lifecycle_bounds.tolerance_bytes,
+        ));
+    }
     let (recovery_maximum, recovery_mean) = image_max_mean_abs(&selected, &error_recovery)?;
     if !z_image_quality_passes(recovery_maximum, recovery_mean) {
         return Err("Z-Image error cleanup changed the warm follow-up".to_owned());
@@ -1246,8 +1409,8 @@ fn run_z_image_reference_loaded(
             { "name": "unknown_budget", "result": "passed" },
             { "name": "stale_evidence", "result": "passed" },
             { "name": "warm_repeat", "result": "passed" },
-            { "name": "cancel", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
-            { "name": "error", "result": "passed", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "cancel", "result": "passed", "reason": "post-cancel active/cache retention and the warm follow-up peak remained within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "post-error active/cache retention and the warm follow-up peak remained within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "the authoritative Z-Image target has no overlay" }
         ],
@@ -1296,6 +1459,15 @@ fn run_z_image_reference_loaded(
                 ("denoiseActivePeak", "bytes", denoise.active),
                 ("decodeActivePeak", "bytes", decode.active),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", lifecycle_clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", lifecycle_clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", lifecycle_clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", lifecycle_bounds.tolerance_bytes),
+                ("lifecycleMaximumFaultPostCleanupActive", "bytes", lifecycle_max_fault_active),
+                ("lifecycleMaximumFaultPostCleanupCache", "bytes", lifecycle_max_fault_cache),
+                ("lifecycleMaximumRecoveryPeak", "bytes", lifecycle_max_recovery_peak),
+                ("lifecycleMaximumRecoveryPostCleanupActive", "bytes", lifecycle_max_recovery_active),
+                ("lifecycleMaximumRecoveryPostCleanupCache", "bytes", lifecycle_max_recovery_cache),
                 ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
             ],
         ),

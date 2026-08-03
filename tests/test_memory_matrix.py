@@ -84,21 +84,28 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
-    assert len(evidence_ids) == len(calibration["records"]) == 28
+    assert len(evidence_ids) == len(calibration["records"]) == 33
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
     # `current` vs `historical` is decided against the SHIPPED inference pin. sc-16353's four exact
-    # Qwen rung-4 records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so every
-    # run in the shipped bundle is now historical until those measurements are re-taken. This is the
-    # fail-closed rule, not lost evidence — the bundle still holds all 28 records (asserted above),
-    # and `generate-memory-matrix.test.mjs` keeps the promotion path itself alive by re-stamping
-    # those four records onto the current pin and proving they still promote exactly four cells.
-    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
+    # Qwen rung-4 records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so those
+    # 28 earlier records remain historical. SC-15510 adds five exact Z-Image records captured at the
+    # shipped pin. Keeping both semantics in one bundle is the fail-closed rule, not lost evidence.
+    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {
+        "current",
+        "historical",
+    }
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert current_eligible == []
+    assert {run["record"]["id"] for run in current_eligible} == {
+        "imc-3815050d075ef68ea0a3",
+        "imc-7313ed0c7f00e185f1a3",
+        "imc-9e4fa849cb5833c9c82b",
+        "imc-b9bdcfddb200b4e67bb3",
+        "imc-d934417b686517c9184b",
+    }
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.
@@ -296,16 +303,20 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_historical_records_remain_unattached_after_an_inference_pin_bump():
+def test_historical_records_remain_unattached_while_current_z_image_records_promote():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
-    # No cell is Verified in the SHIPPED matrix: sc-16962 moved the inference pin past the revision
-    # sc-16353's exact Qwen rung-4 records were measured under, so they are historical and promote
-    # nothing until they are re-measured. The promotion path itself is not untested — it is proved by
-    # `generate-memory-matrix.test.mjs`, which re-stamps exactly those four records onto the current
-    # pin and asserts they promote exactly their four cells and nothing else.
+    # The pin bump still prevents historical Qwen records from attaching. Only SC-15510's five
+    # current-pin, exact q4 Turbo base-provider captures may promote; aliases and sibling tuples stay
+    # unverified. Assert the full IDs so an accidental mode/tier/overlay widening cannot pass by count.
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert {cell["id"] for cell in verified} == set()
+    assert {cell["id"] for cell in verified} == {
+        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:resident",
+        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:staged_residency",
+        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_decode",
+        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_attention",
+        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
+    }
     historical_z_image = [
         cell
         for cell in matrix["cells"]

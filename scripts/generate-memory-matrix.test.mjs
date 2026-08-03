@@ -1007,6 +1007,18 @@ test("a shipping control lane is declared, not inferred from having been measure
     "both exact Krea control geometries remain attached as history until rerun on the new runtime",
   );
 
+  for (const [modelId, provider] of [
+    ["z_image", "z_image_control"],
+    ["z_image_turbo", "z_image_turbo_control"],
+  ]) {
+    const cells = control.filter((cell) => cell.modelId === modelId && cell.backend === "mlx");
+    assert.ok(cells.length > 0, `${modelId}/mlx must expose its shipping control lane`);
+    assert.ok(
+      cells.every((cell) => cell.resolvedRoute === provider),
+      `${modelId}/mlx control cells must target the registered ${provider} provider`,
+    );
+  }
+
   // Every declared lane is represented on every backend the entry advertises — the declaration is what
   // generates cells now, so a lane can be unmeasured without being invisible.
   for (const id of CONTROL_LANE_MODELS) {
@@ -1026,9 +1038,9 @@ test("a shipping control lane is declared, not inferred from having been measure
   );
   assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
 
-  // Declaring a lane must NOT fabricate evidence. The Z-Image captures predate the required typed
-  // load-shape axis and therefore remain in their raw source sessions rather than being attached to
-  // schema-v4 cells; every declared control lane stays unverified until a current capture exists.
+  // Declaring a lane must NOT fabricate evidence. The current Z-Image captures measure the base
+  // no-overlay provider, so none may attach to the distinct control providers; every declared
+  // control lane stays unverified until a current control capture exists.
   //
   // sc-16060: until the promotion producer existed this assertion was green for the trivial reason
   // that NO cell could hold `Verified` — `strategyStatus` never returned it and the cell copied that
@@ -1043,7 +1055,7 @@ test("a shipping control lane is declared, not inferred from having been measure
       cell.backend === "candle" &&
       cell.evidence.historicalVerification.length > 0,
   );
-  assert.equal(attachedZImageControl.length, 0, "untyped historical captures must not enter schema-v4 cells");
+  assert.equal(attachedZImageControl.length, 0, "base evidence must not attach to control cells");
 });
 
 test("every advertised MLX and Candle control route must be declared (sc-16073)", async () => {

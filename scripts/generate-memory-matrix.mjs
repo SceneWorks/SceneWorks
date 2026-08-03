@@ -677,12 +677,31 @@ export const CONTROL_LANE_MODELS = [
   "z_image_turbo",
 ];
 
-// Most control lanes reuse their catalog route id. Krea's MLX lane is a distinct production
-// provider registered by mlx-gen-krea, so its evidence must bind to that provider instead of being
-// orphaned behind the base `krea_2_turbo` route.
+// Most control lanes reuse their catalog route id. Krea and Z-Image's MLX lanes are distinct
+// production providers, so their evidence must bind to those providers instead of being orphaned
+// behind the base catalog routes.
 const CONTROL_PROVIDER_OVERRIDES = new Map([
   ["krea_2_turbo:mlx", "krea_2_turbo_control"],
+  ["z_image:mlx", "z_image_control"],
+  ["z_image_turbo:mlx", "z_image_turbo_control"],
 ]);
+
+// The pinned Z-Image crate exports one provider-id-specific contract for each of its four registry
+// variants from the same `memory_strategy_contract(provider_id, spec)` implementation. The manifest
+// stores the declaration once on each catalog base entry; allow only these source-proven aliases to
+// consume it. This is intentionally narrower than route equivalence: Qwen's separate control
+// provider, for example, remains unbounded and must not inherit the base declaration.
+const STATIC_CONTRACT_PROVIDER_ALIASES = new Map([
+  ["z_image_control", "z_image"],
+  ["z_image_turbo_control", "z_image_turbo"],
+]);
+
+function staticContractCoversProvider(contract, provider) {
+  if (!contract) return false;
+  const aliasedProvider = STATIC_CONTRACT_PROVIDER_ALIASES.get(provider);
+  return contract.provider === provider ||
+    (aliasedProvider !== undefined && aliasedProvider === contract.provider);
+}
 
 function providerFor(model, backend, overlay, route) {
   if (overlay !== "control") return route.engine;
@@ -1127,7 +1146,7 @@ function strategyStatus({
     (staticRung4Verdict?.implementedOverlays ?? [overlay]).includes(overlay) &&
     stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
   );
-  const staticImplementation = staticMemoryContract?.provider === provider
+  const staticImplementation = staticContractCoversProvider(staticMemoryContract, provider)
     ? staticMemoryContract.implementations.find(
         (implementation) =>
           staticRung4Allowed &&

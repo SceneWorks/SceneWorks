@@ -818,12 +818,12 @@
                   "additionalProperties": false,
                   "allOf": [
                     {
-                      "if": { "properties": { "abi": { "const": 2 } }, "required": ["abi"] },
+                      "if": { "properties": { "abi": { "enum": [2, 3] } }, "required": ["abi"] },
                       "then": { "required": ["loadShape"] }
                     }
                   ],
                   "properties": {
-                    "abi": { "enum": [1, 2] },
+                    "abi": { "enum": [1, 2, 3] },
                     "loadShape": {
                       "enum": ["eager_materialization", "deferred_materialization"]
                     },
