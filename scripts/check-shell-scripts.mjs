@@ -17,13 +17,19 @@
 //  2. A scan for bash-4-only constructs. This is the part no `bash -n` can do in CI: on
 //     ubuntu a bash-4 idiom parses cleanly and then explodes on a Mac.
 //
-// SCRIPTS ARE CLASSIFIED BY WHERE THEY RUN, because a single rule cannot be right for
-// both. `docker/runpod-entrypoint.sh` legitimately uses `[[ -v VAR ]]` (bash 4.2): it only
-// ever executes inside a Linux container whose bash is 5.x. Holding it to 3.2 would be a
-// false positive, while holding scripts/*.sh to 5.x would miss the real thing. Worse, a
-// naive `bash -n` is PLATFORM-DEPENDENT — run on a Mac it rejects that container script,
-// run on CI's ubuntu it accepts a bash-4 idiom in a macOS-only script. Both directions are
-// wrong, so the classification below is what makes the gate mean the same thing anywhere.
+// SCRIPTS ARE CLASSIFIED BY WHERE THEY RUN, via LINUX_ONLY below, because a naive
+// `bash -n` is PLATFORM-DEPENDENT: run on a Mac it rejects a container-only script using
+// bash-4 syntax, run on CI's ubuntu it accepts a bash-4 idiom in a macOS-only script. Both
+// directions are wrong, so the classification is what makes the gate mean the same thing
+// anywhere. LINUX_ONLY is currently EMPTY — every tracked script is held to bash 3.2 — but
+// the mechanism stays for the next genuinely container-only script.
+//
+// `docker/runpod-entrypoint.sh` was the original exemption, on the stated grounds that it
+// only ever executes inside a Linux container whose bash is 5.x. That was not true: this
+// repo's own scripts/check-runpod-supervisor.sh executes it directly to assert its
+// fail-closed behavior, so on macOS its one `[[ -v ]]` was a syntax error and the supervisor
+// self-test reported a bogus assertion failure (`status was 2, expected 1`) on every Mac.
+// It is now 3.2-clean and scanned like everything else.
 //
 // DISCOVERY IS EXTENSION-BASED: `git ls-files '*.sh'`. A shell script without a `.sh`
 // extension (or an inline `run:` block in a workflow) is out of scope and unchecked. That
@@ -123,12 +129,15 @@ const BASH4_ONLY = [
 // Scripts that only ever run inside a Linux container (bash 5.x) and are therefore exempt
 // from the bash-3.2 portability scan. Everything else is treated as portable: the scripts/
 // directory is developer- and CI-facing on both macOS and Linux, and setup-nax-runner.sh is
-// macOS-only by definition. Keep this list minimal and justified — an entry here is an
-// assertion that no Mac ever sources the file.
-const LINUX_ONLY = new Set([
-  // Executed as the RunPod image entrypoint; never run on a developer's Mac.
-  "docker/runpod-entrypoint.sh",
-]);
+// macOS-only by definition.
+//
+// DELIBERATELY EMPTY. An entry here asserts that no Mac ever runs the file — and note that
+// "it ships in a Linux image" is not sufficient grounds, because a check in this repo may
+// execute it on a developer's machine to test it (see the runpod-entrypoint.sh history in the
+// header). Before adding one, grep for the script under scripts/ and .github/. Prefer making
+// a script 3.2-clean: the fix is usually `${X+x}` for `[[ -v X ]]`, and an exempt script is
+// one nobody can syntax-check locally.
+const LINUX_ONLY = new Set([]);
 
 function bashMajorOf(binary) {
   const result = spawnSync(binary, ["-c", "echo $BASH_VERSINFO"], { encoding: "utf8" });
