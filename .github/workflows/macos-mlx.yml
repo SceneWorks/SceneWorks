@@ -125,7 +125,25 @@ jobs:
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [self-hosted, macOS, ARM64, nax]
+    # The PR/main path needs only `nax`. The workflow_dispatch calibration paths
+    # additionally need the HF snapshots, and those are HOST STATE that does not travel
+    # with a label — the same defect class this repo just fixed for release.yml's signing
+    # cert. Left on bare `nax` with a multi-box pool:
+    #   * without provision_*, "Resolve exact ... snapshot" fails with "not available on
+    #     this runner" — but only AFTER paying the full build + clippy + test;
+    #   * with provision_*, it succeeds, having downloaded ~57 GiB onto whichever box won
+    #     the scheduling, scattering duplicate multi-tens-of-GiB caches across the pool.
+    # Routing every calibration dispatch to `weights` keeps the big caches on the boxes
+    # designated to hold them, and makes a provisioning run top that box up rather than
+    # seeding a new copy somewhere arbitrary.
+    #
+    # `inputs` is available to job-level `runs-on`, and the event_name guard short-circuits
+    # for push/pull_request, where the inputs are null.
+    #
+    # WARNING: at least one runner must carry `weights`, or a calibration dispatch has no
+    # eligible runner and queues indefinitely instead of failing. See the label topology
+    # table in docs/rust-mlx-build.md.
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     env:
       CARGO_NET_OFFLINE: "true"
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour

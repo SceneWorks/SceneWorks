@@ -35,7 +35,7 @@
 #   --name NAME        Runner name. Default: nax-<local hostname>. Must be unique in scope.
 #   --org ORG          Organization to register with. Default: SceneWorks.
 #   --repo OWNER/REPO  Register to a single repo instead of the org (not the default).
-#   --group GROUP      Org runner group. Default: Default.
+#   --group GROUP      Org runner group. Default: self-hosted-gpu (scoped visibility).
 #   --labels a,b       Extra labels appended to `nax`. self-hosted/macOS/ARM64 are automatic.
 #   --runner-dir DIR   Install root. Default: ~/actions-runner-nax.
 #   --replace          Replace an existing registration with the same name.
@@ -60,6 +60,19 @@ RUNNER_SHA256="8e8839c49b7060b6b2154f4931f815df330c27f167d53ef2239ee3dfce28b079"
 MIN_MACOS="26.2"
 MIN_NODE_MAJOR="20"
 
+# The OTHER half of what `nax` means, and the one a version check cannot see. MLX's
+# `is_nax_available()` requires macOS >= 26.2 AND a GPU architecture generation >= 17,
+# which is Apple M5 or newer. (MLX asks for 18 rather than 17 on one architecture class;
+# `is_nax_available()` in the vendored MLX is the authority — the gate below is a
+# deliberately conservative proxy for it, since this script cannot run MLX to ask.)
+#
+# Why this is a HARD gate rather than a warning: `nax_guard` has no hardware gate of its
+# own (crates/sceneworks-worker/tests/nax_guard.rs — it is a pure numeric SDPA comparison
+# asserting worst_16bit < 0.05). On a pre-M5 box NAX never dispatches, the fallback kernel
+# is numerically fine, and the assertion goes GREEN while testing nothing about NAX. The
+# single tripwire this entire lane exists for would be dead, and CI could not tell us.
+MIN_CHIP_GEN="5"
+
 # A clean MLX-from-source build plus a warm target dir. Hard floor; the lane cannot
 # complete a cold build under it.
 MIN_DISK_GB="40"
@@ -69,7 +82,14 @@ CALIBRATION_DISK_GB="150"
 
 ORG="SceneWorks"
 TARGET_REPO=""
-RUNNER_GROUP="Default"
+# NOT "Default". The runner group is what bounds which repositories may schedule onto
+# this box, and the org's `Default` group has visibility=all — every repo in the org,
+# which for a PUBLIC repo with self-hosted runners is the widest possible setting and
+# undercuts the containment the job-level `if:` is also there to provide. The org's
+# existing self-hosted boxes (nax-macos, cuda-windows, cuda-windows-2) all live in
+# `self-hosted-gpu`, whose visibility is `selected` and scoped to SceneWorks/SceneWorks
+# and SceneWorks/inference. Match that; pass --group explicitly to override.
+RUNNER_GROUP="self-hosted-gpu"
 EXTRA_LABELS=""
 RUNNER_DIR="${HOME}/actions-runner-nax"
 RUNNER_NAME=""
@@ -154,9 +174,22 @@ preflight() {
 
   macos="$(sw_vers -productVersion)"
   if version_at_least "$macos" "$MIN_MACOS"; then
-    ok "macOS ${macos} (>= ${MIN_MACOS}, NAX fast path available)"
+    ok "macOS ${macos} (>= ${MIN_MACOS})"
   else
     bad "macOS ${macos} is below ${MIN_MACOS}. Below the floor the NAX 16-bit kernels miscompile rather than compiling out, so this box must not carry the nax label."
+  fi
+
+  # See MIN_CHIP_GEN above: the OS floor alone does not make a box NAX-capable, and a
+  # box that carries `nax` without the hardware turns nax_guard into a vacuous pass.
+  local brand chip_gen
+  brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  chip_gen="$(printf '%s' "$brand" | sed -nE 's/^Apple M([0-9]+).*/\1/p')"
+  if [[ -z "$chip_gen" ]]; then
+    bad "could not read an Apple M-series generation from '${brand:-unknown}'. NAX requires Apple M${MIN_CHIP_GEN} or newer; refusing to guess, because guessing wrong yields a green nax_guard that tests nothing."
+  elif (( chip_gen < MIN_CHIP_GEN )); then
+    bad "${brand} is below the Apple M${MIN_CHIP_GEN} floor required by MLX's is_nax_available() (GPU architecture generation >= 17). This box must NOT carry the nax label: it would build and test happily while nax_guard passed vacuously, leaving the NAX kernels unguarded."
+  else
+    ok "${brand} (>= M${MIN_CHIP_GEN}, NAX-capable)"
   fi
 
   heading "Toolchain"
@@ -325,8 +358,11 @@ report_pool() {
   # lane is every registered runner carrying `nax` — regardless of scope or name.
   while IFS=$'\t' read -r name status labels; do
     [[ -z "$name" ]] && continue
-    any=1
+    # Count only rows that survive the `nax` filter, so a scope holding runners but no
+    # nax box reports "(none visible)" rather than an empty section that reads as though
+    # the pool were listed successfully.
     if [[ ",${labels}," == *",nax,"* ]]; then
+      any=1
       note "$(printf '%-24s %-8s %s' "$name" "$status" "$labels")"
     fi
   done < <(
@@ -358,7 +394,17 @@ Refusing to unpack. If you intentionally bumped RUNNER_VERSION, update RUNNER_SH
 # lane actually needs are in it, and prove cargo/node resolve through it.
 repair_runner_path() {
   local path_file="${RUNNER_DIR}/.path"
+  # Derive the directories from where the tools ACTUALLY are rather than assuming
+  # Homebrew. A hardcoded list quietly excludes real installs: node under nvm lives at
+  # ~/.nvm/versions/node/<version>/bin, which is both absent from any static list and
+  # version-pinned, so it would break on the next node upgrade even if hardcoded once.
   local wanted="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  local tool tool_path
+  for tool in cargo node npm rustc; do
+    tool_path="$(command -v "$tool" 2>/dev/null || true)"
+    [[ -n "$tool_path" ]] && wanted="$(dirname "$tool_path"):${wanted}"
+  done
+
   local current=""
   [[ -f "$path_file" ]] && current="$(cat "$path_file")"
 
@@ -376,19 +422,37 @@ repair_runner_path() {
   printf '%s' "$merged" > "$path_file"
   ok "wrote ${path_file}"
 
-  local missing=0 tool
+  # FAIL CLOSED. This file's header calls the launchd PATH trap "what separates
+  # 'registered' from 'actually green'", so warning here and then starting the service
+  # anyway would produce precisely the outcome it warns about: a runner that reports
+  # healthy and idle in the Actions UI while failing every job at `cargo build`. A box
+  # that cannot build is worse than no box, because its failures look like code
+  # regressions and it consumes the scheduling slot either way.
+  local missing=""
   for tool in cargo node; do
     if ! PATH="$merged" command -v "$tool" >/dev/null 2>&1; then
-      warn "'${tool}' does not resolve through .path; the service will fail jobs even though the runner reports healthy"
-      missing=1
+      missing="${missing:+${missing}, }${tool}"
     fi
   done
-  (( missing )) || ok "cargo and node both resolve through .path"
+  if [[ -n "$missing" ]]; then
+    die "'${missing}' does not resolve through ${path_file}.
+bin/runsvc.sh gives the launchd service no PATH except this file, so the runner would come
+up healthy and fail every job at the build step. Not starting the service. Install the
+missing tool, or pass its directory on PATH when re-running this script."
+  fi
+  ok "cargo and node both resolve through .path"
 }
 
 install_runner() {
   heading "Runner package"
   local tarball="${RUNNER_DIR}/actions-runner-osx-arm64-${RUNNER_VERSION}.tar.gz"
+
+  # Verify whenever the archive is present, BEFORE the already-unpacked early return
+  # below. Checking only on the first install made the header's "re-checks on every
+  # install" a stated security property the code did not actually hold.
+  if [[ -f "$tarball" ]]; then
+    verify_tarball "$tarball"
+  fi
 
   if [[ -x "${RUNNER_DIR}/config.sh" ]]; then
     ok "runner package already unpacked at ${RUNNER_DIR}"
@@ -497,6 +561,12 @@ install_service() {
   heading "launchd service"
   if [[ -f "${RUNNER_DIR}/.service" ]]; then
     ok "service already installed ($(cat "${RUNNER_DIR}/.service"))"
+    # RESTART, not start. bin/runsvc.sh reads `.path` once at process start, so on an
+    # already-provisioned box — the one that most needs the repair — rewriting `.path`
+    # silently no-ops until the service is bounced. `stop` is tolerant: it is expected to
+    # fail when the service is installed but not currently running, and that is not an
+    # error worth aborting a re-run over.
+    ( cd "$RUNNER_DIR" && ./svc.sh stop ) || note "(service was not running)"
   else
     ( cd "$RUNNER_DIR" && ./svc.sh install ) || die "svc.sh install failed"
     ok "service installed"

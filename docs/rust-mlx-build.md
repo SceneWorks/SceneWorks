@@ -63,14 +63,27 @@ schedule onto them by label:
 
 | Label | Consumed by | Requires on the host |
 | --- | --- | --- |
-| `nax` | `macos-mlx.yml` (this repo), `SceneWorks/inference` `ci.yml` | macOS >= 26.2, full Xcode + Metal, Rust |
+| `nax` | `macos-mlx.yml` (this repo), `SceneWorks/inference` `ci.yml` | macOS >= 26.2, **Apple M5 or newer**, full Xcode + Metal, Rust |
 | `signing` | `release.yml` (this repo) | Developer ID cert in the **login keychain** + notary `.p8` on disk |
+| `weights` | `macos-mlx.yml` `workflow_dispatch` calibration paths | the Qwen / Z-Image calibration snapshots in the local HF cache |
 | `real-weights` | `SceneWorks/inference` `real-weights.yml` (22 jobs, weekly) | the full real-weight snapshot set + runner-local HF auth |
 
-The two non-`nax` labels gate on **host state that does not travel with the label** —
-a signing cert and a weights cache. A box that carries the label without the state takes
-the job and fails it. So a new box gets `nax` **only**, unless you have actually
-provisioned the rest.
+Every label except `nax` gates on **host state that does not travel with the label** — a
+signing cert, a weights cache. A box that carries the label without the state takes the
+job and fails it. So a new box gets `nax` **only**, unless you have actually provisioned
+the rest.
+
+`nax` itself has a hardware floor that is easy to miss: MLX's `is_nax_available()` requires
+macOS >= 26.2 **and** a GPU architecture generation >= 17, i.e. Apple M5 or newer. A
+pre-M5 Mac on 26.2 satisfies every other prerequisite, and `nax_guard` then passes
+**vacuously** — it is a pure numeric SDPA comparison with no hardware gate of its own, so
+when NAX never dispatches the fallback kernel is numerically fine and the assertion goes
+green. The lane's one tripwire would be dead with no signal. `setup-nax-runner.sh` gates on
+the chip generation for exactly this reason.
+
+> At least one runner must carry `weights`, or a calibration dispatch has no eligible
+> runner and **queues indefinitely** rather than failing. Verify before merging a change
+> to that routing.
 
 This is why `release.yml` pins on `signing` rather than plain `nax`: it is tag-triggered
 with `cancel-in-progress: false`, so scheduling it onto an unsigned box means a broken
