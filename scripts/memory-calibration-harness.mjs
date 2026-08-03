@@ -632,6 +632,16 @@ function completedLogicalIds(record) {
   );
 }
 
+function operationallyAttemptedLogicalIds(records, repositories, hardware) {
+  return new Set(records
+    .filter((record) =>
+      record.harnessVersion === HARNESS_VERSION &&
+      equal(record.repositories, repositories) &&
+      equal(record.hardware, hardware)
+    )
+    .map((record) => record.logicalCaseId));
+}
+
 export function expandPlan(config, completed = []) {
   object(config, "plan config");
   const completedLogical = new Set(
@@ -734,7 +744,7 @@ function execute(command, args, input) {
 
 export async function runProviderPlan({
   config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
-  onProviderInvocation, forceFreshPerCase = false, forceBatchRungs = false,
+  onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   const gitState = async (repo, sceneWorks = false) => ({
@@ -772,21 +782,23 @@ export async function runProviderPlan({
   if (fixture && selectedConfig.providers.length === 0) {
     fail(`provider run selected no plan provider with fixture ${fixture}`);
   }
-  let expanded = expandPlan(selectedConfig, existing.records);
   if (forceFreshPerCase && forceBatchRungs) fail("cannot force both fresh and batched provider execution");
-  if (forceFreshPerCase) {
-    expanded = expanded.map((planned) => ({ ...planned, modelLoadPolicy: "fresh_per_case", modelLoadGroup: null }));
-  }
-  if (forceBatchRungs) {
-    expanded = expanded.map((planned) => ({
+  const applyExecutionPolicy = (plannedCases) => plannedCases.map((planned) => {
+    if (forceFreshPerCase) {
+      return { ...planned, modelLoadPolicy: "fresh_per_case", modelLoadGroup: null };
+    }
+    if (forceBatchRungs) return {
       ...planned,
       modelLoadPolicy: "batch_rungs",
       modelLoadGroup: `forced-${digest({ backend: planned.backend, target: planned.target, fixture: planned.fixture })}`,
-    }));
-  }
-  const cases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
-  if (cases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
-  const backends = new Set(cases.map((planned) => planned.backend));
+    };
+    return planned;
+  });
+  const allExpanded = applyExecutionPolicy(expandPlan(selectedConfig));
+  const expanded = applyExecutionPolicy(expandPlan(selectedConfig, existing.records));
+  const selectedCases = backend ? expanded.filter((planned) => planned.backend === backend) : expanded;
+  if (selectedCases.length === 0) fail(`provider run selected no ${backend ?? "remaining"} cases`);
+  const backends = new Set(selectedCases.map((planned) => planned.backend));
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
@@ -796,6 +808,15 @@ export async function runProviderPlan({
     canonicalJson({ action: "probe", repositories }),
   ));
   await assertRepositoriesStable();
+  // Completion remains an evidence-semantic decision: candidate and gated receipts cannot retire
+  // plan cases or promote matrix cells. Resume has a narrower operational concern. A prior receipt
+  // proves that its exact logical case was already attempted only when the harness, both repository
+  // receipts (including matrix source identity/dirty state), and hardware probe all match this run.
+  // Stale or foreign receipts therefore remain scheduled, while a failed multi-invocation capture
+  // can continue without repeating expensive GPU work or colliding on a fresh capturedAt value.
+  const attempted = operationallyAttemptedLogicalIds(existing.records, repositories, probe.hardware);
+  const cases = selectedCases.filter((planned) => !attempted.has(planned.logicalCaseId));
+  if (cases.length === 0) return existing;
   const incoming = [];
   let remaining = cases;
   const sameBatch = (left, right) =>
@@ -806,10 +827,18 @@ export async function runProviderPlan({
     left.backend === right.backend &&
     equal(left.target, right.target) &&
     left.fixture === right.fixture;
+  const requiredBatchRungs = (planned) => {
+    const rungs = new Set(
+      allExpanded
+        .filter((candidate) => sameBatch(planned, candidate))
+        .map((candidate) => candidate.strategy.rung),
+    );
+    return RUNGS.filter((rung) => rungs.has(rung));
+  };
   while (remaining.length > 0) {
     const first = remaining[0];
     const batchRungs = new Set();
-    const invocation = first.modelLoadPolicy === "batch_rungs"
+    const pendingBatch = first.modelLoadPolicy === "batch_rungs"
       ? remaining
           .filter((planned) => sameBatch(first, planned))
           .sort((left, right) => RUNGS.indexOf(left.strategy.rung) - RUNGS.indexOf(right.strategy.rung))
@@ -819,6 +848,17 @@ export async function runProviderPlan({
             return true;
           })
       : [first];
+    const pendingRungs = pendingBatch.map((planned) => planned.strategy.rung);
+    // A provider's batch protocol is defined by the complete rung cohort, not by whichever
+    // parameter cases happen to remain. Candidate/gated evidence intentionally cannot retire its
+    // sibling sweep points, so a canonical five-rung Qwen batch leaves decode/window alternatives
+    // pending. Sending those two rungs as a second `run_batch` violates the adapter contract and
+    // used to discard the first successful batch. Measure an incomplete remainder serially instead;
+    // this preserves gated semantics while ensuring every parameter point is still executed.
+    const invocation = first.modelLoadPolicy === "batch_rungs" &&
+        !equal(pendingRungs, requiredBatchRungs(first))
+      ? [first]
+      : pendingBatch;
     const uniqueRungs = new Set(invocation.map((planned) => planned.strategy.rung));
     if (first.modelLoadPolicy === "batch_rungs" && uniqueRungs.size !== invocation.length) {
       fail(`${first.modelLoadGroup}: a rung batch may contain only one pending case per rung`);
@@ -901,6 +941,13 @@ export async function runProviderPlan({
     remaining = remaining.filter(
       (planned) => !invoked.has(planned.logicalCaseId) && !completed.has(planned.logicalCaseId),
     );
+    if (onProviderCheckpoint) {
+      await onProviderCheckpoint(mergeBundles(existing, {
+        schemaVersion: 4,
+        harnessVersion: HARNESS_VERSION,
+        records: incoming,
+      }));
+    }
   }
   return mergeBundles(existing, { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: incoming });
 }
@@ -908,7 +955,7 @@ export async function runProviderPlan({
 async function readJson(file) {
   return JSON.parse(await readFile(path.resolve(ROOT, file), "utf8"));
 }
-async function atomicWrite(file, value) {
+export async function atomicWrite(file, value) {
   const destination = path.resolve(ROOT, file);
   const temporary = `${destination}.tmp-${process.pid}`;
   await writeFile(temporary, canonicalJson(value));
@@ -946,6 +993,7 @@ async function main() {
     }));
   }
   if (command === "run") {
+    const outputPath = value("--output");
     const output = await runProviderPlan({
       config: await readJson(value("--config")),
       providerCommand: JSON.parse(value("--provider-command")),
@@ -957,8 +1005,9 @@ async function main() {
       fixture: value("--fixture"),
       forceFreshPerCase: args.includes("--fresh-per-case"),
       forceBatchRungs: args.includes("--batch-rungs"),
+      onProviderCheckpoint: (checkpoint) => atomicWrite(outputPath, checkpoint),
     });
-    return void await atomicWrite(value("--output"), output);
+    return void await atomicWrite(outputPath, output);
   }
   fail("usage: check|plan|ingest|assess-reuse|compare-reuse|run (see docs/memory-calibration-harness.md)");
 }

@@ -42,6 +42,13 @@ matrix evidence. Merge is commutative and
 stable-sorted. Different content with the same resolved identity is rejected instead of using
 arrival order or timestamp. Writes use a same-directory temporary file and rename.
 
+Provider resume also tracks attempted work, independently of evidence completion. A gated or
+candidate record suppresses a repeated operational attempt only when its logical case, harness
+version, repository receipts (including source-tree and dirty state), and hardware probe exactly
+match the new run. Stale or foreign-provenance records remain scheduled. This lets a checkpointed
+GPU sweep continue after failure without treating its non-authoritative records as complete or
+eligible for runtime promotion.
+
 ## Provider protocol
 
 `run` executes the provider command, supplied as a JSON argv array. It sends one JSON request on
@@ -57,7 +64,10 @@ target, backend, and fixture in canonical rung order. When multiple parameter po
 one rung, the runner selects one for the batch; a returned complete sweep can then retire the others.
 The adapter must attest exactly one model load, and every fragment preserves its existing logical and
 resolved identity. After every response the runner recomputes completed logical cases before choosing
-another provider invocation.
+another provider invocation. If candidate or gated evidence leaves only part of the original rung
+cohort pending, the runner executes those remaining parameter points individually instead of sending
+an invalid partial `run_batch`. The CLI atomically checkpoints the accumulated schema-valid bundle
+after every successful provider response, so a later failure does not discard earlier captures.
 
 The runner resolves both repositories using `git rev-parse HEAD` and `git status --porcelain`, reads
 the generated matrix source-tree identity, and probes them again after hardware probing and after

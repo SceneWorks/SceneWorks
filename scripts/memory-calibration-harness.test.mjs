@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
-  HARNESS_VERSION, RUNG_REUSE_TOLERANCE, assessProviderReuse, canonicalJson,
+  HARNESS_VERSION, RUNG_REUSE_TOLERANCE, assessProviderReuse, atomicWrite, canonicalJson,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
   runProviderPlan, validateBundle, validateRecord,
 } from "./memory-calibration-harness.mjs";
@@ -843,6 +843,226 @@ test("runner batches one target's five rungs into one attested model load", asyn
   assert.equal(result.records.length, 5);
   assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run_batch", 5]]);
   assert.equal(expandPlan(config, result.records).length, 0);
+});
+
+function qwenGatedBatchConfig() {
+  const target = {
+    ...complete().target,
+    modelId: "qwen_image",
+    provider: "qwen_image",
+  };
+  const shared = {
+    evidenceScope: "candidate",
+    backend: "candle",
+    loadShape: "deferred_materialization",
+    target,
+    calibrationFingerprint:
+      "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+    fixture: "qwen-image-candle-q4-seed15817-step2",
+  };
+  const decode = (decodeTileEdge) => ({ decodeTileEdge, decodeOverlap: 64 });
+  const attention = {
+    ...decode(512),
+    attentionChunkSize: 67_108_864,
+  };
+  return {
+    providers: [
+      {
+        ...shared,
+        rung: "resident",
+        engagedRungs: ["resident"],
+        cases: [{ parameters: {}, expectedResult: "passed" }],
+      },
+      {
+        ...shared,
+        rung: "staged_residency",
+        engagedRungs: ["resident", "staged_residency"],
+        cases: [{ parameters: {}, expectedResult: "passed" }],
+      },
+      {
+        ...shared,
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+        cases: [768, 640, 512, 448, 384, 320, 256].map((edge) => ({
+          parameters: decode(edge),
+          expectedResult: "passed",
+        })),
+      },
+      {
+        ...shared,
+        rung: "bounded_attention",
+        engagedRungs: ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+        cases: [{ parameters: attention, expectedResult: "passed" }],
+      },
+      {
+        ...shared,
+        rung: "bounded_transformer_residency",
+        engagedRungs: [
+          "resident", "staged_residency", "bounded_decode", "bounded_attention",
+          "bounded_transformer_residency",
+        ],
+        cases: [1, 2, 4, 8, 15, 30].map((transformerWindowSize) => ({
+          parameters: { ...attention, transformerWindowSize },
+          expectedResult: "passed",
+        })),
+      },
+    ],
+  };
+}
+
+test("gated Qwen batch persists the canonical five rungs then serializes all remaining sweep points", async () => {
+  const config = qwenGatedBatchConfig();
+  assert.equal(expandPlan(config).length, 16);
+
+  const invocations = [];
+  const checkpointSizes = [];
+  const cleanRepo = await cleanFixtureRepo();
+  const outputDir = await mkdtemp(path.join(tmpdir(), "memory-harness-output-"));
+  const output = path.join(outputDir, "evidence.json");
+  const result = await runProviderPlan({
+    config,
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL(
+        "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
+        import.meta.url,
+      )),
+    ],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    forceBatchRungs: true,
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+    onProviderCheckpoint: async (checkpoint) => {
+      checkpointSizes.push(checkpoint.records.length);
+      await atomicWrite(output, checkpoint);
+      validateBundle(JSON.parse(await readFile(output, "utf8")));
+    },
+  });
+
+  assert.deepEqual(
+    invocations.map(({ action, cases }) => [action, cases.length]),
+    [["run_batch", 5], ...Array.from({ length: 11 }, () => ["run", 1])],
+  );
+  assert.deepEqual(checkpointSizes, Array.from({ length: 12 }, (_, index) => index + 5));
+  assert.equal(result.records.length, 16);
+  assert.ok(result.records.every((record) =>
+    record.status === "gated" && record.evidenceScope === "candidate"
+  ));
+  assert.deepEqual(
+    result.records.map((record) => record.logicalCaseId).sort(),
+    expandPlan(config).map((planned) => planned.logicalCaseId).sort(),
+  );
+  assert.equal(
+    expandPlan(config, result.records).length,
+    16,
+    "gated evidence must not falsely retire or promote planned calibration points",
+  );
+  assert.equal(validateBundle(JSON.parse(await readFile(output, "utf8"))).records.length, 16);
+  assert.deepEqual(await readdir(outputDir), ["evidence.json"]);
+});
+
+test("gated Qwen resume continues after failure without repeating provenance-matched attempts", async () => {
+  const config = qwenGatedBatchConfig();
+  const cleanRepo = await cleanFixtureRepo();
+  const outputDir = await mkdtemp(path.join(tmpdir(), "memory-harness-resume-"));
+  const output = path.join(outputDir, "evidence.json");
+  const state = path.join(outputDir, "provider-state.json");
+  const fixture = fileURLToPath(new URL(
+    "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
+    import.meta.url,
+  ));
+  const firstInvocations = [];
+  await assert.rejects(
+    runProviderPlan({
+      config,
+      providerCommand: [process.execPath, fixture, state, "4"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      forceBatchRungs: true,
+      onProviderInvocation: (invocation) => firstInvocations.push(invocation),
+      onProviderCheckpoint: (checkpoint) => atomicWrite(output, checkpoint),
+    }),
+    /fixture fails after 4 successful invocations/,
+  );
+  assert.deepEqual(
+    firstInvocations.map(({ action, cases }) => [action, cases.length]),
+    [["run_batch", 5], ...Array.from({ length: 4 }, () => ["run", 1])],
+  );
+
+  const checkpoint = validateBundle(JSON.parse(await readFile(output, "utf8")));
+  assert.equal(checkpoint.records.length, 8);
+  const checkpointLogicalIds = new Set(checkpoint.records.map((record) => record.logicalCaseId));
+  const resumedInvocations = [];
+  const resumed = await runProviderPlan({
+    config,
+    providerCommand: [process.execPath, fixture, state],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    resume: checkpoint,
+    forceBatchRungs: true,
+    onProviderInvocation: (invocation) => resumedInvocations.push(invocation),
+    onProviderCheckpoint: (nextCheckpoint) => atomicWrite(output, nextCheckpoint),
+  });
+
+  assert.deepEqual(
+    resumedInvocations.map(({ action, cases }) => [action, cases.length]),
+    Array.from({ length: 8 }, () => ["run", 1]),
+  );
+  const resumedLogicalIds = resumedInvocations.flatMap(({ cases }) =>
+    cases.map((planned) => planned.logicalCaseId)
+  );
+  assert.ok(resumedLogicalIds.every((logicalId) => !checkpointLogicalIds.has(logicalId)));
+  assert.equal(new Set([...checkpointLogicalIds, ...resumedLogicalIds]).size, 16);
+  assert.equal(resumed.records.length, 16);
+  assert.equal(new Set(resumed.records.map((record) => record.id)).size, 16);
+  assert.ok(resumed.records.every((record) => record.id === recordId(record)));
+  assert.equal(new Set(resumed.records.map((record) => record.capturedAt)).size, 12);
+  for (const prior of checkpoint.records) {
+    assert.deepEqual(resumed.records.find((record) => record.id === prior.id), prior);
+  }
+  assert.equal(
+    expandPlan(config, resumed.records).length,
+    16,
+    "operational attempt resume must not turn gated receipts into completion evidence",
+  );
+  assert.equal(validateBundle(JSON.parse(await readFile(output, "utf8"))).records.length, 16);
+  assert.ok((await readdir(outputDir)).every((name) => !name.includes(".tmp-")));
+});
+
+test("operational resume does not suppress an attempt from mismatched hardware provenance", async () => {
+  const config = { providers: [qwenGatedBatchConfig().providers[0]] };
+  const cleanRepo = await cleanFixtureRepo();
+  const fixtureCommand = [
+    process.execPath,
+    fileURLToPath(new URL(
+      "./fixtures/memory-provider-gated-canonical-batch-fixture.mjs",
+      import.meta.url,
+    )),
+  ];
+  const first = await runProviderPlan({
+    config,
+    providerCommand: fixtureCommand,
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+  });
+  const stale = structuredClone(first);
+  stale.records[0].hardware.driverVersion = "stale-driver";
+  stale.records[0].id = recordId(stale.records[0]);
+  validateBundle(stale);
+
+  const invocations = [];
+  const resumed = await runProviderPlan({
+    config,
+    providerCommand: fixtureCommand,
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    resume: stale,
+    onProviderInvocation: (invocation) => invocations.push(invocation),
+  });
+  assert.deepEqual(invocations.map(({ action, cases }) => [action, cases.length]), [["run", 1]]);
+  assert.equal(resumed.records.length, 2);
+  assert.equal(new Set(resumed.records.map((record) => record.logicalCaseId)).size, 1);
+  assert.equal(new Set(resumed.records.map((record) => record.id)).size, 2);
 });
 
 test("runner flags provide explicit fresh and experimental batch controls", async () => {
