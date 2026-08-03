@@ -462,6 +462,13 @@ test("shipped five-rung oracles stay fresh after backend reuse verdicts", async 
       (item) => item.fixture === "fresh-five-rung-z-image-q4-768-seed16402-step2",
     );
     assert.ok(mlx.every((item) => item.modelLoadPolicy === "fresh_per_case"));
+    assert.deepEqual(
+      [...new Set(mlx.map((item) => item.calibrationFingerprint))],
+      ["z-image-mlx-independent-materialization-v3"],
+      "load shape is a typed receipt axis, not part of the provider content fingerprint",
+    );
+    assert.equal(mlx.filter((item) => item.loadShape === "eager_materialization").length, 4);
+    assert.equal(mlx.filter((item) => item.loadShape === "deferred_materialization").length, 1);
     const candle = cases.filter(
       (item) => item.fixture === "fresh-five-rung-krea-q4-1024-seed16402-step2",
     );

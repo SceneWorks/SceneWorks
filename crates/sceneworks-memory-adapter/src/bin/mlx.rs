@@ -1159,6 +1159,10 @@ fn validate_z_image_batch(request: &Value) -> Result<&[Value], String> {
     Ok(planned)
 }
 
+fn z_image_reuse_identity(fingerprint: &str, load_shape: LoadShape) -> String {
+    format!("{fingerprint}@{}", load_shape_key(load_shape))
+}
+
 fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
     let planned = validate_z_image_batch(request)?;
     let mut representative = request.clone();
@@ -1167,6 +1171,7 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
     let catalog =
         runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
     let mut actual_fingerprints = Vec::new();
+    let mut actual_identities = Vec::new();
     for load_shape in [
         LoadShape::EagerMaterialization,
         LoadShape::DeferredMaterialization,
@@ -1177,14 +1182,15 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
             .memory_strategy_contract(Z_IMAGE_PROVIDER, &spec)
             .map_err(|error| format!("read {Z_IMAGE_PROVIDER} memory-strategy contract: {error}"))?
             .ok_or_else(|| format!("{Z_IMAGE_PROVIDER} has no memory-strategy contract"))?;
-        actual_fingerprints.push(
-            contract
-                .calibration
-                .as_ref()
-                .ok_or_else(|| "pinned Z-Image provider has no calibration identity".to_owned())?
-                .fingerprint
-                .clone(),
-        );
+        let calibration = contract
+            .calibration
+            .as_ref()
+            .ok_or_else(|| "pinned Z-Image provider has no calibration identity".to_owned())?;
+        actual_fingerprints.push(calibration.fingerprint.clone());
+        actual_identities.push(z_image_reuse_identity(
+            &calibration.fingerprint,
+            calibration.load_shape,
+        ));
     }
     for item in planned {
         let planned_fingerprint = item
@@ -1206,14 +1212,17 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
     }
     actual_fingerprints.sort_unstable();
     actual_fingerprints.dedup();
-    if actual_fingerprints.len() > 1 {
+    actual_identities.sort_unstable();
+    actual_identities.dedup();
+    if actual_identities.len() > 1 {
         return Ok(json!({
             "verdict": "unable_to_amortize",
             "reason": format!(
                 "one MLX model load cannot preserve the distinct calibrated load-shape identities required by the five rungs: {}",
-                actual_fingerprints.join(", ")
+                actual_identities.join(", ")
             ),
             "calibrationFingerprints": actual_fingerprints,
+            "calibrationIdentities": actual_identities,
             "evidence": "pinned provider contracts for eager and deferred load specs",
         }));
     }
@@ -1221,6 +1230,7 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
         "verdict": "eligible_for_measurement",
         "reason": "all MLX rungs share one calibrated load-shape identity",
         "calibrationFingerprints": actual_fingerprints,
+        "calibrationIdentities": actual_identities,
         "evidence": "pinned provider contracts for eager and deferred load specs",
     }))
 }
@@ -2236,6 +2246,20 @@ fn main() {
     }
     .unwrap_or_else(|error| protocol::fail(error));
     protocol::write_response(&response).unwrap_or_else(|error| protocol::fail(error));
+}
+
+#[cfg(test)]
+mod z_image_reuse_tests {
+    use super::*;
+
+    #[test]
+    fn shape_independent_fingerprint_still_keeps_eager_and_deferred_loads_distinct() {
+        let fingerprint = "z-image-mlx-independent-materialization-v3";
+        assert_ne!(
+            z_image_reuse_identity(fingerprint, LoadShape::EagerMaterialization),
+            z_image_reuse_identity(fingerprint, LoadShape::DeferredMaterialization),
+        );
+    }
 }
 
 #[cfg(test)]
