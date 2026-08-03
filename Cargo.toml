@@ -77,6 +77,22 @@ image = { version = "0.25", default-features = false, features = [
 # resolves to; `crates/sceneworks-worker/tests/image_workspace_dep_guard.rs` reads Cargo.lock and
 # fails the build when the two diverge or when a member re-declares it.
 png = "0.18"
+# onnxruntime bindings for the ort-backed CV jobs (pose/person/upscale). Declared once here
+# because `sceneworks-worker` needs it under BOTH target cfgs — CoreML on macOS, CUDA off-Mac
+# on the candle lane — and that is two declaration sites for one version requirement. Cargo
+# resolves `ort` as a single package across the whole graph, so an exact pin updated in one
+# site and not the other is not a skew, it is an unsatisfiable resolve: #2092 bumped the macOS
+# site to rc.13, left the off-Mac site at rc.12, and every Rust lane died at `cargo fetch
+# --locked` before compiling a line. Dependabot handles duplicates in
+# `[dependencies]`/`[dev-dependencies]` fine (it did exactly that for `rmcp` in the same PR) —
+# it is the target-gated pair it half-applies. One version string here makes that impossible.
+#
+# Unlike `image` above there is no feature union to pin: the EP features stay at the call sites
+# because they are mutually exclusive (a build gets `coreml` xor `cuda`, never both), so they
+# cannot silently widen each other. Keep the `=` pin — `ort` is a pre-release and upstream
+# treats rc-to-rc as freely breaking; rc.13 removed the deprecated `*ExecutionProvider`
+# aliases, a source break that a patch-shaped version bump gives no warning about.
+ort = { version = "=2.0.0-rc.13", features = ["load-dynamic", "download-binaries"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

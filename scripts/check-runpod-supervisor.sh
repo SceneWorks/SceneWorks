@@ -27,7 +27,7 @@ wait_for_event() {
 cat >"${temp_root}/fake-api" <<'EOF'
 #!/usr/bin/env bash
 set -u
-if [[ -v SCENEWORKS_ALLOW_OPEN_BIND ]]; then
+if [[ -n "${SCENEWORKS_ALLOW_OPEN_BIND+x}" ]]; then
   printf 'api:override:present\n' >>"${SCENEWORKS_TEST_EVENTS}"
   exit 91
 fi
@@ -66,7 +66,7 @@ EOF
 cat >"${temp_root}/fake-worker" <<'EOF'
 #!/usr/bin/env bash
 set -u
-if [[ -v SCENEWORKS_ALLOW_OPEN_BIND ]]; then
+if [[ -n "${SCENEWORKS_ALLOW_OPEN_BIND+x}" ]]; then
   printf 'worker:override:present\n' >>"${SCENEWORKS_TEST_EVENTS}"
   exit 91
 fi

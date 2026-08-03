@@ -55,12 +55,22 @@ jobs:
   macos:
     # Self-hosted macOS 26.2 runner; same-repo only — never run fork code.
     if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
-    runs-on: [self-hosted, macOS, ARM64, nax]
+    # `signing`, not just `nax`. This job cannot run on any nax box — it needs the
+    # Developer ID cert in the runner's LOGIN KEYCHAIN and the notary .p8 on that
+    # runner's disk (see the APPLE_API_KEY_PATH note in this file's header). Those are
+    # host state, not repo secrets, so they do not travel with the label. The nax pool
+    # is now more than one Mac (scripts/setup-nax-runner.sh), and on plain `nax` this
+    # job would schedule onto whichever box was free, do the full cold MLX build, and
+    # then fail at codesign/notarize — a broken tag release, since this lane is
+    # tag-triggered with cancel-in-progress: false. `signing` is carried ONLY by the
+    # signing Mac. Do NOT drop it to widen capacity here.
+    runs-on: [self-hosted, macOS, ARM64, nax, signing]
     env:
       CARGO_NET_OFFLINE: "true"
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
-    # default (sc-10420). Runs on the SOLE self-hosted nax box (shared with
-    # macos-mlx.yml), so a wedge holds that box against queued runs (sc-13603).
+    # default (sc-10420). Pinned by `signing` to the one signing Mac, which also
+    # carries `nax` and `real-weights`, so a wedge here holds that box against this
+    # repo's MLX lane and the inference repo's real-weights lane both (sc-13603).
     # Generous for the release path: a cold MLX-from-source rebuild plus Apple
     # notarization's variable network round-trip sit on top of the healthy
     # ~7-14 min.
