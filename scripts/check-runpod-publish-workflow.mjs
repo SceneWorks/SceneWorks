@@ -57,7 +57,7 @@ for (const contract of [
   "inference_token=${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}",
   "x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}@github.com",
   "npm run check",
-  "npm run check:docker:runpod",
+  "npm run check:runpod:image-contract",
   "scripts/check-gen-core-skew.sh --self-test",
   "sceneworks-worker --features backend-candle",
   "sceneworks-rust-api --features embed-web,backend-candle",

@@ -1,6 +1,6 @@
 // Syntax + portability gate for the repo's shell scripts.
 //
-// WHY: the repo's shell surface had no CI coverage at all — `check:docker:runpod:supervisor`
+// WHY: the repo's shell surface had no CI coverage at all — `check:runpod:entrypoint`
 // runs one script's self-test, and nothing parsed the rest. scripts/setup-nax-runner.sh is
 // several hundred lines of provisioning bash that must run under the bash macOS actually
 // ships, and three of its defects were found by executing it rather than reading it.

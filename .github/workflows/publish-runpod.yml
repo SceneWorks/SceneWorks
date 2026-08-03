@@ -81,7 +81,7 @@ jobs:
       - name: Validate scaffold and RunPod publication contracts
         run: |
           npm run check
-          npm run check:docker:runpod
+          npm run check:runpod:image-contract
       - name: Fetch the private inference release
         env:
           CARGO_NET_OFFLINE: "false"
