@@ -85,6 +85,21 @@ the chip generation for exactly this reason.
 > runner and **queues indefinitely** rather than failing. Verify before merging a change
 > to that routing.
 
+`weights` means "a box designated to host calibration snapshots" — **not** a guarantee of
+any particular tier or revision. The resolve step matches an exact
+`/snapshots/<40-hex>/<tier>` path, so a dispatch naming a revision or tier that a given
+`weights` box does not hold still fails there (or re-downloads, with `provision_*`). Boxes
+in the pool can therefore hold different subsets. Keep track of which holds what:
+
+| Box | Qwen tiers | Z-Image |
+| --- | --- | --- |
+| `nax-macos` | bf16, q4, q8 | q4 (plus the inference `real-weights` set) |
+| `nax-macos-2` | bf16 | q4 |
+
+A `qwen_tier: q4`/`q8` dispatch that lands on a box holding only `bf16` needs
+`provision_qwen_snapshot: true`, or pre-seed the missing tiers first (`q4` 26.4 GiB,
+`q8` 35.9 GiB).
+
 This is why `release.yml` pins on `signing` rather than plain `nax`: it is tag-triggered
 with `cancel-in-progress: false`, so scheduling it onto an unsigned box means a broken
 release that needs manual recovery, after paying a full cold MLX build first.
