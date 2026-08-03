@@ -332,23 +332,24 @@
             "scopes": [
               {
                 "entries": ["qwen_image"],
-                "tiers": ["bf16"],
+                "tiers": ["bf16", "q4", "q8"],
                 "modes": ["text_to_image"],
                 "overlays": ["none"],
                 "finding": "moves"
               }
             ],
-            "reason": "SC-15511's authoritative base-BF16 ladder run measured bounded attention at 64,574,244,508 allocator bytes (67,847,061,504 conservative predicted bytes) and bounded transformer residency at 16,128,899,280 allocator bytes (16,978,542,592 conservative predicted bytes). Separately, SC-16353's unbounded-versus-window-1 same-stream attribution found no whole-request movement because conditioning dominated that comparison; it is retained as a distinct attribution result rather than substituted for the rung-3-versus-rung-4 ladder measurement.",
+            "reason": "Authoritative base/no-overlay ladder runs measured bounded attention versus bounded transformer residency at 64,574,244,508 versus 16,128,899,280 allocator bytes for BF16, 33,921,472,156 versus 15,977,855,160 for Q4, and 44,091,560,604 versus 15,977,855,160 for Q8. SC-16353's separate unbounded-window-60-versus-window-1 same-stream attribution did not move the conditioning-dominated request peak; that control is retained as an attribution result rather than substituted for the rung-3-versus-rung-4 ladder measurements.",
             "evidence": [
               {
                 "source": "docs/generated/memory-calibration-evidence.json",
-                "reason": "Authoritative base BF16/no-overlay provider records compare the complete bounded-attention and bounded-transformer-residency rungs on the same pinned artifact and fixture."
+                "reason": "Authoritative base BF16/Q4/Q8 no-overlay provider records compare complete bounded-attention and bounded-transformer-residency requests on pinned artifacts, fixtures, inference revisions, and calibration fingerprints."
               }
             ]
           },
           "findings": [
             "The five-block QwenFunControlBranch is structurally windowable because it is the same uniform QwenTransformerBlock stack, but the MLX control provider does not implement its block stream in this change. It is a real resident remainder, and qwen_image_control is excluded from rung 3/4 instead of inheriting a family-level claim.",
-            "Window 1 is the sole bounded production cadence. SC-16353's 1024x1024 BF16/Q4/Q8 sweep found it lowered denoise residency but did not move the conditioning-bound request peak; that result is retained as measurement evidence, not relabeled as a request saving."
+            "Window 1 is the sole bounded production cadence. The same-stream window-60-versus-window-1 attribution control did not move the conditioning-bound request peak, while the authoritative complete rung-3-versus-rung-4 requests moved the peak by 75.02% for BF16, 52.90% for Q4, and 63.76% for Q8.",
+            "The Q4 and Q8 rung-4 captures passed output-equivalence thresholds, range verification, loadability, cleanup, cancellation/error-path scenarios, and the required negative mutation check."
           ]
         },
         "candle": {

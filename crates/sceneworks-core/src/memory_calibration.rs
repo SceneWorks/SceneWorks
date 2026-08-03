@@ -2037,14 +2037,14 @@ mod tests {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
         };
-        assert_eq!(bundle.records.len(), 24);
+        assert_eq!(bundle.records.len(), 28);
         assert_eq!(
             bundle
                 .records
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
                 .count(),
-            22
+            24
         );
         assert_eq!(
             bundle
@@ -2052,7 +2052,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            2
+            4
         );
     }
 
