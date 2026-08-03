@@ -22,6 +22,7 @@ pub mod memory_calibration;
 pub mod mlx_tier_completeness;
 pub mod observability;
 pub mod payload_util;
+pub mod preview_support;
 pub mod project_store;
 pub mod safetensors;
 pub mod session_log;

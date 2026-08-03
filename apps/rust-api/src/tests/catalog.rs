@@ -301,6 +301,63 @@ async fn real_builtin_catalog_exposes_krea_img2img_ui_flag() {
 }
 
 #[tokio::test]
+async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
+    // sc-16965 (epic 16948). The whole story is that a weights-free consumer must be able to tell
+    // "this route cannot live-preview" from "it can, but no frame has arrived yet". That needs the
+    // flag to survive merge → serialize on the REAL shipped manifest, through the same
+    // /api/v1/models path the app calls — and it is served from the generated
+    // `builtin.preview-support.jsonc`, NOT from a registry, because THIS process links no engines
+    // (docker/rust.Dockerfile builds the API without backend-candle, so a serve-time derivation
+    // would report "nothing supports preview" on every server).
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let real_manifest = include_str!("../../../../config/manifests/builtin.models.jsonc");
+    std::fs::write(config_dir.join("builtin.models.jsonc"), real_manifest)
+        .expect("builtin models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = |id: &str| {
+        models
+            .as_array()
+            .expect("catalog is an array")
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("{id} present in the catalog"))
+            .clone()
+    };
+
+    // A wired candle route that DOES preview (sc-16952). Keyed by backend, never a bare boolean:
+    // the same model id answers differently per engine and never fully collapses (SenseNova is
+    // candle-only and MLX never wired it).
+    assert_eq!(
+        entry("qwen_image")["preview"]["byBackend"]["candle"],
+        Value::Bool(true),
+        "qwen_image must advertise live preview on candle in the /models response"
+    );
+    // A wired candle route that does NOT preview — `false`, which is a different claim from absent.
+    assert_eq!(
+        entry("sdxl")["preview"]["byBackend"]["candle"],
+        Value::Bool(false),
+        "sdxl is wired on candle and does not preview — served as false, not omitted"
+    );
+    // No mlx facts file is dumped on this checkout, so mlx is UNKNOWN. It must be ABSENT rather
+    // than false: inventing `false` would make the UI claim a route cannot preview when the catalog
+    // has no measurement for it.
+    assert!(
+        entry("sdxl")["preview"]["byBackend"].get("mlx").is_none(),
+        "an un-dumped backend must be absent (unknown), never served as false"
+    );
+    // Purely additive: a model the generated table does not know keeps its exact previous shape.
+    assert!(
+        entry("kokoro_82m").get("preview").is_none(),
+        "an audio model has no engine-backed preview answer and must get no `preview` key at all"
+    );
+}
+
+#[tokio::test]
 async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
