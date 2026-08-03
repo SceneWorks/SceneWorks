@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e07db8c241cb3576921e7e157a45569041bf6447af0a24cb5c64f8a8d056d16a",
-    "matrixRevision": "source-tree:71395e664969a4eeaa675a238be7daa98886a85876f30152ac7ae15f94d78c8d",
-    "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+    "sceneWorksRevision": "source-tree:0fc286ba579acb66f4757b88604704c67f36936f7812412facac13ba44ba6218",
+    "matrixRevision": "source-tree:4a0055c1fe28aa308d1f415cff8816fde17c18a4a926920d56326f3574daacf8",
+    "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "e52f07950fa8db538e985ca668ba449873594bd9877bbcf1ff7c7fad9023fc19"
+        "sha256": "469ee2378253333f9735626636b5edc5569831a507095445fa0df51e3d900133"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "31fa5916d8b64784daf05f3707b0794b30d53f6cae3de7f2df06ad925a0c1fe0"
+        "sha256": "2ff577c2b495c0f109a463c5b88cdfc6f12f8ddb076a4bfc661eaef56e8cf51f"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -64,9 +64,9 @@
     },
     "completeRecords": 33,
     "matrixSummaryCalibrationRuns": 33,
-    "matrixSummaryCurrentCalibrationRuns": 5,
-    "verifiedCells": 5,
-    "note": "33 complete record(s) exist in the evidence bundle; the matrix reports 5 current calibration run(s) and 5 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "matrixSummaryCurrentCalibrationRuns": 0,
+    "verifiedCells": 0,
+    "note": "33 complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -370,10 +370,9 @@
   "cells": {
     "total": 7360,
     "byState": {
-      "Implemented/unverified": 2887,
+      "Implemented/unverified": 2892,
       "Missing": 4462,
-      "Structurally N/A": 6,
-      "Verified": 5
+      "Structurally N/A": 6
     },
     "byBackend": {
       "candle": 2740,
@@ -381,11 +380,10 @@
     },
     "byStateAndBackend": {
       "Implemented/unverified @ candle": 934,
-      "Implemented/unverified @ mlx": 1953,
+      "Implemented/unverified @ mlx": 1958,
       "Missing @ candle": 1800,
       "Missing @ mlx": 2662,
-      "Structurally N/A @ candle": 6,
-      "Verified @ mlx": 5
+      "Structurally N/A @ candle": 6
     },
     "byRung": {
       "bounded_attention": 1472,

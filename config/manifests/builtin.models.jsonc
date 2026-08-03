@@ -1379,9 +1379,9 @@
         // (z_image_turbo is already registered) — it makes the standard q4/q8/bf16 turnkey routing
         // catalog-declared, so a future quant-matrix model can opt in from the manifest alone.
         "standardTierLayout": true,
-        // SC-15510: exact current-pin q4 base-provider evidence. These bindings intentionally
-        // promote only the measured 768² text-to-image/no-overlay cells; the contract below keeps
-        // every sibling tier, mode, overlay, geometry, and parameter tuple Implemented/unverified.
+        // SC-15510: exact q4 base-provider evidence retained at its historical inference pin after
+        // SC-15815 advanced the shared Candle runtime. These bindings promote only when their exact
+        // pin is current; the contract below independently keeps every covered cell implemented.
         "calibrations": [
           {
             "abi": 3,

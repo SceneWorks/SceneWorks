@@ -86,26 +86,16 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     evidence_ids = {record["id"] for record in calibration["records"]}
     assert len(evidence_ids) == len(calibration["records"]) == 33
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
-    # `current` vs `historical` is decided against the SHIPPED inference pin. sc-16353's four exact
-    # Qwen rung-4 records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so those
-    # 28 earlier records remain historical. SC-15510 adds five exact Z-Image records captured at the
-    # shipped pin. Keeping both semantics in one bundle is the fail-closed rule, not lost evidence.
-    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {
-        "current",
-        "historical",
-    }
+    # `current` vs `historical` is decided against the shipped inference pin. Qwen's records predate
+    # `d4802320`, and SC-15815 advanced the shared pin again to `bf06bb56` after SC-15510 captured
+    # Z-Image. All 33 records therefore remain retained history and none is runtime-current.
+    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert {run["record"]["id"] for run in current_eligible} == {
-        "imc-6c1321a632cf8ba19ec3",
-        "imc-7f0855d89b197e74aad7",
-        "imc-83885e42f05bcc3881d2",
-        "imc-adcb1c7d1cc0cffeea73",
-        "imc-e99ffcdc141cc6ca5d60",
-    }
+    assert current_eligible == []
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.
@@ -126,10 +116,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         run["record"]["target"]["modelId"] != "z_image"
         for run in matrix["calibrationRuns"]
     ), "captures without a measured loadShape must remain outside the schema-v4 bundle"
-    # The long-standing bf16 shared-ladder captures, described by the tuple/rung assertions below.
-    # Scoped to bf16 explicitly: since sc-16962 moved the pin, the four superseded q4/q8 rung-4
-    # records are historical too, and they are asserted separately above rather than folded in here
-    # where they would silently widen a claim about a different capture set.
+    # The long-standing bf16 captures remain in the bundle. Only resident/staged rows still bind to
+    # cells without an independent current static fingerprint; the older bounded fingerprints must
+    # not mask the provider contract, even as historical characterization.
     historical_qwen = [
         run
         for run in matrix["calibrationRuns"]
@@ -138,7 +127,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and run["record"]["target"]["tier"] == "bf16"
         and run["binding"]["eligible"]
     ]
-    assert len(historical_qwen) == 10
+    assert len(historical_qwen) == 4
     assert all(run["binding"]["reasons"] == [] for run in historical_qwen)
     assert {
         (
@@ -154,9 +143,6 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ) == {
         "resident": 2,
         "staged_residency": 2,
-        "bounded_decode": 2,
-        "bounded_attention": 2,
-        "bounded_transformer_residency": 2,
     }
 
 
@@ -303,20 +289,29 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_historical_records_remain_unattached_while_current_z_image_records_promote():
+def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
-    # The pin bump still prevents historical Qwen records from attaching. Only SC-15510's five
-    # current-pin, exact q4 Turbo base-provider captures may promote; aliases and sibling tuples stay
-    # unverified. Assert the full IDs so an accidental mode/tier/overlay widening cannot pass by count.
+    # The pin bump prevents both Qwen and Z-Image history from promoting. Static provider contracts
+    # remain implemented, but exact runtime admission must fail closed until the records are recaptured.
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert {cell["id"] for cell in verified} == {
-        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:resident",
-        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:staged_residency",
-        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_decode",
-        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_attention",
-        "z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
-    }
+    assert verified == []
+    historical_z_image_turbo = [
+        cell
+        for cell in matrix["cells"]
+        if cell["modelId"] == "z_image_turbo"
+        and cell["backend"] == "mlx"
+        and cell["tier"] == "q4"
+        and cell["mode"] == "text_to_image"
+        and cell["overlay"] == "none"
+        and cell["evidence"]["historicalVerification"]
+    ]
+    assert len(historical_z_image_turbo) == 5
+    assert all(
+        cell["state"] == "Implemented/unverified"
+        and cell["evidence"]["currentEnvironmentVerification"] == []
+        for cell in historical_z_image_turbo
+    )
     historical_z_image = [
         cell
         for cell in matrix["cells"]

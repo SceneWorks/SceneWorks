@@ -586,20 +586,11 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   assert.ok(
     bounded.every((cell) =>
       cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
-      (
-        cell.evidence.staticImplementation.some((entry) =>
-          entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
-        ) ||
-        (
-          cell.state === "Verified" &&
-          cell.evidence.staticImplementation.some((entry) =>
-            entry.source.includes("mlx_fit_gate.rs#evidence_admission_route"),
-          ) &&
-          cell.evidence.currentEnvironmentVerification.length === 1
-        )
+      cell.evidence.staticImplementation.some((entry) =>
+        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
       ),
     ),
-    "every bounded cell must name the pinned MLX provider contract and its calibration ABI",
+    "historical bindings must not mask the pinned MLX provider contract",
   );
 
   const turboContract = manifest.models.find((model) => model.id === "z_image_turbo")
@@ -643,23 +634,10 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     (cell) => zImageIds.includes(cell.modelId) && cell.backend === "mlx",
   );
   const verified = allZImageMlx.filter((cell) => cell.state === "Verified");
-  assert.deepEqual(
-    verified.map((cell) => cell.id).sort(),
-    [
-      "bounded_attention",
-      "bounded_decode",
-      "bounded_transformer_residency",
-      "resident",
-      "staged_residency",
-    ].map((rung) => `z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:${rung}`).sort(),
-    "only the five exact q4 Turbo base-provider records may be promoted",
-  );
+  assert.deepEqual(verified, [], "the d480 Z-Image records must remain historical at pin bf06");
   assert.ok(
-    verified.every((cell) =>
-      cell.evidence.currentEnvironmentVerification.length === 1 &&
-      cell.evidence.currentEnvironmentVerification[0].geometry === "768x768"
-    ),
-    "every promoted Z-Image cell must cite its exact authoritative Metal capture",
+    allZImageMlx.every((cell) => cell.evidence.currentEnvironmentVerification.length === 0),
+    "no historical Z-Image capture may be promoted across an exact inference-pin change",
   );
   assert.ok(
     allZImageMlx
@@ -1946,6 +1924,29 @@ async function currentEvidenceFixture({
   return JSON.stringify(parsed);
 }
 
+/// Re-stamp the manifest half of an exact calibration binding alongside a synthetic current record.
+/// Production promotion requires both halves to name the linked inference runtime revision.
+async function currentManifestCalibrationFixture({
+  select = (binding) => binding.provider === "krea_2_turbo_control",
+} = {}) {
+  const [manifest, cargo] = await Promise.all([
+    readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8"),
+  ]);
+  const pin = cargo.match(
+    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/,
+  )[1];
+  const parsed = JSON.parse(stripJsoncComments(manifest));
+  for (const model of parsed.models) {
+    for (const backend of ["candle", "mlx"]) {
+      for (const binding of model[backend]?.calibrations ?? []) {
+        if (select(binding)) binding.inferenceRevision = pin;
+      }
+    }
+  }
+  return JSON.stringify(parsed);
+}
+
 /// The four rung-4 Qwen records sc-16353 ingested, re-stamped onto the current inference pin.
 ///
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
@@ -1981,8 +1982,14 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   // records re-stamped onto the current pin, and the zeroed-pin mutation below is what keeps it live
   // rather than passing because nothing could promote.
   const qwenOnCurrentPin = await qwenRung4OnCurrentPin();
+  const qwenManifestOnCurrentPin = await currentManifestCalibrationFixture({
+    select: (binding) => binding.provider === "qwen_image",
+  });
   const promotedQwen = await buildMatrix({
-    sourceOverrides: { calibrationEvidence: qwenOnCurrentPin },
+    sourceOverrides: {
+      calibrationEvidence: qwenOnCurrentPin,
+      manifest: qwenManifestOnCurrentPin,
+    },
   });
   assert.equal(
     verifiedQwen(promotedQwen),
@@ -1995,10 +2002,27 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     "an inference pin bump must not carry the previous pin's Qwen verification forward",
   );
 
+  const evidenceOnlyZ = await buildMatrix({
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture({
+        select: (record) => record.target.provider === "z_image_turbo",
+      }),
+    },
+  });
+  assert.equal(
+    evidenceOnlyZ.cells.filter(
+      (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
+        cell.state === "Verified",
+    ).length,
+    0,
+    "current evidence cannot promote through a historical exact manifest binding",
+  );
+
   const cargo = await readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8");
   const staleQwen = await buildMatrix({
     sourceOverrides: {
       calibrationEvidence: qwenOnCurrentPin,
+      manifest: qwenManifestOnCurrentPin,
       cargo: cargo.replace(
         /(candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*")[0-9a-f]+(")/,
         `$1${"0".repeat(40)}$2`,
@@ -2015,7 +2039,10 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   // the state this story found the generator in — this assertion would fail while every other test
   // in this file stayed green.
   const promoted = await buildMatrix({
-    sourceOverrides: { calibrationEvidence: await currentEvidenceFixture() },
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture(),
+      manifest: await currentManifestCalibrationFixture(),
+    },
   });
   const promotedCell = promoted.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
   assert.equal(promotedCell.state, "Verified", "current eligible evidence must promote its cell");
@@ -2040,6 +2067,7 @@ test("Verified never implies geometry coverage — one point certifies one point
   const single = await buildMatrix({
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({ keepGeometries: ["768x768"] }),
+      manifest: await currentManifestCalibrationFixture(),
     },
   });
   const cell = single.cells.find((candidate) => candidate.id === KREA_CONTROL_CELL);
@@ -2074,6 +2102,7 @@ test("a second geometry is what makes a curve determinable (sc-16060)", async ()
       calibrationEvidence: await currentEvidenceFixture({
         keepGeometries: ["768x768", "896x896"],
       }),
+      manifest: await currentManifestCalibrationFixture(),
     },
   });
   const fittedCell = fitted.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
@@ -2086,6 +2115,7 @@ test("a second geometry is what makes a curve determinable (sc-16060)", async ()
   const single = await buildMatrix({
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({ keepGeometries: ["896x896"] }),
+      manifest: await currentManifestCalibrationFixture(),
     },
   });
   const singleCell = single.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
@@ -2115,7 +2145,10 @@ test("the shipped Krea tiers report their recovered two-point fits (sc-16514)", 
 
 test("promotion is available only to an implemented cell (sc-16060)", async () => {
   const matrix = await buildMatrix({
-    sourceOverrides: { calibrationEvidence: await currentEvidenceFixture() },
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture(),
+      manifest: await currentManifestCalibrationFixture(),
+    },
   });
   for (const cell of matrix.cells) {
     if (cell.state === "Verified") {
