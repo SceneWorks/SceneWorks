@@ -3,6 +3,11 @@
 // unaffected.
 export { terminalStatuses, actionStatuses } from "./jobTypes.js";
 
+// Generated live-preview support table (sc-16965). Emitted by `npm run gen:preview-support`
+// alongside config/manifests/builtin.preview-support.jsonc from one derivation; see
+// seedPreviewSupport at the foot of fallbackModels.
+import previewSupportTable from "./data/previewSupport.json";
+
 // Asset Library hygiene (sc-2024 / sc-8339): the Main Asset Library shows ONLY media
 // produced by the Image / Video / Document studios plus manual uploads. This is a
 // positive allow-list (not a single `!== "character_studio"` exclusion) so anything
@@ -101,7 +106,10 @@ Think Mode: When reasoning is needed, you MUST start with a <think></think> bloc
 Non-Think Mode: When no reasoning is needed, directly provide the answer without reasoning. Do not use tags like <image1>, <image2>; present any images naturally alongside the text.
 
 After the think block, always provide a concise, user-facing final answer. The answer may include text, images, or both. Match the user's language in both reasoning and the final answer.`;
-export const fallbackModels = [
+// Live-preview support (sc-16965, epic 16948) is engine-KEYED and generated, so this seed applies
+// the derived table programmatically instead of hand-listing ids on each entry — `seedPreviewSupport`
+// below stamps `preview.byBackend` from `data/previewSupport.json` after the array is authored.
+const seededFallbackModels = [
   {
     id: "z_image_turbo",
     // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
@@ -1018,3 +1026,27 @@ export const fallbackModels = [
     },
   },
 ];
+
+// Live denoise preview support (sc-16965, epic 16948). The served catalog carries
+// `preview.byBackend` — a per-ENGINE map, not a boolean, because the flag genuinely diverges by
+// backend (`krea_2_turbo` is true on MLX/macOS and, until sc-16951, was false on candle/Windows;
+// SenseNova stays candle-only permanently). rust-api merges it onto every /api/v1/models entry from
+// the same generated manifest this table is emitted with, so the offline seed and the live catalog
+// agree by construction.
+//
+// Applied programmatically rather than hand-written per entry: it is derived data
+// (`npm run gen:preview-support` in apps/web emits both artifacts from one derivation) and the
+// previewSupportCatalog.test.js drift guard asserts this application, so a family story that flips a
+// descriptor propagates here with no edit. A model absent from the table gets NO `preview` key —
+// absence reads as "unknown" downstream and renders exactly as it did before this story, which is
+// the safe direction: over-claiming would strand a placeholder on a route that never emits.
+function seedPreviewSupport(models) {
+  return models.map((model) => {
+    const byBackend = previewSupportTable.models[model.id];
+    // Copy rather than alias the imported JSON module: a consumer that mutated a seeded entry would
+    // otherwise corrupt the shared generated table for everyone.
+    return byBackend ? { ...model, preview: { byBackend: { ...byBackend } } } : model;
+  });
+}
+
+export const fallbackModels = seedPreviewSupport(seededFallbackModels);

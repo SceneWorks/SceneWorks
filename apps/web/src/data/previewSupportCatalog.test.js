@@ -1,0 +1,313 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  catalogToWebPreviewSupport,
+  derivePreviewSupport,
+  parseEngineModelTable,
+  PREVIEW_SUPPORT_GENERATOR,
+} from "./previewSupportDerivation.js";
+import previewSupport from "./previewSupport.json";
+// Raw source text (Vite `?raw`) so the guard derives from the same bytes the generator reads. Both
+// live outside the web root — see the server.fs.allow entries in vite.config.js (mirrors the
+// style.txt / builtin.styles.jsonc pair).
+import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
+import previewSupportManifestRaw from "../../../../config/manifests/builtin.preview-support.jsonc?raw";
+// The inference pin itself. `verifyEngineCapabilityFacts` in scripts/bump-inference.mjs compares the
+// facts files against it, but that script runs only when someone bumps THROUGH it — CI never invokes
+// it. So a pin edited by hand would leave the whole catalog advertising the PREVIOUS revision's
+// truth with nothing red. `check-license-coverage.mjs` had already learned this (it compares
+// `audit.inferenceRevision` to the live pin set AND runs in the parity lane); this is the same
+// assertion for the same class of artifact, on a guard that runs on every PR.
+import workerCargoToml from "../../../../crates/sceneworks-worker/Cargo.toml?raw";
+import { fallbackModels } from "../constants.js";
+
+// DISCOVERED, never listed. The generator globs this directory so a newly dumped backend is picked
+// up with no edit; a guard that hardcodes `capabilities.candle.json` would then fail the moment the
+// macOS lane lands `capabilities.mlx.json` — i.e. it would punish exactly the follow-up the design
+// is waiting on. Everything below is derived per-backend from whatever is on disk.
+const factsModules = import.meta.glob(
+  "../../../../config/engine-capabilities/capabilities.*.json",
+  { eager: true, query: "?raw", import: "default" },
+);
+const factsEntries = Object.entries(factsModules)
+  .map(([path, raw]) => ({ name: path.slice(path.lastIndexOf("/") + 1), facts: JSON.parse(raw) }))
+  .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+const factsFiles = factsEntries.map((entry) => entry.facts);
+
+const rows = parseEngineModelTable(enginesSource);
+const derived = derivePreviewSupport(rows, factsFiles);
+
+/** The single inference revision every Cargo manifest in the worker pins, read from the pin itself. */
+const inferencePin = (() => {
+  const revisions = new Set(
+    [
+      ...workerCargoToml.matchAll(
+        /github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/g,
+      ),
+    ].map((match) => match[1]),
+  );
+  if (revisions.size !== 1) {
+    throw new Error(
+      `expected exactly one inference revision in crates/sceneworks-worker/Cargo.toml, found: ${
+        [...revisions].join(", ") || "none"
+      }`,
+    );
+  }
+  return [...revisions][0];
+})();
+
+// Guards sc-16965 (epic 16948). `config/manifests/builtin.preview-support.jsonc` — the block
+// rust-api merges onto every /api/v1/models entry as `preview.byBackend` — must stay a mechanical
+// derivation of (a) the stage-1 engine-capability dumps and (b) the MODEL_TABLE join in engines.rs.
+// Never hand-edited. If either input moves — a family story flips a descriptor and the facts file is
+// re-dumped, or a new MODEL_TABLE row lands — re-run `npm run gen:preview-support` (apps/web); this
+// fails until both artifacts are regenerated.
+//
+// This is the half of the design that runs on EVERY PR. Stage 1 needs a linked engine registry and
+// so can only run on macOS or a `backend-candle` lane (both dispatch-only), but it writes checked-in
+// files, and everything below reads only those. That the stage-1 lane is dispatch-only is not an
+// unguarded gap: sc-16951's `candle-gen-catalog` bidirectional test guards descriptor-level truth in
+// the inference repo's CI continuously.
+describe("preview-support catalog: the artifacts are derived, not authored", () => {
+  it("re-deriving from engines.rs + the facts files reproduces builtin.preview-support.jsonc", () => {
+    expect(JSON.parse(previewSupportManifestRaw)).toEqual(derived);
+  });
+
+  it("re-deriving reproduces the web fallback table previewSupport.json", () => {
+    expect(previewSupport).toEqual(catalogToWebPreviewSupport(derived));
+  });
+
+  it("the two artifacts agree on every model (one derivation, two writes)", () => {
+    const manifest = JSON.parse(previewSupportManifestRaw);
+    expect(previewSupport.models).toEqual(manifest.models);
+    expect(previewSupport.backends).toEqual(manifest.backends);
+    expect(previewSupport.version).toBe(manifest.version);
+  });
+
+  it("names the generator so the only sanctioned update path is discoverable", () => {
+    expect(JSON.parse(previewSupportManifestRaw).generatedBy).toBe(PREVIEW_SUPPORT_GENERATOR);
+  });
+
+  it("covers every backend on disk — the artifacts list exactly the dumped facts files", () => {
+    const onDisk = factsEntries.map((entry) => entry.facts.backend).sort();
+    expect(JSON.parse(previewSupportManifestRaw).backends).toEqual(onDisk);
+    expect(previewSupport.backends).toEqual(onDisk);
+  });
+});
+
+// The stage-1 facts file is a checked-in SOURCE, so it gets the same scrutiny style.txt gets: an
+// empty or truncated one derives as "no route supports live preview", which is a confident wrong
+// answer rather than a missing one. The Rust dumper refuses to write one; this refuses to read one.
+describe("preview-support catalog: the stage-1 facts files are non-vacuous", () => {
+  it("finds at least one checked-in dump", () => {
+    expect(factsEntries.length).toBeGreaterThan(0);
+  });
+
+  it.each(factsEntries.map((entry) => [entry.name, entry.facts]))(
+    "%s carries a full registry, not an empty one",
+    (name, facts) => {
+      // The filename is the routing key — one file per backend so two lanes never rewrite the same
+      // file — so a dump whose `backend` disagrees with its own name would silently take another
+      // lane's slot.
+      expect(`capabilities.${facts.backend}.json`).toBe(name);
+      // Both shipped registries are large (candle 51; the MLX bundle registers 27 provider crates
+      // and 38 preview-capable routes alone), so a dump under this floor is truncated, not small.
+      expect(facts.engines.length).toBeGreaterThan(40);
+      expect(facts.generatedFrom.inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
+    },
+  );
+
+  // The assertion `bump-inference.mjs` makes at bump time, made again where CI can actually see it.
+  // Without this, a pin edited outside the sanctioned script leaves every facts file — and therefore
+  // the entire served catalog — describing the PREVIOUS revision's descriptors, silently.
+  it.each(factsEntries.map((entry) => [entry.name, entry.facts]))(
+    "%s was dumped at the revision the worker currently pins",
+    (name, facts) => {
+      expect(facts.generatedFrom.inferenceRevision, `${name} vs crates/sceneworks-worker/Cargo.toml`)
+        .toBe(inferencePin);
+    },
+  );
+
+  it("the manifest stamps each backend's dump revision, and it is the current pin", () => {
+    const manifest = JSON.parse(previewSupportManifestRaw);
+    for (const backend of manifest.backends) {
+      expect(manifest.generatedFrom[backend].inferenceRevision, backend).toBe(inferencePin);
+    }
+  });
+
+  it("an empty facts file is refused rather than derived from", () => {
+    expect(() => derivePreviewSupport(rows, [{ backend: "candle", engines: [] }])).toThrow(
+      /vacuous-green/,
+    );
+  });
+
+  it("deriving with no facts files at all is refused", () => {
+    expect(() => derivePreviewSupport(rows, [])).toThrow(/no stage-1 facts files/);
+  });
+});
+
+describe("preview-support catalog: the MODEL_TABLE join", () => {
+  it("parses the full engines.rs model table", () => {
+    expect(rows.length).toBeGreaterThan(40);
+    expect(rows.every((row) => row.sceneworksId && row.engineId)).toBe(true);
+  });
+
+  it("is many-to-one: distinct model ids may share one engine id", () => {
+    // z_image_edit runs the Turbo weights through the engine's img2img path, so both SceneWorks ids
+    // resolve to the `z_image_turbo` engine — and therefore to the same preview answer.
+    const shared = rows.filter((row) => row.engineId === "z_image_turbo").map((r) => r.sceneworksId);
+    expect(shared).toEqual(expect.arrayContaining(["z_image_turbo", "z_image_edit"]));
+    expect(previewSupport.models.z_image_turbo).toEqual(previewSupport.models.z_image_edit);
+  });
+
+  it("a MODEL_TABLE row with no matching engine facts is omitted, not defaulted to false", () => {
+    // Absence must never be encoded as `false`: a backend that never registered the engine has no
+    // opinion, and inventing one would let the UI claim "no live preview" about a route it cannot
+    // see. Every emitted entry is backed by a real facts row, on every backend on disk.
+    for (const { facts } of factsEntries) {
+      const factsIds = new Set(facts.engines.map((engine) => engine.id));
+      for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
+        if (!(facts.backend in byBackend)) continue;
+        const engineId = rows.find((row) => row.sceneworksId === modelId)?.engineId;
+        expect(factsIds.has(engineId), `${modelId} → ${engineId} @ ${facts.backend}`).toBe(true);
+      }
+    }
+  });
+
+  it("throws rather than silently emptying when MODEL_TABLE cannot be found", () => {
+    expect(() => parseEngineModelTable("// no table here\n")).toThrow(/MODEL_TABLE/);
+  });
+
+  it("refuses a row it cannot read rather than dropping it", () => {
+    // A row that grows a nested-brace field is invisible to the brace-free matcher. Dropping it
+    // reads downstream as "unknown", which renders exactly as before — i.e. it looks fine. The
+    // count assertion is what turns that into a loud failure.
+    const withNestedField = enginesSource.replace(
+      'sceneworks_id: "sdxl",',
+      'limits: Limits { max: 4 },\n        sceneworks_id: "sdxl",',
+    );
+    expect(withNestedField).not.toBe(enginesSource);
+    expect(() => parseEngineModelTable(withNestedField)).toThrow(
+      /declares \d+ ModelRow entries but only \d+ parsed/,
+    );
+  });
+
+  it("does not parse a commented-out row as a live one", () => {
+    // Over-claiming a model that no longer exists is the dangerous direction here: the catalog would
+    // advertise preview support for a route that is not wired at all.
+    const withGhost = enginesSource.replace(
+      "pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n",
+      "pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n" +
+        "    /*\n" +
+        "    ModelRow {\n" +
+        '        sceneworks_id: "ghost_model",\n' +
+        '        engine_id: "ghost_engine",\n' +
+        '        default_repo: "x/y",\n' +
+        "        default_steps: 1,\n" +
+        "        default_guidance: 1.0,\n" +
+        '        adapter_label: "ghost",\n' +
+        "    },\n" +
+        "    */\n",
+    );
+    expect(withGhost).not.toBe(enginesSource);
+    const ghosted = parseEngineModelTable(withGhost);
+    expect(ghosted.map((row) => row.sceneworksId)).not.toContain("ghost_model");
+    expect(ghosted.length).toBe(rows.length);
+  });
+
+  it("is not truncated by a `];` that only appears inside a comment", () => {
+    // The old first-`\n];` terminator stopped there and dropped every row after it — silently,
+    // because the survivors still cleared the row-count floor.
+    for (const injected of ["    // the table ends with\n    // ];\n", "    /* like this:\n];\n    */\n"]) {
+      const withStray = enginesSource.replace(
+        "pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n",
+        `pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n${injected}`,
+      );
+      expect(withStray).not.toBe(enginesSource);
+      expect(parseEngineModelTable(withStray).length, injected).toBe(rows.length);
+    }
+  });
+});
+
+// What the shipped artifacts claim, cross-checked against the RAW facts rather than against a
+// hand-written id list. A literal list would have to be re-typed by each remaining family story
+// (sc-16953…sc-16960) and would fail outright the first time a second backend is dumped; this
+// re-joins the facts independently of `derivePreviewSupport`, so it still catches a re-dump that
+// nobody regenerated — which is the whole point of landing sc-16965 before those stories.
+describe("preview-support catalog: the shipped answers match the dumped facts", () => {
+  it.each(factsEntries.map((entry) => [entry.facts.backend, entry.facts]))(
+    "advertises live preview on %s for exactly the routes whose descriptors say so",
+    (backend, facts) => {
+      const advertisingEngines = new Set(
+        facts.engines.filter((engine) => engine.supportsPreview).map((engine) => engine.id),
+      );
+      const expected = rows
+        .filter((row) => advertisingEngines.has(row.engineId))
+        .map((row) => row.sceneworksId)
+        .sort();
+      const actual = Object.entries(previewSupport.models)
+        .filter(([, byBackend]) => byBackend[backend] === true)
+        .map(([id]) => id)
+        .sort();
+      expect(actual).toEqual(expected);
+      expect(actual.length, `${backend} advertises nothing — epic 16948 has wired routes`)
+        .toBeGreaterThan(0);
+    },
+  );
+
+  it.each(factsEntries.map((entry) => [entry.facts.backend, entry.facts]))(
+    "says false — not unknown — for every %s route that is wired and does not preview",
+    (backend, facts) => {
+      const nonPreviewing = new Map(
+        facts.engines.map((engine) => [engine.id, engine.supportsPreview]),
+      );
+      const wiredFalse = rows.filter((row) => nonPreviewing.get(row.engineId) === false);
+      expect(wiredFalse.length).toBeGreaterThan(0);
+      for (const row of wiredFalse) {
+        expect(
+          previewSupport.models[row.sceneworksId]?.[backend],
+          `${row.sceneworksId} → ${row.engineId} @ ${backend}`,
+        ).toBe(false);
+      }
+    },
+  );
+
+  it("is engine-KEYED: every entry is a per-backend map, never a bare boolean", () => {
+    for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
+      expect(typeof byBackend, modelId).toBe("object");
+      for (const [backend, supported] of Object.entries(byBackend)) {
+        expect(previewSupport.backends, `${modelId}.${backend}`).toContain(backend);
+        expect(typeof supported, `${modelId}.${backend}`).toBe("boolean");
+      }
+    }
+  });
+});
+
+// The offline fallback catalog (used when GET /api/v1/models is unreachable) must carry the same
+// flag the served catalog does, or the card's three states collapse to two the moment the API
+// blinks. constants.js applies the generated table programmatically rather than hand-listing ids —
+// so this asserts the application, not a transcription.
+describe("preview-support catalog: the offline fallback mirrors the served flag", () => {
+  it("stamps preview.byBackend onto every fallback model the table knows", () => {
+    for (const model of fallbackModels) {
+      const expected = previewSupport.models[model.id];
+      if (!expected) {
+        expect(model.preview, `${model.id} is not in the generated table`).toBeUndefined();
+        continue;
+      }
+      expect(model.preview?.byBackend, model.id).toEqual(expected);
+    }
+  });
+
+  it("seeds BOTH answers, so the offline path can exercise every state", () => {
+    // Derived, not named: which ids are in the offline seed is a product decision that moves, and a
+    // hardcoded pair breaks on a re-dump or a new backend. What must hold is that the seed carries
+    // at least one supporting and one non-supporting route — otherwise a whole UI state is
+    // unreachable when the API is down.
+    const seeded = fallbackModels.filter((model) => previewSupport.models[model.id]);
+    expect(seeded.length).toBeGreaterThan(0);
+    const answers = seeded.flatMap((model) => Object.values(model.preview?.byBackend ?? {}));
+    expect(answers, "no fallback model advertises live preview").toContain(true);
+    expect(answers, "no fallback model reports a wired non-previewing route").toContain(false);
+  });
+});

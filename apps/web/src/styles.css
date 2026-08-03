@@ -15169,6 +15169,36 @@ details[open] > summary.lora-scope-group-heading::before,
   opacity: 0.5;
 }
 
+/* "Supports live preview, first frame has not arrived yet" (sc-16965, epic 16948). Occupies the
+   SAME interim slot the real frame will take, so the cell fills in rather than appearing from
+   nowhere. Only ever rendered for a model whose engine advertises Capabilities.supports_preview and
+   only while the job is still pre-denoise — a model that does not preview gets no cell at all, so
+   the majority of renders are visually unchanged. */
+.worker-progress-card__thumb-cell.preview-pending {
+  cursor: default;
+  position: relative;
+}
+
+.worker-progress-card__preview-pending-media {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--surface),
+    color-mix(in oklch, var(--accent) 18%, var(--surface)),
+    var(--surface)
+  );
+  background-size: 200% 100%;
+  animation: worker-progress-card-skeleton 1400ms ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .worker-progress-card__preview-pending-media {
+    animation: none;
+  }
+}
+
 .worker-progress-card__thumb-media {
   display: block;
   width: 100%;

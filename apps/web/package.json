@@ -10,6 +10,7 @@
     "lint": "eslint src",
     "test": "vitest run --environment jsdom",
     "gen:styles": "node scripts/generate-styles.mjs",
+    "gen:preview-support": "node scripts/generate-preview-support.mjs",
     "gen:style-thumbnails": "node scripts/generate-style-thumbnails.mjs"
   },
   "dependencies": {

@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "generatedBy": "apps/web/scripts/generate-preview-support.mjs",
+  "backends": [
+    "candle"
+  ],
+  "generatedFrom": {
+    "candle": {
+      "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
+    }
+  },
+  "models": {
+    "anima_aesthetic": {
+      "candle": false
+    },
+    "anima_base": {
+      "candle": false
+    },
+    "anima_turbo": {
+      "candle": false
+    },
+    "bernini_image": {
+      "candle": false
+    },
+    "boogu_image": {
+      "candle": false
+    },
+    "boogu_image_edit": {
+      "candle": false
+    },
+    "boogu_image_turbo": {
+      "candle": false
+    },
+    "chroma1_base": {
+      "candle": false
+    },
+    "chroma1_flash": {
+      "candle": false
+    },
+    "chroma1_hd": {
+      "candle": false
+    },
+    "flux2_dev": {
+      "candle": false
+    },
+    "flux2_klein_9b": {
+      "candle": false
+    },
+    "flux2_klein_9b_kv": {
+      "candle": false
+    },
+    "flux2_klein_9b_true_v2": {
+      "candle": false
+    },
+    "flux_dev": {
+      "candle": false
+    },
+    "flux_schnell": {
+      "candle": false
+    },
+    "ideogram_4": {
+      "candle": false
+    },
+    "ideogram_4_turbo": {
+      "candle": false
+    },
+    "illustrious_xl_v1": {
+      "candle": false
+    },
+    "illustrious_xl_v2": {
+      "candle": false
+    },
+    "kolors": {
+      "candle": false
+    },
+    "krea_2_raw": {
+      "candle": true
+    },
+    "krea_2_turbo": {
+      "candle": true
+    },
+    "lens": {
+      "candle": false
+    },
+    "lens_turbo": {
+      "candle": false
+    },
+    "mage_flow": {
+      "candle": false
+    },
+    "mage_flow_base": {
+      "candle": false
+    },
+    "mage_flow_edit": {
+      "candle": false
+    },
+    "mage_flow_edit_base": {
+      "candle": false
+    },
+    "mage_flow_edit_turbo": {
+      "candle": false
+    },
+    "mage_flow_turbo": {
+      "candle": false
+    },
+    "qwen_image": {
+      "candle": true
+    },
+    "realvisxl": {
+      "candle": false
+    },
+    "realvisxl_lightning": {
+      "candle": false
+    },
+    "sana_1600m": {
+      "candle": false
+    },
+    "sana_sprint_1600m": {
+      "candle": false
+    },
+    "sd3_5_large": {
+      "candle": false
+    },
+    "sd3_5_large_turbo": {
+      "candle": false
+    },
+    "sd3_5_medium": {
+      "candle": false
+    },
+    "sdxl": {
+      "candle": false
+    },
+    "sensenova_u1_8b": {
+      "candle": false
+    },
+    "sensenova_u1_8b_fast": {
+      "candle": false
+    },
+    "sensenova_u1_8b_infographic_v2": {
+      "candle": false
+    },
+    "sensenova_u1_8b_infographic_v2_fast": {
+      "candle": false
+    },
+    "sensenova_u1_8b_infographic_v3": {
+      "candle": false
+    },
+    "sensenova_u1_8b_infographic_v3_fast": {
+      "candle": false
+    },
+    "z_image": {
+      "candle": false
+    },
+    "z_image_edit": {
+      "candle": false
+    },
+    "z_image_turbo": {
+      "candle": false
+    }
+  }
+}
