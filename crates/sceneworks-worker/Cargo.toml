@@ -79,7 +79,7 @@ backend-candle = ["dep:runtime-cuda", "dep:ort", "dep:zip"]
 # robust under app-bundle relocation, unlike build-time linking + rpath.
 # `download-binaries` still fetches a CoreML-enabled onnxruntime at build time so the
 # desktop packager (build-sidecar.mjs) has a dylib to stage and dev runs work.
-ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
+ort = { version = "=2.0.0-rc.13", features = ["coreml", "load-dynamic", "download-binaries"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Canonical Apple inference composition. Bespoke provider APIs are re-exported by the bundle.
 # `audio-metal` is additive over the default `media` + `audio` lanes: it runs the WHOLE candle audio
