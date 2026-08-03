@@ -50,7 +50,11 @@ fn documented_job_types() -> Vec<String> {
 /// Remove comments and literal contents before inspecting Rust syntax. This is intentionally small
 /// (the production source remains compiled by rustc), but it understands nested block comments and
 /// escaped quoted strings so a `JobType::Variant` mention outside code cannot satisfy the guard.
-fn code_without_comments_or_literals(source: &str) -> String {
+///
+/// Shared with [`crate::candle_preview_wiring_tests`] (sc-16962), whose guard reads the candle image
+/// lanes' own source: without comment stripping, a doc comment that NAMES the forbidden
+/// `preview: Default::default()` would trip the guard it documents.
+pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;

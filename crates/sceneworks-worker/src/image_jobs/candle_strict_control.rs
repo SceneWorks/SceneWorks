@@ -90,13 +90,27 @@ pub(super) trait CandleStrictControl: Send + 'static {
 
     /// Generate one image conditioned on the already-preprocessed `control` map (pose skeleton, canny
     /// edges, or depth map — the driver picked which). Builds the bespoke request struct internally; the
-    /// driver supplies the shared seed + cancel + progress callback. Returns the output [`Image`].
+    /// driver supplies the shared seed + cancel + progress callback + preview sink. Returns the output
+    /// [`Image`].
+    ///
+    /// `preview` is the job's **live** per-image [`gen_core::PreviewSink`] (epic 16948, sc-16962), built by
+    /// [`preview_sink_for`](super::stream) and handed down by [`run_candle_strict_control`]. Every bespoke
+    /// candle provider is invoked BY NAME rather than through `dyn Generator`, so the registry cannot thread
+    /// the sink for it — this parameter is the only route a strict-control lane has to a live sink.
+    ///
+    /// **An impl whose request struct carries a `preview` field must set it from this argument.** Writing
+    /// `preview: Default::default()` compiles, ships, and produces no previews on that lane — a silent
+    /// narrowing that looks green. [`crate::candle_preview_wiring_tests`] reads these lanes' own source
+    /// and fails on exactly that, on every platform, because both candle CI lanes are dispatch-only. An
+    /// impl whose upstream request has no `preview` field yet binds `_preview`; its file is still swept,
+    /// so adding the field upstream without wiring it here is caught the same way.
     fn generate_one(
         &self,
         model: &Self::Model,
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image>;
 }
@@ -228,7 +242,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             let depth_weights_dir = depth_weights_dir.as_deref();
-            drive_gen_items_scored(tx, poses, move |_index, pose, _preview, on_progress| {
+            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
@@ -244,11 +258,17 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
                     stickwidth,
                     depth_weights_dir,
                 )?;
+                // The job's live per-image preview sink, handed straight to the provider's bespoke request
+                // (epic 16948, sc-16962). `drive_gen_items_scored` built it with `preview_sink_for`, so a
+                // frame emitted on the denoise thread lands as a `GenEvent::Preview` and reaches
+                // `WorkerProgressCard`. This closure used to bind `_preview` and drop it, which is why the
+                // Krea control lane shipped an inert `Default::default()` sink.
                 let out = match provider.generate_one(
                     &model,
                     &control,
                     seed as u64,
                     &cancel,
+                    &preview,
                     on_progress,
                 ) {
                     Ok(out) => out,

@@ -1978,6 +1978,13 @@ mod manifest_pins;
 #[cfg(test)]
 mod architecture_tests;
 
+// Source-level drift guard for the bespoke candle preview wiring (epic 16948, sc-16962). Deliberately
+// NOT cfg-gated to `backend-candle`: the lanes it guards are, and both candle CI lanes are
+// dispatch-only, so a compiled test over them would never run on an ordinary PR — exactly when the
+// "make it compile with `preview: Default::default()`" regression lands.
+#[cfg(test)]
+mod candle_preview_wiring_tests;
+
 // Pinned-snapshot provisioning helpers + the install-layout smokes (sc-13797/sc-13810). Compiled on
 // EVERY platform — the download/layout code is platform-agnostic; only the live-network smoke inside
 // carries `#[cfg(target_os = "macos")]` for lane confinement.

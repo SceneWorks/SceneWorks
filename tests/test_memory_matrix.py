@@ -84,8 +84,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
-    assert len(evidence_ids) == len(calibration["records"]) == 24
+    assert len(evidence_ids) == len(calibration["records"]) == 28
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
+    # `current` vs `historical` is decided against the SHIPPED inference pin. sc-16353's four exact
+    # Qwen rung-4 records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so every
+    # run in the shipped bundle is now historical until those measurements are re-taken. This is the
+    # fail-closed rule, not lost evidence — the bundle still holds all 28 records (asserted above),
+    # and `generate-memory-matrix.test.mjs` keeps the promotion path itself alive by re-stamping
+    # those four records onto the current pin and proving they still promote exactly four cells.
     assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
     current_eligible = [
         run
@@ -93,15 +99,36 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
     assert current_eligible == []
+    # The four records that WERE runtime-current before the pin moved are still present and still
+    # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
+    # the bundle rather than re-dating it.
+    superseded_rung4 = [
+        run
+        for run in matrix["calibrationRuns"]
+        if run["record"]["id"]
+        in {
+            "imc-12f3ccbb72de78cea931",
+            "imc-4426a6e84c4d39d9bff3",
+            "imc-8f041bead8a9346cd1e6",
+            "imc-8f110511b0f85d15f72f",
+        }
+    ]
+    assert len(superseded_rung4) == 4
+    assert all(run["binding"]["eligible"] for run in superseded_rung4)
     assert all(
         run["record"]["target"]["modelId"] != "z_image"
         for run in matrix["calibrationRuns"]
     ), "captures without a measured loadShape must remain outside the schema-v4 bundle"
+    # The long-standing bf16 shared-ladder captures, described by the tuple/rung assertions below.
+    # Scoped to bf16 explicitly: since sc-16962 moved the pin, the four superseded q4/q8 rung-4
+    # records are historical too, and they are asserted separately above rather than folded in here
+    # where they would silently widen a claim about a different capture set.
     historical_qwen = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "historical"
         and run["record"]["target"]["modelId"] == "qwen_image"
+        and run["record"]["target"]["tier"] == "bf16"
         and run["binding"]["eligible"]
     ]
     assert len(historical_qwen) == 10
@@ -269,11 +296,16 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_untyped_historical_z_image_records_remain_unattached_without_runtime_promotion():
+def test_historical_records_remain_unattached_after_an_inference_pin_bump():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
+    # No cell is Verified in the SHIPPED matrix: sc-16962 moved the inference pin past the revision
+    # sc-16353's exact Qwen rung-4 records were measured under, so they are historical and promote
+    # nothing until they are re-measured. The promotion path itself is not untested — it is proved by
+    # `generate-memory-matrix.test.mjs`, which re-stamps exactly those four records onto the current
+    # pin and asserts they promote exactly their four cells and nothing else.
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert verified == []
+    assert {cell["id"] for cell in verified} == set()
     historical_z_image = [
         cell
         for cell in matrix["cells"]
