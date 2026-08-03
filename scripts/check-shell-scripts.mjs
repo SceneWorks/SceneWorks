@@ -84,7 +84,12 @@ const BASH4_ONLY = [
   {
     // ${v^} ${v^^} ${v,} ${v,,} case modification — bash 4.0.
     pattern: /\$\{[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?(?:\^\^?|,,?)\}/,
-    what: "case-modification expansion (${v^^} / ${v,,})",
+    // Escaped template literal, not a plain string. CodeQL's "template syntax in string
+    // literal" rule fires on any ordinary string containing `${...}` — normally a forgotten
+    // backtick, here deliberate SHELL syntax. A template literal with `\${` produces the
+    // byte-identical string and is not what the rule looks for. Applies to every fixture
+    // below too; please don't "simplify" them back to quotes.
+    what: `case-modification expansion (\${v^^} / \${v,,})`,
     since: "bash 4.0",
   },
   {
@@ -182,7 +187,7 @@ function selfTest() {
     ["declare -A map", "associative array"],
     ["  local -A thing", "associative array"],
     ["mapfile -t lines < file", "mapfile"],
-    ['echo "${name^^}"', "case-modification"],
+    [`echo "\${name^^}"`, "case-modification"],
     ["cmd &>> log.txt", "&>>"],
     ["  ;;&", ";;& case fallthrough"],
     ["shopt -s globstar", "globstar"],
@@ -201,23 +206,23 @@ function selfTest() {
   const negative = [
     "# declare -A map",
     "# mapfile is bash 4.0",
-    "# use ${v^^} instead of tr on bash 4",
+    `# use \${v^^} instead of tr on bash 4`,
     "# never write cmd &>> log.txt here",
     "  # ;;& is a bash 4 fallthrough",
     "# shopt -s globstar is bash 4",
-    "# [[ -v name ]] is bash 4.2; use ${name+x} instead",
+    `# [[ -v name ]] is bash 4.2; use \${name+x} instead`,
     'cmd run   # and never [[ -v x ]] here either',
     // 3.2-safe code that must not trip anything.
     "declare -a list",
     'local -r frozen="x"',
-    'printf "%s" "${name}"',
+    `printf "%s" "\${name}"`,
     "cmd >log.txt 2>&1",
     "cmd &> log.txt",
-    'value="${a[@]+"${a[@]}"}"',
-    'echo "${path%/*}"',
+    `value="\${a[@]+"\${a[@]}"}"`,
+    `echo "\${path%/*}"`,
     // `#` inside a parameter expansion is NOT a comment — must still be scanned, and must
     // not be truncated in a way that hides a later idiom on the same line.
-    'echo "${path#/prefix}"',
+    `echo "\${path#/prefix}"`,
   ];
   for (const line of negative) {
     const found = scanForBash4("self-test.sh", line);
@@ -227,7 +232,7 @@ function selfTest() {
   }
 
   // And prove the comment stripper does not swallow a real idiom that precedes a comment.
-  if (scanForBash4("self-test.sh", 'x="${v^^}"   # normalize').length === 0) {
+  if (scanForBash4("self-test.sh", `x="\${v^^}"   # normalize`).length === 0) {
     throw new Error("self-test: comment stripping hid a real idiom on a code line");
   }
 
