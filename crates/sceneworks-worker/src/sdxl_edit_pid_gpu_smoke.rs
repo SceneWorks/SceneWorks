@@ -115,6 +115,7 @@ fn inpaint(model: &SdxlEdit, source: &Image, mask: &Image, w: u32, h: u32, use_p
         strength: 0.85,
         seed: 42,
         use_pid,
+        preview: Default::default(),
         cancel: CancelFlag::new(),
     };
     model

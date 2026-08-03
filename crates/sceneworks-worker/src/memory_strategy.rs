@@ -981,6 +981,54 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn canonical_character_identity_evidence_is_selectable_but_aliases_are_not() {
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        staged.key.mode = MemoryMode::Other("character_image".to_owned());
+        staged.key.overlay = Some("identity".to_owned());
+        staged.key.geometry.reference_count = 1;
+        staged.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &staged,
+        };
+        let mut scope = request();
+        scope.mode = "character_image";
+        scope.overlay = Some("identity");
+        scope.geometry.reference_count = 1;
+        let budget = Some(Budget {
+            available_gb: 8.0,
+            reclaimable_gb: 0.0,
+            total_gb: 8.0,
+            reserved_headroom_gb: 0.0,
+        });
+
+        assert!(matches!(
+            select_strategy(scope, &provider, budget, &[candidate]),
+            Selection::Selected {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        scope.overlay = Some("ip_adapter");
+        assert_eq!(
+            select_strategy(scope, &provider, budget, &[candidate]),
+            Selection::Unverified {
+                reason: MemoryEvidenceVerdict::OutOfEnvelope,
+            }
+        );
+    }
+
     fn staged_only_provider() -> MemoryProviderContract {
         let mut provider = contract();
         for strategy in [

@@ -358,7 +358,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -373,6 +373,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                         seed: seed as u64,
                         sampler: sampler.clone(),
                         scheduler: scheduler.clone(),
+                        preview,
                         cancel: cancel.clone(),
                     };
                     let out = match model.generate(&req, &reference, &mut *on_progress) {

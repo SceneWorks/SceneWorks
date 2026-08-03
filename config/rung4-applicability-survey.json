@@ -628,8 +628,25 @@
         },
         "candle": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "Same 19-double + 38-single split; no Candle block-window path.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "flux_schnell",
+            "flux_dev"
+          ],
+          "implementedModes": [
+            "text_to_image",
+            "character_image",
+            "style_variations"
+          ],
+          "implementedOverlays": [
+            "none",
+            "control",
+            "identity"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1
+          },
+          "summary": "The FLUX.1 schnell/dev Candle lanes rebuild independent windows of the 19 double-stream and 38 single-stream DiT stacks through the shared block-window scheduler. FLUX.1 dev additionally carries one budgeted ControlNet or XLabs IP-Adapter overlay while streaming the base trunk. PuLID, PiD, LoRA, combined overlays, and additional controls remain outside this implementation.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -644,7 +661,7 @@
             {
               "name": "FluxControlNet blocks",
               "blocks": "6 (control route only)",
-              "windowable": true,
+              "windowable": false,
               "entries": [
                 "flux_dev"
               ]
@@ -652,12 +669,24 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/lib.rs",
-              "reason": "The Candle FLUX.1 provider advertises sequential offload but declares no memory_strategy_contract and carries no streamed-block loader."
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs",
+              "reason": "The shared schnell/dev provider contract publishes DiT window size 1 for re-openable directories with DeferredMaterialization. It admits either one typed ControlNet component or one typed XLabs IP-Adapter component (plus its optional image encoder) into the budget, while rejecting combined overlays, extra controls, LoRA, PuLID, and PiD."
             },
             {
-              "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/control_transformer.rs",
-              "reason": "The control route adds `FluxControlNet { blocks: Vec<JointBlock> }` — a partial copy of the base MMDiT, `num_layers: 6` for the shipped Shakker Union-Pro-2.0 — resident alongside the base trunk."
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/ip_dit.rs",
+              "reason": "The native BFL loader keeps `transformer_blocks.` and `single_transformer_blocks.` as separate streamed namespaces and drives both through the shared block-window scheduler with a one-block window."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/packed_dit.rs",
+              "reason": "The packed/diffusers loader prepares separate device-format sidecar views for the double and single prefixes, then materializes only the selected one-block window instead of preparing the full transformer component."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/control.rs",
+              "reason": "The control route keeps its six-block ControlNet branch resident as a separately budgeted overlay, applies the shared attention plan and cancellation checks there, and streams the native or packed base DiT with absolute residual indices."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux/src/packed_dit.rs",
+              "reason": "The packed XLabs route injects cached image projections at the post-QK-normalization, pre-RoPE seam while preserving absolute block indices under a one-block transformer window; the adapter and optional image encoder are separately budgeted overlay components."
             }
           ],
           "requestPeak": {
@@ -1682,7 +1711,7 @@
         "candle": {
           "structuralApplicability": "partial",
           "implementation": "none",
-          "summary": "Same FLUX.1 backbone and identity path on Candle; no block-window path.",
+          "summary": "The Candle PuLID provider now delegates its FLUX.1 trunk to the shared staged/windowed reference backbone, but the PuLID worker route does not select or pass a memory strategy and no PuLID overlay evidence is certified. The family therefore remains implementation:none until SC-15839 wires admission and validates the complete identity request.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -1712,8 +1741,8 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-pulid",
-              "reason": "The Candle PuLID route drives the Candle FLUX.1 transformer, which declares no memory_strategy_contract and carries no streamed-block loader."
+              "source": "inference:crates/media/candle-gen/candle-gen-pulid/src/pulid_flux.rs",
+              "reason": "The Candle PuLID provider now uses `FluxRefBackbone` and its memory-aware injected forward, so the shared FLUX trunk can stage components and stream absolute-index block windows. Its public load path still uses default resident memory, and the SceneWorks PuLID worker does not perform shared selector admission or supply a `GenerationMemory`."
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/ca.rs",
@@ -1721,7 +1750,7 @@
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/idformer.rs",
-              "reason": "`IdFormer { layers: Vec<(PerceiverAttention, FeedForward)> }` at depth 10 plus 6 mapping MLPs (`id_embedding_mapping` and `mapping_{0..4}`). `PulidFlux` holds the FLUX trunk, EVA-CLIP, the IdFormer and the face stack as plain owned fields with no residency seam, so none of it is dropped for the denoise."
+              "reason": "`IdFormer { layers: Vec<(PerceiverAttention, FeedForward)> }` at depth 10 plus 6 mapping MLPs (`id_embedding_mapping` and `mapping_{0..4}`). The shared FLUX backbone seam does not window the EVA-CLIP, IdFormer, face stack, or 20 PuLID cross-attention modules; those overlay components remain resident and require their own exact admission budget."
             }
           ],
           "requestPeak": {
@@ -1729,7 +1758,8 @@
             "reason": "No rung-4 run exists for PuLID."
           },
           "findings": [
-            "PuLID has no residency seam at all: the 57-block FLUX trunk, a 24-block EVA-CLIP tower, the 10-layer IdFormer and 20 per-step cross-attention modules are plain owned fields. Rung 4 would bound the trunk while everything else stays resident, so the share of the peak it can move is smaller than the trunk's block count suggests."
+            "Shared-backbone plumbing is available but not a shipped PuLID capability: the worker has no PuLID memory-strategy selection/context, the provider's normal load remains resident, and there is no exact full-request overlay evidence. Keep implementation:none and uncertified until SC-15839 wires those boundaries and measures the complete request.",
+            "A future PuLID rung 4 bounds only the 57-block FLUX trunk. EVA-CLIP, the 10-layer IdFormer, the face stack, and 20 per-step cross-attention modules remain resident, so their exact bytes must be priced and the peak improvement cannot be inferred from the trunk block count."
           ]
         }
       }

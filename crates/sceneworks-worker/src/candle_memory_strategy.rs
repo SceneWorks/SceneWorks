@@ -22,6 +22,7 @@ use crate::{WorkerError, WorkerResult};
 
 const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
 const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
+const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 pub(crate) struct CandleMemoryEvaluation {
@@ -48,7 +49,13 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
         "style_variations" => (MemoryMode::ImageToImage, "style_variations"),
-        "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
+        // `ImageToImage` serializes as `image_to_image`; retain the catalog's narrower character
+        // axis in `Other` so the typed evidence key and exact calibration lookup share one spelling.
+        "character_image" => (
+            MemoryMode::Other("character_image".to_owned()),
+            "character_image",
+        ),
+        "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
     }
@@ -180,6 +187,37 @@ fn evidence_provider(engine_id: &str) -> &str {
     engine_id.strip_suffix("_control").unwrap_or(engine_id)
 }
 
+fn binding_matches_request(
+    item: &JsonObject<String, Value>,
+    provider: &str,
+    tier: &str,
+    mode: &str,
+    overlay: &str,
+    geometry: MemoryGeometry,
+) -> bool {
+    if text(item, "provider") != Some(provider)
+        || text(item, "tier") != Some(tier)
+        || text(item, "mode") != Some(mode)
+        || text(item, "overlay") != Some(overlay)
+    {
+        return false;
+    }
+    let Some(item_geometry) = item.get("geometry").and_then(Value::as_object) else {
+        return false;
+    };
+    ["width", "height", "batch", "frames"]
+        .into_iter()
+        .zip([
+            geometry.width,
+            geometry.height,
+            geometry.batch,
+            geometry.frames,
+        ])
+        .all(|(key, expected)| {
+            item_geometry.get(key).and_then(Value::as_u64) == Some(u64::from(expected))
+        })
+}
+
 fn verified_candidates(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
@@ -216,28 +254,7 @@ fn verified_candidates(
         let Some(item) = value.as_object() else {
             continue;
         };
-        if text(item, "provider") != Some(evidence_provider)
-            || text(item, "tier") != Some(tier)
-            || text(item, "mode") != Some(mode)
-            || text(item, "overlay") != Some(overlay)
-        {
-            continue;
-        }
-        let Some(item_geometry) = item.get("geometry").and_then(Value::as_object) else {
-            continue;
-        };
-        let exact_geometry = ["width", "height", "batch", "frames"]
-            .into_iter()
-            .zip([
-                geometry.width,
-                geometry.height,
-                geometry.batch,
-                geometry.frames,
-            ])
-            .all(|(key, expected)| {
-                item_geometry.get(key).and_then(Value::as_u64) == Some(u64::from(expected))
-            });
-        if !exact_geometry {
+        if !binding_matches_request(item, evidence_provider, tier, mode, overlay, geometry) {
             continue;
         }
         let Some(rung) = text(item, "rung").and_then(rung) else {
@@ -385,13 +402,15 @@ pub(crate) fn evaluate_shared_image(
             | "z_image_turbo_control"
             | "qwen_image"
             | "qwen_image_edit"
+            | "flux1_schnell"
+            | "flux1_dev"
     ) {
         return Ok(None);
     }
-    let request_evidence_revision = if matches!(engine_id, "qwen_image" | "qwen_image_edit") {
-        QWEN_IMAGE_REQUEST_EVIDENCE_REVISION
-    } else {
-        Z_IMAGE_REQUEST_EVIDENCE_REVISION
+    let request_evidence_revision = match engine_id {
+        "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
+        "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
+        _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
     };
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
     // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
@@ -593,6 +612,122 @@ mod tests {
         let (mode, key) = request_mode("style_variations");
         assert_eq!(mode, MemoryMode::ImageToImage);
         assert_eq!(key, "style_variations");
+    }
+
+    #[test]
+    fn character_image_preserves_its_exact_evidence_key() {
+        let (mode, key) = request_mode("character_image");
+        assert_eq!(mode, MemoryMode::Other("character_image".to_owned()));
+        assert_eq!(key, "character_image");
+
+        let (_, generic_key) = request_mode("image_to_image");
+        assert_eq!(generic_key, "image_to_image");
+    }
+
+    #[test]
+    fn character_identity_and_control_bindings_require_the_canonical_exact_keys() {
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        };
+        let binding = |overlay| {
+            json!({
+                "provider": "flux1_dev",
+                "tier": "q4",
+                "mode": "character_image",
+                "overlay": overlay,
+                "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 }
+            })
+            .as_object()
+            .expect("binding object")
+            .clone()
+        };
+
+        for overlay in ["identity", "control"] {
+            let exact = binding(overlay);
+            assert!(binding_matches_request(
+                &exact,
+                "flux1_dev",
+                "q4",
+                "character_image",
+                overlay,
+                geometry,
+            ));
+            assert!(!binding_matches_request(
+                &exact,
+                "flux1_dev",
+                "q4",
+                "image_to_image",
+                overlay,
+                geometry,
+            ));
+        }
+
+        let identity = binding("identity");
+        assert!(!binding_matches_request(
+            &identity,
+            "flux1_dev",
+            "q4",
+            "character_image",
+            "ip_adapter",
+            geometry,
+        ));
+    }
+
+    #[test]
+    fn uncertified_flux_identity_artifacts_fall_back_to_resident() {
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("alternate-flux-q4")))
+            .with_ip_adapter(WeightsSource::File(PathBuf::from(
+                "alternate-ip-adapter.safetensors",
+            )))
+            .with_component(
+                "flux_ip_image_encoder",
+                WeightsSource::Dir(PathBuf::from("alternate-image-encoder")),
+            )
+            .with_offload_policy(gen_core::OffloadPolicy::Sequential);
+        let evaluation = evaluate_shared_image(
+            "flux1_dev",
+            "flux_dev",
+            &spec,
+            false,
+            &JsonObject::new(),
+            "q4",
+            "character_image",
+            Some("identity"),
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 32.0,
+                total_gb: 32.0,
+            }),
+            Some(8.0),
+            0,
+            MemoryCacheState::Cold,
+        )
+        .expect("FLUX identity evaluation")
+        .expect("resident fallback");
+
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert_eq!(
+            evaluation.context.mode,
+            MemoryMode::Other("character_image".to_owned())
+        );
+        assert_eq!(evaluation.context.overlay.as_deref(), Some("identity"));
+        assert!(evaluation.memory.is_none());
     }
 
     #[test]

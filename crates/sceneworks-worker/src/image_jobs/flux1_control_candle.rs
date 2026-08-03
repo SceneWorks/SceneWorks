@@ -1,4 +1,8 @@
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
+use super::{
+    advanced, apply_candle_image_load_shape, candle_artifact_path_matches,
+    candle_certified_artifact_path, candle_pinned_hf_artifact_path, ensure_hf_cached_file,
+    huggingface_snapshot_dir,
+};
 use super::{
     control_kind_label, pose_entries, requested_control_kind, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
@@ -43,7 +47,6 @@ const FLUX1_CONTROL_CANDLE_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// checkpoint we load; pin the exact commit for defense-in-depth (mirrors sc-8879/sc-9682). Registered
 /// overlays carry their own catalog-authorized immutable revision. HF's tree API still reports the
 /// file's `lfs.oid`, which `ensure_hf_cached_file` verifies against.
-#[cfg(test)]
 pub(super) const FLUX1_CONTROL_CANDLE_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
 /// The FLUX.1-dev base diffusers repo when the manifest omits `repo` (HF-gated). The candle lane loads
 /// the dense bf16 snapshot.
@@ -156,6 +159,20 @@ pub(super) fn flux1_control_candle_repo_file(
     Ok((repo, file))
 }
 
+fn flux1_control_overlay_identity_is_certified(
+    repo: &str,
+    file: &str,
+    revision: &str,
+    control: &Path,
+    expected: Option<PathBuf>,
+) -> bool {
+    if repo != FLUX1_CONTROL_CANDLE_REPO || file != FLUX1_CONTROL_CANDLE_FILE {
+        return false;
+    }
+    revision == FLUX1_CONTROL_CANDLE_REVISION
+        && expected.is_some_and(|expected| candle_artifact_path_matches(control, &expected))
+}
+
 /// Resolve the Shakker Union-Pro-2.0 weight **file** the `Flux1DevControl` provider loads, downloading on
 /// first use. Order: an env-pinned file (`SCENEWORKS_CONTROLNET_FLUX1`) → a whole-repo HF cache snapshot →
 /// download into the app cache. Mirrors the MLX `ensure_flux1_control_weights` / candle
@@ -247,6 +264,7 @@ pub(super) struct Flux1StrictControl {
     /// validates it against its accepted set but does NOT branch the forward (Union-Pro-2.0 dropped the
     /// discrete mode index). The whole pose set shares one `controlMode`, so a single label is correct.
     control_kind: String,
+    memory: gen_core::GenerationMemory,
 }
 
 #[cfg(test)]
@@ -261,6 +279,7 @@ pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictCon
         guidance: 3.5,
         control_scale: 0.7,
         control_kind: "pose".to_owned(),
+        memory: gen_core::GenerationMemory::default(),
     }
 }
 
@@ -290,6 +309,11 @@ impl CandleStrictControl for Flux1StrictControl {
     /// The FLUX.1-dev base tier dir + the Shakker Union-Pro-2.0 control overlay, exactly the two paths
     /// [`Self::load`] hands `Flux1ControlPaths` (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
+        if self.memory != gen_core::GenerationMemory::default() {
+            return ConditioningAdmission::GatedInPreamble {
+                gate: "shared FLUX.1 memory ladder",
+            };
+        }
         ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
             "FLUX.1-dev",
             "strict-control Union-Pro-2.0 branch",
@@ -303,7 +327,7 @@ impl CandleStrictControl for Flux1StrictControl {
             flux_base: self.base.clone(),
             control: self.control.clone(),
         };
-        Flux1DevControl::load(&paths).map_err(|error| {
+        Flux1DevControl::load_with_memory(&paths, self.memory).map_err(|error| {
             WorkerError::Engine(format!("FLUX.1-dev strict-control load failed: {error}"))
         })
     }
@@ -333,6 +357,7 @@ impl CandleStrictControl for Flux1StrictControl {
             control_scale: Some(self.control_scale),
             control_kind: self.control_kind.clone(),
             seed,
+            memory: self.memory,
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
@@ -390,7 +415,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         .to_owned();
 
     let pose_count = pose_entries(request).len();
-    let raw_settings = flux1_control_candle_raw_settings(
+    let mut raw_settings = flux1_control_candle_raw_settings(
         request,
         &repo,
         steps,
@@ -398,6 +423,83 @@ pub(super) async fn generate_candle_flux1_control_stream(
         control_scale,
         pose_count,
     );
+
+    let tier = match base.file_name().and_then(|name| name.to_str()) {
+        Some("q4") => "q4",
+        Some("q8") => "q8",
+        _ => "bf16",
+    };
+    let overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control);
+    let strategy_spec = apply_candle_image_load_shape(
+        "flux1_dev",
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
+            .with_control(gen_core::WeightsSource::File(control.clone()))
+            .with_offload_policy(gen_core::OffloadPolicy::Sequential),
+    );
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        overlay_bytes,
+    );
+    let (control_repo, control_file) = flux1_control_candle_repo_file(request)?;
+    let control_revision = trusted_control_weight_revision(
+        request,
+        FLUX1_CONTROL_CANDLE_ENGINE_ID,
+        &control_repo,
+        &control_file,
+    )?;
+    let expected_control = candle_pinned_hf_artifact_path(
+        settings,
+        &control_repo,
+        &control_revision,
+        Path::new(&control_file),
+    );
+    let artifact_is_certified = candle_certified_artifact_path("flux1_dev", settings, &base, tier)
+        && flux1_control_overlay_identity_is_certified(
+            &control_repo,
+            &control_file,
+            &control_revision,
+            &control,
+            expected_control,
+        );
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+        "flux1_dev",
+        &request.model,
+        &strategy_spec,
+        artifact_is_certified,
+        &request.model_manifest_entry,
+        tier,
+        &request.mode,
+        Some("control"),
+        gen_core::MemoryGeometry {
+            width: request.width,
+            height: request.height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        true,
+        false,
+        false,
+        raw_budget,
+        predicted_peak,
+        overlay_bytes,
+        gen_core::MemoryCacheState::Cold,
+    )?;
+    let generation_memory = memory_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.memory)
+        .unwrap_or_default();
+    if let Some(evaluation) = &memory_evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+    }
 
     let provider = Flux1StrictControl {
         base,
@@ -409,6 +511,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         guidance,
         control_scale,
         control_kind,
+        memory: generation_memory,
     };
 
     run_candle_strict_control(
@@ -423,4 +526,67 @@ pub(super) async fn generate_candle_flux1_control_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod memory_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn optimized_control_evidence_requires_the_canonical_tuple_and_exact_path() {
+        let root = tempfile::tempdir().expect("control fixture");
+        let expected = root.path().join(FLUX1_CONTROL_CANDLE_FILE);
+        let alternate = root.path().join("alternate.safetensors");
+        std::fs::write(&expected, b"control").expect("control fixture");
+        std::fs::write(&alternate, b"control").expect("alternate fixture");
+
+        assert!(flux1_control_overlay_identity_is_certified(
+            FLUX1_CONTROL_CANDLE_REPO,
+            FLUX1_CONTROL_CANDLE_FILE,
+            FLUX1_CONTROL_CANDLE_REVISION,
+            &expected,
+            Some(expected.clone()),
+        ));
+        for (repo, file, revision, path) in [
+            (
+                "someone/alternate-control",
+                FLUX1_CONTROL_CANDLE_FILE,
+                FLUX1_CONTROL_CANDLE_REVISION,
+                expected.as_path(),
+            ),
+            (
+                FLUX1_CONTROL_CANDLE_REPO,
+                "alternate.safetensors",
+                FLUX1_CONTROL_CANDLE_REVISION,
+                expected.as_path(),
+            ),
+            (
+                FLUX1_CONTROL_CANDLE_REPO,
+                FLUX1_CONTROL_CANDLE_FILE,
+                "0123456789abcdef0123456789abcdef01234567",
+                expected.as_path(),
+            ),
+            (
+                FLUX1_CONTROL_CANDLE_REPO,
+                FLUX1_CONTROL_CANDLE_FILE,
+                FLUX1_CONTROL_CANDLE_REVISION,
+                alternate.as_path(),
+            ),
+        ] {
+            assert!(!flux1_control_overlay_identity_is_certified(
+                repo,
+                file,
+                revision,
+                path,
+                Some(expected.clone()),
+            ));
+        }
+        assert!(!flux1_control_overlay_identity_is_certified(
+            FLUX1_CONTROL_CANDLE_REPO,
+            FLUX1_CONTROL_CANDLE_FILE,
+            FLUX1_CONTROL_CANDLE_REVISION,
+            &expected,
+            None,
+        ));
+    }
 }

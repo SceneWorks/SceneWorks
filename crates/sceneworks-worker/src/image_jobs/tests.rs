@@ -14710,8 +14710,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     //
     // `conditioning_admission` has two arms, and the second (`GatedInPreamble`) tells the shared driver to
     // stand down — legitimate only for a lane that gates itself earlier, and the obvious place a future
-    // lane could hide. It is therefore bounded below: exactly ONE handler may use it, that handler must
-    // ALSO carry a live `admit_conditioning_paths(` call, and it must name a gate module it really runs.
+    // lane could hide. It is therefore bounded below: only explicitly audited handlers may use it, and
+    // each must name and actually call the gate that owns its preamble admission.
     const CONDITIONING: &[(&str, &str, &str, &str)] = &[
         (
             "InstantId",
@@ -15044,11 +15044,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     );
 
     // 4b. The `GatedInPreamble` arm tells the shared driver to stand down, so it is the obvious place a
-    //     future lane could hide an ungated route. Bind it to the audited Krea conditioning handler:
-    //     if a handler uses it, that handler must ALSO carry a live gate call of its own (asserted in
-    //     step 3 via its `admit_conditioning_paths(` marker), and it must name a gate module it really
-    //     runs. Krea pose-control gates before its own `note_loaded_peak`; any other lane is a new
-    //     exemption and must fail review here.
+    //     future lane could hide an ungated route. Bind it to the two audited conditioning handlers:
+    //     Krea pose-control gates before its own `note_loaded_peak`, while FLUX.1 control evaluates the
+    //     shared image-memory ladder before constructing the strict-control provider. Any other lane is
+    //     a new exemption and must fail review here.
     let opting_out: Vec<&str> = CONDITIONING
         .iter()
         .filter(|(_, _, source, _)| source.contains("ConditioningAdmission::GatedInPreamble"))
@@ -15056,9 +15055,22 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         .collect();
     assert_eq!(
         opting_out,
-        vec!["KreaControl"],
-        "only the audited Krea pose-control preamble may declare \
+        vec!["Flux1Control", "KreaControl"],
+        "only the audited FLUX.1 shared-ladder and Krea pose-control preambles may declare \
          GatedInPreamble. Anything else tells the shared driver to stand down without review (sc-16069)"
+    );
+    let flux1_source = CONDITIONING
+        .iter()
+        .find(|(route, ..)| *route == "Flux1Control")
+        .expect("Flux1Control row")
+        .2;
+    assert!(
+        flux1_source.contains("gate: \"shared FLUX.1 memory ladder\""),
+        "the FLUX.1 opting-out lane must name the shared image-memory ladder that owns admission"
+    );
+    assert!(
+        flux1_source.contains("candle_memory_strategy::evaluate_shared_image("),
+        "flux1_control_candle.rs must evaluate the shared image-memory ladder before its provider load"
     );
     let krea_source = CONDITIONING
         .iter()

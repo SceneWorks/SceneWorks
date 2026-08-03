@@ -332,10 +332,7 @@ impl CandleStrictControl for Flux2StrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
-        // `Flux2ControlRequest` has no `preview` field yet — candle FLUX.2 is not preview-wired
-        // upstream (epic 16948 Tier 1, sc-16955). `no_candle_image_lane_defaults_its_preview_sink`
-        // sweeps this file, so the guard fails the moment the field appears without being fed.
-        _preview: &gen_core::PreviewSink,
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
         let req = Flux2ControlRequest {
@@ -348,6 +345,7 @@ impl CandleStrictControl for Flux2StrictControl {
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.pid.is_some(),
+            preview: preview.clone(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {
