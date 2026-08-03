@@ -1011,3 +1011,211 @@ describe("live denoise preview", () => {
     expect(api.container.querySelector(".worker-progress-card__thumb-cell.interim")).toBeNull();
   });
 });
+
+// Live-preview DISCOVERABILITY (sc-16965, epic 16948). Three situations used to render identically:
+// the model cannot preview; it can and the first frame has not arrived; a frame is showing. The
+// card now reads `preview.byBackend` off the catalog entry — a capability, never an id list — keyed
+// by the backend of the worker that claimed the job, and exposes the resolved state as
+// `data-preview-state`.
+describe("live preview support states", () => {
+  let api;
+
+  afterEach(() => {
+    api?.cleanup();
+    api = undefined;
+  });
+
+  const DATA_URL = "data:image/jpeg;base64,QUJD";
+  // The candle GPU worker advertises the "candle" lane marker (gpu.rs with_candle_capabilities).
+  const candleWorker = {
+    id: "worker-candle-1",
+    gpuId: "gpu-0",
+    gpuName: "NVIDIA RTX PRO 6000",
+    capabilities: ["gpu", "image_generate", "candle"],
+    utilization: null,
+  };
+  const mlxWorker = {
+    id: "worker-mlx-1",
+    gpuId: "mlx",
+    gpuName: "Apple Silicon (MLX)",
+    capabilities: ["gpu", "image_generate"],
+    utilization: null,
+  };
+  // Same model id, two answers — the reason the flag can never be a single shipped boolean.
+  const models = [
+    { id: "krea_2_turbo", type: "image", preview: { byBackend: { candle: true, mlx: true } } },
+    { id: "sdxl", type: "image", preview: { byBackend: { candle: false, mlx: true } } },
+    { id: "some_external_model", type: "image" },
+  ];
+
+  const contextWith = (workers) => ({ ...makeContext(workers), models });
+
+  const job = (overrides) => ({
+    id: "job-preview-support",
+    type: "image_generate",
+    status: "running",
+    stage: "loading_model",
+    progress: 0.1,
+    attempts: 1,
+    startedAt: "2026-05-28T12:00:00Z",
+    workerId: "worker-candle-1",
+    payload: { model: "krea_2_turbo" },
+    result: {},
+    ...overrides,
+  });
+
+  it("state 1 — a model that does NOT support preview renders exactly as before", () => {
+    api = render(
+      <WorkerProgressCard
+        job={job({ payload: { model: "sdxl" } })}
+        thumbnailsVariant="image-grid"
+      />,
+      contextWith([candleWorker]),
+    );
+    const card = api.container.querySelector(".worker-progress-card");
+    expect(card.getAttribute("data-preview-state")).toBe("unsupported");
+    // No placeholder, no explanatory chrome: a permanent "no live preview" label would be noise on
+    // the majority of renders.
+    expect(api.container.querySelector("[data-testid='live-preview-placeholder']")).toBeNull();
+    expect(api.container.querySelector(".worker-progress-card__thumb-cell.interim")).toBeNull();
+  });
+
+  it("state 2 — supports preview but no frame yet shows the placeholder", () => {
+    api = render(
+      <WorkerProgressCard job={job()} thumbnailsVariant="image-grid" />,
+      contextWith([candleWorker]),
+    );
+    const card = api.container.querySelector(".worker-progress-card");
+    expect(card.getAttribute("data-preview-state")).toBe("pending");
+    const placeholder = api.container.querySelector("[data-testid='live-preview-placeholder']");
+    expect(placeholder).not.toBeNull();
+    // It occupies the same interim grid slot the real frame will take, so the cell fills in rather
+    // than appearing from nowhere.
+    expect(placeholder.classList.contains("interim")).toBe(true);
+    expect(placeholder.classList.contains("worker-progress-card__thumb-cell")).toBe(true);
+    // No <img>: there is no media yet, so AssetThumbnail is never handed a urlless asset.
+    expect(placeholder.querySelector("img")).toBeNull();
+  });
+
+  it("state 3 — a streamed frame supersedes the placeholder in the same slot", () => {
+    api = render(
+      <WorkerProgressCard
+        job={job({
+          stage: "generating",
+          result: { previewFrame: { imageIndex: 0, current: 3, total: 8, dataUrl: DATA_URL } },
+        })}
+        thumbnailsVariant="image-grid"
+      />,
+      contextWith([candleWorker]),
+    );
+    const card = api.container.querySelector(".worker-progress-card");
+    expect(card.getAttribute("data-preview-state")).toBe("live");
+    expect(api.container.querySelector("[data-testid='live-preview-placeholder']")).toBeNull();
+    const cells = api.container.querySelectorAll(".worker-progress-card__thumb-cell.interim");
+    expect(cells).toHaveLength(1);
+    expect(cells[0].querySelector("img")?.getAttribute("src")).toBe(DATA_URL);
+  });
+
+  it("the answer is ENGINE-KEYED: the same model resolves per worker backend", () => {
+    // sdxl previews on MLX but not on candle. Reading a single boolean would be wrong on one of
+    // these two cards.
+    api = render(
+      <WorkerProgressCard
+        job={job({ payload: { model: "sdxl" } })}
+        thumbnailsVariant="image-grid"
+      />,
+      contextWith([candleWorker]),
+    );
+    expect(
+      api.container.querySelector(".worker-progress-card").getAttribute("data-preview-state"),
+    ).toBe("unsupported");
+    api.cleanup();
+
+    api = render(
+      <WorkerProgressCard
+        job={job({ payload: { model: "sdxl" }, workerId: "worker-mlx-1" })}
+        thumbnailsVariant="image-grid"
+      />,
+      contextWith([mlxWorker]),
+    );
+    expect(
+      api.container.querySelector(".worker-progress-card").getAttribute("data-preview-state"),
+    ).toBe("pending");
+  });
+
+  it("a model with no catalog answer is UNKNOWN, not 'does not support'", () => {
+    api = render(
+      <WorkerProgressCard
+        job={job({ payload: { model: "some_external_model" } })}
+        thumbnailsVariant="image-grid"
+      />,
+      contextWith([candleWorker]),
+    );
+    expect(
+      api.container.querySelector(".worker-progress-card").getAttribute("data-preview-state"),
+    ).toBe("unknown");
+    expect(api.container.querySelector("[data-testid='live-preview-placeholder']")).toBeNull();
+  });
+
+  it("an unresolvable worker backend is UNKNOWN rather than an invented answer", () => {
+    api = render(
+      <WorkerProgressCard job={job({ workerId: "worker-gone" })} thumbnailsVariant="image-grid" />,
+      contextWith([]),
+    );
+    expect(
+      api.container.querySelector(".worker-progress-card").getAttribute("data-preview-state"),
+    ).toBe("unknown");
+  });
+
+  // The bound the story requires: a route that advertises support but never emits must degrade to
+  // today's behaviour, not leave a placeholder up for the whole render. Denoise reporting (stage
+  // `generating`) is the boundary — that same update is the one that would carry the first frame.
+  it("the placeholder is bounded: it disappears once denoise reports", () => {
+    api = render(
+      <WorkerProgressCard
+        job={job({ stage: "generating", progress: 0.5 })}
+        thumbnailsVariant="image-grid"
+      />,
+      contextWith([candleWorker]),
+    );
+    expect(
+      api.container.querySelector(".worker-progress-card").getAttribute("data-preview-state"),
+    ).toBe("supported");
+    expect(api.container.querySelector("[data-testid='live-preview-placeholder']")).toBeNull();
+  });
+
+  it("terminal jobs never show the placeholder", () => {
+    for (const status of ["completed", "failed", "canceled"]) {
+      api?.cleanup();
+      api = render(
+        <WorkerProgressCard
+          job={job({ status, stage: "queued" })}
+          thumbnailsVariant="image-grid"
+        />,
+        contextWith([candleWorker]),
+      );
+      expect(
+        api.container.querySelector("[data-testid='live-preview-placeholder']"),
+        status,
+      ).toBeNull();
+    }
+  });
+
+  it("an explicit interimThumbnailAssets prop still wins over the placeholder", () => {
+    const explicit = [
+      { id: "explicit-1", type: "image", url: "/api/v1/files/e-1.png", __interim: true },
+    ];
+    api = render(
+      <WorkerProgressCard
+        job={job()}
+        thumbnailsVariant="image-grid"
+        interimThumbnailAssets={explicit}
+      />,
+      contextWith([candleWorker]),
+    );
+    expect(api.container.querySelector("[data-testid='live-preview-placeholder']")).toBeNull();
+    expect(api.container.querySelectorAll(".worker-progress-card__thumb-cell.interim")).toHaveLength(
+      1,
+    );
+  });
+});

@@ -37,6 +37,12 @@ const documentsDir = fileURLToPath(new URL("../../documents", import.meta.url));
 // project root, so allow it like documentsDir.
 const configDir = fileURLToPath(new URL("../../config", import.meta.url));
 
+// The live-preview-support drift guard (src/data/previewSupportCatalog.test.js, sc-16965) imports
+// crates/sceneworks-worker/src/engines.rs as ?raw to re-parse the MODEL_TABLE join the generator
+// reads — the same "derive from the committed bytes" shape as documents/style.txt above. crates/ is
+// at the repo root, outside the web project root, so allow it like documentsDir.
+const cratesDir = fileURLToPath(new URL("../../crates", import.meta.url));
+
 export default defineConfig({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
@@ -67,7 +73,13 @@ export default defineConfig({
     fs: {
       // Keep the default workspace-root allowance and add the desktop license
       // corpus the Licenses screen imports from.
-      allow: [searchForWorkspaceRoot(process.cwd()), licensesDir, documentsDir, configDir],
+      allow: [
+        searchForWorkspaceRoot(process.cwd()),
+        licensesDir,
+        documentsDir,
+        configDir,
+        cratesDir,
+      ],
     },
   },
 });

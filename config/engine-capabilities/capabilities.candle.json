@@ -1,0 +1,264 @@
+{
+  "backend": "candle",
+  "generatedFrom": {
+    "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+    "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
+  },
+  "engines": [
+    {
+      "id": "anima_aesthetic",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "anima_base",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "anima_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "bernini",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "bernini_renderer",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "boogu_image",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "boogu_image_edit",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "boogu_image_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "chroma1_base",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "chroma1_flash",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "chroma1_hd",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "flux1_dev",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "flux1_schnell",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "flux2_dev",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "flux2_klein_9b",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "ideogram_4",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "ideogram_4_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "kolors",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "krea_2_edit",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_2_raw",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "krea_2_turbo",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "lens",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "lens_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "ltx_2_3_distilled",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_base",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_edit",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_edit_base",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_edit_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mage_flow_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "mochi_1",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "qwen_image",
+      "modality": "image",
+      "supportsPreview": true
+    },
+    {
+      "id": "sana_1600m",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "sana_sprint_1600m",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "scail2_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "sd3_5_large",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "sd3_5_large_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "sd3_5_medium",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "sdxl",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "seedvr2",
+      "modality": "both",
+      "supportsPreview": false
+    },
+    {
+      "id": "seedvr2_3b",
+      "modality": "both",
+      "supportsPreview": false
+    },
+    {
+      "id": "seedvr2_7b",
+      "modality": "both",
+      "supportsPreview": false
+    },
+    {
+      "id": "sensenova_u1_8b",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "sensenova_u1_8b_fast",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "svd_xt",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan2_2_i2v_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan2_2_t2v_14b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan2_2_ti2v_5b",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "wan_vace",
+      "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "z_image",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "z_image_turbo",
+      "modality": "image",
+      "supportsPreview": false
+    }
+  ]
+}

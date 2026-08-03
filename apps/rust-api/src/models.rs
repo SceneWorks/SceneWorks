@@ -4280,6 +4280,14 @@ fn apply_model_catalog_entry(
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
     apply_mac_and_mlx_fields(object, data_dir);
+    // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
+    // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
+    // THIS process may link no engines at all (docker/rust.Dockerfile builds the API without
+    // `backend-candle`, so `Registry::new()` here is empty and a serve-time derivation would report
+    // "nothing supports preview" on every server). Engine-KEYED on purpose — the flag genuinely
+    // diverges by backend and never fully collapses. Additive: a model the generated table does not
+    // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
+    sceneworks_core::preview_support::apply_to_model_entry(object);
     Ok(model)
 }
 
