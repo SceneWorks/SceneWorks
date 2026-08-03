@@ -508,14 +508,19 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
 test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
   assert.equal(model.completedBaseline.completeRecords, 28);
+  // "Runtime-current" is measured against the SHIPPED inference pin. sc-16353's four exact Qwen
+  // Q4/Q8 rung records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so they are
+  // historical and nothing is runtime-current until they are re-measured. The record COUNT below is
+  // what keeps this honest rather than vacuous: the bundle still holds all 28 complete records, so a
+  // zero here means "superseded pin", not "evidence lost".
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    4,
-    "only the four exact current Qwen Q4/Q8 rung records count as runtime-current",
+    0,
+    "an inference pin bump supersedes every runtime-current calibration run until it is re-measured",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
   assert.match(model.completedBaseline.note, /28 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /4 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 6 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
