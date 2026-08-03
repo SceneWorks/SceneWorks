@@ -5,7 +5,9 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { HARNESS_VERSION, logicalCaseId, recordId, validateBundle } from "./memory-calibration-harness.mjs";
+import {
+  HARNESS_VERSION, canonicalJson, logicalCaseId, recordId, validateBundle,
+} from "./memory-calibration-harness.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLAN = path.join(ROOT, "config/memory-calibration-plan.json");
@@ -54,6 +56,25 @@ const PREDICTED = {
 
 function sourceId(source) {
   return `ims-${sha256(JSON.stringify(source)).slice(0, 20)}`;
+}
+
+export function certificationBundle(existing, records) {
+  const bundle = {
+    schemaVersion: 4,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: existing.sourceSessions ?? [],
+    records,
+  };
+  validateBundle(bundle);
+  return bundle;
+}
+
+export function assertCanonicalBundleMatches(checked, expected) {
+  validateBundle(checked);
+  validateBundle(expected);
+  if (canonicalJson(checked) !== canonicalJson(expected)) {
+    throw new Error("checked-in evidence still contains material SC-16170 drift; run with --write");
+  }
 }
 
 async function readSession(filename, metadata) {
@@ -416,38 +437,45 @@ async function loadSources() {
   return { all, baseInventory, controlInventory, loraInventory, controlPhysical, controlQuality, stylePhysical, loraPhysical, loraQuality, lifecycle: lifecycleLoaded, negativeMutation: negativeLoaded };
 }
 
-const plan = JSON.parse(await readFile(PLAN, "utf8"));
-const existing = JSON.parse(await readFile(EVIDENCE, "utf8"));
-const matrix = JSON.parse(await readFile(MATRIX, "utf8"));
-const matrixSourceRevision = matrix.generatedFrom.sceneWorksRevision;
-const specs = plan.providers.filter((spec) => spec.backend === "candle" && spec.target?.modelId === "z_image" && SC16170_FINGERPRINTS.has(spec.calibrationFingerprint));
-if (specs.length !== 90) throw new Error(`expected 90 SC-16170 plan cases, found ${specs.length}`);
-const retainedRecords = existing.records.filter((record) => !(record.backend === "candle" && record.target?.modelId === "z_image"));
-if (process.argv.includes("--clear")) {
-  const bundle = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: retainedRecords };
-  validateBundle(bundle); await writeFile(EVIDENCE, `${JSON.stringify(bundle, null, 2)}\n`); await writeManifestBindings([]);
-  console.log("removed SC-16170 promoted records and bindings"); process.exit(0);
+async function main() {
+  const plan = JSON.parse(await readFile(PLAN, "utf8"));
+  const existing = JSON.parse(await readFile(EVIDENCE, "utf8"));
+  const matrix = JSON.parse(await readFile(MATRIX, "utf8"));
+  const matrixSourceRevision = matrix.generatedFrom.sceneWorksRevision;
+  const specs = plan.providers.filter((spec) => spec.backend === "candle" && spec.target?.modelId === "z_image" && SC16170_FINGERPRINTS.has(spec.calibrationFingerprint));
+  if (specs.length !== 90) throw new Error(`expected 90 SC-16170 plan cases, found ${specs.length}`);
+  const retainedRecords = existing.records.filter((record) => !(record.backend === "candle" && record.target?.modelId === "z_image"));
+  if (process.argv.includes("--clear")) {
+    const bundle = certificationBundle(existing, retainedRecords);
+    await writeFile(EVIDENCE, canonicalJson(bundle));
+    await writeManifestBindings([]);
+    console.log("removed SC-16170 promoted records and bindings");
+    return;
+  }
+  const sources = await loadSources();
+  // Schema v4 requires a measured loadShape on every record. These captures predate that axis, so
+  // continue parsing every source session and constructing every historical case, but do not invent a
+  // shape or publish ABI-1 bindings into the current authoritative bundle.
+  const historicalRecords = specs.map((spec) => makeRecord(spec, matrixSourceRevision, sources));
+  if (historicalRecords.length !== 90) throw new Error("SC-16170 historical record population changed");
+  const bundle = certificationBundle(existing, retainedRecords);
+  const bindings = [];
+  const renderedEvidence = canonicalJson(bundle);
+  if (process.argv.includes("--write")) {
+    await writeFile(EVIDENCE, renderedEvidence);
+    await writeManifestBindings(bindings);
+    console.log(`validated ${historicalRecords.length} historical SC-16170 cases from ${sources.all.length} source sessions; left unpromoted because loadShape was not measured`);
+  } else {
+    const checkedEvidence = JSON.parse(await readFile(EVIDENCE, "utf8"));
+    assertCanonicalBundleMatches(checkedEvidence, bundle);
+    const checkedManifest = await readFile(MANIFEST, "utf8");
+    const manifestWithoutBindings = renderManifestBindings(checkedManifest, []);
+    const expectedManifest = renderManifestBindings(manifestWithoutBindings, bindings);
+    if (checkedManifest !== expectedManifest) throw new Error("checked-in manifest still contains ABI-1 SC-16170 bindings; run with --write");
+    console.log(`validated ${historicalRecords.length} historical SC-16170 cases from ${sources.all.length} committed source sessions; current bundle remains fail-closed`);
+  }
 }
-const sources = await loadSources();
-// Schema v4 requires a measured loadShape on every record. These captures predate that axis, so
-// continue parsing every source session and constructing every historical case, but do not invent a
-// shape or publish ABI-1 bindings into the current authoritative bundle.
-const historicalRecords = specs.map((spec) => makeRecord(spec, matrixSourceRevision, sources));
-if (historicalRecords.length !== 90) throw new Error("SC-16170 historical record population changed");
-const bundle = { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: retainedRecords };
-validateBundle(bundle);
-const bindings = [];
-const renderedEvidence = `${JSON.stringify(bundle, null, 2)}\n`;
-if (process.argv.includes("--write")) {
-  await writeFile(EVIDENCE, renderedEvidence);
-  await writeManifestBindings(bindings);
-  console.log(`validated ${historicalRecords.length} historical SC-16170 cases from ${sources.all.length} source sessions; left unpromoted because loadShape was not measured`);
-} else {
-  const checkedEvidence = await readFile(EVIDENCE, "utf8");
-  if (checkedEvidence !== renderedEvidence) throw new Error("checked-in evidence still contains untyped SC-16170 records; run with --write");
-  const checkedManifest = await readFile(MANIFEST, "utf8");
-  const manifestWithoutBindings = renderManifestBindings(checkedManifest, []);
-  const expectedManifest = renderManifestBindings(manifestWithoutBindings, bindings);
-  if (checkedManifest !== expectedManifest) throw new Error("checked-in manifest still contains ABI-1 SC-16170 bindings; run with --write");
-  console.log(`validated ${historicalRecords.length} historical SC-16170 cases from ${sources.all.length} committed source sessions; current bundle remains fail-closed`);
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
 }
