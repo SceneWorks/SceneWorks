@@ -753,7 +753,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -769,6 +769,18 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         stage_residency: use_sequential,
                         memory: generation_memory,
                         cancel: cancel.clone(),
+                        // The job's LIVE per-image preview sink (epic 16948, sc-16962), built by
+                        // `preview_sink_for` and handed in by `drive_gen_items`. Qwen-Image-Edit emits
+                        // per-step latent previews as of inference `d4802320` (sc-16952); the frames
+                        // are of the TARGET only — the reference latents are concatenated onto the DiT
+                        // sequence inside the predict closure and narrowed straight back off, so the
+                        // sampler's running latent never carries a reference token.
+                        //
+                        // This closure used to bind `_preview` and drop it. `Default::default()` would
+                        // compile and ship an inert sink: green, and no previews on this lane. The
+                        // `preview_wiring_guard` tests in `candle_strict_control` read this source and
+                        // fail on exactly that.
+                        preview,
                     };
                     let result =
                         model.generate(&req, std::slice::from_ref(&reference), &mut *on_progress);

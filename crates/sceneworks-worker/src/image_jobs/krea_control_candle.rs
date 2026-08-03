@@ -421,7 +421,7 @@ fn krea_control_candle_raw_settings(
 /// The per-lane half of the candle Krea strict-control [`CandleStrictControl`] driver: the resolved base +
 /// overlay paths + request numerics. Krea 2 Turbo is CFG-free (no guidance / negative pass) and bf16
 /// (no quant tier). Moved onto the blocking thread, loaded once, drives every pose.
-struct KreaStrictControl {
+pub(super) struct KreaStrictControl {
     base: PathBuf,
     /// Immutable INT8-ConvRot DiT selected by the request. `None` loads `base/transformer`.
     convrot_dit: Option<PathBuf>,
@@ -457,6 +457,58 @@ struct KreaStrictControl {
     /// `None`/g≈1 is a byte-exact no-op. Applied to the pose-control lane's CFG-free context by the
     /// engine (inference sc-12009, `Krea2ControlRequest.text_style_gain`).
     text_style_gain: Option<f32>,
+}
+
+/// Routing/wiring fixture for the Krea strict-control provider — dummy paths, no load. Mirrors
+/// [`super::qwen_control::qwen_strict_control_test_fixture`].
+#[cfg(test)]
+pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictControl {
+    KreaStrictControl {
+        base: path.clone(),
+        convrot_dit: None,
+        control: path,
+        adapters: Vec::new(),
+        branch_tier: None,
+        tile_vae_decode: false,
+        chunk_attention: false,
+        stage_residency: false,
+        prompt: "p".to_owned(),
+        width: 1024,
+        height: 1024,
+        steps: 8,
+        control_scale: 0.7,
+        text_style_gain: None,
+    }
+}
+
+impl KreaStrictControl {
+    /// Build this lane's bespoke request. Split out of [`CandleStrictControl::generate_one`] so the
+    /// preview wiring is reachable without a loaded 20 GB provider — see
+    /// `krea_control_request_carries_the_live_preview_sink`.
+    ///
+    /// `preview` is the job's live sink and is **cloned onto the request**, never defaulted (epic 16948,
+    /// sc-16962). Krea 2 emits per-step latent previews from every render route as of inference
+    /// `f94c0b1c` (sc-16950); before this the lane passed `Default::default()` and the user saw nothing.
+    pub(super) fn control_request(
+        &self,
+        seed: u64,
+        cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
+    ) -> runtime_cuda::providers::krea::Krea2ControlRequest {
+        runtime_cuda::providers::krea::Krea2ControlRequest {
+            prompt: self.prompt.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            control_scale: self.control_scale,
+            text_style_gain: self.text_style_gain,
+            seed,
+            tile_vae_decode: self.tile_vae_decode,
+            stage_residency: self.stage_residency,
+            cancel: cancel.clone(),
+            preview: preview.clone(),
+        }
+    }
 }
 
 impl CandleStrictControl for KreaStrictControl {
@@ -530,25 +582,10 @@ impl CandleStrictControl for KreaStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
-        let req = runtime_cuda::providers::krea::Krea2ControlRequest {
-            prompt: self.prompt.clone(),
-            width: self.width,
-            height: self.height,
-            steps: self.steps as usize,
-            control_scale: self.control_scale,
-            text_style_gain: self.text_style_gain,
-            seed,
-            tile_vae_decode: self.tile_vae_decode,
-            stage_residency: self.stage_residency,
-            cancel: cancel.clone(),
-            // Per-step latent-preview sink, new on this request in the `8ffa211a` inference pin
-            // (sc-17054). This route has no preview plumbing to hand it, and upstream documents the
-            // default inert sink as byte-identical to a render with no preview at all — so this
-            // holds current behaviour exactly. Feeding it is preview work, not a compile fix.
-            preview: Default::default(),
-        };
+        let req = self.control_request(seed, cancel, preview);
         model.generate(&req, control, on_progress).map_err(|error| {
             WorkerError::Engine(format!("Krea 2 strict-pose generation failed: {error}"))
         })

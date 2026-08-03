@@ -12398,6 +12398,77 @@ fn candle_strict_control_trait_routes_each_provider() {
     assert_eq!(kolors.stream_tag(), "kolors_control");
 }
 
+/// epic 16948 / sc-16962: the two preview-wired bespoke strict-control lanes put the job's **live**
+/// sink on their request, not the inert default.
+///
+/// This is the compiled half of the guard (the source-level half is
+/// [`crate::candle_preview_wiring_tests`], which runs on every platform because both candle CI lanes
+/// are dispatch-only). It builds each provider's request through the same `control_request` the
+/// driver calls, hands it a recording sink, and proves a frame emitted on that request reaches the
+/// closure — the property `preview: Default::default()` silently destroys.
+///
+/// Deliberately asserts on DELIVERY rather than `is_active()` alone: an active-but-wrong sink (say,
+/// a second sink built locally) would still pass an `is_active()` check.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_strict_control_requests_carry_the_live_preview_sink() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn counting_sink() -> (gen_core::PreviewSink, Arc<AtomicUsize>) {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        (
+            gen_core::PreviewSink::new(move |_frame| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }),
+            seen,
+        )
+    }
+
+    fn frame() -> gen_core::PreviewFrame {
+        gen_core::PreviewFrame {
+            current: 1,
+            total: 8,
+            image: Image {
+                width: 2,
+                height: 2,
+                pixels: vec![0u8; 12],
+            },
+        }
+    }
+
+    let dummy = std::path::PathBuf::from("/nonexistent");
+    let cancel = CancelFlag::new();
+
+    // Krea 2 pose control (inference f94c0b1c, sc-16950). Before sc-16962 this lane passed
+    // `Default::default()`, so a Krea control render emitted nothing at all.
+    let (sink, seen) = counting_sink();
+    let krea = krea_strict_control_test_fixture(dummy.clone());
+    let req = krea.control_request(7, &cancel, &sink);
+    assert!(
+        req.preview.is_active(),
+        "Krea2ControlRequest.preview must carry the live sink, not the inert default"
+    );
+    req.preview.emit(frame());
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the frame must reach the sink the driver supplied"
+    );
+
+    // Qwen-Image 2512-Fun control (inference d4802320, sc-16952).
+    let (sink, seen) = counting_sink();
+    let qwen = qwen_strict_control_test_fixture(dummy);
+    let req = qwen.control_request(7, &cancel, &sink);
+    assert!(
+        req.preview.is_active(),
+        "QwenFunControlRequest.preview must carry the live sink, not the inert default"
+    );
+    req.preview.emit(frame());
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
+}
+
 /// sc-8823: the candle Kolors strict-control lane is POSE-ONLY. Its `kolors_control` catalog row accepts
 /// `Pose` but REJECTS `canny` / `depth` (the Kolors-ControlNet-Pose branch is a DWPose-skeleton
 /// ControlNet, not an input-agnostic Fun-Union VACE engine). This is the gate that turns a

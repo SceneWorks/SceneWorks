@@ -235,6 +235,21 @@ function regenerateMemoryMatrix() {
   });
 }
 
+// `docs/generated/calibration-cost-model.{json,md}` is derived from the memory matrix regenerated
+// immediately above — it stamps `generatedFrom.inferenceRevision` and re-derives its counts from the
+// matrix cells — so the matrix regen makes it stale by construction. `npm run check` (via
+// `check:rust-derived-docs` -> `check:calibration-cost-model --check`) then fails with "generated
+// calibration cost model is stale", one step further down the SAME generated-artifact cascade this
+// script exists to keep in one commit. It was missing here: sc-16962's bump regenerated the matrix,
+// reported success, and left the cost model behind for `npm run check` to catch minutes later.
+function regenerateCalibrationCostModel() {
+  console.log("$ node scripts/calibration-cost-model.mjs");
+  execFileSync("node", ["scripts/calibration-cost-model.mjs"], {
+    cwd: repoRoot,
+    stdio: "inherit",
+  });
+}
+
 function verifyNoSkew() {
   // gen-core: reuse the repo's own CI-wired guard verbatim.
   console.log("$ bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle");
@@ -451,6 +466,8 @@ function main() {
   cargoUpdate(sha);
   verifyNoSkew();
   regenerateMemoryMatrix();
+  // Downstream of the matrix, so it must follow it — see the note on the function.
+  regenerateCalibrationCostModel();
   verifyLicenseAudit();
   console.log("bump-inference: done");
 }

@@ -314,6 +314,10 @@ impl CandleStrictControl for Flux1StrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        // `Flux1ControlRequest` has no `preview` field yet — candle FLUX.1 is not preview-wired
+        // upstream (epic 16948 Tier 1, sc-16956). `no_candle_image_lane_defaults_its_preview_sink`
+        // sweeps this file, so the guard fails the moment the field appears without being fed.
+        _preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
         let req = Flux1ControlRequest {

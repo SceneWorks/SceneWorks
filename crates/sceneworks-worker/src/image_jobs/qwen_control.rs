@@ -354,6 +354,36 @@ pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictContr
     }
 }
 
+impl QwenStrictControl {
+    /// Build this lane's bespoke request. Split out of [`CandleStrictControl::generate_one`] so the
+    /// preview wiring is reachable without a loaded provider — see
+    /// `qwen_fun_control_request_carries_the_live_preview_sink`.
+    ///
+    /// `preview` is the job's live sink and is **cloned onto the request**, never defaulted (epic 16948,
+    /// sc-16962). Qwen-Image emits per-step latent previews from t2i, edit and `control_fun` as of
+    /// inference `d4802320` (sc-16952). Frames are of the developing target only — the control hint's
+    /// VACE latents never reach the sampler's running latent.
+    pub(super) fn control_request(
+        &self,
+        seed: u64,
+        cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
+    ) -> QwenFunControlRequest {
+        QwenFunControlRequest {
+            prompt: self.prompt.clone(),
+            negative: self.negative.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            guidance: self.guidance,
+            control_scale: self.control_scale,
+            seed,
+            cancel: cancel.clone(),
+            preview: preview.clone(),
+        }
+    }
+}
+
 impl CandleStrictControl for QwenStrictControl {
     type Model = QwenFunControl;
 
@@ -404,19 +434,10 @@ impl CandleStrictControl for QwenStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
-        let req = QwenFunControlRequest {
-            prompt: self.prompt.clone(),
-            negative: self.negative.clone(),
-            width: self.width,
-            height: self.height,
-            steps: self.steps as usize,
-            guidance: self.guidance,
-            control_scale: self.control_scale,
-            seed,
-            cancel: cancel.clone(),
-        };
+        let req = self.control_request(seed, cancel, preview);
         model.generate(&req, control, on_progress).map_err(|error| {
             WorkerError::Engine(format!(
                 "Qwen 2512-Fun strict-control generation failed: {error}"
