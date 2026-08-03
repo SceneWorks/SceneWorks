@@ -443,6 +443,12 @@ impl CandleStrictControl for ZImageStrictControl {
             seed,
             // PiD opt-in (sc-8044): in lockstep with the `with_pid` load — `is_some()` ⇒ decoder loaded.
             use_pid: self.pid.is_some(),
+            // Request-scoped lifecycle controls, new on this request in the `8ffa211a` inference pin
+            // (sc-17054). Nothing on the strict-control route selects them — the fit gate's
+            // `GenerationMemory` is plumbed on the generic generation path, not here — and the
+            // default is documented upstream as keeping the historical resident, unbounded path
+            // byte-for-byte unchanged. Wiring the control route to the fit gate is separate work.
+            memory: Default::default(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {

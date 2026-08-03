@@ -5598,7 +5598,21 @@ mod tests {
             "the raw control source must be replaced, not double-counted"
         );
         let contract = generator.contract.as_ref().expect("fixture contract");
-        let breakdown = cold.context.predicted_peak_breakdown(contract);
+        // Ask the CONTRACT for the typed decomposition, not the run context (sc-17037).
+        //
+        // gen-core `8ffa211a` changed `MemoryRunContext::predicted_peak_breakdown` to ignore
+        // its contract argument (the parameter is literally `_contract` now) and report the
+        // whole scalar as unattributed. That is deliberate and correct: the same bump renamed
+        // `MemoryBudget::fits(predicted_peak_bytes)` to `fits(incremental_live_demand_bytes)`,
+        // so the context scalar is now INCREMENTAL demand after the caller has already credited
+        // request-owned resident bytes — subtracting the provider's formula components from it
+        // again would credit the control branch twice.
+        //
+        // `MemoryProviderContract::decompose_predicted_peak` is unchanged and is where typed
+        // attribution still lives, which is what these four assertions are actually about. This
+        // fixture zeroes activation headroom and fixed reserve, so the context scalar equals the
+        // absolute peak here and the decomposition is exact.
+        let breakdown = contract.decompose_predicted_peak(cold.context.predicted_peak_bytes);
         assert_eq!(
             breakdown.predicted_peak_bytes(),
             BASE_SOURCE_BYTES + CONTROL_RESIDENT_BYTES
@@ -5609,6 +5623,17 @@ mod tests {
             breakdown.components[0].kind,
             MemoryComponentKind::ControlBranch
         );
+        // Pin the context-level behaviour too. Without this the next gen-core bump could quietly
+        // reinstate contract-aware decomposition here — re-introducing exactly the double-credit
+        // the upstream change removed — and nothing in this repo would notice: this test is the
+        // ONLY caller of `predicted_peak_breakdown` in SceneWorks.
+        let context_breakdown = cold.context.predicted_peak_breakdown(contract);
+        assert_eq!(
+            context_breakdown.unattributed_bytes,
+            BASE_SOURCE_BYTES + CONTROL_RESIDENT_BYTES,
+            "the run context reports incremental demand whole; it must not re-decompose it"
+        );
+        assert!(context_breakdown.components.is_empty());
 
         let warm = evaluate_request_with_budget(
             &generator,

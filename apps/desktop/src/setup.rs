@@ -483,6 +483,17 @@ pub(crate) fn settings_file() -> PathBuf {
 /// Root for the provisioned native GPU runtime. Linux provisioning (sc-10376)
 /// consumes this path so its runtime stays under the XDG data base; the Windows
 /// value remains `%APPDATA%\SceneWorks\gpu-runtime`.
+///
+/// Gated to exactly the predicate its call sites live under: `cuda_provision`
+/// (module gated `target_os = "windows"` at `main.rs`), `linux_cuda_provision` (whose
+/// `use crate::setup::{emit, gpu_runtime_dir}` is itself `#[cfg(target_os = "linux")]`
+/// — the module's own predicate is wider, `any(target_os = "linux", all(test,
+/// target_os = "windows"))`, but it does not import this symbol on Windows) and
+/// `linux_candle_runtime` (below, `target_os = "linux"`). macOS provisions no native
+/// GPU runtime — it links MLX — so every caller compiles out there and `-D warnings`
+/// promotes the leftover function to a hard error. Found by the macOS desktop lane
+/// added in sc-17026; same failure mode as sc-17007.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn gpu_runtime_dir() -> PathBuf {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
