@@ -1972,7 +1972,7 @@
           "implementations": [
             {
               "rung": "bounded_decode",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "style_variations"],
               "overlays": ["none", "lora"],
@@ -1983,7 +1983,7 @@
             },
             {
               "rung": "bounded_attention",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "style_variations"],
               "overlays": ["none", "lora"],
@@ -1994,7 +1994,7 @@
             },
             {
               "rung": "bounded_transformer_residency",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "style_variations"],
               "overlays": ["none", "lora"],
@@ -2170,7 +2170,7 @@
           "implementations": [
             {
               "rung": "bounded_decode",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
               "overlays": ["none", "lora", "identity"],
@@ -2181,7 +2181,7 @@
             },
             {
               "rung": "bounded_attention",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
               "overlays": ["none", "lora", "identity"],
@@ -2192,7 +2192,7 @@
             },
             {
               "rung": "bounded_transformer_residency",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
               "overlays": ["none", "lora", "identity"],
@@ -2363,7 +2363,7 @@
           "implementations": [
             {
               "rung": "bounded_decode",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
               "overlays": ["none", "lora", "identity"],
@@ -2374,7 +2374,7 @@
             },
             {
               "rung": "bounded_attention",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
               "overlays": ["none", "lora", "identity"],
@@ -2385,7 +2385,7 @@
             },
             {
               "rung": "bounded_transformer_residency",
-              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+              "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["edit_image", "character_image"],
               "overlays": ["none", "lora", "identity"],

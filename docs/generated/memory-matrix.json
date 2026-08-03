@@ -1,12 +1,12 @@
 {
   "schemaVersion": 5,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d1b7179d78d4ded5d40ee4919a60c716cd14d79ce04aa18616aba332685b7924",
+    "sceneWorksRevision": "source-tree:c63556aa02b47ed7d86cf1e278ae0f9948d01bf36aa58a69980eab0a925ebe9b",
     "inferenceRevision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "ca63b42f0b806371508813318bb86640aa59080ac9eb78576daa0c33a25904b6"
+        "sha256": "c57e0772d138ff8fb4480acc014d4b0d0fd99244e843578bbf6b911f8630c800"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -38,7 +38,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "dd9ed4f791bc12524c3c596afaffa44f6a1e95303cebadb3708bfdf65aa17575"
+        "sha256": "0fcec5628ff2c2ec4febbe29d0176bbffdbda60549c51875b04c3151ef25e363"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -283875,7 +283875,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -283950,7 +283950,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -284040,7 +284040,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -284265,7 +284265,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -284340,7 +284340,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -284430,7 +284430,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -284655,7 +284655,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -284730,7 +284730,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -284820,7 +284820,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -285045,7 +285045,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -285120,7 +285120,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -285210,7 +285210,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -285435,7 +285435,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -285510,7 +285510,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -285600,7 +285600,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -285825,7 +285825,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -285900,7 +285900,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -285990,7 +285990,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -286215,7 +286215,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -286290,7 +286290,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -286380,7 +286380,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -286605,7 +286605,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -286680,7 +286680,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -286770,7 +286770,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -286995,7 +286995,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -287070,7 +287070,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -287160,7 +287160,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -287385,7 +287385,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -287460,7 +287460,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -287550,7 +287550,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -287775,7 +287775,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -287850,7 +287850,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -287940,7 +287940,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -288165,7 +288165,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -288240,7 +288240,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -288330,7 +288330,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -288555,7 +288555,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -288630,7 +288630,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -288720,7 +288720,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -288945,7 +288945,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -289020,7 +289020,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -289110,7 +289110,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -289335,7 +289335,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -289410,7 +289410,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -289500,7 +289500,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -289725,7 +289725,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -289800,7 +289800,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -289890,7 +289890,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -290115,7 +290115,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -290190,7 +290190,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -290280,7 +290280,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -290505,7 +290505,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -290580,7 +290580,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "evidence": {
@@ -290670,7 +290670,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15461,
       "rung4Survey": {
@@ -298215,7 +298215,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -298290,7 +298290,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -298380,7 +298380,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -298605,7 +298605,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -298680,7 +298680,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -298770,7 +298770,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -298995,7 +298995,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -299070,7 +299070,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -299160,7 +299160,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -299385,7 +299385,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -299460,7 +299460,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -299550,7 +299550,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -299775,7 +299775,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -299850,7 +299850,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -299940,7 +299940,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -300165,7 +300165,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -300240,7 +300240,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -300330,7 +300330,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -300555,7 +300555,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -300630,7 +300630,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -300720,7 +300720,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -300945,7 +300945,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -301020,7 +301020,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -301110,7 +301110,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -301335,7 +301335,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -301410,7 +301410,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -301500,7 +301500,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -301725,7 +301725,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -301800,7 +301800,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -301890,7 +301890,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -302115,7 +302115,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -302190,7 +302190,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -302280,7 +302280,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -302505,7 +302505,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -302580,7 +302580,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -302670,7 +302670,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -302895,7 +302895,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -302970,7 +302970,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -303060,7 +303060,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -303285,7 +303285,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -303360,7 +303360,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -303450,7 +303450,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -303675,7 +303675,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -303750,7 +303750,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -303840,7 +303840,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -304065,7 +304065,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -304140,7 +304140,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -304230,7 +304230,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -304455,7 +304455,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -304530,7 +304530,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -304620,7 +304620,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -304845,7 +304845,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -304920,7 +304920,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "evidence": {
@@ -305010,7 +305010,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15460,
       "rung4Survey": {
@@ -313228,7 +313228,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -313312,7 +313312,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -313411,7 +313411,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -313663,7 +313663,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -313747,7 +313747,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -313846,7 +313846,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -314441,7 +314441,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -314525,7 +314525,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -314624,7 +314624,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -315882,7 +315882,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -315966,7 +315966,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -316065,7 +316065,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -316317,7 +316317,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -316401,7 +316401,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -316500,7 +316500,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -317095,7 +317095,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -317179,7 +317179,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -317278,7 +317278,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -317530,7 +317530,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -317614,7 +317614,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -317713,7 +317713,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -318308,7 +318308,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -318392,7 +318392,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -318491,7 +318491,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -318743,7 +318743,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -318827,7 +318827,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -318926,7 +318926,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -319521,7 +319521,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -319605,7 +319605,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -319704,7 +319704,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -319956,7 +319956,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -320040,7 +320040,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
@@ -320139,7 +320139,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {

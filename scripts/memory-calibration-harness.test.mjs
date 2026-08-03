@@ -143,7 +143,7 @@ function qwenPositiveComplete() {
       engagedRungs: ["resident", "bounded_decode"],
       parameters: { decodeTileEdge: 512, decodeOverlap: 64 },
     },
-    calibrationFingerprint: "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+    calibrationFingerprint: "qwen-image-mlx-shared-ladder-2026-08-01-v1",
   });
   record.sweep = {
     axes: [
@@ -374,6 +374,21 @@ test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", a
   assert.deepEqual(
     [...new Set(qwen.map((item) => item.strategy.rung))].sort(),
     ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"].sort(),
+  );
+  assert.ok(
+    qwen.every(
+      (item) => item.calibrationFingerprint === "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+    ),
+    "load shape is a separate evidence-key axis and must not be encoded in the provider fingerprint",
+  );
+  assert.ok(
+    qwen.every(
+      (item) => item.loadShape === (
+        item.strategy.rung === "bounded_transformer_residency"
+          ? "deferred_materialization"
+          : "eager_materialization"
+      )),
+    "every Qwen plan case must retain its exact typed load shape",
   );
   assert.deepEqual(
     qwen

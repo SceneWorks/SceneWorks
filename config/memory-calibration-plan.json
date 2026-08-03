@@ -381,7 +381,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-bf16-seed15511-step2",
       "cases": [
         {
@@ -413,7 +413,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-bf16-seed15511-step2",
       "cases": [
         {
@@ -445,7 +445,7 @@
         "resident",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-bf16-seed15511-step2",
       "cases": [
         {
@@ -523,7 +523,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-bf16-seed15511-step2",
       "cases": [
         {
@@ -562,7 +562,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-bf16-seed15511-step2",
       "cases": [
         {
@@ -600,7 +600,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q4-seed16353-step2",
       "cases": [
         {
@@ -639,7 +639,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q4-seed16353-step2",
       "cases": [
         {
@@ -677,7 +677,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q8-seed16353-step2",
       "cases": [
         {
@@ -716,7 +716,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "fixture": "qwen-image-q8-seed16353-step2",
       "cases": [
         {
