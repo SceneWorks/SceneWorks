@@ -14,7 +14,9 @@ name: macOS MLX worker
 # (the runner reuses its target dir), so MLX compiles once, not every run.
 #
 # Runner prerequisites: macOS >= 26.2, full Xcode + the Metal Toolchain, a Rust
-# toolchain, registered with the `nax` label. See docs/rust-mlx-build.md.
+# toolchain, cmake (MLX builds through CMake — a box without it fails in
+# pmetal-mlx-sys's build script), registered with the `nax` label. See
+# docs/rust-mlx-build.md.
 #
 # SECURITY: this repo is PUBLIC, and GitHub warns against running self-hosted runners
 # for public repos because a fork PR could execute arbitrary code on the runner. The

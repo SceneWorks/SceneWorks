@@ -16,6 +16,10 @@ them). Only macOS compiles MLX from source.
 - **Full Xcode + the Metal Toolchain** (`xcode-select -p` must point at Xcode, not
   the Command Line Tools; `xcrun --find metal` must resolve).
 - A recent stable Rust toolchain (`rust-toolchain.toml` pins `stable`).
+- **CMake** (`brew install cmake`). MLX is a CMake project and `pmetal-mlx-sys`'s
+  build.rs invokes `cmake` by name, so without it the build dies at "failed to run
+  custom build command for `pmetal-mlx-sys`" — a message that points at the dependency,
+  not at the missing host tool. No version floor: cmake 4.x builds MLX fine.
 
 ## The deployment-target build seam
 
@@ -63,7 +67,7 @@ schedule onto them by label:
 
 | Label | Consumed by | Requires on the host |
 | --- | --- | --- |
-| `nax` | `macos-mlx.yml` (this repo), `SceneWorks/inference` `ci.yml` | macOS >= 26.2, **Apple M5 or newer**, full Xcode + Metal, Rust |
+| `nax` | `macos-mlx.yml` (this repo), `SceneWorks/inference` `ci.yml` | macOS >= 26.2, **Apple M5 or newer**, full Xcode + Metal, Rust, CMake |
 | `signing` | `release.yml` (this repo) | Developer ID cert in the **login keychain** + notary `.p8` on disk |
 | `weights` | `macos-mlx.yml` `workflow_dispatch` calibration paths | the Qwen / Z-Image calibration snapshots in the local HF cache |
 | `real-weights` | `SceneWorks/inference` `real-weights.yml` (22 jobs, weekly) | the full real-weight snapshot set + runner-local HF auth |
@@ -158,8 +162,8 @@ scripts/setup-nax-runner.sh --check
 ```
 
 That preflights every prerequisite the lane assumes but never verifies (the 26.2 floor,
-Apple silicon, full Xcode + Metal, a Rust toolchain, node >= 20, disk headroom, sleep
-settings, `gh` auth and admin) and changes nothing. Drop `--check` to install:
+Apple silicon, full Xcode + Metal, a Rust toolchain, CMake, node >= 20, disk headroom,
+sleep settings, `gh` auth and admin) and changes nothing. Drop `--check` to install:
 
 ```sh
 scripts/setup-nax-runner.sh
@@ -195,8 +199,15 @@ recovers `PATH` solely by sourcing a `.path` file that `config.sh` wrote from wh
 `PATH` the configuring shell happened to have. Configure from a shell without
 `~/.cargo/bin` and every job dies at `cargo build` with "command not found" — while the
 runner still reports healthy and idle in the Actions UI. `setup-nax-runner.sh` writes
-`.path` explicitly and asserts that `cargo` and `node` resolve through it; if you
-register by hand, check `cat ~/actions-runner-nax/.path`.
+`.path` explicitly and asserts that `cargo`, `node`, and `cmake` resolve through it; if
+you register by hand, check `cat ~/actions-runner-nax/.path`.
+
+That assertion has to cover the tools the *build* shells out to, not just the ones a
+`run:` step names. `cmake` was missing from it until 2026-08-03, when nax-macos-2 passed
+provisioning and then failed three `nax-worker` runs inside `pmetal-mlx-sys`'s build
+script — healthy in the UI, red on every job, which is exactly the trap above one
+indirection down. `brew install cmake` fixed it (Homebrew's `/opt/homebrew/bin` was
+already on `.path`) and the next run went green in 7m08s.
 
 A LaunchAgent (user session) rather than a LaunchDaemon is correct here: Metal needs a
 real logged-in GUI session. So the box must **stay logged in and never sleep**
