@@ -510,17 +510,17 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.equal(model.completedBaseline.completeRecords, 33);
   // "Runtime-current" is measured against the SHIPPED inference pin. sc-16353's four exact Qwen
   // Q4/Q8 rung records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so they are
-  // historical. SC-15510's five exact Z-Image records were captured at that current pin, so they —
-  // and only they — remain runtime-current. The record count keeps the distinction from collapsing:
-  // the bundle still retains 28 historical records alongside the five current ones.
+  // historical. SC-15510's five exact Z-Image records were captured at `d4802320`; SC-15815 then
+  // moved the shared pin to `bf06bb56` for the Candle repair. The Mac recapture runner was absent,
+  // so all 33 records remain retained history but fail closed as runtime-current evidence.
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    5,
-    "only the five current-pin Z-Image calibration runs remain runtime-current",
+    0,
+    "no historical calibration run may survive the exact inference-pin advance",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
   assert.match(model.completedBaseline.note, /33 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /5 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 6 of 53 catalog entries/);
   const allProse = JSON.stringify(model);

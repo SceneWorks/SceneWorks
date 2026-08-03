@@ -459,16 +459,9 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // other crates a Mac ships were dark. Both halves are pinned here.
   const mlx = await source(".github/workflows/macos-mlx.yml");
   assert.match(mlx, /^\s+run: cargo clippy --all-targets -- -D warnings$/m);
-  // `npm run rust:check` runs a bare `cargo test` too, so the ordinary lane must not
-  // narrow either half back to the single crate. A manual exact-pin Z-Image recapture
-  // may skip only its circular evidence-currentness assertion until the emitted records
-  // are ingested; the following ordinary PR run exercises that assertion again.
-  assert.match(mlx, /RECAPTURE_Z_IMAGE: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference \}\}/);
-  assert.match(
-    mlx,
-    /cargo test -- --skip shipped_z_image_manifest_admits_all_five_current_exact_mlx_ladder_rungs/,
-  );
-  assert.match(mlx, /else\n\s+cargo test\n\s+fi/);
+  // `npm run rust:check` runs a bare `cargo test` too, so the lane must not narrow
+  // either half back to the single crate.
+  assert.match(mlx, /^\s+run: cargo test$/m);
   assert.doesNotMatch(mlx, /cargo test -p sceneworks-worker/);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
@@ -480,7 +473,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf("            cargo test\n");
+  const testAt = mlx.indexOf("run: cargo test\n");
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");

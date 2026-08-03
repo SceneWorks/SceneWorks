@@ -974,7 +974,9 @@ fn evidence_admission_route(
         .bindings
         .iter()
         .filter(|binding| {
-            binding.provider == plan.engine_id
+            binding.query.inference_revision
+                == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                && binding.provider == plan.engine_id
                 && binding.tier == plan_tier_key(plan.tier)
                 && binding.query.artifact_repository == calibration.resolved.identity.repository
                 && binding.query.artifact_resolved_revision
@@ -1143,7 +1145,9 @@ fn verified_lower_alternative(
         .bindings
         .iter()
         .filter(|binding| {
-            binding.provider == plan.engine_id
+            binding.query.inference_revision
+                == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                && binding.provider == plan.engine_id
                 && binding.tier == plan_tier_key(plan.tier)
                 && binding.mode == mode_key
                 && binding.overlay == overlay
@@ -3100,7 +3104,7 @@ mod tests {
     }
 
     #[test]
-    fn shipped_z_image_manifest_admits_all_five_current_exact_mlx_ladder_rungs() {
+    fn shipped_z_image_manifest_rejects_historical_exact_mlx_ladder_rungs() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3128,8 +3132,9 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
+                && binding.query.inference_revision == "d48023204cd3a4f3f8eb060f79803dccaddcb482"
                 && binding.query.inference_revision
-                    == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                    != crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
         }));
         assert!(bindings.iter().all(|binding| {
             binding.query.load_shape
@@ -3167,39 +3172,14 @@ mod tests {
             "text_to_image",
             fixture_budget(128.0),
         )
-        .expect("the shipped manifest and packaged bundle must admit Z-Image");
+        .expect("historical Z-Image evidence must fall back without an error");
 
-        assert_eq!(route.path, AdmissionPath::Evidence);
-        assert_eq!(route.fallback_reason, None);
-        assert_eq!(route.evidence.len(), 5);
-        let mut record_ids = route
-            .evidence
-            .iter()
-            .map(|candidate| candidate.record_id.as_str())
-            .collect::<Vec<_>>();
-        record_ids.sort_unstable();
+        assert_eq!(route.path, AdmissionPath::Legacy);
         assert_eq!(
-            record_ids,
-            [
-                "imc-6c1321a632cf8ba19ec3",
-                "imc-7f0855d89b197e74aad7",
-                "imc-83885e42f05bcc3881d2",
-                "imc-adcb1c7d1cc0cffeea73",
-                "imc-e99ffcdc141cc6ca5d60",
-            ]
+            route.fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity)
         );
-        assert_eq!(
-            route
-                .evidence
-                .iter()
-                .filter(|candidate| {
-                    candidate.evidence.key.load_shape
-                        == gen_core::LoadShape::DeferredMaterialization
-                })
-                .count(),
-            1,
-            "only rung 4 uses deferred materialization",
-        );
+        assert!(route.evidence.is_empty());
     }
 
     #[test]
@@ -3375,14 +3355,19 @@ mod tests {
     }
 
     fn fixture_bundle() -> EvidenceBundle {
-        match sceneworks_core::memory_calibration::load_bundle(include_str!(
+        let mut bundle = match sceneworks_core::memory_calibration::load_bundle(include_str!(
             "../tests/fixtures/mlx-memory-calibration.json"
         ))
         .expect("valid MLX calibration fixture")
         {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
+        };
+        for record in &mut bundle.records {
+            record.repositories.inference.revision =
+                crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned();
         }
+        bundle
     }
 
     fn fixture_binding(tier: &str, variant: &str) -> MlxCalibrationBinding {
@@ -3406,7 +3391,8 @@ mod tests {
                 fingerprint: "fixture-formula-v2".to_owned(),
                 scene_works_revision: "a".repeat(40),
                 matrix_source_revision: "source-tree:1111111".to_owned(),
-                inference_revision: "b".repeat(40),
+                inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                    .to_owned(),
                 artifact_repository: "SceneWorks/fixture".to_owned(),
                 artifact_resolved_revision: "c".repeat(40),
                 artifact_variant: variant.to_owned(),
@@ -3439,7 +3425,7 @@ mod tests {
             "fingerprint": "fixture-formula-v2",
             "sceneWorksRevision": "a".repeat(40),
             "matrixSourceRevision": "source-tree:1111111",
-            "inferenceRevision": "b".repeat(40),
+            "inferenceRevision": crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
             "provider": "fixture_provider",
             "tier": tier,
             "mode": "text_to_image",
@@ -3736,7 +3722,13 @@ mod tests {
             record["loadShape"] = serde_json::json!("eager_materialization");
         }
         match sceneworks_core::memory_calibration::load_bundle(&raw.to_string()).unwrap() {
-            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Ready(mut bundle) => {
+                for record in &mut bundle.records {
+                    record.repositories.inference.revision =
+                        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned();
+                }
+                bundle
+            }
             BundleLoad::Stale(reason) => {
                 panic!("test-migrated packaged bundle is stale: {reason:?}")
             }

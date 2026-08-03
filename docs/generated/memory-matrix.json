@@ -1,12 +1,12 @@
 {
   "schemaVersion": 5,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ce3fe27206ad0be2a9c37aa45c289607b31f2321ce6f29bb955ab55ddbe44502",
+    "sceneWorksRevision": "source-tree:4a0055c1fe28aa308d1f415cff8816fde17c18a4a926920d56326f3574daacf8",
     "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "3cf1c8fcfaed2743ec615e67299d6006d0d9cba2ba135369022e2dacd97ff8d0"
+        "sha256": "b2e465ff7ee6aeee7b90e3f3e36c9bddde6bfa2615a7d5d91c10a486de7123f4"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -18,7 +18,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "bb9542302fbca71784f9d68fb968beacccd17af0aa5281f231dc0f4b794a295b"
+        "sha256": "82c6673818d7bf3984dca04d0207fc35f2b6c24066052002bef653da968de6f9"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -223887,7 +223887,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/calibrations"
           }
         ],
         "declaredCalibration": [
@@ -314913,19 +314913,17 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
-        "measuredGeometries": [
-          "1024x1024"
-        ],
+        "status": "unmeasured",
+        "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "declaredCalibration": [
@@ -314938,52 +314936,7 @@
             "tier": "bf16"
           }
         ],
-        "historicalVerification": [
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-64f519bded8a41da6933",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-01T16:11:17Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "engagedRungs": [
-              "resident",
-              "bounded_decode",
-              "bounded_attention"
-            ],
-            "observedPeakGb": 60.139451649039984,
-            "requiredHostBytes": 118241344444,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0.16862745098039217,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          },
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-76c863da64f63329f12b",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-01T15:19:39Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "engagedRungs": [
-              "resident",
-              "bounded_decode",
-              "bounded_attention"
-            ],
-            "observedPeakGb": 60.139451649039984,
-            "requiredHostBytes": 118241344444,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0.16862745098039217,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          }
-        ],
+        "historicalVerification": [],
         "currentEnvironmentVerification": [],
         "loadability": [
           {
@@ -315044,19 +314997,17 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
-        "measuredGeometries": [
-          "1024x1024"
-        ],
+        "status": "unmeasured",
+        "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "declaredCalibration": [
@@ -315069,50 +315020,7 @@
             "tier": "bf16"
           }
         ],
-        "historicalVerification": [
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-6a2ef3d40aa813cc656e",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-01T16:20:27Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "engagedRungs": [
-              "resident",
-              "bounded_decode"
-            ],
-            "observedPeakGb": 61.20937509089708,
-            "requiredHostBytes": 119449303996,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0.16862745098039217,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          },
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-fba7297248d14e9e8d10",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-01T15:26:52Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "engagedRungs": [
-              "resident",
-              "bounded_decode"
-            ],
-            "observedPeakGb": 61.20874948054552,
-            "requiredHostBytes": 119449303996,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0.16862745098039217,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          }
-        ],
+        "historicalVerification": [],
         "currentEnvironmentVerification": [],
         "loadability": [
           {
@@ -315188,13 +315096,11 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
-        "measuredGeometries": [
-          "1024x1024"
-        ],
+        "status": "unmeasured",
+        "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "rung4Survey": {
@@ -315228,7 +315134,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
           }
         ],
         "declaredCalibration": [
@@ -315241,56 +315147,7 @@
             "tier": "bf16"
           }
         ],
-        "historicalVerification": [
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-c3cd503a27098023d0b2",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-01T16:26:21Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "engagedRungs": [
-              "resident",
-              "staged_residency",
-              "bounded_decode",
-              "bounded_attention",
-              "bounded_transformer_residency"
-            ],
-            "observedPeakGb": 15.021208003163338,
-            "requiredHostBytes": 67372825532,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0.16862745098039217,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          },
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-da3533c476605929f10d",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-01T15:32:09Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "engagedRungs": [
-              "resident",
-              "staged_residency",
-              "bounded_decode",
-              "bounded_attention",
-              "bounded_transformer_residency"
-            ],
-            "observedPeakGb": 14.882715437561274,
-            "requiredHostBytes": 67238607804,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0.16862745098039217,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          }
-        ],
+        "historicalVerification": [],
         "currentEnvironmentVerification": [],
         "loadability": [
           {
@@ -315345,7 +315202,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/mlx/calibrations"
           }
         ],
         "declaredCalibration": [
@@ -315455,7 +315312,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/mlx/calibrations"
           }
         ],
         "declaredCalibration": [
@@ -512062,7 +511919,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
           }
         ],
         "declaredCalibration": [
@@ -512168,7 +512025,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
           }
         ],
         "declaredCalibration": [
@@ -512338,7 +512195,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
           }
         ],
         "declaredCalibration": [
@@ -512429,7 +512286,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/mlx/calibrations"
           }
         ],
         "declaredCalibration": [
@@ -512518,7 +512375,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
+            "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/mlx/calibrations"
           }
         ],
         "declaredCalibration": [
@@ -531416,6 +531273,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -532088,6 +531946,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -532751,8 +532610,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -532985,8 +532846,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -533479,6 +533342,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -533704,6 +533568,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -533928,8 +533793,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -534163,6 +534030,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -534948,6 +534816,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -535174,6 +535043,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -535879,6 +535749,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -536613,8 +536484,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -536860,6 +536733,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -537285,8 +537159,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -537832,6 +537708,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -538058,6 +537935,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },
@@ -538281,8 +538159,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -538506,6 +538386,7 @@
       "binding": {
         "eligible": false,
         "reasons": [
+          "fingerprint-mismatch",
           "strategy-parameters-mismatch"
         ]
       },

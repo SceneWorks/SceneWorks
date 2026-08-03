@@ -1379,9 +1379,9 @@
         // (z_image_turbo is already registered) — it makes the standard q4/q8/bf16 turnkey routing
         // catalog-declared, so a future quant-matrix model can opt in from the manifest alone.
         "standardTierLayout": true,
-        // SC-15510: exact current-pin q4 base-provider evidence. These bindings intentionally
-        // promote only the measured 768² text-to-image/no-overlay cells; the contract below keeps
-        // every sibling tier, mode, overlay, geometry, and parameter tuple Implemented/unverified.
+        // SC-15510: exact q4 base-provider evidence retained at its historical inference pin after
+        // SC-15815 advanced the shared Candle runtime. These bindings promote only when their exact
+        // pin is current; the contract below independently keeps every covered cell implemented.
         "calibrations": [
           {
             "abi": 3,
@@ -1389,7 +1389,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1404,7 +1404,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1419,7 +1419,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1434,7 +1434,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1449,7 +1449,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",

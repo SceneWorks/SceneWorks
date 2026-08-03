@@ -1125,6 +1125,7 @@ function strategyStatus({
   overlay,
   rung4Survey,
   manifestById,
+  inferenceRevision,
 }) {
   // `z_image_edit` is a catalog alias, not an inference provider. Its MLX jobs resolve to the
   // `z_image_turbo` descriptor and therefore must consume that provider's static contract just as
@@ -1156,7 +1157,7 @@ function strategyStatus({
           implementation.overlays.includes(overlay),
       )
     : undefined;
-  const declaredCalibrations = (model[backend]?.calibrations ?? []).filter(
+  const allDeclaredCalibrations = (model[backend]?.calibrations ?? []).filter(
     (binding) =>
       binding.provider === provider &&
       binding.tier === tier &&
@@ -1165,10 +1166,13 @@ function strategyStatus({
       binding.rung === rung &&
       staticRung4Allowed,
   );
-  if (declaredCalibrations.length) {
-    const fingerprints = sortedUnique(declaredCalibrations.map((binding) => binding.fingerprint));
+  const currentDeclaredCalibrations = allDeclaredCalibrations.filter(
+    (binding) => binding.inferenceRevision === inferenceRevision,
+  );
+  const calibrationStatus = (bindings, source, evidenceAdmissionCurrent) => {
+    const fingerprints = sortedUnique(bindings.map((binding) => binding.fingerprint));
     const parameters = sortedUnique(
-      declaredCalibrations.map((binding) => JSON.stringify(binding.parameters ?? {})),
+      bindings.map((binding) => JSON.stringify(binding.parameters ?? {})),
     );
     if (fingerprints.length !== 1 || parameters.length !== 1) {
       throw new Error(
@@ -1177,7 +1181,7 @@ function strategyStatus({
     }
     return {
       state: "Implemented/unverified",
-      source: "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route",
+      source,
       parameters: {
         ...(staticImplementation?.parameters ?? {}),
         ...JSON.parse(parameters[0]),
@@ -1187,7 +1191,16 @@ function strategyStatus({
       },
       calibrationFingerprint: fingerprints[0],
       engagedRungs: staticImplementation?.engagedRungs,
+      requiresCurrentCalibrationBinding: true,
+      evidenceAdmissionCurrent,
     };
+  };
+  if (currentDeclaredCalibrations.length) {
+    return calibrationStatus(
+      currentDeclaredCalibrations,
+      "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route",
+      true,
+    );
   }
   if (staticImplementation) {
     return {
@@ -1201,7 +1214,16 @@ function strategyStatus({
       },
       calibrationFingerprint: staticImplementation.fingerprint,
       engagedRungs: staticImplementation.engagedRungs,
+      requiresCurrentCalibrationBinding: allDeclaredCalibrations.length > 0,
+      evidenceAdmissionCurrent: false,
     };
+  }
+  if (allDeclaredCalibrations.length) {
+    return calibrationStatus(
+      allDeclaredCalibrations,
+      `config/manifests/builtin.models.jsonc#models/${model.id}/${backend}/calibrations`,
+      false,
+    );
   }
   const staticCapability = declaredModel[backend]?.memoryStrategyCapabilities?.[rung];
   if (staticCapability?.overlays?.includes(overlay)) {
@@ -1625,6 +1647,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                 overlay,
                 rung4Survey,
                 manifestById,
+                inferenceRevision: pin,
               });
               const fingerprint =
                 status.state === "Missing"
@@ -1736,7 +1759,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
               // `Implemented/unverified` ONLY — `Missing` has no implementation to verify and
               // `Structurally N/A` has nothing to measure, so neither may be lifted by evidence.
               const state =
-                status.state === "Implemented/unverified" && currentRuns.length > 0
+                status.state === "Implemented/unverified" &&
+                  currentRuns.length > 0 &&
+                  (!status.requiresCurrentCalibrationBinding || status.evidenceAdmissionCurrent)
                   ? "Verified"
                   : status.state;
               const cell = {

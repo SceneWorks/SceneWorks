@@ -201,22 +201,8 @@ jobs:
       # M-series Mac with the graph already built for `-p sceneworks-worker`: the added
       # members are 24 suites in ~26 s of actual test time. Still runs the NAX 16-bit
       # SDPA guard, which is this lane's original reason to exist. sc-17026.
-      #
-      # An exact-pin Z-Image recapture is the one intentional bootstrap exception. The
-      # admission test below cannot report Evidence until the later calibration step has
-      # produced and a follow-up commit has ingested records for the new inference pin.
-      # Skip only that circular currentness assertion during the manual capture; all other
-      # workspace tests still run, and the next ordinary PR run executes the assertion with
-      # the newly committed evidence.
       - name: Workspace tests incl. the NAX 16-bit SDPA guard
-        env:
-          RECAPTURE_Z_IMAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        run: |
-          if [[ "$RECAPTURE_Z_IMAGE" == "true" ]]; then
-            cargo test -- --skip shipped_z_image_manifest_admits_all_five_current_exact_mlx_ladder_rungs
-          else
-            cargo test
-          fi
+        run: cargo test
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
