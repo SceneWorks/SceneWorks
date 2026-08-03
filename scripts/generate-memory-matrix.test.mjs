@@ -492,7 +492,26 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
     ),
     "the static production contract must inventory the complete shipped ladder",
   );
-  const verified = cells.filter((cell) => cell.state === "Verified");
+  // Promotion is a property of CURRENT evidence, and the shipped rung-4 records were measured under
+  // the previous inference pin (`8ffa211a`); sc-16962 moved it to `d4802320`, so on the shipped
+  // bundle they are historical and promote nothing. That is the fail-closed rule, asserted here so
+  // the exactness claim below cannot be read as a claim about the shipped matrix.
+  assert.deepEqual(
+    cells.filter((cell) => cell.state === "Verified").map((cell) => cell.id),
+    [],
+    "records measured under a superseded inference pin must not stay Verified",
+  );
+
+  const onCurrentPin = await buildMatrix({
+    sourceOverrides: { calibrationEvidence: await qwenRung4OnCurrentPin() },
+  });
+  const verified = onCurrentPin.cells.filter(
+    (cell) =>
+      qwenEntries.includes(cell.modelId) &&
+      cell.backend === "mlx" &&
+      boundedRungs.includes(cell.rung) &&
+      cell.state === "Verified",
+  );
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
@@ -1754,11 +1773,20 @@ test("request-peak tier overrides fail closed", async () => {
 const KREA_CONTROL_CELL =
   "krea_2_turbo:krea_2_turbo_control:mlx:q4:text_to_image:control:bounded_decode";
 
-/// The shipped bundle re-stamped onto the current inference pin. Both shipped records are
-/// `historical` — their inference revision predates the pin. Promotion is a property of CURRENT
-/// evidence, so the fixture restamps only Krea records; current Qwen records remain independently
-/// bound to the checked-in runtime pin.
-async function currentEvidenceFixture({ keepGeometries = null } = {}) {
+/// The shipped bundle re-stamped onto the current inference pin. Every shipped record is
+/// `historical` — its inference revision predates the pin — so promotion, which is a property of
+/// CURRENT evidence, has to be asserted against a re-stamped fixture rather than the shipped bundle.
+///
+/// `select` chooses which records are re-stamped, defaulting to Krea. It exists because the Qwen
+/// rung-4 records ingested by sc-16353 were current at the `8ffa211a` pin and stopped being current
+/// the moment sc-16962 moved it to `d4802320` — the fail-closed rule working as designed, and the
+/// reason the two families are re-stamped separately: the geometry tests below depend on ONLY the
+/// Krea cell moving relative to the shipped matrix, and [`qwenRung4OnCurrentPin`] must move exactly
+/// the four rung-4 cells rather than every Qwen record in the bundle.
+async function currentEvidenceFixture({
+  keepGeometries = null,
+  select = (record) => record.target.provider === "krea_2_turbo_control",
+} = {}) {
   const [bundle, cargo] = await Promise.all([
     readFile(new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url), "utf8"),
     readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8"),
@@ -1770,12 +1798,12 @@ async function currentEvidenceFixture({ keepGeometries = null } = {}) {
   parsed.records = parsed.records
     .filter(
       (record) =>
-        record.target.provider !== "krea_2_turbo_control" ||
+        !select(record) ||
         !keepGeometries ||
         keepGeometries.includes(`${record.target.geometry.width}x${record.target.geometry.height}`),
     )
     .map((record) => {
-      if (record.target.provider !== "krea_2_turbo_control") return record;
+      if (!select(record)) return record;
       // `repositories` is part of the record's deterministic identity, so re-stamping the revision
       // without re-deriving the id produces a bundle the harness rejects outright. Recomputing it
       // through the real `recordId` keeps the fixture a VALID record rather than a shape that only
@@ -1792,6 +1820,21 @@ async function currentEvidenceFixture({ keepGeometries = null } = {}) {
   return JSON.stringify(parsed);
 }
 
+/// The four rung-4 Qwen records sc-16353 ingested, re-stamped onto the current inference pin.
+///
+/// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
+/// records in the bundle: the rung-4 ingest carries the bare
+/// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
+/// `-deferred` load-shape variants. Re-stamping the whole provider instead would promote nine cells
+/// and quietly widen the very claim these tests exist to keep exact.
+const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
+const qwenRung4OnCurrentPin = () =>
+  currentEvidenceFixture({
+    select: (record) =>
+      record.target.provider === "qwen_image" &&
+      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT,
+  });
+
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
   const shipped = await buildMatrix();
   const shippedCell = shipped.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
@@ -1800,17 +1843,36 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     "Implemented/unverified",
     "the shipped Krea records are historical on the newly pinned inference revision",
   );
-  assert.equal(
-    shipped.cells.filter(
+  const verifiedQwen = (matrix) =>
+    matrix.cells.filter(
       (cell) => cell.modelId === "qwen_image" && cell.backend === "mlx" && cell.state === "Verified",
-    ).length,
+    ).length;
+
+  // sc-16353 ingested the Qwen rung-4 measurements under the `8ffa211a` pin, so on `main` at that
+  // moment they were CURRENT and four cells promoted off the shipped bundle. sc-16962 moved the pin
+  // to `d4802320`, which makes them historical by exactly the rule the Krea assertion above states.
+  // That is the fail-closed behaviour, not a loss of coverage — so the promotion claim moves onto
+  // records re-stamped onto the current pin, and the zeroed-pin mutation below is what keeps it live
+  // rather than passing because nothing could promote.
+  const qwenOnCurrentPin = await qwenRung4OnCurrentPin();
+  const promotedQwen = await buildMatrix({
+    sourceOverrides: { calibrationEvidence: qwenOnCurrentPin },
+  });
+  assert.equal(
+    verifiedQwen(promotedQwen),
     4,
     "the exact current Qwen Q4/Q8 rung pairs must promote only their four cells",
+  );
+  assert.equal(
+    verifiedQwen(shipped),
+    0,
+    "an inference pin bump must not carry the previous pin's Qwen verification forward",
   );
 
   const cargo = await readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8");
   const staleQwen = await buildMatrix({
     sourceOverrides: {
+      calibrationEvidence: qwenOnCurrentPin,
       cargo: cargo.replace(
         /(candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*")[0-9a-f]+(")/,
         `$1${"0".repeat(40)}$2`,
@@ -1818,9 +1880,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     },
   });
   assert.equal(
-    staleQwen.cells.filter(
-      (cell) => cell.modelId === "qwen_image" && cell.backend === "mlx" && cell.state === "Verified",
-    ).length,
+    verifiedQwen(staleQwen),
     0,
     "an inference pin change must fail closed instead of carrying Qwen verification forward",
   );

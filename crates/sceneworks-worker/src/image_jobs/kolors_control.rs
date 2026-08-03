@@ -324,6 +324,10 @@ impl CandleStrictControl for KolorsStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
+        // `KolorsControlRequest` has no `preview` field yet — candle Kolors is not preview-wired
+        // upstream (epic 16948 Tier 1, sc-16954, which covers SDXL + kolors + instantid). `no_candle_image_lane_defaults_its_preview_sink`
+        // sweeps this file, so the guard fails the moment the field appears without being fed.
+        _preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
         let req = KolorsControlRequest {
