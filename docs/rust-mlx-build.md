@@ -94,11 +94,14 @@ in the pool can therefore hold different subsets. Keep track of which holds what
 | Box | Qwen tiers | Z-Image |
 | --- | --- | --- |
 | `nax-macos` | bf16, q4, q8 | q4 (plus the inference `real-weights` set) |
-| `nax-macos-2` | bf16 | q4 |
+| `nax-macos-2` | bf16, q4, q8 | q4 |
 
-A `qwen_tier: q4`/`q8` dispatch that lands on a box holding only `bf16` needs
-`provision_qwen_snapshot: true`, or pre-seed the missing tiers first (`q4` 26.4 GiB,
-`q8` 35.9 GiB).
+Both boxes currently hold every tier at revision `8080a417…` (Qwen) / `bb2bc989…`
+(Z-Image), so any `qwen_tier` dispatch resolves on either. That symmetry is a property of
+the current pool, not a guarantee — a box seeded with only the `bf16` default would fail a
+`q4`/`q8` dispatch at resolve unless it passed `provision_qwen_snapshot: true`. Sizes if
+you need to seed a new box: `bf16` 53.8 GiB, `q4` 26.4 GiB, `q8` 35.9 GiB, Z-Image `q4`
+5.5 GiB.
 
 This is why `release.yml` pins on `signing` rather than plain `nax`: it is tag-triggered
 with `cancel-in-progress: false`, so scheduling it onto an unsigned box means a broken
