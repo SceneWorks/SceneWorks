@@ -69,7 +69,10 @@ ensure_writable_dir() {
 
 effective_api_host() {
   local host
-  if [[ -v SCENEWORKS_API_HOST ]]; then
+  # `${X+x}` rather than `[[ -v X ]]`: identical semantics for a scalar, but parses
+  # under bash 3.2, so scripts/check-runpod-supervisor.sh can exercise this
+  # entrypoint directly on a developer's Mac and not only inside the Linux image.
+  if [[ -n "${SCENEWORKS_API_HOST+x}" ]]; then
     host="$(trim_whitespace "${SCENEWORKS_API_HOST}")"
     # Match the API's env_string fallback for an explicitly blank value.
     [[ -n "${host}" ]] || host="127.0.0.1"
