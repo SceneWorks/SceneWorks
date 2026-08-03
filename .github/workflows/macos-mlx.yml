@@ -113,8 +113,10 @@ on:
 # Main must key on `github.sha`, not `github.ref`: GitHub keeps at most ONE pending
 # run per group and evicts it when a newer run queues, so a shared main group still
 # drops the middle commit of a 3+ merge burst even with cancel-in-progress off.
-# Per-SHA groups cannot evict each other; runs serialize on the self-hosted box
-# instead. Do NOT collapse this back to `group: ...${{ github.ref }}`.
+# Per-SHA groups cannot evict each other, so every main commit keeps its own NAX
+# verdict; they then spread across the self-hosted nax pool (one group per SHA imposes
+# no ordering between them) and queue only once the pool is saturated. Do NOT collapse
+# this back to `group: ...${{ github.ref }}`.
 concurrency:
   group: macos-mlx-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -123,16 +125,36 @@ jobs:
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [self-hosted, macOS, ARM64, nax]
+    # The PR/main path needs only `nax`. The workflow_dispatch calibration paths
+    # additionally need the HF snapshots, and those are HOST STATE that does not travel
+    # with a label — the same defect class this repo just fixed for release.yml's signing
+    # cert. Left on bare `nax` with a multi-box pool:
+    #   * without provision_*, "Resolve exact ... snapshot" fails with "not available on
+    #     this runner" — but only AFTER paying the full build + clippy + test;
+    #   * with provision_*, it succeeds, having downloaded ~57 GiB onto whichever box won
+    #     the scheduling, scattering duplicate multi-tens-of-GiB caches across the pool.
+    # Routing every calibration dispatch to `weights` keeps the big caches on the boxes
+    # designated to hold them, and makes a provisioning run top that box up rather than
+    # seeding a new copy somewhere arbitrary.
+    #
+    # `inputs` is available to job-level `runs-on`, and the event_name guard short-circuits
+    # for push/pull_request, where the inputs are null.
+    #
+    # WARNING: at least one runner must carry `weights`, or a calibration dispatch has no
+    # eligible runner and queues indefinitely instead of failing. See the label topology
+    # table in docs/rust-mlx-build.md.
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     env:
       CARGO_NET_OFFLINE: "true"
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
-    # default (sc-10420). This lane is the SOLE self-hosted nax box and
-    # serializes main-push runs (github.sha concurrency), so a wedge here holds
-    # that box and starves every queued PR/main run on it (sc-13603). Well above
-    # the healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source
-    # rebuild still fits. Only an explicit calibration+provisioning dispatch gets
-    # four hours for the approximately 57 GiB public snapshot.
+    # default (sc-10420). The nax pool is small and hand-registered — GitHub's
+    # hosted images cannot run this lane at all, so capacity is exactly the Macs
+    # somebody provisioned (scripts/setup-nax-runner.sh, docs/rust-mlx-build.md).
+    # A wedge therefore removes a whole box from a pool of a couple, and the
+    # remaining boxes absorb every queued PR/main run (sc-13603). Well above the
+    # healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source rebuild
+    # still fits. Only an explicit calibration+provisioning dispatch gets four
+    # hours for the approximately 57 GiB public snapshot.
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && ((inputs.run_memory_calibration && inputs.provision_qwen_snapshot) || (inputs.run_five_rung_reference && inputs.provision_z_image_snapshot)) && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
