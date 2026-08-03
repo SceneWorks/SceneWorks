@@ -146,7 +146,7 @@ mod tests {
     fn reads_the_current_wired_candle_routes_as_supporting() {
         // Representative truth at inference pin 5b6d6aa: Krea, Qwen-Image, and SDXL all advertise
         // live preview. Keep SDXL here because its provider gained preview after this contract's
-        // original d4802320 fixture was written.
+        // original pre-5b6 fixture was written.
         assert_eq!(supports_preview("krea_2_turbo", "candle"), Some(true));
         assert_eq!(supports_preview("krea_2_raw", "candle"), Some(true));
         assert_eq!(supports_preview("qwen_image", "candle"), Some(true));

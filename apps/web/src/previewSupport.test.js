@@ -80,7 +80,7 @@ describe("modelForJob", () => {
 
 describe("livePreviewState", () => {
   const supporting = { id: "krea_2_turbo", preview: { byBackend: { candle: true } } };
-  const inert = { id: "sdxl", preview: { byBackend: { candle: false } } };
+  const inert = { id: "sd3_5_medium", preview: { byBackend: { candle: false } } };
   const running = (overrides) => ({
     type: "image_generate",
     status: "running",

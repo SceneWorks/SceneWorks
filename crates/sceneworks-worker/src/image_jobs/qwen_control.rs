@@ -361,8 +361,9 @@ impl QwenStrictControl {
     /// calls this and asserts an emitted frame reaches the sink the driver supplied.
     ///
     /// `preview` is the job's live sink and is **cloned onto the request**, never defaulted (epic 16948,
-    /// sc-16962). Qwen-Image emits per-step latent previews from t2i, edit and `control_fun` as of
-    /// inference `d4802320` (sc-16952). Frames are of the developing target only — the control hint's
+    /// sc-16962). At inference `5b6d6aa`, Qwen-Image emits per-step latent previews from t2i, edit
+    /// and `control_fun` (introduced by sc-16952). Frames are of the developing target only — the
+    /// control hint's
     /// VACE latents never reach the sampler's running latent.
     pub(super) fn control_request(
         &self,

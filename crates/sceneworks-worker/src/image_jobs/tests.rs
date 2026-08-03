@@ -12457,7 +12457,7 @@ fn candle_strict_control_requests_carry_the_live_preview_sink() {
         "the frame must reach the sink the driver supplied"
     );
 
-    // Qwen-Image 2512-Fun control (inference d4802320, sc-16952).
+    // Qwen-Image 2512-Fun control (inference 5b6d6aa; preview field introduced by sc-16952).
     let (sink, seen) = counting_sink();
     let qwen = qwen_strict_control_test_fixture(dummy);
     let req = qwen.control_request(7, &cancel, &sink);

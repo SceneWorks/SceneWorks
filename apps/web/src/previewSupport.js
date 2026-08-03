@@ -34,8 +34,8 @@ export const PRE_DENOISE_STAGES = new Set([
  *
  * ## Why the placeholder needs this
  *
- * The first `generating` update does NOT carry frame 1. Traced end to end at inference pin
- * `d4802320`:
+ * The first `generating` update does NOT carry frame 1. Rechecked end to end at inference pin
+ * `5b6d6aa`:
  *
  * 1. `candle-gen/src/sampler.rs` `run_curated_sampler` calls `on_progress(Progress::Step { … })`
  *    and only THEN `hook.emit(…)` for the preview, inside the same evaluation closure.
