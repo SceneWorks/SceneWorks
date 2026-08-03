@@ -73,7 +73,7 @@ use runtime_macos::media::Result as MlxResult;
 // The off-Mac (Windows/Linux candle GPU-worker lane) backend is `ort` (onnxruntime) with the
 // CUDA execution provider + a CPU fallback (sc-5498) — the same EP pattern as `pose_jobs`.
 #[cfg(not(target_os = "macos"))]
-use ort::execution_providers::CUDAExecutionProvider;
+use ort::ep::CUDA;
 #[cfg(not(target_os = "macos"))]
 use ort::session::Session;
 #[cfg(not(target_os = "macos"))]
@@ -840,7 +840,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
         // by `pose_jobs`); best-effort, see `ort_cuda`.
         crate::ort_cuda::preload_cuda_dylibs();
         b = b
-            .with_execution_providers([CUDAExecutionProvider::default().build().error_on_failure()])
+            .with_execution_providers([CUDA::default().build().error_on_failure()])
             .map_err(ort_err)?;
     }
     b.commit_from_file(path).map_err(ort_err)

@@ -79,7 +79,7 @@ backend-candle = ["dep:runtime-cuda", "dep:ort", "dep:zip"]
 # robust under app-bundle relocation, unlike build-time linking + rpath.
 # `download-binaries` still fetches a CoreML-enabled onnxruntime at build time so the
 # desktop packager (build-sidecar.mjs) has a dylib to stage and dev runs work.
-ort = { version = "=2.0.0-rc.12", features = ["coreml", "load-dynamic", "download-binaries"] }
+ort = { workspace = true, features = ["coreml"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Canonical Apple inference composition. Bespoke provider APIs are re-exported by the bundle.
 # `audio-metal` is additive over the default `media` + `audio` lanes: it runs the WHOLE candle audio
@@ -110,7 +110,7 @@ runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "bf06bb5
 # `download-binaries` fetches a CUDA-enabled onnxruntime at build time so dev runs + the candle packager
 # have a dylib to stage. `zip` unpacks the openmmlab weight bundles (download-on-first-use parity with
 # rtmlib), shared with the Mac path — optional + candle-gated off-Mac for the same reason as `ort`.
-ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic", "download-binaries"], optional = true }
+ort = { workspace = true, features = ["cuda"], optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [lints]
