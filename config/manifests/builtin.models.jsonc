@@ -1379,6 +1379,82 @@
         // (z_image_turbo is already registered) — it makes the standard q4/q8/bf16 turnkey routing
         // catalog-declared, so a future quant-matrix model can opt in from the manifest alone.
         "standardTierLayout": true,
+        // SC-15510: exact current-pin q4 base-provider evidence. These bindings intentionally
+        // promote only the measured 768² text-to-image/no-overlay cells; the contract below keeps
+        // every sibling tier, mode, overlay, geometry, and parameter tuple Implemented/unverified.
+        "calibrations": [
+          {
+            "abi": 1,
+            "fingerprint": "z-image-mlx-independent-materialization-v3",
+            "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
+            "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/z-image-turbo-mlx",
+            "artifactResolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-mlx-independent-materialization-v3",
+            "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
+            "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/z-image-turbo-mlx",
+            "artifactResolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4",
+            "rung": "staged_residency", "parameters": {}
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-mlx-independent-materialization-v3",
+            "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
+            "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/z-image-turbo-mlx",
+            "artifactResolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4",
+            "rung": "bounded_decode", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-mlx-independent-materialization-v3",
+            "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
+            "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/z-image-turbo-mlx",
+            "artifactResolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4",
+            "rung": "bounded_attention", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }
+          },
+          {
+            "abi": 1,
+            "fingerprint": "z-image-mlx-independent-materialization-v3",
+            "sceneWorksRevision": "0da9bb00c19b429ff3b37b2287a06048e7a624bb",
+            "matrixSourceRevision": "source-tree:13933866a283f080861a563dfc5d45fa3a26a9f5ede81c554c2e2d0e51952ef4",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/z-image-turbo-mlx",
+            "artifactResolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4",
+            "rung": "bounded_transformer_residency",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }
+          }
+        ],
         // SC-15510: pinned export of the shared contract implemented by mlx-gen-z-image. The
         // declaration inventories capability and candidate domains only; exact entry/tier/geometry
         // evidence remains separate and cannot make either the base or edit sibling Verified.

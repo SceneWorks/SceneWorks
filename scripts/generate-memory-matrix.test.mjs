@@ -586,8 +586,17 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   assert.ok(
     bounded.every((cell) =>
       cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
-      cell.evidence.staticImplementation.some((entry) =>
-        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+      (
+        cell.evidence.staticImplementation.some((entry) =>
+          entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+        ) ||
+        (
+          cell.state === "Verified" &&
+          cell.evidence.staticImplementation.some((entry) =>
+            entry.source.includes("mlx_fit_gate.rs#evidence_admission_route"),
+          ) &&
+          cell.evidence.currentEnvironmentVerification.length === 1
+        )
       ),
     ),
     "every bounded cell must name the pinned MLX provider contract and its calibration ABI",
@@ -628,6 +637,38 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     bounded
       .filter((cell) => cell.modelId !== "z_image_turbo")
       .every((cell) => cell.state === "Implemented/unverified"),
+  );
+
+  const allZImageMlx = matrix.cells.filter(
+    (cell) => zImageIds.includes(cell.modelId) && cell.backend === "mlx",
+  );
+  const verified = allZImageMlx.filter((cell) => cell.state === "Verified");
+  assert.deepEqual(
+    verified.map((cell) => cell.id).sort(),
+    [
+      "bounded_attention",
+      "bounded_decode",
+      "bounded_transformer_residency",
+      "resident",
+      "staged_residency",
+    ].map((rung) => `z_image_turbo:z_image_turbo:mlx:q4:text_to_image:none:${rung}`).sort(),
+    "only the five exact q4 Turbo base-provider records may be promoted",
+  );
+  assert.ok(
+    verified.every((cell) =>
+      cell.evidence.currentEnvironmentVerification.length === 1 &&
+      cell.evidence.currentEnvironmentVerification[0].geometry === "768x768"
+    ),
+    "every promoted Z-Image cell must cite its exact authoritative Metal capture",
+  );
+  assert.ok(
+    allZImageMlx
+      .filter((cell) => cell.state !== "Verified")
+      .every((cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.evidence.currentEnvironmentVerification.length === 0
+      ),
+    "unmeasured Z-Image sibling tuples must remain implemented but unverified",
   );
 });
 
