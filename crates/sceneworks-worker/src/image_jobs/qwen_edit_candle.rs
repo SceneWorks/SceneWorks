@@ -609,6 +609,16 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             QWEN_EDIT_CANDLE_ENGINE,
             &request.model,
             &strategy_spec,
+            // `artifact_is_certified` (sc-17054). The z-image caller passes a real check that the
+            // weights ARE the pinned turnkey snapshot (`zimage_certified_artifact_path`, base.rs).
+            // This route has no equivalent: there is a `QWEN_EDIT_CANDLE_TURNKEY_REPO` but no
+            // pinned `_REVISION`, so there is no artifact identity to verify against. Passing
+            // `true` would assert a certification nothing checked — exactly the unsound claim this
+            // parameter was added to stop — so declare it uncertified. The cost is that this route
+            // consults no packaged evidence and falls back to the resident selection, which can
+            // over-reserve but never under-reserve. Restoring optimized candidates here needs a
+            // pinned qwen-edit certified artifact first.
+            false,
             &request.model_manifest_entry,
             tier,
             &request.mode,
@@ -625,6 +635,12 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             false,
             raw_budget,
             needed,
+            // `runtime_overlay_bytes` (sc-17054). Calibration records describe the certified overlay
+            // fixture; a user's LoRAs can be larger, so every optimized candidate must reserve the
+            // bytes this request actually needs before the fit check. `user_adapter_bytes` is the
+            // same quantity already charged to `needed` above, and is this route's analogue of the
+            // `adapter_resident_bytes` the z-image caller passes.
+            user_adapter_bytes,
             gen_core::MemoryCacheState::Cold,
         )? {
             generation_memory = evaluation.memory;
