@@ -84,15 +84,23 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
-    assert len(evidence_ids) == len(calibration["records"]) == 24
+    assert len(evidence_ids) == len(calibration["records"]) == 28
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
-    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
+    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {
+        "current",
+        "historical",
+    }
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert current_eligible == []
+    assert {run["record"]["id"] for run in current_eligible} == {
+        "imc-12f3ccbb72de78cea931",
+        "imc-4426a6e84c4d39d9bff3",
+        "imc-8f041bead8a9346cd1e6",
+        "imc-8f110511b0f85d15f72f",
+    }
     assert all(
         run["record"]["target"]["modelId"] != "z_image"
         for run in matrix["calibrationRuns"]
@@ -269,11 +277,16 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
     shutil.rmtree(tmp_path, onexc=remove_readonly)
 
 
-def test_untyped_historical_z_image_records_remain_unattached_without_runtime_promotion():
+def test_historical_records_remain_unattached_while_exact_qwen_evidence_promotes():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
     verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert verified == []
+    assert {cell["id"] for cell in verified} == {
+        "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
+        "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
+        "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
+        "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
+    }
     historical_z_image = [
         cell
         for cell in matrix["cells"]
