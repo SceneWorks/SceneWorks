@@ -16,12 +16,8 @@ import { terminalStatuses } from "./jobTypes.js";
  * Stages a job passes through BEFORE its first denoise step.
  *
  * The worker reports `loading_model` while the text encoder and render components load, and flips to
- * `generating` on the first denoise step — the same update that carries the first `previewFrame`
- * (`image_jobs/base.rs`, `streaming_result_with_preview`). So "still in one of these stages" is
- * exactly "denoise has not reported yet", which is what bounds the placeholder: the moment a
- * supporting job starts denoising, either a frame is attached (live) or the placeholder is gone and
- * the card degrades to its pre-sc-16965 appearance. No timers, no thresholds, no stuck placeholder
- * on a route that advertises support but never emits.
+ * `generating` on the first denoise step. So "still in one of these stages" is exactly "denoise has
+ * not reported yet".
  */
 export const PRE_DENOISE_STAGES = new Set([
   "queued",
@@ -32,6 +28,55 @@ export const PRE_DENOISE_STAGES = new Set([
   "loading_model",
   "estimating",
 ]);
+
+/**
+ * The 1-based denoise step a running job last reported, or `null` if it has not reported one.
+ *
+ * ## Why the placeholder needs this
+ *
+ * The first `generating` update does NOT carry frame 1. Traced end to end at inference pin
+ * `d4802320`:
+ *
+ * 1. `candle-gen/src/sampler.rs` `run_curated_sampler` calls `on_progress(Progress::Step { … })`
+ *    and only THEN `hook.emit(…)` for the preview, inside the same evaluation closure.
+ * 2. `image_jobs/stream.rs` sends both down ONE mpsc channel (`send_gen_progress` /
+ *    `preview_sink_for`), so the worker sees them in that order.
+ * 3. `image_jobs/base.rs` POSTs in the `GenEvent::Step` arm; the `GenEvent::Preview` arm
+ *    deliberately does NOT post — the frame "rides the NEXT Step/Decoding update", by design, so
+ *    previews add zero requests to the existing cadence.
+ *
+ * So the POST that first reports `generating` is emitted *before* frame 1 exists, and the frame
+ * lands on the step-2 POST. Bounding the placeholder on the pre-denoise stage set alone therefore
+ * produced a one-step blink of the very cell this story adds: `pending` (placeholder) →
+ * `supported` (cell removed) → `live` (cell restored). Holding `pending` across step 1 closes it.
+ *
+ * There is no structured step field on the job record — `ProgressRequest` carries the count only
+ * inside the human-facing `message` ("Image 1/2 — step 3/20.", built in `base.rs`) — so this reads
+ * it from there. A message that does not match yields `null`, which degrades to the old behaviour
+ * (the blink) rather than to a stuck placeholder: the failure direction is the safe one.
+ */
+const DENOISE_STEP_MESSAGE = /\bstep\s+(\d+)\s*\/\s*(\d+)/i;
+
+export function reportedDenoiseStep(job) {
+  const match = DENOISE_STEP_MESSAGE.exec(typeof job?.message === "string" ? job.message : "");
+  if (!match) return null;
+  const current = Number.parseInt(match[1], 10);
+  return Number.isFinite(current) ? current : null;
+}
+
+/**
+ * Whether `job` is still inside the window where a supporting route cannot have delivered a frame
+ * yet: any pre-denoise stage, or the FIRST denoise step (see {@link reportedDenoiseStep}).
+ *
+ * Bounded at one step. A route that advertises support but never emits shows the placeholder for
+ * its first step and then degrades to exactly today's card — no timers, no thresholds, no stuck
+ * placeholder for the whole render.
+ */
+function awaitingFirstFrame(job) {
+  if (PRE_DENOISE_STAGES.has(job?.stage ?? job?.status)) return true;
+  const step = reportedDenoiseStep(job);
+  return step !== null && step <= 1;
+}
 
 /**
  * Which tensor backend the worker running `job` uses — the KEY the preview flag is stored under.
@@ -92,10 +137,12 @@ export const PREVIEW_JOB_TYPES = new Set(["image_generate", "image_edit"]);
  * The card's live-preview state for one job. Total — every job gets exactly one of:
  *
  * - `"live"`        a streamed frame is on the record and the job is still running.
- * - `"pending"`     the route supports preview, the job is running, and denoise has not reported
- *                   yet. THE state this story exists to make visible: show the placeholder.
- * - `"supported"`   the route supports preview but we are neither showing a frame nor waiting in
- *                   the pre-denoise window (terminal, or denoising with nothing emitted yet).
+ * - `"pending"`     the route supports preview, the job is running, and no frame CAN have arrived
+ *                   yet — pre-denoise, or the first denoise step, whose POST is emitted before
+ *                   frame 1 exists. THE state this story exists to make visible: show the
+ *                   placeholder.
+ * - `"supported"`   the route supports preview but we are neither showing a frame nor inside that
+ *                   window (terminal, or past step 1 with nothing emitted).
  * - `"unsupported"` the route is wired and does NOT preview. Render exactly as before — no
  *                   placeholder, no explanatory chrome; a permanent "no live preview" label on
  *                   every non-previewing model would be noise on the majority of renders.
@@ -114,7 +161,7 @@ export function livePreviewState(job, model, backend) {
   const supported = modelPreviewSupport(model, backend);
   if (supported === null) return "unknown";
   if (supported === false) return "unsupported";
-  if (!terminal && PRE_DENOISE_STAGES.has(job?.stage ?? job?.status)) return "pending";
+  if (!terminal && awaitingFirstFrame(job)) return "pending";
   return "supported";
 }
 

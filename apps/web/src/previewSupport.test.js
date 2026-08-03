@@ -124,13 +124,60 @@ describe("livePreviewState", () => {
     expect(livePreviewState(running({}), supporting, null)).toBe("unknown");
   });
 
-  // The bound: once denoise reports (the same update that would carry frame 1), a supporting model
-  // that emitted nothing falls back to `supported` — no cell, i.e. today's behaviour — instead of
+  // The first `generating` POST is emitted BEFORE frame 1 exists: the sampler calls `on_progress`
+  // and only then the preview hook, both down one channel, and `GenEvent::Preview` deliberately
+  // does not POST — the frame rides the NEXT Step update (`image_jobs/base.rs`). So step 1 is still
+  // "no frame can have arrived", and dropping out of `pending` there blinks the cell away one step
+  // before the frame restores it.
+  it("holds `pending` across the first denoise step, which posts before frame 1 exists", () => {
+    const job = running({ stage: "generating", message: "Image 1/2 — step 1/20." });
+    expect(livePreviewState(job, supporting, "candle")).toBe("pending");
+  });
+
+  it("reads the step through an auto-tier disclosure prefix", () => {
+    const job = running({
+      stage: "generating",
+      message: "Streaming blocks to keep this fit — Image 1/1 — step 1/8.",
+    });
+    expect(livePreviewState(job, supporting, "candle")).toBe("pending");
+  });
+
+  // The bound, one step wide: by step 2 an emitting route has posted a frame, so a supporting model
+  // still showing nothing falls back to `supported` — no cell, i.e. today's behaviour — instead of
   // holding a placeholder for the whole render.
-  it("leaves `pending` as soon as the job reports a denoise step", () => {
+  it("leaves `pending` once the job reports a step past the first", () => {
+    for (const message of ["Image 1/2 — step 2/20.", "Image 2/2 — step 17/20."]) {
+      expect(
+        livePreviewState(running({ stage: "generating", message }), supporting, "candle"),
+        message,
+      ).toBe("supported");
+    }
+  });
+
+  it("falls back to `supported` when the message carries no step at all", () => {
+    // Safe direction: an unparseable message degrades to the pre-sc-16965 card, never to a
+    // placeholder stuck for the whole render.
     expect(livePreviewState(running({ stage: "generating" }), supporting, "candle")).toBe(
       "supported",
     );
+    expect(
+      livePreviewState(running({ stage: "generating", message: "Decoding." }), supporting, "candle"),
+    ).toBe("supported");
+  });
+
+  it("prefers `live` over `pending` when step 1 already carries a frame", () => {
+    const job = running({
+      stage: "generating",
+      message: "Image 1/1 — step 1/4.",
+      result: { previewFrame: { dataUrl: "data:image/jpeg;base64,QQ==" } },
+    });
+    expect(livePreviewState(job, supporting, "candle")).toBe("live");
+  });
+
+  it("never shows the placeholder for a non-supporting route, whatever the step", () => {
+    const job = running({ stage: "generating", message: "Image 1/1 — step 1/20." });
+    expect(livePreviewState(job, inert, "candle")).toBe("unsupported");
+    expect(livePreviewState(job, { id: "external" }, "candle")).toBe("unknown");
   });
 
   it("never reports `live` or `pending` on a terminal job", () => {

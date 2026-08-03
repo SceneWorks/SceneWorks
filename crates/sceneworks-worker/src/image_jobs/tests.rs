@@ -15212,3 +15212,52 @@ mod preview_stream_tests {
         assert_eq!(without, streaming_result(&plan, &[]));
     }
 }
+
+/// The event ORDER the UI's placeholder bound depends on (sc-16965, epic 16948).
+///
+/// `GenEvent::Preview` deliberately does not POST — the frame rides the *next* `Step`/`Decoding`
+/// update, so previews add zero requests to the existing per-step cadence. Combined with the
+/// sampler's own ordering (`candle-gen/src/sampler.rs` `run_curated_sampler` calls
+/// `on_progress(Progress::Step { … })` and only THEN `hook.emit(…)`, both delivered down the single
+/// `GenEvent` channel), that means **the first `generating` POST is always frame-less**: frame 1
+/// lands on the step-2 update.
+///
+/// `apps/web/src/previewSupport.js` holds its "Preview starting…" placeholder across the first
+/// denoise step because of exactly this — without it the card blinks pending → supported → live. If
+/// someone makes the Preview arm post its own update, the frame arrives a step earlier, that bound
+/// becomes a one-step over-hold, and the comment there becomes a lie. Pin the property next to the
+/// code that owns it.
+///
+/// Deliberately OUTSIDE `preview_stream_tests`: this reads source text and needs none of the
+/// engine-gated types, so it runs on every lane rather than only on macOS / `backend-candle`.
+#[test]
+fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
+    let base = include_str!("base.rs");
+    let arm_start = base
+        .find("GenEvent::Preview { index, frame } => {")
+        .expect("the Preview arm of consume_gen_events");
+    let arm_end = arm_start
+        + base[arm_start..]
+            .find("\n            GenEvent::Image {")
+            .expect("the Preview arm is followed by the Image arm");
+    let arm = &base[arm_start..arm_end];
+    assert!(
+        !arm.contains("update_job("),
+        "GenEvent::Preview must NOT post — the frame rides the next Step/Decoding update, which is \
+         why the first `generating` POST carries no previewFrame and why previewSupport.js holds \
+         its placeholder across denoise step 1. Arm:\n{arm}"
+    );
+    assert!(
+        arm.contains("latest_preview = Some(slot)"),
+        "the Preview arm must park the frame in the single latest-wins slot for the next POST"
+    );
+    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked.
+    let step_start = base
+        .find("GenEvent::Step {")
+        .expect("the Step arm of consume_gen_events");
+    let step_arm = &base[step_start..(step_start + 2000).min(base.len())];
+    assert!(
+        step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
+        "the Step arm is the POST that carries the parked frame"
+    );
+}

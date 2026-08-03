@@ -11,12 +11,50 @@ import previewSupport from "./previewSupport.json";
 // live outside the web root — see the server.fs.allow entries in vite.config.js (mirrors the
 // style.txt / builtin.styles.jsonc pair).
 import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
-import candleFactsRaw from "../../../../config/engine-capabilities/capabilities.candle.json?raw";
 import previewSupportManifestRaw from "../../../../config/manifests/builtin.preview-support.jsonc?raw";
+// The inference pin itself. `verifyEngineCapabilityFacts` in scripts/bump-inference.mjs compares the
+// facts files against it, but that script runs only when someone bumps THROUGH it — CI never invokes
+// it. So a pin edited by hand would leave the whole catalog advertising the PREVIOUS revision's
+// truth with nothing red. `check-license-coverage.mjs` had already learned this (it compares
+// `audit.inferenceRevision` to the live pin set AND runs in the parity lane); this is the same
+// assertion for the same class of artifact, on a guard that runs on every PR.
+import workerCargoToml from "../../../../crates/sceneworks-worker/Cargo.toml?raw";
 import { fallbackModels } from "../constants.js";
 
-const factsFiles = [JSON.parse(candleFactsRaw)];
-const derived = derivePreviewSupport(parseEngineModelTable(enginesSource), factsFiles);
+// DISCOVERED, never listed. The generator globs this directory so a newly dumped backend is picked
+// up with no edit; a guard that hardcodes `capabilities.candle.json` would then fail the moment the
+// macOS lane lands `capabilities.mlx.json` — i.e. it would punish exactly the follow-up the design
+// is waiting on. Everything below is derived per-backend from whatever is on disk.
+const factsModules = import.meta.glob(
+  "../../../../config/engine-capabilities/capabilities.*.json",
+  { eager: true, query: "?raw", import: "default" },
+);
+const factsEntries = Object.entries(factsModules)
+  .map(([path, raw]) => ({ name: path.slice(path.lastIndexOf("/") + 1), facts: JSON.parse(raw) }))
+  .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+const factsFiles = factsEntries.map((entry) => entry.facts);
+
+const rows = parseEngineModelTable(enginesSource);
+const derived = derivePreviewSupport(rows, factsFiles);
+
+/** The single inference revision every Cargo manifest in the worker pins, read from the pin itself. */
+const inferencePin = (() => {
+  const revisions = new Set(
+    [
+      ...workerCargoToml.matchAll(
+        /github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/g,
+      ),
+    ].map((match) => match[1]),
+  );
+  if (revisions.size !== 1) {
+    throw new Error(
+      `expected exactly one inference revision in crates/sceneworks-worker/Cargo.toml, found: ${
+        [...revisions].join(", ") || "none"
+      }`,
+    );
+  }
+  return [...revisions][0];
+})();
 
 // Guards sc-16965 (epic 16948). `config/manifests/builtin.preview-support.jsonc` — the block
 // rust-api merges onto every /api/v1/models entry as `preview.byBackend` — must stay a mechanical
@@ -50,11 +88,10 @@ describe("preview-support catalog: the artifacts are derived, not authored", () 
     expect(JSON.parse(previewSupportManifestRaw).generatedBy).toBe(PREVIEW_SUPPORT_GENERATOR);
   });
 
-  it("stamps the inference revision each facts file was dumped under", () => {
-    const manifest = JSON.parse(previewSupportManifestRaw);
-    for (const backend of manifest.backends) {
-      expect(manifest.generatedFrom[backend].inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
-    }
+  it("covers every backend on disk — the artifacts list exactly the dumped facts files", () => {
+    const onDisk = factsEntries.map((entry) => entry.facts.backend).sort();
+    expect(JSON.parse(previewSupportManifestRaw).backends).toEqual(onDisk);
+    expect(previewSupport.backends).toEqual(onDisk);
   });
 });
 
@@ -62,31 +99,54 @@ describe("preview-support catalog: the artifacts are derived, not authored", () 
 // empty or truncated one derives as "no route supports live preview", which is a confident wrong
 // answer rather than a missing one. The Rust dumper refuses to write one; this refuses to read one.
 describe("preview-support catalog: the stage-1 facts files are non-vacuous", () => {
-  it("the candle dump carries the full registry, not an empty one", () => {
-    const facts = JSON.parse(candleFactsRaw);
-    expect(facts.backend).toBe("candle");
-    expect(facts.engines.length).toBeGreaterThan(40);
-    expect(facts.generatedFrom.inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
+  it("finds at least one checked-in dump", () => {
+    expect(factsEntries.length).toBeGreaterThan(0);
+  });
+
+  it.each(factsEntries.map((entry) => [entry.name, entry.facts]))(
+    "%s carries a full registry, not an empty one",
+    (name, facts) => {
+      // The filename is the routing key — one file per backend so two lanes never rewrite the same
+      // file — so a dump whose `backend` disagrees with its own name would silently take another
+      // lane's slot.
+      expect(`capabilities.${facts.backend}.json`).toBe(name);
+      // Both shipped registries are large (candle 51; the MLX bundle registers 27 provider crates
+      // and 38 preview-capable routes alone), so a dump under this floor is truncated, not small.
+      expect(facts.engines.length).toBeGreaterThan(40);
+      expect(facts.generatedFrom.inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
+    },
+  );
+
+  // The assertion `bump-inference.mjs` makes at bump time, made again where CI can actually see it.
+  // Without this, a pin edited outside the sanctioned script leaves every facts file — and therefore
+  // the entire served catalog — describing the PREVIOUS revision's descriptors, silently.
+  it.each(factsEntries.map((entry) => [entry.name, entry.facts]))(
+    "%s was dumped at the revision the worker currently pins",
+    (name, facts) => {
+      expect(facts.generatedFrom.inferenceRevision, `${name} vs crates/sceneworks-worker/Cargo.toml`)
+        .toBe(inferencePin);
+    },
+  );
+
+  it("the manifest stamps each backend's dump revision, and it is the current pin", () => {
+    const manifest = JSON.parse(previewSupportManifestRaw);
+    for (const backend of manifest.backends) {
+      expect(manifest.generatedFrom[backend].inferenceRevision, backend).toBe(inferencePin);
+    }
   });
 
   it("an empty facts file is refused rather than derived from", () => {
-    expect(() =>
-      derivePreviewSupport(parseEngineModelTable(enginesSource), [
-        { backend: "candle", engines: [] },
-      ]),
-    ).toThrow(/vacuous-green/);
+    expect(() => derivePreviewSupport(rows, [{ backend: "candle", engines: [] }])).toThrow(
+      /vacuous-green/,
+    );
   });
 
   it("deriving with no facts files at all is refused", () => {
-    expect(() => derivePreviewSupport(parseEngineModelTable(enginesSource), [])).toThrow(
-      /no stage-1 facts files/,
-    );
+    expect(() => derivePreviewSupport(rows, [])).toThrow(/no stage-1 facts files/);
   });
 });
 
 describe("preview-support catalog: the MODEL_TABLE join", () => {
-  const rows = parseEngineModelTable(enginesSource);
-
   it("parses the full engines.rs model table", () => {
     expect(rows.length).toBeGreaterThan(40);
     expect(rows.every((row) => row.sceneworksId && row.engineId)).toBe(true);
@@ -103,37 +163,114 @@ describe("preview-support catalog: the MODEL_TABLE join", () => {
   it("a MODEL_TABLE row with no matching engine facts is omitted, not defaulted to false", () => {
     // Absence must never be encoded as `false`: a backend that never registered the engine has no
     // opinion, and inventing one would let the UI claim "no live preview" about a route it cannot
-    // see. Every emitted entry is backed by a real facts row.
-    const factsIds = new Set(factsFiles[0].engines.map((engine) => engine.id));
-    for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
-      if (!("candle" in byBackend)) continue;
-      const engineId = rows.find((row) => row.sceneworksId === modelId)?.engineId;
-      expect(factsIds.has(engineId), `${modelId} → ${engineId}`).toBe(true);
+    // see. Every emitted entry is backed by a real facts row, on every backend on disk.
+    for (const { facts } of factsEntries) {
+      const factsIds = new Set(facts.engines.map((engine) => engine.id));
+      for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
+        if (!(facts.backend in byBackend)) continue;
+        const engineId = rows.find((row) => row.sceneworksId === modelId)?.engineId;
+        expect(factsIds.has(engineId), `${modelId} → ${engineId} @ ${facts.backend}`).toBe(true);
+      }
     }
   });
 
   it("throws rather than silently emptying when MODEL_TABLE cannot be found", () => {
     expect(() => parseEngineModelTable("// no table here\n")).toThrow(/MODEL_TABLE/);
   });
+
+  it("refuses a row it cannot read rather than dropping it", () => {
+    // A row that grows a nested-brace field is invisible to the brace-free matcher. Dropping it
+    // reads downstream as "unknown", which renders exactly as before — i.e. it looks fine. The
+    // count assertion is what turns that into a loud failure.
+    const withNestedField = enginesSource.replace(
+      'sceneworks_id: "sdxl",',
+      'limits: Limits { max: 4 },\n        sceneworks_id: "sdxl",',
+    );
+    expect(withNestedField).not.toBe(enginesSource);
+    expect(() => parseEngineModelTable(withNestedField)).toThrow(
+      /declares \d+ ModelRow entries but only \d+ parsed/,
+    );
+  });
+
+  it("does not parse a commented-out row as a live one", () => {
+    // Over-claiming a model that no longer exists is the dangerous direction here: the catalog would
+    // advertise preview support for a route that is not wired at all.
+    const withGhost = enginesSource.replace(
+      "pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n",
+      "pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n" +
+        "    /*\n" +
+        "    ModelRow {\n" +
+        '        sceneworks_id: "ghost_model",\n' +
+        '        engine_id: "ghost_engine",\n' +
+        '        default_repo: "x/y",\n' +
+        "        default_steps: 1,\n" +
+        "        default_guidance: 1.0,\n" +
+        '        adapter_label: "ghost",\n' +
+        "    },\n" +
+        "    */\n",
+    );
+    expect(withGhost).not.toBe(enginesSource);
+    const ghosted = parseEngineModelTable(withGhost);
+    expect(ghosted.map((row) => row.sceneworksId)).not.toContain("ghost_model");
+    expect(ghosted.length).toBe(rows.length);
+  });
+
+  it("is not truncated by a `];` that only appears inside a comment", () => {
+    // The old first-`\n];` terminator stopped there and dropped every row after it — silently,
+    // because the survivors still cleared the row-count floor.
+    for (const injected of ["    // the table ends with\n    // ];\n", "    /* like this:\n];\n    */\n"]) {
+      const withStray = enginesSource.replace(
+        "pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n",
+        `pub(crate) const MODEL_TABLE: &[ModelRow] = &[\n${injected}`,
+      );
+      expect(withStray).not.toBe(enginesSource);
+      expect(parseEngineModelTable(withStray).length, injected).toBe(rows.length);
+    }
+  });
 });
 
-// The current truth at inference pin d4802320: sc-16951 flipped the three Krea routes and sc-16952
-// flipped Qwen-Image. The remaining family stories (sc-16953…sc-16960) each flip more; when one
-// lands and the facts file is re-dumped, THIS list is what fails and tells the next author to
-// regenerate — which is the whole point of landing sc-16965 before them rather than after.
-describe("preview-support catalog: the shipped candle answers", () => {
-  it("advertises live preview for exactly the wired candle routes", () => {
-    const advertising = Object.entries(previewSupport.models)
-      .filter(([, byBackend]) => byBackend.candle === true)
-      .map(([id]) => id)
-      .sort();
-    expect(advertising).toEqual(["krea_2_raw", "krea_2_turbo", "qwen_image"]);
-  });
+// What the shipped artifacts claim, cross-checked against the RAW facts rather than against a
+// hand-written id list. A literal list would have to be re-typed by each remaining family story
+// (sc-16953…sc-16960) and would fail outright the first time a second backend is dumped; this
+// re-joins the facts independently of `derivePreviewSupport`, so it still catches a re-dump that
+// nobody regenerated — which is the whole point of landing sc-16965 before those stories.
+describe("preview-support catalog: the shipped answers match the dumped facts", () => {
+  it.each(factsEntries.map((entry) => [entry.facts.backend, entry.facts]))(
+    "advertises live preview on %s for exactly the routes whose descriptors say so",
+    (backend, facts) => {
+      const advertisingEngines = new Set(
+        facts.engines.filter((engine) => engine.supportsPreview).map((engine) => engine.id),
+      );
+      const expected = rows
+        .filter((row) => advertisingEngines.has(row.engineId))
+        .map((row) => row.sceneworksId)
+        .sort();
+      const actual = Object.entries(previewSupport.models)
+        .filter(([, byBackend]) => byBackend[backend] === true)
+        .map(([id]) => id)
+        .sort();
+      expect(actual).toEqual(expected);
+      expect(actual.length, `${backend} advertises nothing — epic 16948 has wired routes`)
+        .toBeGreaterThan(0);
+    },
+  );
 
-  it("says false — not unknown — for a candle route that is wired but does not preview", () => {
-    expect(previewSupport.models.sdxl).toEqual({ candle: false });
-    expect(previewSupport.models.sensenova_u1_8b).toEqual({ candle: false });
-  });
+  it.each(factsEntries.map((entry) => [entry.facts.backend, entry.facts]))(
+    "says false — not unknown — for every %s route that is wired and does not preview",
+    (backend, facts) => {
+      const nonPreviewing = new Map(
+        facts.engines.map((engine) => [engine.id, engine.supportsPreview]),
+      );
+      const wiredFalse = rows.filter((row) => nonPreviewing.get(row.engineId) === false);
+      expect(wiredFalse.length).toBeGreaterThan(0);
+      for (const row of wiredFalse) {
+        expect(
+          previewSupport.models[row.sceneworksId]?.[backend],
+          `${row.sceneworksId} → ${row.engineId} @ ${backend}`,
+        ).toBe(false);
+      }
+    },
+  );
 
   it("is engine-KEYED: every entry is a per-backend map, never a bare boolean", () => {
     for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
@@ -162,17 +299,15 @@ describe("preview-support catalog: the offline fallback mirrors the served flag"
     }
   });
 
-  it("covers the candle routes that DO advertise preview", () => {
-    // qwen_image (sc-16952) is the advertising route that is also in the offline seed — the Krea
-    // ids are catalog-only, so this is the one the fallback path can actually exercise.
-    const advertising = fallbackModels
-      .filter((model) =>
-        Object.values(model.preview?.byBackend ?? {}).some((supported) => supported === true),
-      )
-      .map((model) => model.id);
-    expect(advertising).toContain("qwen_image");
-    expect(fallbackModels.find((model) => model.id === "sdxl").preview.byBackend).toEqual({
-      candle: false,
-    });
+  it("seeds BOTH answers, so the offline path can exercise every state", () => {
+    // Derived, not named: which ids are in the offline seed is a product decision that moves, and a
+    // hardcoded pair breaks on a re-dump or a new backend. What must hold is that the seed carries
+    // at least one supporting and one non-supporting route — otherwise a whole UI state is
+    // unreachable when the API is down.
+    const seeded = fallbackModels.filter((model) => previewSupport.models[model.id]);
+    expect(seeded.length).toBeGreaterThan(0);
+    const answers = seeded.flatMap((model) => Object.values(model.preview?.byBackend ?? {}));
+    expect(answers, "no fallback model advertises live preview").toContain(true);
+    expect(answers, "no fallback model reports a wired non-previewing route").toContain(false);
   });
 });

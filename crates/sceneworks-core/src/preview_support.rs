@@ -156,11 +156,11 @@ mod tests {
     #[test]
     fn distinguishes_wired_false_from_unknown() {
         assert_eq!(supports_preview("sdxl", "candle"), Some(false));
-        assert_eq!(
-            supports_preview("sdxl", "mlx"),
-            None,
-            "no mlx facts file is dumped on this checkout, so mlx is UNKNOWN, not false"
-        );
+        // A backend with no facts file is UNKNOWN, not false. Asserted against a name that can
+        // never be dumped rather than against `mlx`: `mlx` is exactly the backend the macOS lane is
+        // expected to add, and pinning "mlx is absent" here would turn that follow-up into a red
+        // test with a comment claiming the absence was intentional.
+        assert_eq!(supports_preview("sdxl", "no_such_backend"), None);
         assert_eq!(supports_preview("not_a_model", "candle"), None);
     }
 

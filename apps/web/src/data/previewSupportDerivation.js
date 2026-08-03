@@ -39,26 +39,90 @@ export const PREVIEW_SUPPORT_GENERATOR = "apps/web/scripts/generate-preview-supp
 // The `MODEL_TABLE` const in engines.rs. Anchored on the type so a rename is a loud parse failure
 // rather than a silently empty table.
 const MODEL_TABLE_OPEN = "const MODEL_TABLE: &[ModelRow] = &[";
-const MODEL_TABLE_CLOSE = "\n];";
 
-// The table has ~60 rows and only ever grows. A parse that yields fewer than this has almost
-// certainly matched the wrong thing (a refactor, a reformat), and an under-parsed table would drop
-// real models from the catalog silently — the exact class of failure a drift guard exists to catch.
-const MIN_EXPECTED_MODEL_ROWS = 40;
+// Belt-and-braces only. The real guard is the exact `ModelRow`-occurrence count in
+// {@link parseEngineModelTable} — the floor exists solely to catch an anchor that matched something
+// tiny and structurally wrong. Kept just under the current row count (53) rather than at the old
+// 40, whose 13 rows of slack grew with the table and let a truncated parse through.
+const MIN_EXPECTED_MODEL_ROWS = 50;
 
 /**
- * Parse the `sceneworks_id` → `engine_id` rows out of `crates/sceneworks-worker/src/engines.rs`.
+ * Strip Rust comments, leaving string literals and line structure intact.
  *
- * Returns `[{ sceneworksId, engineId }]` in source order. Throws — never returns a partial or empty
- * table — because every failure mode here (renamed const, reformatted rows, a row missing a field)
- * would otherwise degrade into "this model has no engine", which reads downstream as a legitimate
- * "unknown" and hides the breakage.
+ * Comment handling is the difference between "this model no longer exists" and "this model
+ * over-claims live preview". A row commented OUT with a block-comment span is not a row, and a
+ * line-based `//` filter cannot see that; a `];` inside a comment is not the end of the table.
+ * Both are handled here, once, before anything else looks at the text. Block comments nest in
+ * Rust, so the depth counter is not decoration.
+ *
+ * String literals are copied verbatim (escapes honoured) so a `//` inside a repo URL — every
+ * `default_repo` is one — can never be mistaken for a comment.
  */
-export function parseEngineModelTable(rustSource) {
-  if (typeof rustSource !== "string" || rustSource.length === 0) {
-    throw new Error("parseEngineModelTable: expected the engines.rs source text");
+function stripRustComments(source) {
+  let out = "";
+  let index = 0;
+  let blockDepth = 0; // Rust block comments nest.
+  while (index < source.length) {
+    if (blockDepth > 0) {
+      if (source.startsWith("/*", index)) {
+        blockDepth += 1;
+        index += 2;
+      } else if (source.startsWith("*/", index)) {
+        blockDepth -= 1;
+        index += 2;
+      } else {
+        // Keep newlines so the caller's line-oriented error messages still line up.
+        out += source[index] === "\n" ? "\n" : " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      blockDepth = 1;
+      index += 2;
+      continue;
+    }
+    if (source.startsWith("//", index)) {
+      while (index < source.length && source[index] !== "\n") index += 1;
+      continue;
+    }
+    if (source[index] === '"') {
+      out += source[index];
+      index += 1;
+      while (index < source.length) {
+        const char = source[index];
+        out += char;
+        index += 1;
+        if (char === "\\") {
+          if (index < source.length) {
+            out += source[index];
+            index += 1;
+          }
+          continue;
+        }
+        if (char === '"') break;
+      }
+      continue;
+    }
+    out += source[index];
+    index += 1;
   }
-  const open = rustSource.indexOf(MODEL_TABLE_OPEN);
+  if (blockDepth > 0) {
+    throw new Error("parseEngineModelTable: engines.rs has an unterminated `/*` block comment");
+  }
+  return out;
+}
+
+/**
+ * The text between `MODEL_TABLE`'s opening `&[` and its MATCHING `]`.
+ *
+ * Bracket-matched rather than terminated on the first `\n];`, because that sequence can occur
+ * inside the table (a nested literal, a re-indent) and truncating there drops every row after it —
+ * which read downstream as a pile of legitimate "unknown"s. Comments are already gone by the time
+ * this runs; string literals are skipped so a bracket inside one cannot close the table.
+ */
+function sliceModelTableBody(source) {
+  const open = source.indexOf(MODEL_TABLE_OPEN);
   if (open === -1) {
     throw new Error(
       `parseEngineModelTable: no ${JSON.stringify(MODEL_TABLE_OPEN)} in engines.rs — the model ` +
@@ -66,23 +130,56 @@ export function parseEngineModelTable(rustSource) {
     );
   }
   const bodyStart = open + MODEL_TABLE_OPEN.length;
-  const close = rustSource.indexOf(MODEL_TABLE_CLOSE, bodyStart);
-  if (close === -1) {
-    throw new Error("parseEngineModelTable: MODEL_TABLE is not terminated by `\\n];`");
+  let depth = 1; // the `[` the anchor ends on
+  let index = bodyStart;
+  while (index < source.length) {
+    const char = source[index];
+    if (char === '"') {
+      index += 1;
+      while (index < source.length) {
+        const inner = source[index];
+        index += 1;
+        if (inner === "\\") {
+          index += 1;
+          continue;
+        }
+        if (inner === '"') break;
+      }
+      continue;
+    }
+    if (char === "[" || char === "{" || char === "(") depth += 1;
+    else if (char === "]" || char === "}" || char === ")") {
+      depth -= 1;
+      if (depth === 0) return source.slice(bodyStart, index);
+    }
+    index += 1;
   }
+  throw new Error(
+    "parseEngineModelTable: MODEL_TABLE's opening `&[` is never closed — the table is truncated " +
+      "or the brackets are unbalanced",
+  );
+}
 
-  // Drop whole-line `//` comments before matching. The table is heavily commented and those
-  // comments are prose (they mention `ModelRow` by name), so leaving them in would let a sentence
-  // masquerade as a row. Only FULL-line comments are stripped, so a trailing `// …` after a field
-  // cannot swallow the field itself.
-  const body = rustSource
-    .slice(bodyStart, close)
-    .split("\n")
-    .filter((line) => !line.trimStart().startsWith("//"))
-    .join("\n");
+/**
+ * Parse the `sceneworks_id` → `engine_id` rows out of `crates/sceneworks-worker/src/engines.rs`.
+ *
+ * Returns `[{ sceneworksId, engineId }]` in source order. Throws — never returns a partial or empty
+ * table — because every failure mode here (renamed const, reformatted rows, a row missing a field)
+ * would otherwise degrade into "this model has no engine", which reads downstream as a legitimate
+ * "unknown" and hides the breakage. A DROPPED model is the dangerous direction precisely because
+ * unknown renders exactly as it did before this story: it looks fine.
+ */
+export function parseEngineModelTable(rustSource) {
+  if (typeof rustSource !== "string" || rustSource.length === 0) {
+    throw new Error("parseEngineModelTable: expected the engines.rs source text");
+  }
+  // Comments first, then locate the table: a `];` or a `ModelRow` mention inside a comment must not
+  // be able to end the table or be counted as a row.
+  const body = sliceModelTableBody(stripRustComments(rustSource));
 
-  // Rows carry only scalar/string fields — no nested braces — so a non-greedy brace-free match is
-  // exact here and cannot run past a row boundary.
+  // Rows carry only scalar/string fields today — no nested braces — so a brace-free match is exact.
+  // The moment that stops being true this regex silently SKIPS the row, so the count below is what
+  // makes the assumption enforceable rather than merely documented.
   const rows = [];
   for (const match of body.matchAll(/ModelRow\s*\{([^{}]*)\}/g)) {
     const fields = match[1];
@@ -94,6 +191,21 @@ export function parseEngineModelTable(rustSource) {
       );
     }
     rows.push({ sceneworksId, engineId });
+  }
+
+  // Every `ModelRow` the (comment-free) table declares must have produced a row. Without this, a
+  // row that grows a nested-brace field — `limits: Limits { max: 4 }` — is silently DROPPED and the
+  // model reads as "unknown" downstream, i.e. renders exactly as before and looks fine. The drift
+  // guard would only catch it on a PR where nobody blind-regenerates, and blind-regenerating is
+  // exactly the workflow each remaining family story (sc-16953…sc-16960) follows.
+  const declared = (body.match(/\bModelRow\b/g) ?? []).length;
+  if (rows.length !== declared) {
+    throw new Error(
+      `parseEngineModelTable: MODEL_TABLE declares ${declared} ModelRow entries but only ` +
+        `${rows.length} parsed. A row the brace-free matcher cannot read (most likely a new field ` +
+        "with a nested `{ … }` value) would otherwise be dropped silently and read as \"unknown\". " +
+        "Teach this parser the new shape, then re-run `npm run gen:preview-support`.",
+    );
   }
 
   if (rows.length < MIN_EXPECTED_MODEL_ROWS) {
