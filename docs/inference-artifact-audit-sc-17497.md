@@ -44,7 +44,7 @@ comment blocked — produce a **byte-identical** measurement binary.
 
 The proof is frozen in source — `FLUX2_COMPATIBILITY_AUDIT.artifactProof` in
 `scripts/generate-memory-matrix.mjs` and `FLUX2_AUDIT_ARTIFACT_PROOF` in
-`crates/sceneworks-worker/src/candle_memory_strategy.rs` — so the checked-in record cannot authorize
+`crates/sceneworks-worker/src/inference_compatibility_audit.rs` — so the checked-in record cannot authorize
 itself.
 
 ## A digest only speaks for what the binary links
@@ -106,6 +106,14 @@ Three edits, in this order:
 
 On the free path, leave both proofs `null`/`None`: one frozen while the closure is quiet demands a
 build that is not due, and both validators reject that.
+
+Moving the live pin at all — with or without a build — also means updating the five `flux2_dev`
+`compatibleInferenceRevision` bindings in `config/manifests/builtin.models.jsonc` and the three
+places that lock the window to a literal revision: `LIVE_INFERENCE_REVISION` in
+`scripts/sc-15833-flux2-evidence.test.mjs`, the evidence-classification test in
+`scripts/calibration-cost-model.test.mjs`, and
+`tests/test_memory_matrix.py::test_calibration_evidence_is_schema_valid_and_matrix_ingested` on the
+parity lane. Regenerate `docs/generated/*` afterwards; never hand-edit them.
 
 The Rust half deliberately lives in its own module rather than in `candle_memory_strategy`, which
 compiles only under `all(not(target_os = "macos"), feature = "backend-candle")` and whose tests link

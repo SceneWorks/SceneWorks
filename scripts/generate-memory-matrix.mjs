@@ -39,7 +39,7 @@ const RUNGS = [
 //
 // When a path moves, object identity can no longer decide: the 42-line `//!` doc comment in
 // inference `35251a88` moved `candle-gen`'s tree while provably changing nothing that compiles.
-// `artifactDigest` is then the proof — the SHA-256 of the LINKED `candle-gen-flux2` lib test binary
+// `artifactProof` is then the answer — the SHA-256 of the LINKED `candle-gen-flux2` lib test binary
 // (the exact target that produced the measurements), built at both revisions under one toolchain by
 // `scripts/inference-artifact-audit.mjs`. Identical bytes there mean identical compiled code, which
 // is the claim the calibration actually depends on.
@@ -1260,7 +1260,7 @@ const V2_AUDIT_METHOD =
  * Freezing it in source is what stops the checked-in record from authorizing itself.
  *
  * `expected` is injectable so the tests can exercise the ACCEPTING side of the artifact layer while
- * the shipped constant still carries `artifactDigest: null`. Without it the only reachable v2 cases
+ * the shipped constant still carries `artifactProof: null`. Without it the only reachable v2 cases
  * would be rejections, and a validator only ever tested against its own default is a false green.
  */
 export function validatedInferenceCompatibility(body, expected = FLUX2_COMPATIBILITY_AUDIT) {
