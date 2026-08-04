@@ -43,17 +43,59 @@ use crate::architecture_tests::code_without_comments_or_literals;
 /// The bespoke candle request literals whose upstream struct carries a `preview` field at the pinned
 /// inference revision, and the worker file that builds each.
 ///
-/// All three request types remain present at inference `5b6d6aa`; sc-16950/sc-16952 originally
-/// introduced their preview fields.
+/// All fourteen request types are present at inference `35251a88`. sc-16950/sc-16952 introduced the
+/// first three; sc-16954…sc-16957 added the other eleven as their families wired up, and sc-17393
+/// listed them here at the closeout pin bump. Until then only the original three were named, so the
+/// *positive* guard below — "this lane binds a live sink" — covered three of fourteen lanes. The
+/// generic sweeps still saw the rest, but a sweep can only prove the absence of a bad spelling; it
+/// cannot prove the field is there at all. Reverting `Flux2EditRequest.preview` to an inert default
+/// was caught, while deleting the line outright was not.
 const WIRED_LANES: &[(&str, &str)] = &[
     ("Krea2ControlRequest", "krea_control_candle.rs"),
     ("QwenFunControlRequest", "qwen_control.rs"),
     ("QwenEditRequest", "qwen_edit_candle.rs"),
+    ("SdxlEditRequest", "sdxl_edit_candle.rs"),
+    ("IpAdapterSdxlRequest", "sdxl_ipadapter.rs"),
+    ("KolorsControlRequest", "kolors_control.rs"),
+    ("IpAdapterKolorsRequest", "kolors_ipadapter.rs"),
+    ("Flux2EditRequest", "flux2_edit_candle.rs"),
+    ("Flux2ControlRequest", "flux2_control_candle.rs"),
+    ("Flux1ControlRequest", "flux1_control_candle.rs"),
+    ("IpAdapterFluxRequest", "flux_ipadapter.rs"),
+    ("PulidFluxRequest", "pulid_candle.rs"),
+    ("ZImageControlRequest", "zimage_control.rs"),
+    ("ZImageEditRequest", "zimage_identity_candle.rs"),
 ];
 
-/// Files that thread the sink from a `drive_gen_items*` closure into a bespoke provider. Each must
-/// BIND the closure's preview parameter; `_preview` means the sink is being dropped on the floor.
-const SINK_CONSUMERS: &[&str] = &["candle_strict_control.rs", "qwen_edit_candle.rs"];
+/// Files that receive the job's live sink and must forward it into a bespoke provider. Each must
+/// BIND its preview parameter; `_preview` means the sink is being dropped on the floor before any
+/// request is built, which no amount of correctness at the struct literal can repair.
+///
+/// Two shapes reach these lanes and both are covered:
+///
+/// * a `drive_gen_items*` **closure** parameter (`move |_index, item, preview, on_progress|`), and
+/// * a [`crate::image_jobs::candle_strict_control::CandleStrictControl::generate_one`] **trait
+///   parameter** (`preview: &gen_core::PreviewSink`), which is how every strict-control lane gets it.
+///
+/// `zimage_identity_candle.rs` was absent from this list until sc-17393 even though it threads a
+/// sink, so its closure could have been reverted to `_preview` with every guard still green.
+const SINK_CONSUMERS: &[&str] = &[
+    "candle_strict_control.rs",
+    "qwen_edit_candle.rs",
+    "krea_control_candle.rs",
+    "qwen_control.rs",
+    "sdxl_edit_candle.rs",
+    "sdxl_ipadapter.rs",
+    "kolors_control.rs",
+    "kolors_ipadapter.rs",
+    "flux2_edit_candle.rs",
+    "flux2_control_candle.rs",
+    "flux1_control_candle.rs",
+    "flux_ipadapter.rs",
+    "pulid_candle.rs",
+    "zimage_control.rs",
+    "zimage_identity_candle.rs",
+];
 
 /// `*Request` types under `src/image_jobs/` that are **not** bespoke by-name provider requests, and
 /// are therefore exempt from the struct-update rule in
@@ -427,6 +469,17 @@ fn candle_preview_consumers_do_not_discard_their_sink() {
             !code.contains("_preview,"),
             "src/image_jobs/{file}: a `drive_gen_items*` closure still binds `_preview` and drops \
              the job's live sink. Bind `preview` and forward it to the bespoke request."
+        );
+        // The TYPED spelling, which the closure check above cannot see. Every strict-control lane
+        // receives its sink as `preview: &gen_core::PreviewSink` — a `CandleStrictControl::
+        // generate_one` parameter, not a closure parameter — so discarding it reads `_preview: &..`
+        // and ends at a colon, never a comma. Six of the fifteen files listed here take the sink
+        // only in that position, so without this assertion they were being "guarded" by a check
+        // that could not fail for them.
+        assert!(
+            !code.contains("_preview:"),
+            "src/image_jobs/{file}: a `CandleStrictControl::generate_one` impl binds `_preview` and \
+             drops the job's live sink. Bind `preview` and forward it to the bespoke request."
         );
         assert!(
             code.contains("preview"),
