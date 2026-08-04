@@ -207,12 +207,9 @@ export function buildMeasurementBinary({
   // Both spellings: on macOS `os.tmpdir()` hands back `/var/folders/...` while cargo and rustc see
   // the canonical `/private/var/folders/...`, and a remap that does not match the path rustc is
   // given silently does nothing.
-  const remap = [
-    ...new Set([workdir, resolvedPath(workdir)]),
-  ]
+  const remap = [...new Set([workdir, resolvedPath(workdir)])]
     .map((root) => `--remap-path-prefix=${root}=/inference`)
-    .concat(`--remap-path-prefix=${cargoHome()}=/cargo`)
-    .join(" ");
+    .concat(`--remap-path-prefix=${cargoHome()}=/cargo`);
   const report = runCargo({
     cwd: workdir,
     args: [
@@ -231,7 +228,13 @@ export function buildMeasurementBinary({
       ...process.env,
       CARGO_TARGET_DIR: cargoTargetDir,
       CARGO_INCREMENTAL: "0",
-      RUSTFLAGS: [process.env.RUSTFLAGS, remap].filter(Boolean).join(" "),
+      // CARGO_ENCODED_RUSTFLAGS, not RUSTFLAGS: cargo splits the latter on WHITESPACE, and the box
+      // this has to run on is Windows, where the default temp directory sits under a profile path
+      // that routinely contains a space ("C:\Users\Michael Trefry\AppData\Local\Temp\..."). A
+      // space-joined remap there is silently truncated into arguments that match nothing. The
+      // encoded form is 0x1f-separated and takes arbitrary values.
+      CARGO_ENCODED_RUSTFLAGS: encodedRustflags(remap),
+      RUSTFLAGS: undefined,
     },
   });
   const executable = selectMeasurementExecutable(report);
@@ -334,6 +337,17 @@ function defaultCargoRunner({ cwd, args, env }) {
   return result.stdout.split("\n");
 }
 
+/**
+ * Flags in cargo's 0x1f-separated encoding, carrying through anything already in the environment.
+ *
+ * An inherited `RUSTFLAGS` is whitespace-separated by definition, so it is re-split on whitespace;
+ * only the flags this script adds — the ones that may contain a space — get to be atomic.
+ */
+export function encodedRustflags(flags, inherited = process.env.RUSTFLAGS) {
+  const carried = (inherited ?? "").split(/\s+/).filter(Boolean);
+  return [...carried, ...flags].join("\u001f");
+}
+
 /** Canonical form where the path exists, best-effort otherwise (so tests can pass synthetic paths). */
 function resolvedPath(target) {
   try {
@@ -417,11 +431,6 @@ export async function main(argv) {
     process.stderr.write(`[audit] closure paths moved: ${changed.join(", ")}\n`);
     const cudaRelease = lane === "cuda" ? assertRealCudaCompiler() : null;
     const workdir = value("--workdir") ?? mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-build-"));
-    // `--remap-path-prefix` arguments are joined with spaces before rustc splits them again, so a
-    // path containing whitespace would silently produce a remap that never matches.
-    if (/\s/.test(workdir)) {
-      throw new Error(`--workdir must not contain whitespace (got ${JSON.stringify(workdir)})`);
-    }
     const cargoTargetDir = path.join(workdir, "..", `${path.basename(workdir)}-target`);
     try {
       git(repo, ["worktree", "add", "--detach", workdir, captured]);

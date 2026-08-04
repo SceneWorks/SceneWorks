@@ -14,6 +14,7 @@ import {
   changedClosurePaths,
   closureObjectPairs,
   coveredClosurePaths,
+  encodedRustflags,
   digestBytes,
   resolveRevision,
   selectMeasurementExecutable,
@@ -209,8 +210,10 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
     assert.deepEqual(args.slice(args.indexOf("--features"), args.indexOf("--features") + 2), ["--features", "cuda"]);
     assert.ok(args.includes("--locked"), "an unlocked resolve could move a dependency between builds");
     assert.equal(env.CARGO_INCREMENTAL, "0", "incremental artifacts are not reproducible");
-    assert.match(env.RUSTFLAGS, /--remap-path-prefix=\/w=\/inference/);
-    assert.match(env.RUSTFLAGS, /--remap-path-prefix=.*=\/cargo/);
+    assert.equal(env.RUSTFLAGS, undefined, "the encoded form must not be shadowed by the split one");
+    const flags = env.CARGO_ENCODED_RUSTFLAGS.split("\u001f");
+    assert.ok(flags.includes("--remap-path-prefix=/w=/inference"));
+    assert.ok(flags.some((flag) => /^--remap-path-prefix=.*=\/cargo$/.test(flag)));
   }
   assert.notEqual(first.digest, second.digest, "different bytes, different digest");
   assert.equal(first.executable, "/w/target/deps/candle_gen_flux2-1");
@@ -305,6 +308,18 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
       }),
     /does not link crates\/bundles\/runtime-cuda/,
   );
+});
+
+test("a remap path containing a space survives, because the CUDA box is Windows", () => {
+  // cargo splits RUSTFLAGS on WHITESPACE. The only machine that can produce a `cuda` record is the
+  // Windows RTX box, whose default temp directory sits under a profile path that routinely contains
+  // a space — so a space-joined remap is silently truncated into flags that match nothing, and the
+  // digests would then embed real paths. The 0x1f-encoded form takes arbitrary values.
+  const spaced = "--remap-path-prefix=C:\\Users\\Michael Trefry\\AppData\\Local\\Temp\\audit=/inference";
+  const encoded = encodedRustflags([spaced], "-C debuginfo=0");
+  assert.deepEqual(encoded.split("\u001f"), ["-C", "debuginfo=0", spaced]);
+  assert.equal(encodedRustflags([spaced], undefined).split("\u001f").length, 1, "no env, one flag");
+  assert.equal(encodedRustflags([], "").length, 0, "nothing in, nothing out");
 });
 
 test("the audited artifact names the target that actually produced the measurements", () => {
