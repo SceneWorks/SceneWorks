@@ -16,6 +16,10 @@ use sceneworks_core::memory_calibration::{
 };
 use serde_json::{Map as JsonObject, Value};
 
+use crate::inference_compatibility_audit::{
+    compatibility_audit_authorizes, FLUX2_AUDIT_ARTIFACT_PROOF, FLUX2_CAPTURED_INFERENCE_REVISION,
+    FLUX2_COMPATIBLE_INFERENCE_REVISION, FLUX2_INFERENCE_COMPATIBILITY_AUDIT,
+};
 use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 use crate::vram_gate::VramBudget;
 use crate::{WorkerError, WorkerResult};
@@ -24,37 +28,6 @@ const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request
 const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
 const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
 const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
-const FLUX2_CAPTURED_INFERENCE_REVISION: &str = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
-const FLUX2_COMPATIBLE_INFERENCE_REVISION: &str = "277f423822bf1899340ed3d867c3d6a773473d7b";
-const FLUX2_INFERENCE_COMPATIBILITY_AUDIT: &str =
-    include_str!("../../../docs/calibration/sc-15833/inference-compatibility-277f.json");
-const FLUX2_AUDITED_OBJECTS: [(&str, &str); 7] = [
-    ("Cargo.toml", "8f5af6b9d53bbfe3be5d9d79b8949364138a087c"),
-    (
-        "crates/contracts/gen-core",
-        "9a7e86f5893e584a8d0d656147abc4ae93af6922",
-    ),
-    (
-        "crates/bundles/runtime-cuda",
-        "aba807f775872760e72fd98f28a5a0d2853cf00f",
-    ),
-    (
-        "crates/media/candle-gen/candle-gen",
-        "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
-    ),
-    (
-        "crates/media/candle-gen/candle-gen-pid",
-        "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
-    ),
-    (
-        "crates/media/candle-gen/candle-gen-flux2",
-        "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
-    ),
-    (
-        "crates/media/candle-gen/vendor/candle-kernels",
-        "3b8327cf01d346c8068a5e9d096dcdddca440e99",
-    ),
-];
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -205,33 +178,10 @@ fn audited_compatible_inference_revision(
     {
         return None;
     }
-    let audit: Value = serde_json::from_str(FLUX2_INFERENCE_COMPATIBILITY_AUDIT).ok()?;
-    if audit.get("schemaVersion")?.as_u64()? != 1
-        || audit.get("story")?.as_str()? != "SC-15833"
-        || audit.get("capturedInferenceRevision")?.as_str()? != FLUX2_CAPTURED_INFERENCE_REVISION
-        || audit.get("compatibleInferenceRevision")?.as_str()?
-            != FLUX2_COMPATIBLE_INFERENCE_REVISION
-        || audit.get("method")?.as_str()?
-            != "git object identity across the complete Candle FLUX.2 runtime dependency closure"
-    {
-        return None;
-    }
-    let objects = audit.get("auditedObjects")?.as_array()?;
-    if objects.len() != FLUX2_AUDITED_OBJECTS.len() {
-        return None;
-    }
-    for (path, object_id) in FLUX2_AUDITED_OBJECTS {
-        let matching = objects
-            .iter()
-            .filter(|entry| entry.get("path").and_then(Value::as_str) == Some(path))
-            .collect::<Vec<_>>();
-        if matching.len() != 1
-            || matching[0].get("capturedObject").and_then(Value::as_str) != Some(object_id)
-            || matching[0].get("compatibleObject").and_then(Value::as_str) != Some(object_id)
-        {
-            return None;
-        }
-    }
+    compatibility_audit_authorizes(
+        FLUX2_INFERENCE_COMPATIBILITY_AUDIT,
+        FLUX2_AUDIT_ARTIFACT_PROOF,
+    )?;
     Some(claimed)
 }
 

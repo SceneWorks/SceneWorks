@@ -5,7 +5,8 @@ import test from "node:test";
 import { deflateSync } from "node:zlib";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { buildMatrix } from "./generate-memory-matrix.mjs";
+import { buildMatrix, validatedInferenceCompatibility } from "./generate-memory-matrix.mjs";
+import { AUDIT_CLOSURE_PATHS, AUDIT_METHOD } from "./inference-artifact-audit.mjs";
 import { validateRecord } from "./memory-calibration-harness.mjs";
 import {
   flux2CalibrationPlans,
@@ -870,4 +871,248 @@ test("SC-15833 committed bundle and plan preserve all unrelated evidence structu
   assert.equal(plans.length, 5);
   assert.equal(plan.providers.filter((item) => item.target.provider === "flux2_dev").length, 5);
   assert.deepEqual(plans.map(({ rung }) => rung), RUNGS);
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-17497: the compiled-artifact layer.
+//
+// The v1 audit's unit was a crate tree, so 42 lines of `//!` doc comment in inference `35251a88`
+// invalidated a proof it could not possibly have affected. These tests pin the layered replacement:
+// object identity still carries the common case for free, and when a path DOES move the record must
+// produce a compiled-artifact digest that matches the one frozen in source.
+// ---------------------------------------------------------------------------------------------
+
+const V2_METHOD =
+  "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
+  "the complete Candle FLUX.2 runtime dependency closure";
+const ARTIFACT_DIGEST = `sha256:${"c".repeat(64)}`;
+const CANDLE_GEN = "crates/media/candle-gen/candle-gen";
+const RUNTIME_CUDA = "crates/bundles/runtime-cuda";
+// What the `candle-gen-flux2` lib test binary links. `runtime-cuda` is deliberately absent: it
+// depends on the provider, not the other way round.
+const ADJUDICATES = [
+  "crates/contracts/gen-core",
+  "crates/media/candle-gen/candle-gen",
+  "crates/media/candle-gen/candle-gen-pid",
+  "crates/media/candle-gen/candle-gen-flux2",
+  "crates/media/candle-gen/vendor/candle-kernels",
+];
+
+async function shippedAudit() {
+  return JSON.parse(await readFile(
+    new URL("../docs/calibration/sc-15833/inference-compatibility-277f.json", import.meta.url),
+  ));
+}
+
+/** The frozen-constant side, mirroring `FLUX2_COMPATIBILITY_AUDIT` for a pin that needs a build. */
+function expectedWith(audit, digest, adjudicates = ADJUDICATES) {
+  return {
+    story: "SC-15833",
+    modelId: "flux2_dev",
+    provider: "flux2_dev",
+    capturedInferenceRevision: INFERENCE_REVISION,
+    compatibleInferenceRevision: LIVE_INFERENCE_REVISION,
+    artifactProof: digest === null ? null : { digest, adjudicates },
+    auditedObjects: Object.fromEntries(
+      audit.auditedObjects.map(({ path, capturedObject }) => [path, capturedObject]),
+    ),
+  };
+}
+
+/** A v2 record in which `moved` closure paths carry a different compatible object. */
+function v2Record(audit, { moved = [], artifact = undefined } = {}) {
+  const record = {
+    schemaVersion: 2,
+    story: "SC-15833",
+    capturedInferenceRevision: INFERENCE_REVISION,
+    compatibleInferenceRevision: LIVE_INFERENCE_REVISION,
+    method: V2_METHOD,
+    command: "node scripts/inference-artifact-audit.mjs --repo PATH --captured SHA40 --compatible SHA40",
+    changedClosurePaths: [...moved],
+    auditedObjects: audit.auditedObjects.map(({ path, capturedObject }) => ({
+      path,
+      capturedObject,
+      compatibleObject: moved.includes(path) ? "e".repeat(40) : capturedObject,
+    })),
+  };
+  if (artifact !== undefined) record.auditedArtifact = artifact;
+  return record;
+}
+
+function cudaArtifact(overrides = {}) {
+  return {
+    package: "candle-gen-flux2",
+    kind: "lib test binary",
+    test: "tests::flux2_dev_probed_generate_for_offload_ab",
+    profile: "release",
+    lane: "cuda",
+    features: ["cuda"],
+    rustc: "rustc 1.96.0",
+    capturedDigest: ARTIFACT_DIGEST,
+    compatibleDigest: ARTIFACT_DIGEST,
+    ...overrides,
+  };
+}
+
+test("SC-17497 the audit script and the matrix validator agree on the v2 method string", () => {
+  assert.equal(AUDIT_METHOD, V2_METHOD, "a drift here would reject every record the script emits");
+  assert.deepEqual([...AUDIT_CLOSURE_PATHS].sort(), [
+    "Cargo.toml",
+    "crates/bundles/runtime-cuda",
+    "crates/contracts/gen-core",
+    "crates/media/candle-gen/candle-gen",
+    "crates/media/candle-gen/candle-gen-flux2",
+    "crates/media/candle-gen/candle-gen-pid",
+    "crates/media/candle-gen/vendor/candle-kernels",
+  ].sort());
+});
+
+test("SC-17497 the shipped v1 record still validates, and still may not carry a moved object", async () => {
+  const audit = await shippedAudit();
+  const expected = expectedWith(audit, null);
+  assert.equal(validatedInferenceCompatibility(JSON.stringify(audit), expected), expected);
+
+  const moved = structuredClone(audit);
+  moved.auditedObjects.find(({ path }) => path === CANDLE_GEN).compatibleObject = "e".repeat(40);
+  assert.throws(
+    () => validatedInferenceCompatibility(JSON.stringify(moved), expected),
+    /object pair is invalid/,
+    "v1 asserts object identity and nothing else, so it cannot absorb a move",
+  );
+});
+
+test("SC-17497 a v2 record with an unmoved closure needs no build and no artifact block", async () => {
+  const audit = await shippedAudit();
+  const expected = expectedWith(audit, null);
+  const record = v2Record(audit);
+  assert.equal(validatedInferenceCompatibility(JSON.stringify(record), expected), expected);
+
+  assert.throws(
+    () => validatedInferenceCompatibility(JSON.stringify(record), expectedWith(audit, ARTIFACT_DIGEST)),
+    /missing its expected artifact proof/,
+    "a digest left frozen after the closure went quiet would demand a build that is not due",
+  );
+});
+
+test("SC-17497 a doc-comment move is authorized by a matching compiled-artifact digest", async () => {
+  const audit = await shippedAudit();
+  const expected = expectedWith(audit, ARTIFACT_DIGEST);
+  const record = v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() });
+  assert.equal(
+    validatedInferenceCompatibility(JSON.stringify(record), expected),
+    expected,
+    "the exact sc-16961 shape: one crate tree moved, identical compiled code",
+  );
+
+  // Mutation check: the digest is the whole proof, so one character must be fatal.
+  const tampered = v2Record(audit, {
+    moved: [CANDLE_GEN],
+    artifact: cudaArtifact({
+      capturedDigest: `sha256:d${"c".repeat(63)}`,
+      compatibleDigest: `sha256:d${"c".repeat(63)}`,
+    }),
+  });
+  assert.throws(
+    () => validatedInferenceCompatibility(JSON.stringify(tampered), expected),
+    /compiled-artifact proof is invalid/,
+  );
+});
+
+test("SC-17497 every way of faking the artifact proof is refused", async () => {
+  const audit = await shippedAudit();
+  const expected = expectedWith(audit, ARTIFACT_DIGEST);
+  const reject = (label, record, pattern) =>
+    assert.throws(() => validatedInferenceCompatibility(JSON.stringify(record), expected), pattern, label);
+
+  reject(
+    "a Metal build is not proof of the CUDA artifact the capture ran",
+    v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact({ lane: "metal", features: ["metal"] }) }),
+    /compiled-artifact proof is invalid/,
+  );
+  reject(
+    "digests that disagree are a re-capture, not an authorization",
+    v2Record(audit, {
+      moved: [CANDLE_GEN],
+      artifact: cudaArtifact({ compatibleDigest: `sha256:${"d".repeat(64)}` }),
+    }),
+    /compiled-artifact proof is invalid/,
+  );
+  reject(
+    "a moved path with no artifact block at all",
+    v2Record(audit, { moved: [CANDLE_GEN] }),
+    /compiled-artifact proof is invalid/,
+  );
+  reject(
+    "auditing some other crate's binary",
+    v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact({ package: "candle-gen" }) }),
+    /compiled-artifact proof is invalid/,
+  );
+  reject(
+    "auditing a debug build the capture never used",
+    v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact({ profile: "debug" }) }),
+    /compiled-artifact proof is invalid/,
+  );
+  reject(
+    "understating which paths moved hides a second, unproven change",
+    { ...v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), changedClosurePaths: [] },
+    /misdeclares which closure paths changed/,
+  );
+  reject(
+    "a captured object that does not match the code the measurements ran on",
+    (() => {
+      const record = v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() });
+      record.auditedObjects[0].capturedObject = "a".repeat(40);
+      return record;
+    })(),
+    /closure is incomplete or unrecognized/,
+  );
+  reject(
+    "a v3 nobody has defined",
+    { ...v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), schemaVersion: 3 },
+    /identity is invalid/,
+  );
+
+  assert.throws(
+    () =>
+      validatedInferenceCompatibility(
+        JSON.stringify(v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() })),
+        expectedWith(audit, null),
+      ),
+    /compiled-artifact proof is invalid/,
+    "the record may not authorize itself: with no digest frozen in source there is no proof",
+  );
+});
+
+test("SC-17497 a digest cannot speak for a closure path the audited binary never links", async () => {
+  // `runtime-cuda` depends on `candle-gen-flux2`, so a commit into the CUDA bundle leaves the
+  // measurement binary byte-identical. Reading that unchanged digest as proof would be a false
+  // green — strictly worse than the false positive this story removes.
+  const audit = await shippedAudit();
+  const expected = expectedWith(audit, ARTIFACT_DIGEST);
+  assert.throws(
+    () =>
+      validatedInferenceCompatibility(
+        JSON.stringify(v2Record(audit, { moved: [RUNTIME_CUDA], artifact: cudaArtifact() })),
+        expected,
+      ),
+    /cannot adjudicate crates\/bundles\/runtime-cuda/,
+  );
+  assert.throws(
+    () =>
+      validatedInferenceCompatibility(
+        JSON.stringify(v2Record(audit, { moved: [CANDLE_GEN, RUNTIME_CUDA], artifact: cudaArtifact() })),
+        expected,
+      ),
+    /cannot adjudicate crates\/bundles\/runtime-cuda/,
+    "riding along with an adjudicable path does not launder it",
+  );
+  const linksTheBundle = expectedWith(audit, ARTIFACT_DIGEST, [...ADJUDICATES, RUNTIME_CUDA]);
+  assert.equal(
+    validatedInferenceCompatibility(
+      JSON.stringify(v2Record(audit, { moved: [RUNTIME_CUDA], artifact: cudaArtifact() })),
+      linksTheBundle,
+    ),
+    linksTheBundle,
+    "an artifact that DOES link it may adjudicate it — the rule is coverage, not a blocklist",
+  );
 });
