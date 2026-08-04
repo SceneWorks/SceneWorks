@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
 
 import {
   HARNESS_VERSION,
@@ -29,10 +29,27 @@ const EXPECTED_CALIBRATION_ABI = 3;
 const EXPECTED_CALIBRATION_FINGERPRINT =
   "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
 const EXPECTED_INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
-const CAPTURE_PATH = "docs/calibration/sc-15833/capture.json";
 const SHA256 = /^[0-9a-f]{64}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+const EXPECTED_BASE_INPUT = {
+  role: "base",
+  path: "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+  bytes: 33582076196,
+  sha256: "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+  repository: "SceneWorks/flux2-dev-mlx",
+  resolvedRevision: "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+  variant: "q4",
+};
+const EXPECTED_CONTROL_INPUT = {
+  role: "control",
+  path: "E:/huggingface/sceneworks-staging/sc15833-flux2-control-b3dcd783/FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors",
+  bytes: 8232506680,
+  sha256: "516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a7a794",
+  repository: "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
+  resolvedRevision: "b3dcd7836a0e926248dac3ccba8fc0853495764b",
+  variant: "union-2602",
+};
 
 const RUNGS = [
   "resident",
@@ -83,14 +100,6 @@ const RUNG_ENV = {
 };
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
-const phase = (peak) => ({
-  activeBytes: peak,
-  allocatorBytes: peak,
-  deviceBytes: peak,
-  wiredBytes: peak,
-  reclaimableBytes: 0,
-});
-
 function fail(message) {
   throw new Error(`${STORY}: ${message}`);
 }
@@ -198,19 +207,16 @@ function assertExactTest(text, identity, filename) {
 }
 
 function baseCommand(capture, descriptor) {
+  const outputPath = `${SESSION_PREFIX}base-q4-${descriptor.rung}.rgb`;
   const parity = descriptor.rung === "resident"
     ? ""
     : ` FLUX2_PARITY_REFERENCE=${SESSION_PREFIX}base-q4-resident.rgb`;
-  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${capture.baseInput.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[descriptor.rung]} FLUX2_OUT=${descriptor.outputPath}${parity} MEMORY_INFERENCE_REVISION=${EXPECTED_INFERENCE_REVISION} MEMORY_SCENEWORKS_REVISION=${capture.repositories.sceneWorks.revision} MEMORY_MODEL_REVISION=${capture.baseInput.resolvedRevision} MEMORY_MODEL_INVENTORY_SHA256=${capture.baseInput.sha256} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
+  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${capture.baseInput.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[descriptor.rung]} FLUX2_OUT=${outputPath}${parity} MEMORY_INFERENCE_REVISION=${EXPECTED_INFERENCE_REVISION} MEMORY_SCENEWORKS_REVISION=${capture.repositories.sceneWorks.revision} MEMORY_MODEL_REVISION=${capture.baseInput.resolvedRevision} MEMORY_MODEL_INVENTORY_SHA256=${capture.baseInput.sha256} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
 }
 
 function routeCommand(capture, descriptor) {
   const control = descriptor.route === "control" ? ` FLUX2_CONTROL=${capture.controlInput.path}` : "";
   return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${capture.baseInput.path}${control} FLUX2_DEV_OUT_DIR=${SESSION_PREFIX.slice(0, -1)} FLUX2_DEV_W=512 FLUX2_DEV_H=512 cargo test -p sceneworks-worker --release --no-default-features --features backend-candle flux2_dev_gpu_smoke::flux2_dev_${descriptor.route}_candle_gpu_smoke -- --ignored --nocapture --test-threads=1`;
-}
-
-function supportCommand(descriptor) {
-  return `node scripts/sc-15833-flux2-evidence.mjs --support-${descriptor.kind.replace("_mutation", "")} ${CAPTURE_PATH} ${descriptor.rung}`;
 }
 
 function assertExactCommand(actual, expected, label) {
@@ -315,14 +321,6 @@ function validateMeasuredParity(resident, candidate) {
   return measured;
 }
 
-function measuredNegativeMutation(output, filename) {
-  const mutated = Buffer.from(output);
-  for (let index = 0; index < mutated.length; index += 1) {
-    mutated[index] = output[index] < 128 ? 255 : 0;
-  }
-  return rgb8Parity(output, mutated, filename);
-}
-
 function expectedSnakeParameters(rung) {
   const parameters = PARAMETERS[rung];
   return {
@@ -423,67 +421,16 @@ function sourceSession(spec) {
   return session;
 }
 
-function printMarker(name, value) {
-  process.stdout.write(`${name} ${JSON.stringify(value)}\n`);
-}
-
-async function runSupportCapture(mode, capturePath, rung) {
-  if (!RUNGS.includes(rung)) fail(`support capture has invalid rung ${rung}`);
-  if (capturePath.replaceAll("\\", "/") !== CAPTURE_PATH) {
-    fail(`support capture path must equal ${CAPTURE_PATH}`);
-  }
-  await validateLiveInferencePins();
-  const capture = JSON.parse(await readFile(path.join(ROOT, CAPTURE_PATH), "utf8"));
-  validateCaptureEnvelope(capture);
-  const kind = mode === "--support-lifecycle" ? "lifecycle" : "negative_mutation";
-  const descriptor = capture.supportSessions.find((item) => item.kind === kind && item.rung === rung);
-  if (!descriptor) fail(`capture is missing ${kind}:${rung}`);
-  assertExactCommand(descriptor.command, supportCommand(descriptor), `${kind}.${rung}.command`);
-  printMarker("SC15833_SOURCE_V1", {
-    schema_version: 1,
-    captured_at: descriptor.capturedAt,
-    repositories: capture.repositories,
-    hardware: capture.hardware,
-    inputs: [capture.baseInput],
-  });
-
-  if (kind === "lifecycle") {
-    const identity = `flux2_dev_gpu_smoke::sc15833_lifecycle_${rung}`;
-    const result = spawnSync("cargo", [
-      "test", "-p", "sceneworks-worker", "--no-default-features", "--features", "backend-candle",
-      identity, "--", "--exact", "--nocapture", "--test-threads=1",
-    ], { cwd: ROOT, encoding: "utf8" });
-    process.stdout.write(result.stdout ?? "");
-    process.stderr.write(result.stderr ?? "");
-    if (result.status !== 0) fail(`${identity} failed with exit ${result.status}`);
-    printMarker("SC15833_VALIDATION_V1", {
-      kind, rung, parameters: PARAMETERS[rung], result: "passed", warm_repeat: true,
-      cancel_cleanup: true, cancel_warm_follow_up: true,
-      error_cleanup: true, error_warm_follow_up: true,
-    });
-    return;
-  }
-
-  const outputPath = repoRelative(descriptor.outputPath, `${kind}.${rung}.outputPath`);
-  const output = await readFile(path.join(ROOT, outputPath));
-  if (output.length !== 1024 * 1024 * 3) fail(`${outputPath} is not a 1024x1024 RGB8 output`);
-  const measured = measuredNegativeMutation(output, outputPath);
-  printMarker("SC15833_VALIDATION_V1", {
-    kind, rung, parameters: PARAMETERS[rung], result: "passed", measured: true,
-    maximum_error: measured.maximumError, mean_error: measured.meanError,
-  });
-  process.stdout.write(`test sc15833_negative_mutation_${rung} ... ok\n`);
-  process.stdout.write("test result: ok. 1 passed; 0 failed\n");
-}
-
 function validateCaptureEnvelope(capture) {
   exactObject(capture, "capture", [
     "schemaVersion", "story", "promotionIntent", "repositories", "hardware", "calibrationAbi",
     "calibrationFingerprint", "baseInput", "controlInput", "baseSessions", "routeSessions",
-    "supportSessions", "excludedAttempts",
+    "excludedAttempts",
   ]);
   if (capture.schemaVersion !== 1 || capture.story !== STORY) fail("capture envelope is not SC-15833 schema 1");
-  if (!['report_only', 'complete'].includes(capture.promotionIntent)) fail("promotionIntent must be report_only or complete");
+  if (!['report_only', 'runtime_complete'].includes(capture.promotionIntent)) {
+    fail("promotionIntent must be report_only or runtime_complete; exhaustive complete certification belongs to SC-15922");
+  }
   exactObject(capture.repositories, "repositories", ["sceneWorks", "inference"]);
   exactObject(capture.repositories.sceneWorks, "repositories.sceneWorks", ["revision", "dirty", "matrixSourceRevision"]);
   exactObject(capture.repositories.inference, "repositories.inference", ["revision", "dirty"]);
@@ -507,9 +454,9 @@ function validateCaptureEnvelope(capture) {
   if (capture.calibrationFingerprint !== EXPECTED_CALIBRATION_FINGERPRINT) {
     fail("calibrationFingerprint must equal the exact reviewed FLUX.2 dev provider fingerprint");
   }
-  validateInput(capture.baseInput, "baseInput", "base", "q4");
-  validateInput(capture.controlInput, "controlInput", "control", null);
-  for (const name of ["baseSessions", "routeSessions", "supportSessions", "excludedAttempts"]) {
+  validateInput(capture.baseInput, "baseInput", EXPECTED_BASE_INPUT);
+  validateInput(capture.controlInput, "controlInput", EXPECTED_CONTROL_INPUT);
+  for (const name of ["baseSessions", "routeSessions", "excludedAttempts"]) {
     if (!Array.isArray(capture[name])) fail(`${name} must be an array`);
   }
 }
@@ -534,20 +481,137 @@ async function validateLiveInferencePins() {
   if (count === 0) fail("live Cargo manifests contain no immutable SceneWorks/inference pins");
 }
 
-function validateInput(input, label, role, variant) {
+function validateInput(input, label, expected) {
   exactObject(input, label, ["role", "path", "bytes", "sha256", "repository", "resolvedRevision", "variant"]);
-  if (input.role !== role || (variant && input.variant !== variant)) fail(`${label} has the wrong role or variant`);
-  requireText(input.path, `${label}.path`);
-  if (!Number.isSafeInteger(input.bytes) || input.bytes <= 0) fail(`${label}.bytes is invalid`);
-  requireDigest(input.sha256, `${label}.sha256`);
-  requireText(input.repository, `${label}.repository`);
-  requireRevision(input.resolvedRevision, `${label}.resolvedRevision`);
-  requireText(input.variant, `${label}.variant`);
+  if (canonicalJson(input) !== canonicalJson(expected)) {
+    fail(`${label} must equal the exact immutable SC-15833 artifact identity`);
+  }
 }
 
 async function readRepoFile(relative, reader) {
   const safe = repoRelative(relative, "capture file path");
   return Buffer.from(await reader(safe));
+}
+
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const PNG_CRC_TABLE = Uint32Array.from({ length: 256 }, (_, value) => {
+  let crc = value;
+  for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+  return crc >>> 0;
+});
+
+function pngCrc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = PNG_CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function paeth(left, above, upperLeft) {
+  const estimate = left + above - upperLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const aboveDistance = Math.abs(estimate - above);
+  const upperLeftDistance = Math.abs(estimate - upperLeft);
+  if (leftDistance <= aboveDistance && leftDistance <= upperLeftDistance) return left;
+  return aboveDistance <= upperLeftDistance ? above : upperLeft;
+}
+
+function inspectPng(bytes, filename) {
+  if (bytes.length < PNG_SIGNATURE.length || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    fail(`${filename} is not a PNG image`);
+  }
+  let offset = 8;
+  let ihdr = null;
+  let sawEnd = false;
+  const compressed = [];
+  while (offset < bytes.length) {
+    if (offset + 12 > bytes.length) fail(`${filename} has a truncated PNG chunk`);
+    const length = bytes.readUInt32BE(offset);
+    const typeOffset = offset + 4;
+    const dataOffset = typeOffset + 4;
+    const crcOffset = dataOffset + length;
+    if (crcOffset + 4 > bytes.length) fail(`${filename} has a truncated PNG chunk payload`);
+    const type = bytes.subarray(typeOffset, dataOffset).toString("ascii");
+    const crcInput = bytes.subarray(typeOffset, crcOffset);
+    if (pngCrc32(crcInput) !== bytes.readUInt32BE(crcOffset)) {
+      fail(`${filename} has an invalid ${type} CRC`);
+    }
+    const data = bytes.subarray(dataOffset, crcOffset);
+    if (!ihdr && type !== "IHDR") fail(`${filename} PNG must start with IHDR`);
+    if (type === "IHDR") {
+      if (ihdr || length !== 13) fail(`${filename} has an invalid IHDR`);
+      ihdr = {
+        width: data.readUInt32BE(0),
+        height: data.readUInt32BE(4),
+        bitDepth: data[8],
+        colorType: data[9],
+        compression: data[10],
+        filter: data[11],
+        interlace: data[12],
+      };
+    } else if (type === "IDAT") compressed.push(data);
+    else if (type === "IEND") {
+      if (length !== 0 || sawEnd) fail(`${filename} has an invalid IEND`);
+      sawEnd = true;
+      offset = crcOffset + 4;
+      break;
+    }
+    offset = crcOffset + 4;
+  }
+  if (!ihdr || compressed.length === 0 || !sawEnd || offset !== bytes.length) {
+    fail(`${filename} is missing required PNG chunks or has trailing bytes`);
+  }
+  if (
+    ihdr.width !== 512 || ihdr.height !== 512 || ihdr.bitDepth !== 8
+    || ![2, 6].includes(ihdr.colorType) || ihdr.compression !== 0
+    || ihdr.filter !== 0 || ihdr.interlace !== 0
+  ) fail(`${filename} must be a non-interlaced 512x512 RGB8 or RGBA8 PNG`);
+  const channels = ihdr.colorType === 2 ? 3 : 4;
+  const stride = ihdr.width * channels;
+  let inflated;
+  try {
+    inflated = inflateSync(Buffer.concat(compressed));
+  } catch (error) {
+    fail(`${filename} has invalid compressed image data: ${error.message}`);
+  }
+  if (inflated.length !== (stride + 1) * ihdr.height) fail(`${filename} has the wrong decoded byte length`);
+  const decoded = Buffer.alloc(stride * ihdr.height);
+  for (let row = 0; row < ihdr.height; row += 1) {
+    const sourceOffset = row * (stride + 1);
+    const filter = inflated[sourceOffset];
+    if (filter > 4) fail(`${filename} has unsupported PNG filter ${filter}`);
+    const targetOffset = row * stride;
+    for (let column = 0; column < stride; column += 1) {
+      const raw = inflated[sourceOffset + 1 + column];
+      const left = column >= channels ? decoded[targetOffset + column - channels] : 0;
+      const above = row > 0 ? decoded[targetOffset + column - stride] : 0;
+      const upperLeft = row > 0 && column >= channels
+        ? decoded[targetOffset + column - stride - channels]
+        : 0;
+      const predictor = filter === 0 ? 0
+        : filter === 1 ? left
+          : filter === 2 ? above
+            : filter === 3 ? Math.floor((left + above) / 2)
+              : paeth(left, above, upperLeft);
+      decoded[targetOffset + column] = (raw + predictor) & 0xff;
+    }
+  }
+  const pixelCount = ihdr.width * ihdr.height;
+  let sum = 0;
+  for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+    const at = pixel * channels;
+    sum += decoded[at] + decoded[at + 1] + decoded[at + 2];
+  }
+  const count = pixelCount * 3;
+  const mean = sum / count;
+  let squared = 0;
+  for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+    const at = pixel * channels;
+    for (let channel = 0; channel < 3; channel += 1) {
+      const delta = decoded[at + channel] - mean;
+      squared += delta * delta;
+    }
+  }
+  return { format: "png", width: ihdr.width, height: ihdr.height, stdDev: Math.sqrt(squared / count) };
 }
 
 async function ingestBaseSession(descriptor, capture, reader) {
@@ -556,6 +620,10 @@ async function ingestBaseSession(descriptor, capture, reader) {
   requireText(descriptor.command, `${descriptor.rung}.command`);
   const sourcePath = repoRelative(descriptor.sourcePath, `${descriptor.rung}.sourcePath`, SESSION_PREFIX);
   const outputPath = repoRelative(descriptor.outputPath, `${descriptor.rung}.outputPath`);
+  const expectedSource = `${SESSION_PREFIX}base-q4-${descriptor.rung}.log`;
+  const expectedOutput = `${SESSION_PREFIX}base-q4-${descriptor.rung}.rgb`;
+  if (sourcePath !== expectedSource) fail(`${descriptor.rung}.sourcePath must equal ${expectedSource}`);
+  if (outputPath !== expectedOutput) fail(`${descriptor.rung}.outputPath must equal ${expectedOutput}`);
   assertExactCommand(descriptor.command, baseCommand(capture, descriptor), `${descriptor.rung}.command`);
   if (!RFC3339.test(descriptor.capturedAt ?? "")) fail(`${descriptor.rung}.capturedAt must be stable RFC3339 UTC`);
   if (/dirty|experimental|failed|sweep/i.test(sourcePath) || /dirty|experimental|failed|sweep/i.test(outputPath)) {
@@ -606,7 +674,9 @@ async function ingestRouteSession(descriptor, capture, reader) {
   requireText(descriptor.command, `${descriptor.route}.command`);
   const sourcePath = repoRelative(descriptor.sourcePath, `${descriptor.route}.sourcePath`, SESSION_PREFIX);
   const outputPath = repoRelative(descriptor.outputPath, `${descriptor.route}.outputPath`);
+  const expectedSource = `${SESSION_PREFIX}${descriptor.route}-q4-resident.log`;
   const expectedOutput = `${SESSION_PREFIX}flux2_dev_${descriptor.route}_candle.png`;
+  if (sourcePath !== expectedSource) fail(`${descriptor.route}.sourcePath must equal ${expectedSource}`);
   if (outputPath !== expectedOutput) fail(`${descriptor.route}.outputPath must equal ${expectedOutput}`);
   assertExactCommand(descriptor.command, routeCommand(capture, descriptor), `${descriptor.route}.command`);
   if (!RFC3339.test(descriptor.capturedAt ?? "")) fail(`${descriptor.route}.capturedAt must be stable RFC3339 UTC`);
@@ -635,6 +705,12 @@ async function ingestRouteSession(descriptor, capture, reader) {
   }
   const stdMatch = text.match(new RegExp(`\\[smoke\\] dev ${descriptor.route} 512x512 std ([0-9.]+)`));
   if (!stdMatch || Number(stdMatch[1]) <= 0) fail(`${sourcePath} is missing a non-degenerate output diagnostic`);
+  const image = inspectPng(outputBytes, outputPath);
+  if (image.stdDev <= 0) fail(`${outputPath} is a degenerate image`);
+  const loggedStdDev = Number(stdMatch[1]);
+  if (Math.abs(image.stdDev - loggedStdDev) > 0.0051) {
+    fail(`${sourcePath} output diagnostic does not match the accepted PNG pixels`);
+  }
   const outputSha256 = sha256(outputBytes);
   const session = sourceSession({
     kind: "physical_cuda",
@@ -657,82 +733,8 @@ async function ingestRouteSession(descriptor, capture, reader) {
     outputs: [{ path: outputPath, sha256: outputSha256 }],
     claims: ["loadability", "overlay"],
   });
-  return { descriptor, outputSha256, outputStdDev: Number(stdMatch[1]), session };
-}
-
-function validateSupportMarker(marker, descriptor, filename) {
-  exactObject(marker, `${filename} validation marker`, marker.kind === "lifecycle"
-    ? ["kind", "rung", "parameters", "result", "warm_repeat", "cancel_cleanup", "cancel_warm_follow_up", "error_cleanup", "error_warm_follow_up"]
-    : ["kind", "rung", "parameters", "result", "measured", "maximum_error", "mean_error"]);
-  if (marker.kind !== descriptor.kind || marker.rung !== descriptor.rung) {
-    fail(`${filename} validation marker kind/rung mismatch`);
-  }
-  if (canonicalJson(marker.parameters) !== canonicalJson(PARAMETERS[descriptor.rung])) {
-    fail(`${filename} validation marker parameters mismatch`);
-  }
-  if (marker.result !== "passed") fail(`${filename} validation marker did not pass`);
-  if (marker.kind === "lifecycle") {
-    for (const key of ["warm_repeat", "cancel_cleanup", "cancel_warm_follow_up", "error_cleanup", "error_warm_follow_up"]) {
-      if (marker[key] !== true) fail(`${filename} lifecycle validation did not prove ${key}`);
-    }
-  } else if (marker.kind === "negative_mutation") {
-    if (marker.measured !== true) fail(`${filename} negative mutation was not measured`);
-    for (const key of ["maximum_error", "mean_error"]) {
-      if (!Number.isFinite(marker[key]) || marker[key] < 0) fail(`${filename} has invalid ${key}`);
-    }
-    if (marker.maximum_error <= BOUNDED_MAX_ABS && marker.mean_error <= BOUNDED_MAX_ABS) {
-      fail(`${filename} negative mutation did not breach the provider quality threshold`);
-    }
-  } else fail(`${filename} has unknown validation kind ${marker.kind}`);
-}
-
-async function ingestSupportSession(descriptor, capture, reader) {
-  exactObject(descriptor, `support session ${descriptor?.kind ?? "?"}`, [
-    "kind", "rung", "parameters", "command", "sourcePath", "capturedAt", "outputPath",
-  ]);
-  if (!['lifecycle', 'negative_mutation'].includes(descriptor.kind)) fail(`invalid support kind ${descriptor.kind}`);
-  if (!RUNGS.includes(descriptor.rung)) fail(`invalid support rung ${descriptor.rung}`);
-  if (canonicalJson(descriptor.parameters) !== canonicalJson(PARAMETERS[descriptor.rung])) {
-    fail(`${descriptor.kind}.${descriptor.rung}.parameters do not match the exact provider selection`);
-  }
-  requireText(descriptor.command, `${descriptor.kind}.command`);
-  const sourcePath = repoRelative(descriptor.sourcePath, `${descriptor.kind}.sourcePath`, SESSION_PREFIX);
-  const expectedSource = `${SESSION_PREFIX}support-${descriptor.kind.replace("_", "-")}-${descriptor.rung.replaceAll("_", "-")}.log`;
-  if (sourcePath !== expectedSource) fail(`${descriptor.kind}.${descriptor.rung}.sourcePath must equal ${expectedSource}`);
-  const outputPath = repoRelative(descriptor.outputPath, `${descriptor.kind}.outputPath`);
-  assertExactCommand(descriptor.command, supportCommand(descriptor), `${descriptor.kind}.${descriptor.rung}.command`);
-  if (!RFC3339.test(descriptor.capturedAt ?? "")) fail(`${descriptor.kind}.capturedAt must be stable RFC3339 UTC`);
-  if (/dirty|experimental|failed|sweep/i.test(sourcePath)) fail(`${sourcePath} is excluded from authoritative ingestion`);
-  const logBytes = await readRepoFile(sourcePath, reader);
-  const text = decodeLog(logBytes);
-  assertPassingTestLog(text, sourcePath);
-  const identity = descriptor.kind === "lifecycle"
-    ? `flux2_dev_gpu_smoke::sc15833_lifecycle_${descriptor.rung}`
-    : `sc15833_negative_mutation_${descriptor.rung}`;
-  assertExactTest(text, identity, sourcePath);
-  validateSourceMarker(text, capture, descriptor, [capture.baseInput], sourcePath);
-  const marker = extractWrappedJson(text, "SC15833_VALIDATION_V1", sourcePath);
-  validateSupportMarker(marker, descriptor, sourcePath);
-  const session = sourceSession({
-    kind: "unit_test",
-    command: descriptor.command,
-    sourcePath,
-    capturedAt: descriptor.capturedAt,
-    repositories: {
-      sceneWorks: { revision: capture.repositories.sceneWorks.revision, dirty: false },
-      inference: { revision: capture.repositories.inference.revision, dirty: false },
-    },
-    hardware: capture.hardware,
-    target: {
-      tier: "q4", mode: "text_to_image", overlay: "none",
-      rung: descriptor.rung,
-    },
-    stdoutSha256: sha256(logBytes),
-    inputs: [capture.baseInput],
-    outputs: [],
-    claims: [descriptor.kind === "lifecycle" ? "lifecycle" : "negative_mutation"],
-  });
-  return { descriptor, marker, outputPath, session };
+  return { descriptor, outputSha256, outputStdDev: image.stdDev, outputFormat: image.format,
+    outputWidth: image.width, outputHeight: image.height, session };
 }
 
 async function ingestExcludedAttempt(descriptor, reader, acceptedPaths) {
@@ -768,18 +770,16 @@ function qualityFor(base) {
   };
 }
 
-function makeCompleteRecord(base, capture, supportByKey) {
+function makeRuntimeCompleteRecord(base, capture) {
   const rung = base.descriptor.rung;
   const peak = base.record.observed_peak_bytes;
+  const predictedPeak = base.record.predicted_peak_bytes;
   const quality = qualityFor(base);
-  const lifecycleSupport = supportByKey.get(`lifecycle:${rung}`);
-  const negativeSupport = supportByKey.get(`negative_mutation:${rung}`);
-  const negative = negativeSupport.marker;
   const parameters = PARAMETERS[rung];
   const record = {
     id: "",
     logicalCaseId: "",
-    status: "complete",
+    status: "runtime_complete",
     evidenceScope: "authoritative",
     backend: "candle",
     loadShape: "deferred_materialization",
@@ -809,25 +809,19 @@ function makeCompleteRecord(base, capture, supportByKey) {
       rangeVerified: true,
     },
     scenarios: [
-      { name: "exact_fit", result: "passed", predictedBytes: peak, effectiveBudgetBytes: peak },
+      { name: "exact_fit", result: "passed", predictedBytes: predictedPeak, effectiveBudgetBytes: predictedPeak },
       { name: "unknown_budget", result: "passed" },
       { name: "stale_evidence", result: "passed" },
-      { name: "warm_repeat", result: "passed" },
-      { name: "cancel", result: "passed", cleanupVerified: true, warmFollowUpPassed: true },
-      { name: "error", result: "passed", cleanupVerified: true, warmFollowUpPassed: true },
+      { name: "warm_repeat", result: "not_run", reason: "not exercised by this physical CUDA campaign" },
+      { name: "cancel", result: "not_run", reason: "deferred to exhaustive lifecycle certification in SC-15922" },
+      { name: "error", result: "not_run", reason: "deferred to exhaustive lifecycle certification in SC-15922" },
       { name: "loadability", result: "passed" },
       { name: "overlay", result: "not_applicable", reason: "the base request has no runtime overlay" },
     ],
-    predictedPeakBytes: { conditioning: peak, denoise: peak, decode: peak, overall: peak },
-    observedMemory: { conditioning: phase(peak), denoise: phase(peak), decode: phase(peak), overall: phase(peak) },
+    predictedPeakBytes: { overall: predictedPeak },
+    observedMemory: { overall: { activeBytes: peak } },
     quality,
-    negativeMutation: {
-      parameters,
-      measured: true,
-      result: "failed_as_expected",
-      maximumError: negative.maximum_error,
-      meanError: negative.mean_error,
-    },
+    negativeMutation: null,
     loadability: {
       result: "passed",
       resolvedPathFingerprint: `${capture.baseInput.repository}@${capture.baseInput.resolvedRevision}:${capture.baseInput.variant}`,
@@ -841,15 +835,6 @@ function makeCompleteRecord(base, capture, supportByKey) {
         { name: "outputRgbBytes", unit: "bytes", value: 1024 * 1024 * 3 },
         { name: "rgb8MaximumError", unit: "RGB8 levels", value: quality.maximumError },
       ],
-    },
-    derivation: {
-      memory: { kind: "direct", sourceSessionIds: [base.session.id] },
-      quality: { kind: "direct", sourceSessionIds: [base.session.id] },
-      loadability: { kind: "direct", sourceSessionIds: [base.session.id] },
-      lifecycle: { kind: "direct", sourceSessionIds: [lifecycleSupport.session.id] },
-      negativeMutation: { kind: "direct", sourceSessionIds: [negativeSupport.session.id] },
-      overlay: { kind: "direct", sourceSessionIds: [base.session.id] },
-      justification: "Every complete claim is bound to this exact rung, provider parameters, immutable artifacts, and reviewed runtime revisions.",
     },
     calibrationFingerprint: capture.calibrationFingerprint,
     capturedAt: base.descriptor.capturedAt,
@@ -866,11 +851,9 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
   validateCaptureEnvelope(capture);
   const base = await Promise.all(capture.baseSessions.map((item) => ingestBaseSession(item, capture, reader)));
   const route = await Promise.all(capture.routeSessions.map((item) => ingestRouteSession(item, capture, reader)));
-  const support = await Promise.all(capture.supportSessions.map((item) => ingestSupportSession(item, capture, reader)));
   const acceptedPaths = new Set([
     ...base.map((item) => item.descriptor.sourcePath.replaceAll("\\", "/")),
     ...route.map((item) => item.descriptor.sourcePath.replaceAll("\\", "/")),
-    ...support.map((item) => item.descriptor.sourcePath.replaceAll("\\", "/")),
   ]);
   const excludedAttempts = await Promise.all(
     capture.excludedAttempts.map((item) => ingestExcludedAttempt(item, reader, acceptedPaths)),
@@ -901,43 +884,16 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
   if (route.length !== 2 || !routeByName.has("edit") || !routeByName.has("control")) {
     blockers.push("the exact edit and control source sessions are both required");
   }
-  const supportByKey = new Map(
-    support.map((item) => [`${item.descriptor.kind}:${item.descriptor.rung}`, item]),
-  );
-  if (support.length !== RUNGS.length * 2 || supportByKey.size !== support.length) {
-    blockers.push("promotion requires one lifecycle and one negative-mutation session per rung");
-  }
-  for (const rung of RUNGS) {
-    const baseItem = baseByRung.get(rung);
-    const lifecycle = supportByKey.get(`lifecycle:${rung}`);
-    const negative = supportByKey.get(`negative_mutation:${rung}`);
-    if (!lifecycle || !negative || !baseItem) {
-      blockers.push(`${rung} is missing its exact lifecycle or negative-mutation support session`);
-      continue;
-    }
-    for (const item of [lifecycle, negative]) {
-      if (item.outputPath !== baseItem.descriptor.outputPath.replaceAll("\\", "/")) {
-        blockers.push(`${item.descriptor.kind}.${rung} is not bound to the exact rung output`);
-      }
-    }
-    const measured = measuredNegativeMutation(baseItem.outputBytes, negative.descriptor.sourcePath);
-    if (
-      !sameSerializedMetric(measured.maximumError, negative.marker.maximum_error) ||
-      !sameSerializedMetric(measured.meanError, negative.marker.mean_error)
-    ) {
-      blockers.push(`${rung} negative-mutation metrics do not match the bound rung output`);
-    }
-  }
-  if (capture.promotionIntent !== "complete") {
+  if (capture.promotionIntent !== "runtime_complete") {
     blockers.push("capture promotionIntent is report_only; no calibration record may be emitted");
   }
   if (excludedAttempts.length === 0) blockers.push("excluded attempts must be explicitly enumerated with reasons and hashes");
 
   const promotionEligible = blockers.length === 0;
   const records = promotionEligible
-    ? RUNGS.map((rung) => makeCompleteRecord(baseByRung.get(rung), capture, supportByKey))
+    ? RUNGS.map((rung) => makeRuntimeCompleteRecord(baseByRung.get(rung), capture))
     : [];
-  const sourceSessions = [...base, ...route, ...support].map((item) => item.session);
+  const sourceSessions = [...base, ...route].map((item) => item.session);
   const report = {
     schemaVersion: 1,
     story: STORY,
@@ -968,13 +924,9 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
       route: item.descriptor.route,
       outputSha256: item.outputSha256,
       outputStdDev: item.outputStdDev,
-      sourceSessionId: item.session.id,
-    })),
-    support: support.map((item) => ({
-      kind: item.descriptor.kind,
-      rung: item.descriptor.rung,
-      parameters: item.descriptor.parameters,
-      marker: item.marker,
+      outputFormat: item.outputFormat,
+      outputWidth: item.outputWidth,
+      outputHeight: item.outputHeight,
       sourceSessionId: item.session.id,
     })),
     excludedAttempts,
@@ -1036,11 +988,6 @@ export function updatePlan(existing, ingestion) {
 
 async function main() {
   const [capturePath, ...flags] = process.argv.slice(2);
-  if (["--support-lifecycle", "--support-negative"].includes(capturePath)) {
-    if (flags.length !== 2) fail(`usage: ${capturePath} ${CAPTURE_PATH} <rung>`);
-    await runSupportCapture(capturePath, flags[0], flags[1]);
-    return;
-  }
   if (!capturePath) fail("usage: node scripts/sc-15833-flux2-evidence.mjs <capture.json> [--write-report <path>] [--write]");
   const absoluteCapture = path.resolve(ROOT, capturePath);
   const capture = JSON.parse(await readFile(absoluteCapture, "utf8"));

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { deflateSync } from "node:zlib";
 
 import { validateRecord } from "./memory-calibration-harness.mjs";
 import {
@@ -13,10 +14,10 @@ import {
 
 const SCENEWORKS_REVISION = "1".repeat(40);
 const INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
-const MODEL_REVISION = "3".repeat(40);
-const MODEL_INVENTORY = "4".repeat(64);
-const CONTROL_REVISION = "5".repeat(40);
-const CONTROL_SHA = "6".repeat(64);
+const MODEL_REVISION = "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
+const MODEL_INVENTORY = "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b";
+const CONTROL_REVISION = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
+const CONTROL_SHA = "516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a7a794";
 const MATRIX_SOURCE = `source-tree:${"7".repeat(64)}`;
 const FINGERPRINT = "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
 const OUTPUT = Buffer.alloc(1024 * 1024 * 3, 17);
@@ -36,7 +37,7 @@ const HARDWARE = {
 };
 const BASE_INPUT = {
   role: "base",
-  path: "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4",
+  path: "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
   bytes: 33582076196,
   sha256: MODEL_INVENTORY,
   repository: "SceneWorks/flux2-dev-mlx",
@@ -45,10 +46,10 @@ const BASE_INPUT = {
 };
 const CONTROL_INPUT = {
   role: "control",
-  path: "E:/huggingface/sceneworks-staging/sc15833-flux2-control/control.safetensors",
+  path: "E:/huggingface/sceneworks-staging/sc15833-flux2-control-b3dcd783/FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors",
   bytes: 8232506680,
   sha256: CONTROL_SHA,
-  repository: "xiaozaa/catvton-flux2-control",
+  repository: "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
   resolvedRevision: CONTROL_REVISION,
   variant: "union-2602",
 };
@@ -101,7 +102,8 @@ function parametersFor(rung) {
   }).filter(([, value]) => value !== null));
 }
 
-function baseCommand(rung, outputPath) {
+function baseCommand(rung) {
+  const outputPath = `docs/calibration/sc-15833/base-q4-${rung}.rgb`;
   const parity = rung === "resident"
     ? ""
     : " FLUX2_PARITY_REFERENCE=docs/calibration/sc-15833/base-q4-resident.rgb";
@@ -111,11 +113,6 @@ function baseCommand(rung, outputPath) {
 function routeCommand(route) {
   const control = route === "control" ? ` FLUX2_CONTROL=${CONTROL_INPUT.path}` : "";
   return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${BASE_INPUT.path}${control} FLUX2_DEV_OUT_DIR=docs/calibration/sc-15833 FLUX2_DEV_W=512 FLUX2_DEV_H=512 cargo test -p sceneworks-worker --release --no-default-features --features backend-candle flux2_dev_gpu_smoke::flux2_dev_${route}_candle_gpu_smoke -- --ignored --nocapture --test-threads=1`;
-}
-
-function supportCommand(kind, rung) {
-  const mode = kind === "negative_mutation" ? "negative" : "lifecycle";
-  return `node scripts/sc-15833-flux2-evidence.mjs --support-${mode} docs/calibration/sc-15833/capture.json ${rung}`;
 }
 
 function outputForRung(rung) {
@@ -221,47 +218,78 @@ function baseLog(rung, capturedAt, overrides = {}) {
   );
 }
 
-function routeLog(route, capturedAt) {
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, value) => {
+  let crc = value;
+  for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+  return crc >>> 0;
+});
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(data.length + 12);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), data.length + 8);
+  return chunk;
+}
+
+function routePng(route, width = 512, height = 512) {
+  const pixels = Buffer.alloc(width * height * 3);
+  let sum = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const at = (y * width + x) * 3;
+      pixels[at] = x & 0xff;
+      pixels[at + 1] = y & 0xff;
+      pixels[at + 2] = route === "edit" ? ((x + y) & 0xff) : ((x ^ y) & 0xff);
+      sum += pixels[at] + pixels[at + 1] + pixels[at + 2];
+    }
+  }
+  const mean = sum / pixels.length;
+  let squared = 0;
+  for (const value of pixels) squared += (value - mean) ** 2;
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * (width * 3 + 1);
+    raw[row] = 0;
+    pixels.copy(raw, row + 1, y * width * 3, (y + 1) * width * 3);
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const bytes = Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+  return { bytes, stdDev: Math.sqrt(squared / pixels.length) };
+}
+
+function routeLog(route, capturedAt, stdDev) {
   const testName = route === "edit"
     ? "flux2_dev_edit_candle_gpu_smoke"
     : "flux2_dev_control_candle_gpu_smoke";
   return Buffer.from(
     `${sourceHeader(capturedAt, route === "control" ? [BASE_INPUT, CONTROL_INPUT] : [BASE_INPUT])}running 1 test\n` +
-    `[smoke] dev ${route} 512x512 std ${route === "edit" ? "80.28" : "31.82"} -> output.png\n` +
+    `[smoke] dev ${route} 512x512 std ${stdDev.toFixed(2)} -> output.png\n` +
     `[smoke] DONE: flux2_dev ${route} (candle) coherent\n` +
     `test flux2_dev_gpu_smoke::${testName} ... ok\n` +
     "test result: ok. 1 passed; 0 failed\n",
   );
 }
 
-function supportLog(kind, rung, capturedAt) {
-  const output = outputForRung(rung);
-  const mutated = Buffer.from(Uint8Array.from(output, (value) => value < 128 ? 255 : 0));
-  const negative = parityMetrics(output, mutated);
-  const marker = kind === "lifecycle"
-    ? {
-      kind, rung, parameters: parametersFor(rung),
-      result: "passed",
-      warm_repeat: true,
-      cancel_cleanup: true,
-      cancel_warm_follow_up: true,
-      error_cleanup: true,
-      error_warm_follow_up: true,
-    }
-    : {
-      kind, rung, parameters: parametersFor(rung), result: "passed", measured: true,
-      maximum_error: negative.maximum, mean_error: negative.mean,
-    };
-  const identity = kind === "lifecycle"
-    ? `flux2_dev_gpu_smoke::sc15833_lifecycle_${rung}`
-    : `sc15833_negative_mutation_${rung}`;
-  return Buffer.from(
-    `${sourceHeader(capturedAt, [BASE_INPUT])}SC15833_VALIDATION_V1 ${wrappedJson(marker)}\n` +
-    `test ${identity} ... ok\ntest result: ok. 1 passed; 0 failed\n`,
-  );
-}
-
-function fixture({ promotionIntent = "complete", support = true } = {}) {
+function fixture({ promotionIntent = "runtime_complete" } = {}) {
   const files = new Map();
   const baseSessions = RUNGS.map((rung, index) => {
     const sourcePath = `docs/calibration/sc-15833/base-q4-${rung}.log`;
@@ -274,7 +302,7 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
     files.set(outputPath, output);
     return {
       rung,
-      command: baseCommand(rung, outputPath),
+      command: baseCommand(rung),
       sourcePath,
       capturedAt,
       outputPath,
@@ -284,8 +312,9 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
     const sourcePath = `docs/calibration/sc-15833/${route}-q4-resident.log`;
     const outputPath = `docs/calibration/sc-15833/flux2_dev_${route}_candle.png`;
     const capturedAt = `2026-08-04T04:1${index}:00Z`;
-    files.set(sourcePath, routeLog(route, capturedAt));
-    files.set(outputPath, Buffer.from(`${route}-png`));
+    const output = routePng(route);
+    files.set(sourcePath, routeLog(route, capturedAt, output.stdDev));
+    files.set(outputPath, output.bytes);
     return {
       route,
       command: routeCommand(route),
@@ -294,22 +323,6 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
       outputPath,
     };
   });
-  const supportSessions = support ? RUNGS.flatMap((rung, rungIndex) =>
-    ["lifecycle", "negative_mutation"].map((kind, kindIndex) => {
-      const sourcePath = `docs/calibration/sc-15833/support-${kind.replace("_", "-")}-${rung.replaceAll("_", "-")}.log`;
-      const capturedAt = `2026-08-04T04:${20 + rungIndex * 2 + kindIndex}:00Z`;
-      const outputPath = `docs/calibration/sc-15833/base-q4-${rung}.rgb`;
-      files.set(sourcePath, supportLog(kind, rung, capturedAt));
-      return {
-        kind,
-        rung,
-        parameters: parametersFor(rung),
-        command: supportCommand(kind, rung),
-        sourcePath,
-        capturedAt,
-        outputPath,
-      };
-    })) : [];
   const excludedPath = "target/sc15833-evidence/dirty_experimental_decode_1024_1.log";
   files.set(excludedPath, Buffer.from("diagnostic only; repositories intentionally dirty"));
   const capture = {
@@ -324,7 +337,6 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
     controlInput: structuredClone(CONTROL_INPUT),
     baseSessions,
     routeSessions,
-    supportSessions,
     excludedAttempts: [{
       sourcePath: excludedPath,
       reason: "diagnostic sweep ran from a dirty experimental inference tree and is never promotion evidence",
@@ -338,19 +350,27 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
   return { capture, files, reader };
 }
 
-test("SC-15833 ingests five strict base rungs plus edit/control and support sessions", async () => {
+test("SC-15833 ingests five strict physical base rungs plus real edit/control PNGs", async () => {
   const { capture, reader } = fixture();
   const ingestion = await ingestFlux2Capture(capture, { reader });
   assert.equal(ingestion.report.promotionEligible, true);
   assert.deepEqual(ingestion.report.blockers, []);
   assert.equal(ingestion.records.length, 5);
-  assert.equal(ingestion.sourceSessions.length, 17);
-  assert.equal(ingestion.report.acceptedSessions.length, 17);
+  assert.equal(ingestion.sourceSessions.length, 7);
+  assert.equal(ingestion.report.acceptedSessions.length, 7);
   assert.equal(ingestion.report.excludedAttempts.length, 1);
   assert.match(ingestion.report.excludedAttempts[0].reason, /dirty experimental/);
   for (const record of ingestion.records) {
     validateRecord(record);
-    assert.equal(record.status, "complete");
+    assert.equal(record.status, "runtime_complete");
+    assert.deepEqual(Object.keys(record.predictedPeakBytes), ["overall"]);
+    assert.deepEqual(Object.keys(record.observedMemory), ["overall"]);
+    assert.deepEqual(Object.keys(record.observedMemory.overall), ["activeBytes"]);
+    assert.equal(record.predictedPeakBytes.overall, record.observedMemory.overall.activeBytes);
+    assert.equal(record.negativeMutation, null);
+    for (const name of ["warm_repeat", "cancel", "error"]) {
+      assert.equal(record.scenarios.find((scenario) => scenario.name === name).result, "not_run");
+    }
     assert.equal(record.repositories.inference.revision, INFERENCE_REVISION);
     assert.equal(record.repositories.sceneWorks.revision, SCENEWORKS_REVISION);
     assert.equal(record.target.provider, "flux2_dev");
@@ -375,9 +395,12 @@ test("SC-15833 ingests five strict base rungs plus edit/control and support sess
     ingestion.report.routes.map(({ route }) => route).sort(),
     ["control", "edit"],
   );
+  assert.ok(ingestion.report.routes.every((route) =>
+    route.outputFormat === "png" && route.outputWidth === 512 && route.outputHeight === 512
+    && route.outputStdDev > 0));
 });
 
-test("SC-15833 report-only and incomplete validation can never update promotion artifacts", async () => {
+test("SC-15833 report-only validation can never update promotion artifacts", async () => {
   const reportOnly = fixture({ promotionIntent: "report_only" });
   const reported = await ingestFlux2Capture(reportOnly.capture, { reader: reportOnly.reader });
   assert.equal(reported.report.promotionEligible, false);
@@ -387,12 +410,12 @@ test("SC-15833 report-only and incomplete validation can never update promotion 
   const existing = JSON.parse(await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url)));
   assert.throws(() => updateBundle(existing, reported), /refusing evidence update/);
 
-  const incomplete = fixture({ support: false });
-  const blocked = await ingestFlux2Capture(incomplete.capture, { reader: incomplete.reader });
-  assert.equal(blocked.report.promotionEligible, false);
-  assert.equal(blocked.records.length, 0);
-  assert.match(blocked.report.blockers.join("\n"), /lifecycle/);
-  assert.match(blocked.report.blockers.join("\n"), /negative-mutation/);
+  const overclaim = fixture();
+  overclaim.capture.promotionIntent = "complete";
+  await assert.rejects(
+    ingestFlux2Capture(overclaim.capture, { reader: overclaim.reader }),
+    /exhaustive complete certification belongs to SC-15922/,
+  );
 });
 
 test("SC-15833 rejects staged drift and bounded diagnostics above provider maxAbs", async () => {
@@ -453,6 +476,50 @@ test("SC-15833 rejects staged drift and bounded diagnostics above provider maxAb
   );
 });
 
+test("SC-15833 rejects arbitrary route bytes and PNG diagnostics not derived from pixels", async () => {
+  const arbitrary = fixture();
+  arbitrary.files.set(
+    "docs/calibration/sc-15833/flux2_dev_edit_candle.png",
+    Buffer.from("not-a-png"),
+  );
+  await assert.rejects(
+    ingestFlux2Capture(arbitrary.capture, { reader: arbitrary.reader }),
+    /is not a PNG image/,
+  );
+
+  const mismatched = fixture();
+  const output = routePng("edit");
+  mismatched.files.set(
+    "docs/calibration/sc-15833/edit-q4-resident.log",
+    routeLog("edit", "2026-08-04T04:10:00Z", output.stdDev + 1),
+  );
+  await assert.rejects(
+    ingestFlux2Capture(mismatched.capture, { reader: mismatched.reader }),
+    /output diagnostic does not match the accepted PNG pixels/,
+  );
+
+  const corrupt = fixture();
+  const bytes = Buffer.from(corrupt.files.get("docs/calibration/sc-15833/flux2_dev_control_candle.png"));
+  bytes[bytes.length - 20] ^= 1;
+  corrupt.files.set("docs/calibration/sc-15833/flux2_dev_control_candle.png", bytes);
+  await assert.rejects(
+    ingestFlux2Capture(corrupt.capture, { reader: corrupt.reader }),
+    /invalid .* CRC|invalid compressed image data/,
+  );
+
+  const wrongDimensions = fixture();
+  const narrow = routePng("edit", 511, 512);
+  wrongDimensions.files.set("docs/calibration/sc-15833/flux2_dev_edit_candle.png", narrow.bytes);
+  wrongDimensions.files.set(
+    "docs/calibration/sc-15833/edit-q4-resident.log",
+    routeLog("edit", "2026-08-04T04:10:00Z", narrow.stdDev),
+  );
+  await assert.rejects(
+    ingestFlux2Capture(wrongDimensions.capture, { reader: wrongDimensions.reader }),
+    /must be a non-interlaced 512x512/,
+  );
+});
+
 test("SC-15833 rejects dirty naming, dirty repositories, malformed provenance, and accepted/excluded overlap", async () => {
   const named = fixture();
   const session = named.capture.baseSessions[0];
@@ -461,7 +528,7 @@ test("SC-15833 rejects dirty naming, dirty repositories, malformed provenance, a
   named.files.set(session.sourcePath, named.files.get(oldPath));
   await assert.rejects(
     ingestFlux2Capture(named.capture, { reader: named.reader }),
-    /excluded from authoritative ingestion/,
+    /resident\.sourcePath must equal/,
   );
 
   const dirty = fixture();
@@ -483,44 +550,59 @@ test("SC-15833 rejects dirty naming, dirty repositories, malformed provenance, a
     /exact approved command/,
   );
 
-  const copiedLifecycle = fixture();
-  const residentLifecycle = copiedLifecycle.capture.supportSessions.find(
-    (item) => item.kind === "lifecycle" && item.rung === "resident",
+  const alternateBasePaths = fixture();
+  const boundedBase = alternateBasePaths.capture.baseSessions.find(
+    (item) => item.rung === "bounded_decode",
   );
-  const stagedLifecycle = copiedLifecycle.capture.supportSessions.find(
-    (item) => item.kind === "lifecycle" && item.rung === "staged_residency",
-  );
-  copiedLifecycle.files.set(
-    stagedLifecycle.sourcePath,
-    copiedLifecycle.files.get(residentLifecycle.sourcePath),
-  );
+  const originalBaseSource = boundedBase.sourcePath;
+  const originalBaseOutput = boundedBase.outputPath;
+  boundedBase.sourcePath = "docs/calibration/sc-15833/clean-copied-bounded-decode.log";
+  boundedBase.outputPath = "docs/calibration/sc-15833/clean-copied-bounded-decode.rgb";
+  boundedBase.command = boundedBase.command.replace(originalBaseOutput, boundedBase.outputPath);
+  alternateBasePaths.files.set(boundedBase.sourcePath, alternateBasePaths.files.get(originalBaseSource));
+  alternateBasePaths.files.set(boundedBase.outputPath, alternateBasePaths.files.get(originalBaseOutput));
   await assert.rejects(
-    ingestFlux2Capture(copiedLifecycle.capture, { reader: copiedLifecycle.reader }),
-    /exact approved test|source marker has the wrong schema or capture time|kind\/rung mismatch/,
+    ingestFlux2Capture(alternateBasePaths.capture, { reader: alternateBasePaths.reader }),
+    /bounded_decode\.sourcePath must equal/,
   );
 
-  const copiedOutputScope = fixture();
-  const boundedNegative = copiedOutputScope.capture.supportSessions.find(
-    (item) => item.kind === "negative_mutation" && item.rung === "bounded_decode",
+  const alternateRoutePath = fixture();
+  const editRoute = alternateRoutePath.capture.routeSessions.find((item) => item.route === "edit");
+  const originalRouteSource = editRoute.sourcePath;
+  editRoute.sourcePath = "docs/calibration/sc-15833/clean-copied-edit.log";
+  alternateRoutePath.files.set(editRoute.sourcePath, alternateRoutePath.files.get(originalRouteSource));
+  await assert.rejects(
+    ingestFlux2Capture(alternateRoutePath.capture, { reader: alternateRoutePath.reader }),
+    /edit\.sourcePath must equal/,
   );
-  boundedNegative.outputPath = "docs/calibration/sc-15833/base-q4-resident.rgb";
-  const scoped = await ingestFlux2Capture(copiedOutputScope.capture, { reader: copiedOutputScope.reader });
-  assert.equal(scoped.report.promotionEligible, false);
-  assert.match(scoped.report.blockers.join("\n"), /not bound to the exact rung output/);
 
   const mutableModel = fixture();
   mutableModel.capture.baseInput.resolvedRevision = "main";
   await assert.rejects(
     ingestFlux2Capture(mutableModel.capture, { reader: mutableModel.reader }),
-    /baseInput\.resolvedRevision must be a nonzero lowercase Git SHA/,
+    /exact immutable SC-15833 artifact identity/,
   );
 
   const mutableControl = fixture();
   mutableControl.capture.controlInput.resolvedRevision = "latest";
   await assert.rejects(
     ingestFlux2Capture(mutableControl.capture, { reader: mutableControl.reader }),
-    /controlInput\.resolvedRevision must be a nonzero lowercase Git SHA/,
+    /exact immutable SC-15833 artifact identity/,
   );
+
+  for (const mutate of [
+    (capture) => { capture.baseInput.path += "-copy"; },
+    (capture) => { capture.baseInput.bytes += 1; },
+    (capture) => { capture.controlInput.sha256 = "0".repeat(64); },
+    (capture) => { capture.controlInput.repository = "mutable/control"; },
+  ]) {
+    const artifact = fixture();
+    mutate(artifact.capture);
+    await assert.rejects(
+      ingestFlux2Capture(artifact.capture, { reader: artifact.reader }),
+      /exact immutable SC-15833 artifact identity/,
+    );
+  }
 
   const wrongAbi = fixture();
   wrongAbi.capture.calibrationAbi += 1;
@@ -578,7 +660,7 @@ test("SC-15833 bundle and plan updates preserve all unrelated evidence structura
   assert.equal(updated.records.filter((record) => record.target.provider === "flux2_dev").length, 5);
   assert.equal(
     updated.sourceSessions.filter((session) => session.sourcePath.startsWith("docs/calibration/sc-15833/")).length,
-    17,
+    7,
   );
 
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));

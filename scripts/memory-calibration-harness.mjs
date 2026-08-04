@@ -244,6 +244,31 @@ function validatePredicted(predicted, label) {
   }
 }
 
+function validateRuntimePredicted(predicted, label) {
+  object(predicted, label);
+  const keys = Object.keys(predicted);
+  if (keys.length === 1 && keys[0] === "overall") {
+    number(predicted.overall, `${label}.overall`);
+    return;
+  }
+  validatePredicted(predicted, label);
+}
+
+function validateRuntimeObserved(observed, label) {
+  object(observed, label);
+  const keys = Object.keys(observed);
+  if (keys.length === 1 && keys[0] === "overall") {
+    object(observed.overall, `${label}.overall`);
+    const overallKeys = Object.keys(observed.overall);
+    if (overallKeys.length !== 1 || overallKeys[0] !== "activeBytes") {
+      fail(`${label}.overall must contain only the measured activeBytes high-water mark`);
+    }
+    number(observed.overall.activeBytes, `${label}.overall.activeBytes`);
+    return;
+  }
+  validatePhaseMetrics(observed, label);
+}
+
 function validateComplete(record) {
   if (record.repositories.sceneWorks.dirty || record.repositories.inference.dirty) {
     fail(`${record.id}: complete evidence cannot come from a dirty repository`);
@@ -334,7 +359,9 @@ function validateComplete(record) {
   ) fail(`${record.id}: negative mutation did not breach a threshold`);
   if (record.loadability.result !== "passed") fail(`${record.id}: loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
-  if (record.observedMemory.overall.deviceBytes > record.hardware.memoryBytes) {
+  const observedDeviceBytes = record.observedMemory.overall.deviceBytes
+    ?? record.observedMemory.overall.activeBytes;
+  if (observedDeviceBytes > record.hardware.memoryBytes) {
     fail(`${record.id}: overall device bytes exceed probed hardware memory`);
   }
   if (record.backend === "mlx" && record.observedMemory.overall.wiredBytes > record.hardware.wiredLimitBytes) {
@@ -370,8 +397,8 @@ function validateRuntimeComplete(record) {
   if (record.repositories.sceneWorks.dirty || record.repositories.inference.dirty) {
     fail(`${record.id}: runtime-complete evidence cannot come from a dirty repository`);
   }
-  validatePredicted(record.predictedPeakBytes, `${record.id}.predictedPeakBytes`);
-  validatePhaseMetrics(record.observedMemory, `${record.id}.observedMemory`);
+  validateRuntimePredicted(record.predictedPeakBytes, `${record.id}.predictedPeakBytes`);
+  validateRuntimeObserved(record.observedMemory, `${record.id}.observedMemory`);
   const [soleCase] = record.sweep.cases;
   if (
     record.sweep.rangeVerified !== true ||
@@ -417,7 +444,9 @@ function validateRuntimeComplete(record) {
   ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   if (record.loadability.result !== "passed") fail(`${record.id}: runtime-complete loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
-  if (record.observedMemory.overall.deviceBytes > record.hardware.memoryBytes) {
+  const observedDeviceBytes = record.observedMemory.overall.deviceBytes
+    ?? record.observedMemory.overall.activeBytes;
+  if (observedDeviceBytes > record.hardware.memoryBytes) {
     fail(`${record.id}: overall device bytes exceed probed hardware memory`);
   }
 }
@@ -640,8 +669,18 @@ export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE
       fail(`${logicalCaseId}: fresh/reused comparison requires observedMemory on both records`);
     }
     const metrics = [];
-    for (const phase of ["conditioning", "denoise", "decode", "overall"]) {
-      for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"]) {
+    const overallOnly = Object.keys(freshRecord.observedMemory).length === 1
+      || Object.keys(reusedRecord.observedMemory).length === 1;
+    if (overallOnly && (
+      Object.keys(freshRecord.observedMemory).length !== 1
+      || Object.keys(reusedRecord.observedMemory).length !== 1
+    )) fail(`${logicalCaseId}: fresh/reused observedMemory shapes differ`);
+    const phases = overallOnly ? ["overall"] : ["conditioning", "denoise", "decode", "overall"];
+    const metricNames = overallOnly
+      ? ["activeBytes"]
+      : ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"];
+    for (const phase of phases) {
+      for (const metric of metricNames) {
         const freshBytes = freshRecord.observedMemory[phase][metric];
         const reusedBytes = reusedRecord.observedMemory[phase][metric];
         const differenceBytes = Math.abs(reusedBytes - freshBytes);

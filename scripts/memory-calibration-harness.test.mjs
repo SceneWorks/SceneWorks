@@ -118,6 +118,39 @@ function complete(overrides = {}) {
   return record;
 }
 
+function runtimeComplete() {
+  const record = complete({
+    status: "runtime_complete",
+    sweep: {
+      axes: [{ parameter: "decodeTileEdge", testedValues: [512] }],
+      cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, result: "passed" }],
+      rangeVerified: true,
+    },
+    scenarios: [
+      { name: "exact_fit", result: "passed", predictedBytes: 200, effectiveBudgetBytes: 200 },
+      { name: "unknown_budget", result: "passed" },
+      { name: "stale_evidence", result: "passed" },
+      { name: "warm_repeat", result: "not_run", reason: "not exercised by the physical runtime campaign" },
+      { name: "cancel", result: "not_run", reason: "deferred to exhaustive lifecycle certification" },
+      { name: "error", result: "not_run", reason: "deferred to exhaustive lifecycle certification" },
+      { name: "loadability", result: "passed" },
+      { name: "overlay", result: "not_applicable", reason: "base-only runtime record" },
+    ],
+    predictedPeakBytes: { overall: 200 },
+    observedMemory: { overall: { activeBytes: 200 } },
+    quality: {
+      contract: "physical final-output parity", identicalInputs: true, result: "passed",
+      maximumError: 0.01, meanError: 0.001, rootMeanSquareError: 0.002,
+      maximumErrorThreshold: 0.08, meanErrorThreshold: 0.01,
+      rootMeanSquareErrorThreshold: 0.02,
+    },
+    negativeMutation: null,
+  });
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  return record;
+}
+
 function qwenPositiveComplete() {
   const record = complete({
     evidenceScope: "authoritative",
@@ -173,6 +206,33 @@ test("complete record validates and identity includes evidence scope plus resolv
     mutate(changed);
     assert.notEqual(recordId(changed), record.id);
   }
+});
+
+test("runtime-complete accepts an honest overall CUDA high-water mark without fabricated phases", () => {
+  const record = runtimeComplete();
+  assert.equal(validateRecord(record), record);
+  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
+
+  const malformed = runtimeComplete();
+  malformed.observedMemory.overall.deviceBytes = malformed.observedMemory.overall.activeBytes;
+  malformed.id = recordId(malformed);
+  assert.throws(() => validateRecord(malformed), /only the measured activeBytes/);
+
+  const overCapacity = runtimeComplete();
+  overCapacity.hardware.memoryBytes = 100;
+  overCapacity.id = recordId(overCapacity);
+  assert.throws(() => validateRecord(overCapacity), /exceed probed hardware/);
+});
+
+test("complete status still rejects overall-only runtime telemetry", () => {
+  const record = runtimeComplete();
+  record.status = "complete";
+  record.id = recordId(record);
+  assert.throws(() => validateRecord(record), /conditioning/);
+  assert.throws(
+    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] }),
+    /schema validation failed/,
+  );
 });
 
 test("complete final-output quality may attest identical inputs without claiming identical latents", () => {
