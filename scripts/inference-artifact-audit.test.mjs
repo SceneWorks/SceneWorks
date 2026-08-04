@@ -11,6 +11,7 @@ import {
   AUDIT_CLOSURE_CRATES,
   AUDIT_CLOSURE_PATHS,
   assertComparableToolchains,
+  assertNoConfigRustflags,
   assertRealCudaCompiler,
   auditRecord,
   buildMeasurementBinary,
@@ -209,6 +210,9 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
         toolchains.push([cwd, checkouts.length]);
         return rustc;
       },
+      // Injected, not the host's: on the Linux/macOS lanes that run this, `reproducibleLinkFlags()`
+      // is `[]`, so asserting against the host value passes with the flags unwired entirely.
+      linkFlags: reproducibleLinkFlags("win32"),
     });
 
   const first = build("5ffd7612");
@@ -226,8 +230,8 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
     assert.ok(flags.some((flag) => /^--remap-path-prefix=.*=\/cargo$/.test(flag)));
     assert.deepEqual(
       flags.filter((flag) => flag.startsWith("-Clink-arg=")),
-      reproducibleLinkFlags(),
-      "the host's reproducibility flags ride every build, not just the first",
+      reproducibleLinkFlags("win32"),
+      "the reproducibility flags ride every build, not just the first",
     );
   }
   assert.notEqual(first.digest, second.digest, "different bytes, different digest");
@@ -278,6 +282,7 @@ test("two revisions built under different toolchains are refused, not quietly co
       runCargo: () => [report],
       readArtifact: () => Buffer.from("same bytes"),
       readToolchain: () => rustc,
+      linkFlags: [],
     });
   assert.notEqual(build("rustc 1.96.0").rustc, build("rustc 1.97.0").rustc);
 });
@@ -299,11 +304,12 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
   ];
   const covered = coveredClosurePaths(compiled, "/w");
   assert.deepEqual(covered, [
-    // sc-17524: the three build inputs are covered because they are inputs to THIS build — cargo
+    // sc-17524: the build inputs are covered because they are inputs to THIS build — cargo
     // never names them, so compile coverage alone would leave them permanently unadjudicable.
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
+    ".cargo/config.toml",
     "crates/contracts/gen-core",
     "crates/media/candle-gen/candle-gen",
     "crates/media/candle-gen/candle-gen-pid",
@@ -364,6 +370,29 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
       }),
     /does not link crates\/bundles\/runtime-cuda/,
   );
+});
+
+test("a cargo config that declares rustflags is refused, because this script overrides them", () => {
+  // sc-17524. `.cargo/config.toml` is a closure path now, which makes this sharper than it looks:
+  // cargo REPLACES `build.rustflags` with `CARGO_ENCODED_RUSTFLAGS` rather than merging, and this
+  // script must set the latter for the path remaps. So declared flags are dropped from BOTH builds,
+  // the digests agree with each other and with nothing that ships — and the audit would then report
+  // the config edit as adjudicated. Refusing is the only honest answer until the flags are merged.
+  const ok = (config) => assert.doesNotThrow(() => assertNoConfigRustflags(config, "5ffd7612"));
+  ok('[env]\nRUST_TEST_THREADS = { value = "1", force = true }\n');
+  ok("");
+  ok('# rustflags = "-Ctarget-cpu=native" is commented out\n');
+  for (const declared of [
+    '[build]\nrustflags = ["-Ctarget-cpu=native"]\n',
+    '[target.x86_64-pc-windows-msvc]\nrustflags = ["-Clink-arg=/STACK:8000000"]\n',
+    '[target."cfg(all())"]\n  rustflags = ["-Dwarnings"]\n',
+  ]) {
+    assert.throws(
+      () => assertNoConfigRustflags(declared, "5ffd7612"),
+      /declares rustflags.*REPLACES/s,
+      `must refuse: ${declared.split("\n")[0]}`,
+    );
+  }
 });
 
 test("a manifest path is compared in POSIX form on every host, not in the host's own separators", () => {
@@ -431,8 +460,8 @@ test("the closure covers the workspace build inputs, not only the crate trees", 
   // seven crate trees stayed byte-identical, so the free path reported "no build needed" over a
   // changed build input. Asserting the membership rather than only the length means dropping one
   // and adding another cannot keep this green.
-  assert.deepEqual([...AUDIT_CLOSURE_BUILD_INPUTS], ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]);
-  assert.equal(AUDIT_CLOSURE_PATHS.length, 9);
+  assert.deepEqual([...AUDIT_CLOSURE_BUILD_INPUTS], ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml"]);
+  assert.equal(AUDIT_CLOSURE_PATHS.length, 10);
   assert.deepEqual([...AUDIT_CLOSURE_PATHS], [...AUDIT_CLOSURE_BUILD_INPUTS, ...AUDIT_CLOSURE_CRATES]);
   assert.equal(
     new Set(AUDIT_CLOSURE_PATHS).size,

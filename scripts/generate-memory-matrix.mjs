@@ -77,6 +77,7 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
       "Cargo.toml",
       "Cargo.lock",
       "rust-toolchain.toml",
+      ".cargo/config.toml",
       "crates/contracts/gen-core",
       "crates/media/candle-gen/candle-gen",
       "crates/media/candle-gen/candle-gen-pid",
@@ -93,6 +94,7 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
     "Cargo.toml": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
     "Cargo.lock": "8ab01e00f01607a99845d875ed60275ae033450c",
     "rust-toolchain.toml": "ae829f875c68c03c367ce92cc05e041036a92d0a",
+    ".cargo/config.toml": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
     "crates/contracts/gen-core": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
     "crates/bundles/runtime-cuda": "aba807f775872760e72fd98f28a5a0d2853cf00f",
     "crates/media/candle-gen/candle-gen": "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
@@ -1290,7 +1292,7 @@ const V3_AUDIT_METHOD =
  * Freezing it in source is what stops the checked-in record from authorizing itself.
  *
  * sc-17524: only v3 is accepted. v1 and v2 describe sc-15833's SEVEN-path closure, which omits
- * `Cargo.lock` and `rust-toolchain.toml`; re-grading such a record against the nine-path
+ * `Cargo.lock` and `rust-toolchain.toml`; re-grading such a record against the ten-path
  * expectations would read it as evidence about two inputs it never looked at. The closure-identity
  * check below would reject them on size anyway — this is the loud version of the same refusal.
  *

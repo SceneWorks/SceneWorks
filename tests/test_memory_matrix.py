@@ -100,19 +100,18 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     }
 
     # `current` vs `historical` is decided against the shipped inference pin plus exact audited
-    # compatibility. SC-15833 proves the Candle FLUX.2 dependency closure tree-identical at 5ffd
-    # and 277f, so only its five records may authorize the later runtime -- and only while 277f is
-    # still the live pin. The audit is a WINDOW, not a permanent grant: once the pin moves past it
-    # those five join every other retained record as historical, which is the fail-closed rule
-    # SC-15833's own "refuses to authorize capture promotion against a newer live inference pin"
-    # test asserts directly.
+    # compatibility. SC-15833 certifies the Candle FLUX.2 closure across an exact window -- captured
+    # at 5ffd, compatible through `audited_live_revision` -- so only its five records may authorize
+    # the later runtime, and only while that revision is still the live pin. The audit is a WINDOW,
+    # not a permanent grant: once the pin moves past it those five join every other retained record
+    # as historical, which is the fail-closed rule SC-15833's own "refuses to authorize capture
+    # promotion against a newer live inference pin" test asserts directly.
     #
-    # Derived from the live pin rather than hardcoded, so a bump does not make this test wrong.
-    # It asserted a flat `{"current"}`, which was only ever true at 277f; sc-17393's bump to
-    # 35251a88 is the first bump to arrive after SC-15833 landed. Re-certifying FLUX.2 needs a new
-    # `inference-compatibility-<rev>.json` proof, and that proof's audited-object set includes
-    # `crates/media/candle-gen/candle-gen`, which 277f->35251a88 changes -- so the window has to be
-    # re-audited by measurement, not widened by editing this assertion.
+    # Derived from the live pin rather than hardcoded, so a bump does not make this test wrong; it
+    # degrades to `{"historical"}` on its own and comes back when the window is re-audited. sc-17524
+    # did exactly that for 06e0c5e9 -- `Cargo.lock`, gen-core and candle-gen all moved, and the
+    # compiled measurement binary was byte-identical at both ends. Only a measurement re-opens this
+    # window; editing the constant below does not.
     audited_live_revision = "06e0c5e919918aeb7cec966a83ce6fe394feec5e"
     worker_manifest = (
         ROOT / "crates" / "sceneworks-worker" / "Cargo.toml"

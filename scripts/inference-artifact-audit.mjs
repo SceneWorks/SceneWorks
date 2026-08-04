@@ -45,7 +45,7 @@
 //
 // ## What the closure is, and why it grew (sc-17524)
 //
-// sc-15833 declared it as seven crate trees. Two root-level siblings that feed every one of those
+// sc-15833 declared it as seven crate trees. Three build inputs that feed every one of those
 // builds were not among them, and one of the gaps was already realized inside the authorized
 // window: `Cargo.lock` moved between `5ffd7612` and `277f4238` while all seven trees stayed
 // byte-identical, so the free path printed "no build needed" over a changed build input. A
@@ -59,7 +59,7 @@
 //
 // ## The fast path is the point
 //
-// When all nine objects are byte-identical there is nothing to compile and the script says so
+// When all ten objects are byte-identical there is nothing to compile and the script says so
 // without building anything, exactly as before. The build only happens when a path actually moved —
 // "cheap and automatic when nothing compiled changed, loud only when something did".
 //
@@ -74,7 +74,15 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -87,13 +95,23 @@ import { pathToFileURL } from "node:url";
  * the realized gap: it moved between `5ffd7612` and `277f4238` while all seven audited crate trees
  * stayed byte-identical, so the free path reported "no build needed" over a changed build input. A
  * `cargo update` bumping a semver-compatible transitive dependency the measurement binary actually
- * links moves ONLY this file. `rust-toolchain.toml` is the same shape — a rustc bump genuinely does
- * change the compiled code, and nothing on the free path looked at it.
+ * links moves ONLY this file. `rust-toolchain.toml` is the same shape — a channel bump genuinely
+ * does change the compiled code, and nothing on the free path looked at it. (A channel bump is
+ * then caught by `assertComparableToolchains`, which hard-stops before any digest is compared.)
+ *
+ * `.cargo/config.toml` is the third of the same class and the easiest to overlook, because it is
+ * not at the repo root and is not a manifest. Cargo reads it for every build in the worktree, and
+ * a `[build] rustflags`, a `[target.*]` linker override or an `[env]` entry a build script consumes
+ * changes the compiled code while moving none of the crate trees. It is inert across every window
+ * audited so far — object `61d7be37…` at 5ffd7612, 277f4238 and 06e0c5e9, and it declares no
+ * rustflags — but "has not bitten yet" is what was said about the lockfile too. See
+ * `assertNoConfigRustflags` for the one part of it this tool cannot honestly adjudicate.
  */
 export const AUDIT_CLOSURE_BUILD_INPUTS = Object.freeze([
   "Cargo.toml",
   "Cargo.lock",
   "rust-toolchain.toml",
+  ".cargo/config.toml",
 ]);
 
 /** The crate trees. These reach the audited binary exactly one way: by being compiled into it. */
@@ -106,13 +124,13 @@ export const AUDIT_CLOSURE_CRATES = Object.freeze([
   "crates/media/candle-gen/vendor/candle-kernels",
 ]);
 
-/** FLUX.2's complete Candle/CUDA compile closure: sc-15833's seven paths plus sc-17524's two. */
+/** FLUX.2's complete Candle/CUDA compile closure: sc-15833's seven paths plus sc-17524's three. */
 export const AUDIT_CLOSURE_PATHS = Object.freeze([
   ...AUDIT_CLOSURE_BUILD_INPUTS,
   ...AUDIT_CLOSURE_CRATES,
 ]);
 
-// v3 is sc-17524's nine-path closure. v1/v2 records describe the seven-path one and are refused
+// v3 is sc-17524's ten-path closure. v1/v2 records describe the seven-path one and are refused
 // outright rather than re-graded: a record that never looked at `Cargo.lock` cannot be re-read as
 // evidence about it, and a silent re-grade is how an audit ends up asserting more than it measured.
 export const SCHEMA_VERSION = 3;
@@ -243,8 +261,14 @@ export function buildMeasurementBinary({
   runCargo = defaultCargoRunner,
   readArtifact = (file) => readFileSync(file),
   readToolchain = defaultToolchain,
+  // Injectable for the same reason `closureRelativePath` takes a `platformPath`: on the Linux and
+  // macOS lanes that actually run these tests `reproducibleLinkFlags()` is `[]`, so a test that
+  // compares against the HOST's value passes whether or not the flags are wired in at all.
+  linkFlags = reproducibleLinkFlags(),
 }) {
   runGit(workdir, ["checkout", "--detach", revision]);
+  // After the checkout: the config is a closure path now, so each revision gets its own look.
+  assertNoConfigRustflags(readCargoConfig(workdir), revision);
   // AFTER the checkout, because the checkout also swaps `rust-toolchain.toml` and rustup will
   // silently hand the second build a different compiler. Reading this once up front — as this did
   // originally — records a toolchain that may not be the one that built both artifacts.
@@ -255,7 +279,7 @@ export function buildMeasurementBinary({
   const remap = [...new Set([workdir, resolvedPath(workdir)])]
     .map((root) => `--remap-path-prefix=${root}=/inference`)
     .concat(`--remap-path-prefix=${cargoHome()}=/cargo`)
-    .concat(reproducibleLinkFlags());
+    .concat(linkFlags);
   const report = runCargo({
     cwd: workdir,
     args: [
@@ -296,6 +320,47 @@ function defaultToolchain(workdir) {
   return execFileSync("rustc", ["--version"], { cwd: workdir, encoding: "utf8" }).trim();
 }
 
+/** The checked-out workspace's cargo config, or "" when there is none. */
+export function readCargoConfig(workdir, read = readFileSync) {
+  for (const name of ["config.toml", "config"]) {
+    try {
+      return read(path.join(workdir, ".cargo", name), "utf8");
+    } catch {
+      /* next */
+    }
+  }
+  return "";
+}
+
+/**
+ * Refuse a workspace whose cargo config declares rustflags (sc-17524).
+ *
+ * `CARGO_ENCODED_RUSTFLAGS` **replaces** `build.rustflags` and `target.*.rustflags` — cargo picks
+ * one source by precedence and does not merge. This script must set it, because the path remaps are
+ * what make the digest independent of where the worktree lives. So any flags the checked-out
+ * `.cargo/config.toml` declares are silently dropped from BOTH builds: the two digests would agree
+ * with each other and with nothing that ships.
+ *
+ * That is bad on its own, and worse now that the config is a closure path — an edit to it would be
+ * reported as adjudicable and come back byte-identical, so the audit would affirmatively certify a
+ * flag change it had itself removed. A false green manufactured by the tool's own environment.
+ *
+ * inference declares none today (`[env]` only), so this never fires. It fires the day it would lie,
+ * which is the same bargain `assertRealCudaCompiler` makes with the stub `nvcc`.
+ */
+export function assertNoConfigRustflags(configToml, revision) {
+  // Deliberately blunt: any `rustflags` key at all, in any table. Narrowing it to `[build]` would
+  // miss `[target.x86_64-pc-windows-msvc]`, and there is no reading of a declared rustflags this
+  // tool can honour while it owns the environment variable that overrides them.
+  if (!/^\s*rustflags\s*=/m.test(configToml)) return;
+  throw new Error(
+    `${revision}: .cargo/config.toml declares rustflags, which this audit cannot honour. It sets ` +
+      "CARGO_ENCODED_RUSTFLAGS for the path remapping, and cargo REPLACES the config's flags with " +
+      "it rather than merging — so the audited binary would be built without them and its digest " +
+      "would describe a build nobody ships. Teach this script to merge them before auditing again.",
+  );
+}
+
 /**
  * Flags that make the linked artifact a function of the code rather than of the clock.
  *
@@ -330,7 +395,10 @@ function defaultToolchain(workdir) {
  * Dropping the PDB does not weaken the claim. The audited binary is built `--no-run` and never
  * executes; debug info is not code, `.text` is byte-identical with and without it, and the one
  * thing it can hide — a symbol or local renamed with no codegen change — is not a change in the
- * compiled code either.
+ * compiled code either. Measured rather than argued, because the flag that buys stability is the
+ * one most likely to over-normalize: under these exact flags, mutating `RMS_EPS` in
+ * `candle-gen-flux2/src/transformer.rs` from `1e-5` to `2e-5` moves the digest from
+ * `sha256:d80844f2…` to `sha256:43fcc369…`. Stable, not blind.
  *
  * The Metal lane needs nothing: Mach-O carries no link timestamp, and sc-17497's `277f -> d2216f6b
  * -> 277f` round trip on macOS was already byte-stable, which is exactly why this went unseen.
@@ -342,40 +410,6 @@ export function reproducibleLinkFlags(platform = process.platform) {
   return platform === "win32" ? ["-Clink-arg=/Brepro", "-Clink-arg=/DEBUG:NONE"] : [];
 }
 
-/**
- * The closure paths the built binary can speak for — the only ones its digest may adjudicate.
- *
- * Two kinds of entry, adjudicated two different ways:
- *
- *   - **Crate trees** are covered when cargo reports having COMPILED a package whose manifest lives
- *     under them. This is not a detail. `runtime-cuda` depends on `candle-gen-flux2`, NOT the other
- *     way round, so a commit into `crates/bundles/runtime-cuda` leaves the measurement binary
- *     byte-identical, and reading an unchanged digest as proof over it would be a false green — the
- *     one failure mode strictly worse than the false positive this audit set out to remove.
- *   - **Build inputs** (`Cargo.lock`, `rust-toolchain.toml`, the virtual root `Cargo.toml`) can
- *     never appear here, because cargo's `compiler-artifact` stream only ever names *package*
- *     manifests. They are covered anyway, and soundly: they are inputs to THIS build. A lockfile
- *     bump that moves a dependency the binary links, a `[workspace.dependencies]` edit, a rustc
- *     bump — each of them recompiles the binary, so each of them shows up in its digest. One that
- *     leaves the digest byte-identical (sc-17524's real example: `sha2` added to mlx crates and
- *     `candle-gen-sensenova`) provably did not reach the measured code.
- *
- * The build-input inference is gated on the audited package's own tree being covered, so it cannot
- * be reached by an empty or unrecognized cargo report: without that gate a build that compiled
- * nothing would still hand back three adjudicable paths.
- *
- * sc-17524 considered switching the audited artifact to `runtime-cuda`'s test binary instead, to
- * make the whole closure adjudicable by compile coverage alone. Measured and rejected: that binary
- * links the ENTIRE CUDA bundle, so its digest moves on any commit to any of ~50 provider crates.
- * Over the very window this had to adjudicate (`5ffd7612` -> `06e0c5e9`) `candle-gen-catalog`,
- * `candle-gen-chroma`, `candle-gen-sdxl` and `candle-gen-sensenova` all moved, none of them in
- * FLUX.2's closure. It would have reported "the compiled code changed, re-capture" for FLUX.2 code
- * that did not change — the 47.6 GB false positive this epic exists to remove, with a wider trigger.
- *
- * Crate coverage is derived from cargo's own report of what it compiled (`compiler-artifact` is
- * emitted for fresh units too, so a warm cache does not shrink the set) rather than from a
- * hand-maintained list, so it cannot drift away from the dependency graph.
- */
 /**
  * A manifest path as a repo-relative POSIX path, or `null` if it is outside `root` (sc-17587).
  *
@@ -395,6 +429,48 @@ export function closureRelativePath(root, manifestPath, platformPath = path) {
   return native.split(platformPath.sep).join("/");
 }
 
+/**
+ * The closure paths the built binary can speak for — the only ones its digest may adjudicate.
+ *
+ * Two kinds of entry, adjudicated two different ways:
+ *
+ *   - **Crate trees** are covered when cargo reports having COMPILED a package whose manifest lives
+ *     under them. This is not a detail. `runtime-cuda` depends on `candle-gen-flux2`, NOT the other
+ *     way round, so a commit into `crates/bundles/runtime-cuda` leaves the measurement binary
+ *     byte-identical, and reading an unchanged digest as proof over it would be a false green — the
+ *     one failure mode strictly worse than the false positive this audit set out to remove.
+ *   - **Build inputs** (the virtual root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+ *     `.cargo/config.toml`) can never appear here, because cargo's `compiler-artifact` stream only
+ *     ever names *package* manifests. They are covered anyway, and soundly: they are inputs to THIS
+ *     build. A lockfile bump that moves a dependency the binary links, a `[workspace.dependencies]`
+ *     edit, a `[target.*]` linker override — each of them recompiles the binary, so each shows up
+ *     in its digest. One that leaves the digest byte-identical (sc-17524's real example: `sha2`
+ *     added to mlx crates and `candle-gen-sensenova`) provably did not reach the measured code.
+ *
+ * Two carve-outs, both handled elsewhere rather than here, because "the digest saw it" is not true
+ * of either: a `rust-toolchain.toml` CHANNEL bump never reaches a digest comparison at all, because
+ * `assertComparableToolchains` hard-stops first; and rustflags declared in `.cargo/config.toml` are
+ * replaced by this script's own `CARGO_ENCODED_RUSTFLAGS`, so `assertNoConfigRustflags` refuses the
+ * run instead of certifying a build the flags were stripped out of.
+ *
+ * The build-input inference is gated on the audited package's own tree being covered, so it cannot
+ * be reached by an empty or unrecognized cargo report: without that gate a build that compiled
+ * nothing would still hand back four adjudicable paths.
+ *
+ * sc-17524 considered switching the audited artifact to `runtime-cuda`'s test binary instead, to
+ * make the whole closure adjudicable by compile coverage alone. Measured and rejected: that binary
+ * links the ENTIRE CUDA bundle, so its digest moves on any commit to any of ~50 provider crates.
+ * Over the very window this had to adjudicate (`5ffd7612` -> `06e0c5e9`) `candle-gen-catalog`,
+ * `candle-gen-chroma`, `candle-gen-sdxl` and `candle-gen-sensenova` all moved, none of them in
+ * FLUX.2's closure. It would have reported "the compiled code changed, re-capture" for FLUX.2 code
+ * that did not change — the 47.6 GB false positive this epic exists to remove, with a wider trigger.
+ * What that trade gives up is narrower feature unification than the shipped bundle resolves; see
+ * `docs/inference-artifact-audit-sc-17497.md`.
+ *
+ * Crate coverage is derived from cargo's own report of what it compiled (`compiler-artifact` is
+ * emitted for fresh units too, so a warm cache does not shrink the set) rather than from a
+ * hand-maintained list, so it cannot drift away from the dependency graph.
+ */
 export function coveredClosurePaths(cargoJsonLines, workdir) {
   const covered = new Set();
   // `realpathSync`, not the raw path: `os.tmpdir()` is `/var/folders/...` on macOS and cargo reports
@@ -597,6 +673,15 @@ export async function main(argv) {
     // same path with the same target directory. Deleting it unconditionally, as this did, made
     // every re-run cold and effectively made the tool single-shot on the one box that can run it.
     const requestedWorkdir = value("--workdir");
+    // The failure path below `rmSync`s the workdir when `git worktree add` fails, which is fine for
+    // a directory this script made and NOT fine for one an operator handed it. Now that the usage
+    // text actively recommends a persistent path, refuse to adopt a non-empty one at all.
+    if (requestedWorkdir && existsSync(requestedWorkdir) && readdirSync(requestedWorkdir).length > 0) {
+      throw new Error(
+        `--workdir ${requestedWorkdir} already exists and is not empty. This script checks revisions ` +
+          "out into it and removes it afterwards; point it somewhere it owns.",
+      );
+    }
     const workdir = requestedWorkdir ?? mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-build-"));
     const cargoTargetDir = path.join(workdir, "..", `${path.basename(workdir)}-target`);
     try {

@@ -27,6 +27,11 @@
       "compatibleObject": "ae829f875c68c03c367ce92cc05e041036a92d0a"
     },
     {
+      "path": ".cargo/config.toml",
+      "capturedObject": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
+      "compatibleObject": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45"
+    },
+    {
       "path": "crates/contracts/gen-core",
       "capturedObject": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
       "compatibleObject": "cd524172a25b63edf1847e47b35ae2c3a4bf596a"
@@ -73,6 +78,7 @@
       "Cargo.toml",
       "Cargo.lock",
       "rust-toolchain.toml",
+      ".cargo/config.toml",
       "crates/contracts/gen-core",
       "crates/media/candle-gen/candle-gen",
       "crates/media/candle-gen/candle-gen-pid",

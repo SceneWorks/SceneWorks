@@ -578,6 +578,7 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
       "Cargo.toml",
       "Cargo.lock",
       "rust-toolchain.toml",
+      ".cargo/config.toml",
       "crates/bundles/runtime-cuda",
       "crates/contracts/gen-core",
       "crates/media/candle-gen/candle-gen",
@@ -585,7 +586,7 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
       "crates/media/candle-gen/candle-gen-pid",
       "crates/media/candle-gen/vendor/candle-kernels",
     ].sort(),
-    "sc-17524: the two workspace build inputs are part of the closure the record must cover",
+    "sc-17524: the workspace build inputs are part of the closure the record must cover",
   );
   assert.ok(proof.auditedObjects.every(({ capturedObject, compatibleObject }) =>
     /^[0-9a-f]{40}$/.test(capturedObject) && /^[0-9a-f]{40}$/.test(compatibleObject)));
@@ -945,6 +946,7 @@ const ADJUDICATES = [
   "Cargo.toml",
   "Cargo.lock",
   "rust-toolchain.toml",
+  ".cargo/config.toml",
   "crates/contracts/gen-core",
   "crates/media/candle-gen/candle-gen",
   "crates/media/candle-gen/candle-gen-pid",
@@ -1013,17 +1015,30 @@ test("SC-17497 the audit script and both validators agree on the strings they al
   assert.equal(`${rustMethod[1]}${rustMethod[2]}`, V3_METHOD);
   assert.equal(SCHEMA_VERSION, 3);
   assert.match(rust, new RegExp(`FLUX2_AUDIT_SCHEMA_VERSION: u64 = ${SCHEMA_VERSION};`));
-  // sc-17524: the two build inputs are FILES at the repo root, so the old
-  // `Cargo\.toml|crates/…` alternation silently stopped matching two of the nine entries and the
-  // set comparison would have gone green on a Rust table that had never been widened.
+  // sc-17524: the build inputs are FILES, not crate directories, and one of them (`.cargo/config.toml`)
+  // is not even at the repo root. The old `Cargo\.toml|crates/…` alternation silently stopped
+  // matching them, so the set comparison would have gone green on a Rust table never widened at all.
+  // Anchored on the 40-hex object instead, which every entry of that table has and nothing else does.
   assert.deepEqual(
-    [...rust.matchAll(/\(\s*"((?:[A-Za-z][\w.-]*\.(?:toml|lock)|crates\/[^"]+))",\s*\n?\s*"[0-9a-f]{40}"/g)]
+    [...rust.matchAll(/\(\s*"([^"]+)",\s*\n?\s*"[0-9a-f]{40}",?\s*\n?\s*\)/g)]
       .map(([, objectPath]) => objectPath)
       .sort(),
     [...AUDIT_CLOSURE_PATHS].sort(),
     "the Rust closure set must match the one the script audits",
   );
-  assert.equal(AUDIT_CLOSURE_PATHS.length, 9, "and both must be the widened nine-path closure");
+  assert.equal(AUDIT_CLOSURE_PATHS.length, 10, "and both must be the widened ten-path closure");
+
+  // sc-17524: the frozen ADJUDICATES set is duplicated across the two languages too, and unlike the
+  // digest — where a typo fails closed — an over-wide one fails OPEN. Nothing pinned the two copies
+  // to each other, so a Rust-only typo adding `crates/bundles/runtime-cuda` was caught by no test.
+  const rustProof = /FLUX2_AUDIT_ARTIFACT_PROOF: Option<\(&str, &\[&str\]\)> = Some\(\(\s*"([^"]+)",\s*&\[([^\]]*)\]/.exec(rust);
+  assert.ok(rustProof, "the Rust artifact proof must stay machine-readable from this test");
+  assert.equal(rustProof[1], FLUX2_COMPATIBILITY_AUDIT.artifactProof.digest, "one frozen digest, two languages");
+  assert.deepEqual(
+    [...rustProof[2].matchAll(/"([^"]+)"/g)].map(([, entry]) => entry),
+    [...FLUX2_COMPATIBILITY_AUDIT.artifactProof.adjudicates],
+    "an adjudicable set that is wider in one language than the other fails OPEN in that language",
+  );
 });
 
 test("SC-17524 the shipped record validates only against the proof frozen in source", async () => {
@@ -1082,7 +1097,7 @@ test("SC-17524 a moved build input demands a digest, and is adjudicated by one",
   );
 });
 
-test("SC-17497 a v2 record with an unmoved closure needs no build and no artifact block", async () => {
+test("SC-17497 a v3 record with an unmoved closure needs no build and no artifact block", async () => {
   const audit = await shippedAudit();
   assert.ok(accepts(v3Record(audit), null));
   rejects(

@@ -14,7 +14,7 @@ pub(crate) const FLUX2_COMPATIBLE_INFERENCE_REVISION: &str =
     "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
 pub(crate) const FLUX2_INFERENCE_COMPATIBILITY_AUDIT: &str =
     include_str!("../../../docs/calibration/sc-15833/inference-compatibility-06e0.json");
-/// sc-17524: v3 is the nine-path closure. v1 and v2 describe sc-15833's seven-path one, which omits
+/// sc-17524: v3 is the ten-path closure. v1 and v2 describe sc-15833's seven-path one, which omits
 /// `Cargo.lock` and `rust-toolchain.toml`; accepting one would read it as evidence about two build
 /// inputs it never looked at.
 pub(crate) const FLUX2_AUDIT_SCHEMA_VERSION: u64 = 3;
@@ -43,6 +43,7 @@ pub(crate) const FLUX2_AUDIT_ARTIFACT_PROOF: Option<(&str, &[&str])> = Some((
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
+        ".cargo/config.toml",
         "crates/contracts/gen-core",
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-pid",
@@ -52,16 +53,20 @@ pub(crate) const FLUX2_AUDIT_ARTIFACT_PROOF: Option<(&str, &[&str])> = Some((
 ));
 /// The CAPTURED side of the closure — the code the measurements were taken against. Immutable.
 ///
-/// sc-17524 added the two workspace build inputs. They are not packages, so cargo's
+/// sc-17524 added the three workspace build inputs. They are not packages, so cargo's
 /// `compiler-artifact` stream can never name them, but they feed every build in the closure — and
 /// `Cargo.lock` had already moved inside the authorized window while all seven crate trees stayed
 /// byte-identical, which is a changed build input sailing through the free path unexamined.
-pub(crate) const FLUX2_AUDITED_OBJECTS: [(&str, &str); 9] = [
+pub(crate) const FLUX2_AUDITED_OBJECTS: [(&str, &str); 10] = [
     ("Cargo.toml", "8f5af6b9d53bbfe3be5d9d79b8949364138a087c"),
     ("Cargo.lock", "8ab01e00f01607a99845d875ed60275ae033450c"),
     (
         "rust-toolchain.toml",
         "ae829f875c68c03c367ce92cc05e041036a92d0a",
+    ),
+    (
+        ".cargo/config.toml",
+        "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
     ),
     (
         "crates/contracts/gen-core",
@@ -217,6 +222,7 @@ mod sc_17497_artifact_audit_tests {
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
+        ".cargo/config.toml",
         "crates/contracts/gen-core",
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-pid",
