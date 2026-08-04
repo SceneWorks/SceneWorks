@@ -5008,6 +5008,184 @@
           "expectedResult": "passed"
         }
       ]
+    },
+    {
+      "name": "candle-flux2-dev-q4-resident-sc15833",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "modelId": "flux2_dev",
+        "provider": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-flux2-dev-q4-staged_residency-sc15833",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "modelId": "flux2_dev",
+        "provider": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-flux2-dev-q4-bounded_decode-sc15833",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "modelId": "flux2_dev",
+        "provider": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 1024,
+            "decodeOverlap": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-flux2-dev-q4-bounded_attention-sc15833",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "modelId": "flux2_dev",
+        "provider": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 1024,
+            "decodeOverlap": 1,
+            "attentionChunkSize": 67108864
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-flux2-dev-q4-bounded_transformer_residency-sc15833",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "modelId": "flux2_dev",
+        "provider": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 1024,
+            "decodeOverlap": 1,
+            "attentionChunkSize": 67108864,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "dit"
+          },
+          "expectedResult": "passed"
+        }
+      ]
     }
   ]
 }

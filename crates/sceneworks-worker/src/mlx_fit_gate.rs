@@ -3745,7 +3745,7 @@ mod tests {
     }
 
     fn fixture_ladder() -> (EvidenceBundle, MlxRequestPlan) {
-        use sceneworks_core::memory_calibration::{PredictedPeakBytes, RequiredNullable};
+        use sceneworks_core::memory_calibration::RequiredNullable;
 
         let mut bundle = fixture_bundle();
         let base = bundle.records.remove(0);
@@ -3770,12 +3770,13 @@ mod tests {
             record.strategy.parameters = parameters.clone();
             record.sweep.cases[0].parameters = parameters;
             if let RequiredNullable::Value(predicted) = &mut record.predicted_peak_bytes {
-                *predicted = PredictedPeakBytes {
-                    conditioning: predicted.conditioning.min(gib_to_bytes(peak_gib)),
-                    denoise: gib_to_bytes(peak_gib),
-                    decode: predicted.decode.min(gib_to_bytes(peak_gib)),
-                    overall: gib_to_bytes(peak_gib),
-                };
+                let predicted = predicted
+                    .full_mut()
+                    .expect("fixture has full phase telemetry");
+                predicted.conditioning = predicted.conditioning.min(gib_to_bytes(peak_gib));
+                predicted.denoise = gib_to_bytes(peak_gib);
+                predicted.decode = predicted.decode.min(gib_to_bytes(peak_gib));
+                predicted.overall = gib_to_bytes(peak_gib);
             }
             record
         };
@@ -3914,7 +3915,7 @@ mod tests {
 
     #[test]
     fn exact_infeasible_geometry_refuses_before_provider_and_names_only_verified_lower_geometry() {
-        use sceneworks_core::memory_calibration::{PredictedPeakBytes, RequiredNullable};
+        use sceneworks_core::memory_calibration::RequiredNullable;
 
         let mut bundle = fixture_bundle();
         let mut high_record = bundle.records.remove(0);
@@ -3928,12 +3929,11 @@ mod tests {
         let RequiredNullable::Value(predicted) = &mut high_record.predicted_peak_bytes else {
             panic!("fixture predicted peak");
         };
-        *predicted = PredictedPeakBytes {
-            conditioning: predicted.conditioning,
-            denoise: gib_to_bytes(6.0),
-            decode: predicted.decode,
-            overall: gib_to_bytes(6.0),
-        };
+        let predicted = predicted
+            .full_mut()
+            .expect("fixture has full phase telemetry");
+        predicted.denoise = gib_to_bytes(6.0);
+        predicted.overall = gib_to_bytes(6.0);
         bundle.records = vec![high_record, lower_record];
 
         let mut plan = fixture_plan();
@@ -4904,7 +4904,7 @@ mod tests {
     #[test]
     fn krea_route_admission_reaches_later_rungs_when_verified_rows_exist() {
         use gen_core::{LoadShape, MemoryParameterRanges, MemoryStrategySupport};
-        use sceneworks_core::memory_calibration::{PredictedPeakBytes, RequiredNullable};
+        use sceneworks_core::memory_calibration::RequiredNullable;
 
         const KREA_CONTROL_ROUTE: &str = "krea_2_turbo_control";
         let (mut bundle, mut plan) = fixture_ladder();
@@ -4965,14 +4965,18 @@ mod tests {
         transformer_record.strategy.parameters = transformer_parameters.clone();
         transformer_record.sweep.cases[0].parameters = transformer_parameters.clone();
         if let RequiredNullable::Value(predicted) = &mut transformer_record.predicted_peak_bytes {
-            *predicted = PredictedPeakBytes {
-                conditioning: predicted.conditioning.min(gib_to_bytes(3.0)),
-                denoise: gib_to_bytes(3.0),
-                decode: predicted.decode.min(gib_to_bytes(3.0)),
-                overall: gib_to_bytes(3.0),
-            };
+            let predicted = predicted
+                .full_mut()
+                .expect("fixture has full phase telemetry");
+            predicted.conditioning = predicted.conditioning.min(gib_to_bytes(3.0));
+            predicted.denoise = gib_to_bytes(3.0);
+            predicted.decode = predicted.decode.min(gib_to_bytes(3.0));
+            predicted.overall = gib_to_bytes(3.0);
         }
         if let RequiredNullable::Value(observed) = &mut transformer_record.observed_memory {
+            let observed = observed
+                .full_mut()
+                .expect("fixture has full phase telemetry");
             observed.overall.active_bytes = gib_to_bytes(3.0);
             observed.overall.allocator_bytes = gib_to_bytes(3.0);
             observed.overall.device_bytes = gib_to_bytes(3.0);

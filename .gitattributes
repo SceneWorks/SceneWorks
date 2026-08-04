@@ -81,6 +81,7 @@ pre-push        text diff
 
 # Images
 *.png   binary
+*.rgb   binary
 *.jpg   binary
 *.jpeg  binary
 *.gif   binary
@@ -114,3 +115,4 @@ pre-push        text diff
 
 # Physical calibration transcripts are hashed byte-for-byte by their evidence bundle.
 docs/calibration/sc-16170/*.log binary
+docs/calibration/sc-15833/**/*.log binary

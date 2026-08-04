@@ -23,6 +23,38 @@ use crate::{WorkerError, WorkerResult};
 const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
 const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
 const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
+const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
+const FLUX2_CAPTURED_INFERENCE_REVISION: &str = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
+const FLUX2_COMPATIBLE_INFERENCE_REVISION: &str = "277f423822bf1899340ed3d867c3d6a773473d7b";
+const FLUX2_INFERENCE_COMPATIBILITY_AUDIT: &str =
+    include_str!("../../../docs/calibration/sc-15833/inference-compatibility-277f.json");
+const FLUX2_AUDITED_OBJECTS: [(&str, &str); 7] = [
+    ("Cargo.toml", "8f5af6b9d53bbfe3be5d9d79b8949364138a087c"),
+    (
+        "crates/contracts/gen-core",
+        "9a7e86f5893e584a8d0d656147abc4ae93af6922",
+    ),
+    (
+        "crates/bundles/runtime-cuda",
+        "aba807f775872760e72fd98f28a5a0d2853cf00f",
+    ),
+    (
+        "crates/media/candle-gen/candle-gen",
+        "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
+    ),
+    (
+        "crates/media/candle-gen/candle-gen-pid",
+        "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
+    ),
+    (
+        "crates/media/candle-gen/candle-gen-flux2",
+        "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
+    ),
+    (
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "3b8327cf01d346c8068a5e9d096dcdddca440e99",
+    ),
+];
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -150,6 +182,59 @@ fn text<'a>(object: &'a JsonObject<String, Value>, key: &str) -> Option<&'a str>
         .filter(|value| !value.is_empty())
 }
 
+fn immutable_revision(object: &JsonObject<String, Value>, key: &str) -> Option<String> {
+    let revision = text(object, key)?;
+    (revision.len() == 40
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    .then(|| revision.to_owned())
+}
+
+fn audited_compatible_inference_revision(
+    model_id: &str,
+    provider: &str,
+    captured_revision: &str,
+    binding: &JsonObject<String, Value>,
+) -> Option<String> {
+    let claimed = immutable_revision(binding, "compatibleInferenceRevision")?;
+    if model_id != "flux2_dev"
+        || provider != "flux2_dev"
+        || captured_revision != FLUX2_CAPTURED_INFERENCE_REVISION
+        || claimed != FLUX2_COMPATIBLE_INFERENCE_REVISION
+    {
+        return None;
+    }
+    let audit: Value = serde_json::from_str(FLUX2_INFERENCE_COMPATIBILITY_AUDIT).ok()?;
+    if audit.get("schemaVersion")?.as_u64()? != 1
+        || audit.get("story")?.as_str()? != "SC-15833"
+        || audit.get("capturedInferenceRevision")?.as_str()? != FLUX2_CAPTURED_INFERENCE_REVISION
+        || audit.get("compatibleInferenceRevision")?.as_str()?
+            != FLUX2_COMPATIBLE_INFERENCE_REVISION
+        || audit.get("method")?.as_str()?
+            != "git object identity across the complete Candle FLUX.2 runtime dependency closure"
+    {
+        return None;
+    }
+    let objects = audit.get("auditedObjects")?.as_array()?;
+    if objects.len() != FLUX2_AUDITED_OBJECTS.len() {
+        return None;
+    }
+    for (path, object_id) in FLUX2_AUDITED_OBJECTS {
+        let matching = objects
+            .iter()
+            .filter(|entry| entry.get("path").and_then(Value::as_str) == Some(path))
+            .collect::<Vec<_>>();
+        if matching.len() != 1
+            || matching[0].get("capturedObject").and_then(Value::as_str) != Some(object_id)
+            || matching[0].get("compatibleObject").and_then(Value::as_str) != Some(object_id)
+        {
+            return None;
+        }
+    }
+    Some(claimed)
+}
+
 fn binding(object: &JsonObject<String, Value>) -> Option<CalibrationBinding> {
     let abi = u32::try_from(object.get("abi")?.as_u64()?).ok()?;
     let load_shape = match object.get("loadShape").and_then(Value::as_str) {
@@ -272,6 +357,22 @@ fn verified_candidates(
         let Some(calibration) = binding(item) else {
             continue;
         };
+        // Capture provenance remains `inferenceRevision`. A later runtime pin may be used for
+        // admission only when the manifest carries an exact provider-closure compatibility audit.
+        // Malformed compatibility claims fail closed instead of falling back to captured provenance.
+        let effective_inference_revision = if item.contains_key("compatibleInferenceRevision") {
+            let Some(revision) = audited_compatible_inference_revision(
+                model_id,
+                evidence_provider,
+                &calibration.inference_revision,
+                item,
+            ) else {
+                continue;
+            };
+            revision
+        } else {
+            calibration.inference_revision.clone()
+        };
         let query = EvidenceQuery {
             backend: CalibrationBackend::Candle,
             model_id: model_id.to_owned(),
@@ -322,11 +423,13 @@ fn verified_candidates(
             calibration_abi: calibration.abi,
             calibration_fingerprint: calibration.fingerprint,
             sceneworks_revision: calibration.scene_works_revision,
-            inference_revision: calibration.inference_revision,
+            inference_revision: effective_inference_revision,
             harness_version: record.harness_version.clone(),
-            predicted_peak_bytes: predicted.overall,
+            predicted_peak_bytes: predicted.overall(),
             observed_peak_bytes: match &record.observed_memory {
-                RequiredNullable::Value(observed) => Some(observed.overall.device_bytes),
+                RequiredNullable::Value(observed) => {
+                    Some(observed.overall_device_or_active_bytes())
+                }
                 RequiredNullable::Null => None,
             },
             parity: if record.quality.maximum_error_threshold == Some(0.0)
@@ -492,6 +595,7 @@ fn evaluate_shared_image_inner(
             | "qwen_image_edit"
             | "flux1_schnell"
             | "flux1_dev"
+            | "flux2_dev"
     ) && contract_override.is_none()
     {
         return Ok(None);
@@ -499,6 +603,7 @@ fn evaluate_shared_image_inner(
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
         "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
         "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
+        "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
         _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -850,6 +955,168 @@ mod tests {
                 .is_empty());
             }
         }
+    }
+
+    #[test]
+    fn flux2_dev_base_bindings_are_current_selectable_and_overlay_free() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .expect("embedded model manifest");
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
+        let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+        let model = root["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "flux2_dev")
+            .expect("FLUX.2-dev model");
+        let manifest = model.as_object().expect("FLUX.2-dev model object");
+        let bindings = manifest["candle"]["calibrations"]
+            .as_array()
+            .expect("FLUX.2-dev calibration bindings");
+        assert_eq!(bindings.len(), 5);
+        assert!(bindings.iter().all(|binding| {
+            binding["provider"] == "flux2_dev"
+                && binding["tier"] == "q4"
+                && binding["mode"] == "text_to_image"
+                && binding["overlay"] == "none"
+                && binding["inferenceRevision"] == "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+                && binding["compatibleInferenceRevision"]
+                    == "277f423822bf1899340ed3d867c3d6a773473d7b"
+        }));
+
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let candidates = verified_candidates(
+            manifest,
+            "flux2_dev",
+            "flux2_dev",
+            "q4",
+            "text_to_image",
+            "none",
+            geometry,
+        )
+        .expect("packaged FLUX.2-dev evidence");
+        assert_eq!(candidates.len(), 5);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.predicted_peak_bytes)
+                .collect::<Vec<_>>(),
+            vec![
+                47_700_000_000,
+                44_300_000_000,
+                34_700_000_000,
+                25_200_000_000,
+                14_300_000_000
+            ]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.observed_peak_bytes)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(44_911_779_404),
+                Some(34_070_566_540),
+                Some(30_325_300_672),
+                Some(23_724_359_104),
+                Some(13_537_107_920),
+            ]
+        );
+        assert!(candidates.iter().all(|candidate| {
+            candidate
+                .observed_peak_bytes
+                .is_some_and(|active| candidate.predicted_peak_bytes > active)
+        }));
+        let mut unaudited_manifest = manifest.clone();
+        for binding in unaudited_manifest["candle"]["calibrations"]
+            .as_array_mut()
+            .expect("mutable FLUX.2-dev calibration bindings")
+        {
+            binding["compatibleInferenceRevision"] =
+                json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        }
+        assert!(verified_candidates(
+            &unaudited_manifest,
+            "flux2_dev",
+            "flux2_dev",
+            "q4",
+            "text_to_image",
+            "none",
+            geometry,
+        )
+        .expect("unaudited compatibility query")
+        .is_empty());
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.key.strategy)
+                .collect::<Vec<_>>(),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
+                MemoryStrategy::BoundedTransformerResidency,
+            ]
+        );
+        assert!(verified_candidates(
+            manifest,
+            "flux2_dev",
+            "flux2_dev",
+            "q4",
+            "text_to_image",
+            "control",
+            geometry,
+        )
+        .expect("uncertified FLUX.2-dev control query")
+        .is_empty());
+
+        // At 40 GiB free, the staged allocator high-water plus the selector's 2 GiB reserve
+        // would fit, but its 44.3 GB conservative device peak does not. Admission must advance
+        // to bounded decode, whose 34.7 GB device peak does fit.
+        let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("flux2-dev-q4-fixture")))
+            .with_quant(Quant::Q4);
+        spec.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        let evaluation = evaluate_shared_image(
+            "flux2_dev",
+            "flux2_dev",
+            &spec,
+            true,
+            manifest,
+            "q4",
+            "text_to_image",
+            None,
+            geometry,
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 40.0,
+                total_gb: 96.0,
+            }),
+            Some(44.0),
+            0,
+            MemoryCacheState::Cold,
+        )
+        .expect("FLUX.2-dev safe-device-peak evaluation")
+        .expect("bounded decode must fit");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedDecode
+        );
+        assert_eq!(
+            (evaluation.predicted_peak_gb * BYTES_PER_GIB).round() as u64,
+            34_700_000_000
+        );
     }
 
     #[test]
