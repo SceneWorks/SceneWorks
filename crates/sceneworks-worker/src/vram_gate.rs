@@ -1788,12 +1788,128 @@ mod tests {
         let mut manifest = builtin_krea_turbo_manifest();
         manifest["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
-        // Same fixture surgery as the fingerprint line: pin the opt-in to the CURRENT calibration
-        // ABI so these tests keep exercising the verified ladder. The shipped manifest stays at
-        // its measured ABI and correctly degrades until sc-16915 re-collects.
-        manifest["candle"]["turboFit"]["calibrationAbi"] =
-            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
         manifest
+    }
+
+    /// sc-17097: the shipped `krea_2_turbo` opt-in must be stamped at the calibration ABI the pinned
+    /// provider actually declares.
+    ///
+    /// A stale stamp is not a soft degrade. [`gen_core::MemoryRunContext`] documents that "resident
+    /// requests carry this handshake too", and `optimized_eligibility` returns `Ok(())` for the
+    /// non-optimized resident rung *before* it ever reaches the ABI comparison — so on any card where
+    /// Krea fits resident (every tier on a 96 GB RTX PRO 6000) the selector still returns
+    /// `KreaTurboFit::Resident`, the worker still builds a run context out of this stamp, and
+    /// `standard_memory_strategy_safety_check` rejects the whole request with
+    /// `unsupported: krea_2_turbo: calibration handshake mismatch`.
+    #[test]
+    fn builtin_krea_turbo_calibration_abi_tracks_the_pinned_provider() {
+        let manifest = builtin_krea_turbo_manifest();
+        let shipped = manifest["candle"]["turboFit"]["calibrationAbi"]
+            .as_u64()
+            .expect("shipped calibrationAbi");
+        assert_eq!(
+            u32::try_from(shipped).expect("calibrationAbi fits u32"),
+            gen_core::MEMORY_CALIBRATION_ABI,
+            "builtin.models.jsonc stamps calibrationAbi {shipped} while the pinned gen-core declares \
+             {}; every Krea Turbo candle t2i that fits resident fails the provider handshake until \
+             the fit is re-measured under the current ABI",
+            gen_core::MEMORY_CALIBRATION_ABI
+        );
+    }
+
+    /// sc-17097 end-to-end regression: drive the exact seam `image_jobs::base` uses — the shipped
+    /// manifest's own stamp into a real [`gen_core::MemoryRunContext`], checked against the real
+    /// pinned provider contract — and require the provider to ACCEPT.
+    ///
+    /// This is the production failure reproduced in-process: it goes RED the moment the shipped stamp
+    /// drifts from the provider, whatever the reason, and no fixture surgery can hide it because the
+    /// manifest is read unpatched.
+    #[test]
+    fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
+        let manifest = builtin_krea_turbo_manifest();
+        let turbo_fit = manifest["candle"]["turboFit"]
+            .as_object()
+            .expect("Krea turbo fit");
+        let provider_contract = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
+            )
+            .expect("Krea contract lookup succeeds")
+            .expect("Krea contract exists");
+        let identity = provider_contract
+            .calibration
+            .as_ref()
+            .expect("Krea provider declares calibration");
+
+        // A card that comfortably holds the resident tier, which is what makes this a hard reject
+        // rather than a fallback: the selector picks Resident and the worker builds a context.
+        let budget = Some(VramBudget {
+            free_gb: 90.0,
+            total_gb: 96.0,
+        });
+        let fit = krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, true);
+        let Some(KreaTurboFit::Resident {
+            peak_gb, selection, ..
+        }) = fit
+        else {
+            panic!("expected the shipped Krea manifest to select the resident rung, got {fit:?}");
+        };
+
+        let gb_to_bytes = |gb: f64| {
+            (gb * 1024.0 * 1024.0 * 1024.0)
+                .round()
+                .clamp(0.0, u64::MAX as f64) as u64
+        };
+        // Field-for-field the context `image_jobs::base` builds for a plain Krea Turbo t2i.
+        let context = gen_core::MemoryRunContext {
+            selection,
+            calibration_abi: u32::try_from(
+                turbo_fit["calibrationAbi"]
+                    .as_u64()
+                    .expect("shipped calibrationAbi"),
+            )
+            .expect("calibrationAbi fits u32"),
+            calibration_fingerprint: turbo_fit["calibrationFingerprint"]
+                .as_str()
+                .expect("shipped calibrationFingerprint")
+                .to_owned(),
+            load_shape: identity.load_shape,
+            mode: gen_core::MemoryMode::TextToImage,
+            has_reference: false,
+            use_pid: false,
+            has_phases: false,
+            geometry: gen_core::MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            overlay: None,
+            budget: gen_core::MemoryBudget {
+                total_bytes: gb_to_bytes(96.0),
+                committed_bytes: gb_to_bytes(6.0),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: gb_to_bytes(2.0),
+            },
+            predicted_peak_bytes: gb_to_bytes(peak_gb),
+            cache_state: gen_core::MemoryCacheState::Cold,
+            evidence_revision: format!(
+                "{KREA_TURBO_SCENEWORKS_REVISION}@{KREA_TURBO_INFERENCE_REVISION}"
+            ),
+        };
+
+        let decision =
+            gen_core::standard_memory_strategy_safety_check(&provider_contract, &context, None, None);
+        assert_eq!(
+            decision,
+            gen_core::MemorySafetyDecision::Accept,
+            "the shipped Krea Turbo opt-in must satisfy the pinned provider's calibration handshake \
+             (manifest ABI {}, provider ABI {})",
+            context.calibration_abi,
+            identity.abi
+        );
     }
 
     #[test]
