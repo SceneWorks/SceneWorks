@@ -836,6 +836,11 @@
                     "sceneWorksRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
                     "matrixSourceRevision": { "type": "string", "minLength": 1 },
                     "inferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+                    "compatibleInferenceRevision": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$",
+                      "description": "Optional exact later runtime revision admitted only after a checked-in provider dependency-closure audit proves the captured implementation unchanged. It never rewrites inferenceRevision, which remains capture provenance."
+                    },
                     "provider": { "type": "string", "minLength": 1 },
                     "tier": { "type": "string", "minLength": 1 },
                     "mode": { "type": "string", "minLength": 1 },

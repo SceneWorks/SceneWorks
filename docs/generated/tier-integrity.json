@@ -5,8 +5,8 @@
   "invariant": "No component is resident above the user's selected quant tier unless a declared, measured exception says otherwise.",
   "normativeHome": "docs/memory-strategy-contract.md#tier-integrity",
   "totals": {
-    "exceptions": 105,
-    "measured": 105,
+    "exceptions": 112,
+    "measured": 112,
     "unmeasured": 0,
     "entriesWithoutHostedTierVariants": 6
   },
@@ -40,7 +40,7 @@
         "q4": 1192099840,
         "q8": 1192099840
       },
-      "isolation": "Summed the exact safetensors-header tensor shapes for split_files/text_encoders/qwen_3_06b_base.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the BF16 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+      "isolation": "Summed the exact safetensors-header tensor shapes for split_files/text_encoders/qwen_3_06b_base.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the BF16 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. BOTH lanes verified at bf16: mlx-gen loads at the artifact's native width, and candle-gen-anima/src/loader.rs `compute_dtype()` returns BF16 under the `cuda`/`metal` features. The candle figure is feature-conditional — the CPU-only parity build returns F32, which would double it — so this row states the SHIPPING GPU lanes, not the parity build.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -96,7 +96,7 @@
         "q4": 1192099840,
         "q8": 1192099840
       },
-      "isolation": "Summed the exact safetensors-header tensor shapes for split_files/text_encoders/qwen_3_06b_base.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the BF16 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+      "isolation": "Summed the exact safetensors-header tensor shapes for split_files/text_encoders/qwen_3_06b_base.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the BF16 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. BOTH lanes verified at bf16: mlx-gen loads at the artifact's native width, and candle-gen-anima/src/loader.rs `compute_dtype()` returns BF16 under the `cuda`/`metal` features. The candle figure is feature-conditional — the CPU-only parity build returns F32, which would double it — so this row states the SHIPPING GPU lanes, not the parity build.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -152,7 +152,7 @@
         "q4": 1192099840,
         "q8": 1192099840
       },
-      "isolation": "Summed the exact safetensors-header tensor shapes for split_files/text_encoders/qwen_3_06b_base.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the BF16 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+      "isolation": "Summed the exact safetensors-header tensor shapes for split_files/text_encoders/qwen_3_06b_base.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the BF16 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. BOTH lanes verified at bf16: mlx-gen loads at the artifact's native width, and candle-gen-anima/src/loader.rs `compute_dtype()` returns BF16 under the `cuda`/`metal` features. The candle figure is feature-conditional — the CPU-only parity build returns F32, which would double it — so this row states the SHIPPING GPU lanes, not the parity build.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -302,6 +302,33 @@
     {
       "model": "chroma1_base",
       "component": "textEncoder",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "candle"
+      ],
+      "cause": "packing-exception",
+      "reason": "resolve_quant packs ONLY the transformer, and candle-gen-chroma additionally loads the dense T5-XXL into f32 containers — its stated rationale is f32 DiT activations and mlx parity, though the transformer casts at the call site regardless, so the width is a load-time choice rather than a hard requirement.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 19049242624,
+        "q8": 19049242624
+      },
+      "isolation": "Summed the exact safetensors-header tensor byte spans for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; all 219 tensors are BF16 on disk, but the candle lane materializes them at the F32 runtime load dtype (its own comment: \"loading the bf16 checkpoint as f32 keeps the weight values (bf16) in f32 containers\"), so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: unlike the mlx sibling — whose bf16 residency an on-device repack could remove (sc-16462) — this row's extra width is a deliberate load-dtype decision at the candle load site, tied to the f32 DiT activations and mlx parity (the transformer casts at the call site regardless). Eliminating it means changing the candle compute dtype, not repacking an artifact, and that is a CUDA-lane change tracked as sc-17439.",
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/text.rs::load_t5 — \"Load the T5-XXL encoder from the Chroma snapshot's `text_encoder/` ..., at f32 on `device`\", via `candle_gen::mmap_var_builder(&files, DType::F32, device)`; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
+      "note": "RESTORED by sc-17395. sc-16462 correctly halved the mlx figure (the T5/VAE are bf16 on disk and mlx-gen loads them at that native width, not f32) but then deleted the f32 fact entirely, on the premise that \"the catalog hosts no `candle` block for any chroma entry, so that residency is unreachable\". A manifest per-backend block is optional tuning config, not a lane declaration: chroma1_* is `candle_routed: true` in crates/sceneworks-core/src/jobs_store/routing/catalog.rs and `candle_gen_chroma::register_providers` is wired at candle-gen-catalog/src/lib.rs, so the candle lane ships. The f32 residency is therefore REACHABLE and was undeclared between sc-16462 and sc-17395 — the exact defect the invariant forbids. Split per lane on the SenseNova precedent rather than dropped: declaring bf16 for both would under-declare candle, f32 for both would over-declare mlx (which is what sc-16462 found). See the mlx sibling row."
+    },
+    {
+      "model": "chroma1_base",
+      "component": "textEncoder",
       "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
@@ -325,6 +352,33 @@
       "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands.",
       "source": "config/manifests/builtin.models.jsonc — chroma1_base tier subdirs bundle a dense (bf16, never quantized) T5-XXL text encoder; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
       "note": null
+    },
+    {
+      "model": "chroma1_base",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "candle"
+      ],
+      "cause": "packing-exception",
+      "reason": "Chroma packs only the transformer, and candle-gen-chroma builds the FLUX.1 AutoencoderKL through its f32 VarBuilder, so the dense decoder is resident at f32 rather than its native bf16.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 335278732,
+        "q8": 335278732
+      },
+      "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; all 244 tensors are BF16 on disk, but the candle lane builds the AutoencoderKL through `f32_vb`, so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: the extra width over the bf16 artifact is a candle load-dtype decision (`f32_vb`), not an unpacked artifact, so removing it is a CUDA-lane compute change (tracked as sc-17439) rather than the repack sc-16462 owns for the mlx sibling.",
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/pipeline.rs — `Vae::new(self.f32_vb(&self.root.join(\"vae\"))?)`; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": "RESTORED by sc-17395. sc-16462 correctly halved the mlx figure (the T5/VAE are bf16 on disk and mlx-gen loads them at that native width, not f32) but then deleted the f32 fact entirely, on the premise that \"the catalog hosts no `candle` block for any chroma entry, so that residency is unreachable\". A manifest per-backend block is optional tuning config, not a lane declaration: chroma1_* is `candle_routed: true` in crates/sceneworks-core/src/jobs_store/routing/catalog.rs and `candle_gen_chroma::register_providers` is wired at candle-gen-catalog/src/lib.rs, so the candle lane ships. The f32 residency is therefore REACHABLE and was undeclared between sc-16462 and sc-17395 — the exact defect the invariant forbids. Split per lane on the SenseNova precedent rather than dropped: declaring bf16 for both would under-declare candle, f32 for both would over-declare mlx (which is what sc-16462 found). See the mlx sibling row."
     },
     {
       "model": "chroma1_base",
@@ -356,6 +410,33 @@
     {
       "model": "chroma1_flash",
       "component": "textEncoder",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "candle"
+      ],
+      "cause": "packing-exception",
+      "reason": "resolve_quant packs ONLY the transformer, and candle-gen-chroma additionally loads the dense T5-XXL into f32 containers — its stated rationale is f32 DiT activations and mlx parity, though the transformer casts at the call site regardless, so the width is a load-time choice rather than a hard requirement.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 19049242624,
+        "q8": 19049242624
+      },
+      "isolation": "Summed the exact safetensors-header tensor byte spans for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; all 219 tensors are BF16 on disk, but the candle lane materializes them at the F32 runtime load dtype (its own comment: \"loading the bf16 checkpoint as f32 keeps the weight values (bf16) in f32 containers\"), so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: unlike the mlx sibling — whose bf16 residency an on-device repack could remove (sc-16462) — this row's extra width is a deliberate load-dtype decision at the candle load site, tied to the f32 DiT activations and mlx parity (the transformer casts at the call site regardless). Eliminating it means changing the candle compute dtype, not repacking an artifact, and that is a CUDA-lane change tracked as sc-17439.",
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/text.rs::load_t5 — \"Load the T5-XXL encoder from the Chroma snapshot's `text_encoder/` ..., at f32 on `device`\", via `candle_gen::mmap_var_builder(&files, DType::F32, device)`; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
+      "note": "RESTORED by sc-17395. sc-16462 correctly halved the mlx figure (the T5/VAE are bf16 on disk and mlx-gen loads them at that native width, not f32) but then deleted the f32 fact entirely, on the premise that \"the catalog hosts no `candle` block for any chroma entry, so that residency is unreachable\". A manifest per-backend block is optional tuning config, not a lane declaration: chroma1_* is `candle_routed: true` in crates/sceneworks-core/src/jobs_store/routing/catalog.rs and `candle_gen_chroma::register_providers` is wired at candle-gen-catalog/src/lib.rs, so the candle lane ships. The f32 residency is therefore REACHABLE and was undeclared between sc-16462 and sc-17395 — the exact defect the invariant forbids. Split per lane on the SenseNova precedent rather than dropped: declaring bf16 for both would under-declare candle, f32 for both would over-declare mlx (which is what sc-16462 found). See the mlx sibling row."
+    },
+    {
+      "model": "chroma1_flash",
+      "component": "textEncoder",
       "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
@@ -379,6 +460,33 @@
       "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands.",
       "source": "config/manifests/builtin.models.jsonc — chroma1_flash tier subdirs bundle a dense (bf16, never quantized) T5-XXL text encoder; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
       "note": null
+    },
+    {
+      "model": "chroma1_flash",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "candle"
+      ],
+      "cause": "packing-exception",
+      "reason": "Chroma packs only the transformer, and candle-gen-chroma builds the FLUX.1 AutoencoderKL through its f32 VarBuilder, so the dense decoder is resident at f32 rather than its native bf16.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 335278732,
+        "q8": 335278732
+      },
+      "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; all 244 tensors are BF16 on disk, but the candle lane builds the AutoencoderKL through `f32_vb`, so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: the extra width over the bf16 artifact is a candle load-dtype decision (`f32_vb`), not an unpacked artifact, so removing it is a CUDA-lane compute change (tracked as sc-17439) rather than the repack sc-16462 owns for the mlx sibling.",
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/pipeline.rs — `Vae::new(self.f32_vb(&self.root.join(\"vae\"))?)`; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": "RESTORED by sc-17395. sc-16462 correctly halved the mlx figure (the T5/VAE are bf16 on disk and mlx-gen loads them at that native width, not f32) but then deleted the f32 fact entirely, on the premise that \"the catalog hosts no `candle` block for any chroma entry, so that residency is unreachable\". A manifest per-backend block is optional tuning config, not a lane declaration: chroma1_* is `candle_routed: true` in crates/sceneworks-core/src/jobs_store/routing/catalog.rs and `candle_gen_chroma::register_providers` is wired at candle-gen-catalog/src/lib.rs, so the candle lane ships. The f32 residency is therefore REACHABLE and was undeclared between sc-16462 and sc-17395 — the exact defect the invariant forbids. Split per lane on the SenseNova precedent rather than dropped: declaring bf16 for both would under-declare candle, f32 for both would over-declare mlx (which is what sc-16462 found). See the mlx sibling row."
     },
     {
       "model": "chroma1_flash",
@@ -410,6 +518,33 @@
     {
       "model": "chroma1_hd",
       "component": "textEncoder",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "candle"
+      ],
+      "cause": "packing-exception",
+      "reason": "resolve_quant packs ONLY the transformer, and candle-gen-chroma additionally loads the dense T5-XXL into f32 containers — its stated rationale is f32 DiT activations and mlx parity, though the transformer casts at the call site regardless, so the width is a load-time choice rather than a hard requirement.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 19049242624,
+        "q8": 19049242624
+      },
+      "isolation": "Summed the exact safetensors-header tensor byte spans for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; all 219 tensors are BF16 on disk, but the candle lane materializes them at the F32 runtime load dtype (its own comment: \"loading the bf16 checkpoint as f32 keeps the weight values (bf16) in f32 containers\"), so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: unlike the mlx sibling — whose bf16 residency an on-device repack could remove (sc-16462) — this row's extra width is a deliberate load-dtype decision at the candle load site, tied to the f32 DiT activations and mlx parity (the transformer casts at the call site regardless). Eliminating it means changing the candle compute dtype, not repacking an artifact, and that is a CUDA-lane change tracked as sc-17439.",
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/text.rs::load_t5 — \"Load the T5-XXL encoder from the Chroma snapshot's `text_encoder/` ..., at f32 on `device`\", via `candle_gen::mmap_var_builder(&files, DType::F32, device)`; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
+      "note": "RESTORED by sc-17395. sc-16462 correctly halved the mlx figure (the T5/VAE are bf16 on disk and mlx-gen loads them at that native width, not f32) but then deleted the f32 fact entirely, on the premise that \"the catalog hosts no `candle` block for any chroma entry, so that residency is unreachable\". A manifest per-backend block is optional tuning config, not a lane declaration: chroma1_* is `candle_routed: true` in crates/sceneworks-core/src/jobs_store/routing/catalog.rs and `candle_gen_chroma::register_providers` is wired at candle-gen-catalog/src/lib.rs, so the candle lane ships. The f32 residency is therefore REACHABLE and was undeclared between sc-16462 and sc-17395 — the exact defect the invariant forbids. Split per lane on the SenseNova precedent rather than dropped: declaring bf16 for both would under-declare candle, f32 for both would over-declare mlx (which is what sc-16462 found). See the mlx sibling row."
+    },
+    {
+      "model": "chroma1_hd",
+      "component": "textEncoder",
       "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
@@ -433,6 +568,33 @@
       "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands.",
       "source": "config/manifests/builtin.models.jsonc — chroma1_hd tier subdirs bundle a dense (bf16, never quantized) T5-XXL text encoder; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
       "note": null
+    },
+    {
+      "model": "chroma1_hd",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "candle"
+      ],
+      "cause": "packing-exception",
+      "reason": "Chroma packs only the transformer, and candle-gen-chroma builds the FLUX.1 AutoencoderKL through its f32 VarBuilder, so the dense decoder is resident at f32 rather than its native bf16.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 335278732,
+        "q8": 335278732
+      },
+      "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; all 244 tensors are BF16 on disk, but the candle lane builds the AutoencoderKL through `f32_vb`, so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: the extra width over the bf16 artifact is a candle load-dtype decision (`f32_vb`), not an unpacked artifact, so removing it is a CUDA-lane compute change (tracked as sc-17439) rather than the repack sc-16462 owns for the mlx sibling.",
+      "source": "crates/media/candle-gen/candle-gen-chroma/src/pipeline.rs — `Vae::new(self.f32_vb(&self.root.join(\"vae\"))?)`; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/vae/diffusion_pytorch_model.safetensors",
+      "note": "RESTORED by sc-17395. sc-16462 correctly halved the mlx figure (the T5/VAE are bf16 on disk and mlx-gen loads them at that native width, not f32) but then deleted the f32 fact entirely, on the premise that \"the catalog hosts no `candle` block for any chroma entry, so that residency is unreachable\". A manifest per-backend block is optional tuning config, not a lane declaration: chroma1_* is `candle_routed: true` in crates/sceneworks-core/src/jobs_store/routing/catalog.rs and `candle_gen_chroma::register_providers` is wired at candle-gen-catalog/src/lib.rs, so the candle lane ships. The f32 residency is therefore REACHABLE and was undeclared between sc-16462 and sc-17395 — the exact defect the invariant forbids. Split per lane on the SenseNova precedent rather than dropped: declaring bf16 for both would under-declare candle, f32 for both would over-declare mlx (which is what sc-16462 found). See the mlx sibling row."
     },
     {
       "model": "chroma1_hd",
@@ -570,6 +732,33 @@
       "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency.",
       "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs; isolated artifact: SceneWorks/flux2-klein-9b-mlx@acf05e8d5103838baba6a5e32dc91d6997a56023:q8/vae/diffusion_pytorch_model.safetensors",
       "note": null
+    },
+    {
+      "model": "flux2_klein_9b_kv",
+      "component": "textEncoder",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "backends": [
+        "candle"
+      ],
+      "cause": "packing-exception",
+      "reason": "The KV-optimized distill of the base 9B, with the same packing policy: transformer packed, Qwen3 text encoder dense — and candle-gen-flux2 builds every component through its f32 VarBuilder, so the dense encoder is resident at f32 rather than the artifact's bf16.",
+      "evidenceState": "measured",
+      "costGb": null,
+      "costBytes": null,
+      "costBytesByTier": {
+        "q4": 32762941440,
+        "q8": 32762941440
+      },
+      "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model.safetensors at immutable revision 406265beebe141024a06e24038c3713cf7af87d8; floating tensors were counted at the F32 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. Same element count as the mlx sibling row (8,190,735,360), which counts them at 2 bytes. This is isolated weight residency, excluding activations and allocator overhead.",
+      "triageDecision": "measure",
+      "reviewedCause": "packing-exception",
+      "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
+      "source": "crates/media/candle-gen/candle-gen-flux2/src/lib.rs — the pipeline's `dtype: DType::F32` feeds `component_vb(\"text_encoder\")`; crates/sceneworks-worker/src/engines.rs maps sceneworks_id \"flux2_klein_9b_kv\" to engine_id \"flux2_klein_9b\", so the same candle FLUX.2 provider serves it; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@406265beebe141024a06e24038c3713cf7af87d8:q8/text_encoder/model.safetensors",
+      "note": "ADDED by sc-17395. The sibling `flux2_klein_9b` has carried both an mlx bf16 and a candle f32 textEncoder row since sc-16015, but `_kv` had only the mlx one — so ~30.5 GiB of f32 residency on a shipping lane was undeclared. Invisible until `backends` became mandatory: while omission meant \"both lanes\", a single-lane row and a genuinely mlx-only row were indistinguishable, so nothing could ask why one klein entry had two rows and its twin had one."
     },
     {
       "model": "flux2_klein_9b_kv",
@@ -793,7 +982,7 @@
     {
       "model": "instantid_realvisxl",
       "component": "identityAdapters",
-      "residentTier": "bf16",
+      "residentTier": "f16",
       "appliesToTiers": [
         "q4",
         "q8"
@@ -812,8 +1001,8 @@
       "triageDecision": null,
       "reviewedCause": null,
       "triageNote": null,
-      "source": "config/manifests/builtin.models.jsonc `instantid_realvisxl` — \"The InstantID IdentityNet ControlNet + ip-adapter (~4 GiB) + antelopev2 face pack stay DENSE (small, precision-sensitive)\"",
-      "note": "This entry additionally DEFAULTS to bf16 for the whole model for the same reason, so on a default job nothing is above tier; the exception applies when a user explicitly selects q4/q8."
+      "source": "config/manifests/builtin.models.jsonc `instantid_realvisxl` — \"The InstantID IdentityNet ControlNet + ip-adapter (~4 GiB) + antelopev2 face pack stay DENSE (small, precision-sensitive)\"; both loaders pin the width: mlx-gen-instantid/src/model.rs:52 `const DTYPE: Dtype = Dtype::Float16` and candle-gen-instantid/src/model.rs:56 `const DTYPE: DType = DType::F16`",
+      "note": "This entry additionally DEFAULTS to bf16 for the whole model for the same reason, so on a default job nothing is above tier; the exception applies when a user explicitly selects q4/q8. The f16 width covers the IdentityNet ControlNet and the ip-adapter, which is what the 4 GiB figure measures; the antelopev2 face pack named in `reason` loads f32 via candle-gen-face and is NOT included in the cost — pre-existing scope, recorded here so the row is not read as covering it. residentTier was \"bf16\" until sc-17395 read both loaders: BOTH pin f16, not bf16. f16 and bf16 share a fidelity rank and a 2-byte width, so the 4 GiB cost and the above-tier verdict are unchanged — but the ledger states the precision a component is ACTUALLY resident at, and the entry's bf16 DEFAULT is a different fact about the base model that this row had absorbed."
     },
     {
       "model": "kolors",

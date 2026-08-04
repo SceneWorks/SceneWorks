@@ -58,6 +58,26 @@
         "overall": { "type": "integer", "minimum": 0 }
       }
     },
+    "runtimePredicted": {
+      "type": "object", "additionalProperties": false,
+      "required": ["overall"],
+      "properties": {
+        "overall": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "runtimeObserved": {
+      "type": "object", "additionalProperties": false,
+      "required": ["overall"],
+      "properties": {
+        "overall": {
+          "type": "object", "additionalProperties": false,
+          "required": ["activeBytes"],
+          "properties": {
+            "activeBytes": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
     "sourceTarget": {
       "type": "object", "additionalProperties": false,
       "required": ["tier", "mode", "overlay", "rung"],
@@ -292,8 +312,20 @@
             }
           }
         },
-        "predictedPeakBytes": { "oneOf": [{ "$ref": "#/$defs/predicted" }, { "type": "null" }] },
-        "observedMemory": { "oneOf": [{ "$ref": "#/$defs/phaseMetrics" }, { "type": "null" }] },
+        "predictedPeakBytes": {
+          "oneOf": [
+            { "$ref": "#/$defs/predicted" },
+            { "$ref": "#/$defs/runtimePredicted" },
+            { "type": "null" }
+          ]
+        },
+        "observedMemory": {
+          "oneOf": [
+            { "$ref": "#/$defs/phaseMetrics" },
+            { "$ref": "#/$defs/runtimeObserved" },
+            { "type": "null" }
+          ]
+        },
         "quality": {
           "type": "object",
           "additionalProperties": false,
@@ -470,8 +502,18 @@
                   "inference": { "properties": { "dirty": { "const": false } } }
                 }
               },
-              "predictedPeakBytes": { "$ref": "#/$defs/predicted" },
-              "observedMemory": { "$ref": "#/$defs/phaseMetrics" },
+              "predictedPeakBytes": {
+                "oneOf": [
+                  { "$ref": "#/$defs/predicted" },
+                  { "$ref": "#/$defs/runtimePredicted" }
+                ]
+              },
+              "observedMemory": {
+                "oneOf": [
+                  { "$ref": "#/$defs/phaseMetrics" },
+                  { "$ref": "#/$defs/runtimeObserved" }
+                ]
+              },
               "target": {
                 "properties": { "overlay": { "const": "none" } }
               },
