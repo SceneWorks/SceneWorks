@@ -23,6 +23,7 @@ use crate::{WorkerError, WorkerResult};
 const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
 const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
 const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
+const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -49,7 +50,10 @@ fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
 fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
-        "style_variations" => (MemoryMode::ImageToImage, "style_variations"),
+        "style_variations" => (
+            MemoryMode::Other("style_variations".to_owned()),
+            "style_variations",
+        ),
         // `ImageToImage` serializes as `image_to_image`; retain the catalog's narrower character
         // axis in `Other` so the typed evidence key and exact calibration lookup share one spelling.
         "character_image" => (
@@ -492,6 +496,7 @@ fn evaluate_shared_image_inner(
             | "qwen_image_edit"
             | "flux1_schnell"
             | "flux1_dev"
+            | "flux2_dev"
     ) && contract_override.is_none()
     {
         return Ok(None);
@@ -499,6 +504,7 @@ fn evaluate_shared_image_inner(
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
         "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
         "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
+        "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
         _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -705,7 +711,7 @@ mod tests {
     #[test]
     fn style_variations_preserves_its_exact_evidence_key() {
         let (mode, key) = request_mode("style_variations");
-        assert_eq!(mode, MemoryMode::ImageToImage);
+        assert_eq!(mode, MemoryMode::Other("style_variations".to_owned()));
         assert_eq!(key, "style_variations");
     }
 

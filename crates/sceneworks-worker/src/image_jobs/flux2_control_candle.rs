@@ -1,11 +1,12 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
-    pid_effective_dims, pid_output_tier, pose_entries, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Quant, Settings, Value,
-    WorkerError, WorkerResult,
+    apply_candle_image_load_shape, candle_certified_artifact_path,
+    candle_certified_hf_artifact_path, pid_effective_dims, pid_output_tier, pose_entries,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
+    resolve_quant, run_candle_strict_control, trusted_control_weight_revision, ApiClient,
+    CancelFlag, CandleStrictControl, Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Image,
+    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Progress, Quant, Settings,
+    Value, WorkerError, WorkerResult,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -248,6 +249,9 @@ pub(super) struct Flux2StrictControl {
     steps: u32,
     guidance: f32,
     control_scale: f32,
+    memory: gen_core::GenerationMemory,
+    memory_spec: gen_core::LoadSpec,
+    memory_context: Option<gen_core::MemoryRunContext>,
     /// Per-generation PiD decoder weights (epic 7840, sc-8044): `Some` only when this generation opted in
     /// (`advanced.usePid`) AND the `flux2` PiD + Gemma snapshots are cached. Threaded into `with_pid` at
     /// load; `use_pid` on the request is `is_some()` so the two stay in lockstep (the engine rejects a
@@ -257,6 +261,7 @@ pub(super) struct Flux2StrictControl {
 
 #[cfg(test)]
 pub(super) fn flux2_strict_control_test_fixture(path: PathBuf) -> Flux2StrictControl {
+    let memory_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(path.clone()));
     Flux2StrictControl {
         base: path.clone(),
         control: path,
@@ -267,6 +272,9 @@ pub(super) fn flux2_strict_control_test_fixture(path: PathBuf) -> Flux2StrictCon
         steps: 28,
         guidance: 4.0,
         control_scale: 0.75,
+        memory: gen_core::GenerationMemory::default(),
+        memory_spec,
+        memory_context: None,
         pid: None,
     }
 }
@@ -312,7 +320,16 @@ impl CandleStrictControl for Flux2StrictControl {
             root: self.base.clone(),
             control: self.control.clone(),
         };
-        let model = Flux2Control::load(&paths, self.quant).map_err(|error| {
+        let loaded = match &self.memory_context {
+            Some(context) => Flux2Control::load_with_memory_context(
+                &paths,
+                self.quant,
+                &self.memory_spec,
+                context,
+            ),
+            None => Flux2Control::load_with_memory(&paths, self.quant, self.memory),
+        };
+        let model = loaded.map_err(|error| {
             WorkerError::Engine(format!(
                 "FLUX.2-dev strict-pose control load failed: {error}"
             ))
@@ -348,7 +365,13 @@ impl CandleStrictControl for Flux2StrictControl {
             preview: preview.clone(),
             cancel: cancel.clone(),
         };
-        model.generate(&req, control, on_progress).map_err(|error| {
+        let generated = match self.memory_context.as_ref() {
+            Some(context) => {
+                model.generate_with_memory_context(context, &req, control, on_progress)
+            }
+            None => model.generate(&req, control, on_progress),
+        };
+        generated.map_err(|error| {
             WorkerError::Engine(format!("FLUX.2-dev strict-pose generation failed: {error}"))
         })
     }
@@ -413,6 +436,73 @@ pub(super) async fn generate_candle_flux2_control_stream(
         use_pid,
         pid_output_tier(request),
     );
+    let tier = match base.file_name().and_then(|name| name.to_str()) {
+        Some("q4") => "q4",
+        Some("q8") => "q8",
+        _ => "bf16",
+    };
+    let overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&control);
+    let mut strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
+        .with_control(gen_core::WeightsSource::File(control.clone()))
+        .with_offload_policy(gen_core::OffloadPolicy::Sequential);
+    strategy_spec.quantize = quant;
+    let strategy_spec = apply_candle_image_load_shape("flux2_dev", strategy_spec);
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        overlay_bytes,
+    );
+    let (control_repo, control_file) = flux2_control_candle_repo_file(request)?;
+    let control_revision = trusted_control_weight_revision(
+        request,
+        FLUX2_CONTROL_CANDLE_ENGINE_ID,
+        &control_repo,
+        &control_file,
+    )?;
+    let artifact_is_certified = candle_certified_artifact_path("flux2_dev", settings, &base, tier)
+        && candle_certified_hf_artifact_path(
+            settings,
+            &control_repo,
+            &control_revision,
+            Path::new(&control_file),
+            &control,
+        );
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+        "flux2_dev",
+        &request.model,
+        &strategy_spec,
+        artifact_is_certified,
+        &request.model_manifest_entry,
+        tier,
+        &request.mode,
+        Some("control"),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            // The control map is an overlay input, not a token-concatenated image reference.
+            reference_count: 0,
+        },
+        false,
+        use_pid,
+        false,
+        raw_budget,
+        predicted_peak,
+        overlay_bytes,
+        gen_core::MemoryCacheState::Cold,
+    )?;
+    let generation_memory = memory_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.memory)
+        .unwrap_or_default();
+    let memory_context = memory_evaluation
+        .as_ref()
+        .map(|evaluation| evaluation.context.clone());
     let mut raw_settings = flux2_control_candle_raw_settings(
         request,
         &repo,
@@ -424,6 +514,12 @@ pub(super) async fn generate_candle_flux2_control_stream(
     );
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
+    if let Some(evaluation) = &memory_evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+    }
 
     let provider = Flux2StrictControl {
         base,
@@ -435,6 +531,9 @@ pub(super) async fn generate_candle_flux2_control_stream(
         steps,
         guidance,
         control_scale,
+        memory: generation_memory,
+        memory_spec: strategy_spec,
+        memory_context,
         pid: pid_weights,
     };
 

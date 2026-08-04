@@ -927,6 +927,9 @@ const FLUX1_SCHNELL_MLX_TURNKEY_REVISION: &str =
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX1_DEV_MLX_TURNKEY_REVISION: &str =
     "323fd12d79f78ad444e882e8d8e871914584f2b9";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const FLUX2_DEV_MLX_TURNKEY_REVISION: &str =
+    "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 
 #[cfg(any(
     target_os = "macos",
@@ -2497,6 +2500,7 @@ fn candle_certified_artifact_path(
         "flux1_schnell" =>
             ("SceneWorks/flux1-schnell-mlx", FLUX1_SCHNELL_MLX_TURNKEY_REVISION),
         "flux1_dev" => ("SceneWorks/flux1-dev-mlx", FLUX1_DEV_MLX_TURNKEY_REVISION),
+        "flux2_dev" => ("SceneWorks/flux2-dev-mlx", FLUX2_DEV_MLX_TURNKEY_REVISION),
         _ => return false,
     };
     candle_certified_hf_artifact_path(settings, repo, revision, Path::new(tier), weights_dir)
@@ -3168,7 +3172,14 @@ fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
         && spec.pid.is_none()
         && spec.identity.is_none()
         && !(spec.control.is_some() && spec.ip_adapter.is_some());
-    if qwen_native || flux_supported {
+    let flux2_dev_supported = engine_id == "flux2_dev"
+        && directory
+        && spec.adapters.is_empty()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.pid.is_none()
+        && spec.identity.is_none();
+    if qwen_native || flux_supported || flux2_dev_supported {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3198,6 +3209,7 @@ mod candle_image_load_shape_tests {
             "qwen_image_edit",
             "flux1_schnell",
             "flux1_dev",
+            "flux2_dev",
         ] {
             assert_eq!(
                 apply_candle_image_load_shape(engine_id, fixture_spec()).load_shape,
@@ -3253,6 +3265,16 @@ mod candle_image_load_shape_tests {
         assert_eq!(
             apply_candle_image_load_shape("flux1_dev", combined).load_shape,
             gen_core::LoadShape::EagerMaterialization
+        );
+        assert_eq!(
+            apply_candle_image_load_shape(
+                "flux2_dev",
+                fixture_spec().with_control(WeightsSource::File(std::path::PathBuf::from(
+                    "control.safetensors",
+                )))
+            )
+            .load_shape,
+            gen_core::LoadShape::DeferredMaterialization
         );
     }
 
