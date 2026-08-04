@@ -122,10 +122,17 @@ pub enum SourceSessionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceHardware {
     pub probe: String,
     pub memory_bytes: u64,
+    /// Source-session hardware is the schema's extensible `hardwareBase`, not one of the closed
+    /// production-record hardware arms. Preserve backend-specific probe receipts (CUDA identity,
+    /// driver/runtime versions, or future MLX metadata) while validation continues to require the
+    /// two portable base fields. Keeping the extensions flattened mirrors JSON Schema's deliberate
+    /// lack of `additionalProperties: false` on `hardwareBase` without loosening `SourceSession`.
+    #[serde(flatten, default)]
+    pub extensions: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -2214,6 +2221,16 @@ mod tests {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
         };
+        assert_eq!(bundle.source_sessions.len(), 16);
+        assert!(bundle.source_sessions.iter().all(|session| {
+            session.hardware.extensions.contains_key("deviceId")
+                && session
+                    .hardware
+                    .extensions
+                    .contains_key("computeCapability")
+                && session.hardware.extensions.contains_key("driverVersion")
+                && session.hardware.extensions.contains_key("runtimeVersion")
+        }));
         assert_eq!(bundle.records.len(), 43);
         assert_eq!(
             bundle
@@ -2247,6 +2264,28 @@ mod tests {
                 .count(),
             7
         );
+    }
+
+    #[test]
+    fn source_hardware_accepts_schema_extensions_without_opening_source_sessions() {
+        let mut extended: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        extended["sourceSessions"][0]["hardware"]["futureProbeMetadata"] =
+            json!({ "tool": "next-generation-probe", "version": 2 });
+        let bundle = match load_bundle(&extended.to_string()).expect("hardware extension parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("extended bundle must be current: {reason:?}"),
+        };
+        assert_eq!(
+            bundle.source_sessions[0].hardware.extensions["futureProbeMetadata"],
+            json!({ "tool": "next-generation-probe", "version": 2 })
+        );
+
+        extended["sourceSessions"][0]["unexpectedSessionField"] = json!(true);
+        assert!(matches!(
+            load_bundle(&extended.to_string()),
+            Err(BundleLoadError::Json(_))
+        ));
     }
 
     #[test]
