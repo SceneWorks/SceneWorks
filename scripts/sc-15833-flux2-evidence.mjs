@@ -211,7 +211,7 @@ function baseCommand(capture, descriptor) {
   const parity = descriptor.rung === "resident"
     ? ""
     : ` FLUX2_PARITY_REFERENCE=${SESSION_PREFIX}base-q4-resident.rgb`;
-  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${capture.baseInput.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[descriptor.rung]} FLUX2_OUT=${outputPath}${parity} MEMORY_EXPECTED_ABI=${EXPECTED_CALIBRATION_ABI} MEMORY_EXPECTED_FINGERPRINT=${EXPECTED_CALIBRATION_FINGERPRINT} MEMORY_INFERENCE_REVISION=${EXPECTED_INFERENCE_REVISION} MEMORY_SCENEWORKS_REVISION=${capture.repositories.sceneWorks.revision} MEMORY_MODEL_REVISION=${capture.baseInput.resolvedRevision} MEMORY_MODEL_INVENTORY_SHA256=${capture.baseInput.sha256} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
+  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${capture.baseInput.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[descriptor.rung]} FLUX2_OUT=${outputPath}${parity} MEMORY_EXPECTED_ABI=${EXPECTED_CALIBRATION_ABI} MEMORY_EXPECTED_FINGERPRINT=${EXPECTED_CALIBRATION_FINGERPRINT} INFERENCE_REVISION=${EXPECTED_INFERENCE_REVISION} SCENEWORKS_REVISION=${capture.repositories.sceneWorks.revision} MEMORY_MODEL_REVISION=${capture.baseInput.resolvedRevision} MEMORY_MODEL_INVENTORY_SHA256=${capture.baseInput.sha256} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
 }
 
 function routeCommand(capture, descriptor) {
