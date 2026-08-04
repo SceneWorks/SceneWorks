@@ -1114,7 +1114,10 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
+    [
+      "15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx",
+      "15519:candle",
+    ],
   );
   assert.equal(
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")

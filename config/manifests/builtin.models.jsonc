@@ -6556,6 +6556,93 @@
       // conservative STATIC admit floor (sc-9094 memory-eligibility); the dynamic fit-gate now drives the
       // true resident/sequential/reject decision per card.
       "candle": {
+        // SC-15833: exact Q4 base-only CUDA memory-ladder evidence. Edit and strict ControlNet
+        // loadability are captured separately, but only the text-to-image/none coordinates below
+        // are admitted as runtime-complete memory evidence.
+        "calibrations": [
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
+            "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+            "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
+            "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+            "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+            "rung": "staged_residency", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
+            "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+            "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+            "rung": "bounded_decode", "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
+            "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+            "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+            "rung": "bounded_attention",
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1, "attentionChunkSize": 67108864 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+            "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
+            "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+            "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+            "rung": "bounded_transformer_residency",
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "dit" }
+          }
+        ],
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none", "control"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none", "control"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none", "control"]
+          }
+        },
         "minMemoryGb": 56,
         "vramGbByTier": { "q4": 44.0, "q8": 70.7, "bf16": 128.0 },
         "vramMeasuredPixels": 1048576,

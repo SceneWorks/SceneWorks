@@ -206,6 +206,22 @@ function assertExactTest(text, identity, filename) {
   }
 }
 
+function assertExactNocaptureTest(text, identity, filename) {
+  const lines = text.split(/\r?\n/).map((item) => item.trim());
+  const exact = `test ${identity} ... ok`;
+  const prefix = `test ${identity} ... [smoke] `;
+  const exactIndices = lines.flatMap((line, index) => line === exact ? [index] : []);
+  const interleavedIndices = lines.flatMap((line, index) => line.startsWith(prefix) ? [index] : []);
+  if (exactIndices.length === 1 && interleavedIndices.length === 0) return;
+  const standaloneOkIndices = lines.flatMap((line, index) => line === "ok" ? [index] : []);
+  if (
+    exactIndices.length !== 0 || interleavedIndices.length !== 1 || standaloneOkIndices.length !== 1 ||
+    standaloneOkIndices[0] <= interleavedIndices[0]
+  ) {
+    fail(`${filename} did not pass the exact approved nocapture test ${identity}`);
+  }
+}
+
 function baseCommand(capture, descriptor) {
   const outputPath = `${SESSION_PREFIX}base-q4-${descriptor.rung}.rgb`;
   const parity = descriptor.rung === "resident"
@@ -699,7 +715,7 @@ async function ingestRouteSession(descriptor, capture, reader) {
   const done = descriptor.route === "edit"
     ? "[smoke] DONE: flux2_dev edit (candle) coherent"
     : "[smoke] DONE: flux2_dev control (candle) coherent";
-  assertExactTest(text, `flux2_dev_gpu_smoke::${test}`, sourcePath);
+  assertExactNocaptureTest(text, `flux2_dev_gpu_smoke::${test}`, sourcePath);
   if (!text.includes(done)) {
     fail(`${sourcePath} did not pass the exact ${descriptor.route} smoke`);
   }

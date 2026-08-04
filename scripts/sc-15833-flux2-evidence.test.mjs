@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { deflateSync } from "node:zlib";
 
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { validateRecord } from "./memory-calibration-harness.mjs";
 import {
   flux2CalibrationPlans,
@@ -283,11 +284,15 @@ function routeLog(route, capturedAt, stdDev, outputBytes) {
     : "flux2_dev_control_candle_gpu_smoke";
   const outputPath = `docs/calibration/sc-15833/flux2_dev_${route}_candle.png`;
   const outputSha256 = createHash("sha256").update(outputBytes).digest("hex");
+  const loading = route === "edit"
+    ? `[smoke] loading flux2_dev EDIT (Q4) from ${BASE_INPUT.path} ...`
+    : `[smoke] loading flux2_dev CONTROL (Q4) from ${BASE_INPUT.path} + ${CONTROL_INPUT.path} ...`;
   return Buffer.from(
     `${sourceHeader(capturedAt, route === "control" ? [BASE_INPUT, CONTROL_INPUT] : [BASE_INPUT])}running 1 test\n` +
+    `test flux2_dev_gpu_smoke::${testName} ... ${loading}\n` +
     `[smoke] dev ${route} 512x512 std ${stdDev.toFixed(2)} -> ${outputPath} sha256=${outputSha256}\n` +
     `[smoke] DONE: flux2_dev ${route} (candle) coherent\n` +
-    `test flux2_dev_gpu_smoke::${testName} ... ok\n` +
+    "ok\n" +
     "test result: ok. 1 passed; 0 failed\n",
   );
 }
@@ -401,6 +406,74 @@ test("SC-15833 ingests five strict physical base rungs plus real edit/control PN
   assert.ok(ingestion.report.routes.every((route) =>
     route.outputFormat === "png" && route.outputWidth === 512 && route.outputHeight === 512
     && route.outputStdDev > 0));
+});
+
+test("SC-15833 requires a unique ordered Cargo nocapture route result", async () => {
+  const missingOk = fixture();
+  const editPath = "docs/calibration/sc-15833/edit-q4-resident.log";
+  missingOk.files.set(
+    editPath,
+    Buffer.from(missingOk.files.get(editPath).toString("utf8").replace("\nok\ntest result:", "\ntest result:")),
+  );
+  await assert.rejects(
+    ingestFlux2Capture(missingOk.capture, { reader: missingOk.reader }),
+    /exact approved nocapture test/,
+  );
+
+  const duplicateIdentity = fixture();
+  const controlPath = "docs/calibration/sc-15833/control-q4-resident.log";
+  const controlText = duplicateIdentity.files.get(controlPath).toString("utf8");
+  const identity = controlText.split("\n").find((line) =>
+    line.startsWith("test flux2_dev_gpu_smoke::flux2_dev_control_candle_gpu_smoke ... [smoke] "));
+  duplicateIdentity.files.set(controlPath, Buffer.from(controlText.replace(identity, `${identity}\n${identity}`)));
+  await assert.rejects(
+    ingestFlux2Capture(duplicateIdentity.capture, { reader: duplicateIdentity.reader }),
+    /exact approved nocapture test/,
+  );
+});
+
+test("SC-15833 binds exactly five current Q4 base cells into the manifest and matrix", async () => {
+  const manifestSource = await readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8");
+  const manifest = JSON.parse(stripJsoncComments(manifestSource));
+  const model = manifest.models.find(({ id }) => id === "flux2_dev");
+  const bindings = model.candle.calibrations;
+  assert.equal(bindings.length, 5);
+  assert.deepEqual(
+    bindings.map(({ rung }) => rung).sort(),
+    [...RUNGS].sort(),
+  );
+  for (const binding of bindings) {
+    assert.equal(binding.abi, 3);
+    assert.equal(binding.loadShape, "deferred_materialization");
+    assert.equal(binding.fingerprint, FINGERPRINT);
+    assert.equal(binding.inferenceRevision, INFERENCE_REVISION);
+    assert.equal(binding.provider, "flux2_dev");
+    assert.equal(binding.tier, "q4");
+    assert.equal(binding.mode, "text_to_image");
+    assert.equal(binding.overlay, "none");
+    assert.deepEqual(binding.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+    assert.equal(binding.artifactRepository, BASE_INPUT.repository);
+    assert.equal(binding.artifactResolvedRevision, BASE_INPUT.resolvedRevision);
+    assert.equal(binding.artifactVariant, BASE_INPUT.variant);
+  }
+
+  const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
+  assert.equal(matrix.generatedFrom.inferenceRevision, INFERENCE_REVISION);
+  const runs = matrix.calibrationRuns.filter(({ record }) => record.target.provider === "flux2_dev");
+  assert.equal(runs.length, 5);
+  assert.ok(runs.every(({ binding, semantics, record }) =>
+    binding.eligible && binding.reasons.length === 0 && semantics === "current" &&
+    record.status === "runtime_complete"));
+  const cells = matrix.cells.filter((cell) =>
+    cell.modelId === "flux2_dev" && cell.backend === "candle" && cell.tier === "q4" &&
+    cell.mode === "text_to_image" && cell.overlay === "none",
+  );
+  assert.equal(cells.length, 5);
+  assert.ok(cells.every((cell) => cell.state === "Runtime verified"));
+  assert.ok(cells.every((cell) =>
+    cell.evidence.currentEnvironmentVerification.length === 1 &&
+    cell.evidence.currentEnvironmentVerification[0].recordStatus === "runtime_complete",
+  ));
 });
 
 test("SC-15833 report-only validation can never update promotion artifacts", async () => {

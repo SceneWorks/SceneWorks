@@ -161,10 +161,23 @@ test("FLUX.1 manifest has ten base bindings and zero overlay bindings", async ()
   }
 });
 
-test("generated matrix exposes runtime activation without Full sibling signoff", async () => {
+test("generated matrix makes FLUX.1 runtime activation depend only on the live inference pin", async () => {
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
   assert.equal(matrix.schemaVersion, 6);
-  assert.equal(matrix.summary.calibrationRunsByStatus.runtimeComplete, 10);
+  const liveInferenceRevision = matrix.generatedFrom.inferenceRevision;
+  const evidenceIsCurrent = INFERENCE_REVISION === liveInferenceRevision;
+  const runs = matrix.calibrationRuns.filter(({ record }) =>
+    ["flux1_schnell", "flux1_dev"].includes(record.target.provider),
+  );
+  assert.equal(runs.length, 10);
+  assert.deepEqual(
+    runs.map(({ record }) => `${record.target.provider}:${record.strategy.rung}`).sort(),
+    Object.keys(EXPECTED).flatMap((provider) => [
+      "bounded_attention", "bounded_decode", "bounded_transformer_residency", "resident", "staged_residency",
+    ].map((rung) => `${provider}:${rung}`)).sort(),
+  );
+  assert.ok(runs.every(({ record }) => record.status === "runtime_complete"));
+  assert.ok(runs.every(({ semantics }) => semantics === (evidenceIsCurrent ? "current" : "historical")));
   assert.ok(matrix.summary.calibrationRunsByStatus.complete > 0);
   const cells = matrix.cells.filter((cell) =>
     ["flux_schnell", "flux_dev"].includes(cell.modelId) &&
@@ -172,13 +185,21 @@ test("generated matrix exposes runtime activation without Full sibling signoff",
     cell.mode === "text_to_image" && cell.overlay === "none",
   );
   assert.equal(cells.length, 10);
-  assert.ok(cells.every((cell) => cell.state === "Runtime verified"));
-  assert.equal(cells.filter((cell) => cell.state === "Verified").length, 0);
   assert.ok(cells.every((cell) =>
-    cell.evidence.currentEnvironmentVerification.some(
-      (evidence) => evidence.recordStatus === "runtime_complete",
-    ),
+    cell.state === (evidenceIsCurrent ? "Runtime verified" : "Implemented/unverified"),
   ));
+  assert.equal(cells.filter((cell) => cell.state === "Verified").length, 0);
+  assert.ok(cells.every((cell) => {
+    const current = cell.evidence.currentEnvironmentVerification.filter(
+      (evidence) => evidence.recordStatus === "runtime_complete",
+    );
+    const historical = cell.evidence.historicalVerification.filter(
+      (evidence) => evidence.recordStatus === "runtime_complete",
+    );
+    return evidenceIsCurrent
+      ? current.length === 1 && historical.length === 0
+      : current.length === 0 && historical.length === 1;
+  }));
   const overlays = matrix.cells.filter((cell) =>
     ["flux_schnell", "flux_dev"].includes(cell.modelId) &&
     cell.backend === "candle" && cell.overlay !== "none",
@@ -187,8 +208,10 @@ test("generated matrix exposes runtime activation without Full sibling signoff",
 
   const markdown = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
   assert.match(markdown, /`Runtime verified` means the exact base-only coordinate is production-admissible/);
-  assert.match(markdown, /\| `flux_dev` \| candle .*\| Runtime verified \|/);
-  assert.match(markdown, /\| `flux_schnell` \| candle .*\| Runtime verified \|/);
+  for (const model of ["flux_dev", "flux_schnell"]) {
+    const state = evidenceIsCurrent ? "Runtime verified" : "Implemented/unverified";
+    assert.match(markdown, new RegExp("\\| `" + model + "` \\| candle .*\\| " + state + " \\|"));
+  }
 });
 
 test("runtime_complete rejects overclaimed lifecycle or overlay coverage", () => {

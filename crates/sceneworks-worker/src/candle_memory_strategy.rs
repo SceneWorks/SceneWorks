@@ -858,6 +858,78 @@ mod tests {
     }
 
     #[test]
+    fn flux2_dev_base_bindings_are_current_selectable_and_overlay_free() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .expect("embedded model manifest");
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
+        let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+        let model = root["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "flux2_dev")
+            .expect("FLUX.2-dev model");
+        let manifest = model.as_object().expect("FLUX.2-dev model object");
+        let bindings = manifest["candle"]["calibrations"]
+            .as_array()
+            .expect("FLUX.2-dev calibration bindings");
+        assert_eq!(bindings.len(), 5);
+        assert!(bindings.iter().all(|binding| {
+            binding["provider"] == "flux2_dev"
+                && binding["tier"] == "q4"
+                && binding["mode"] == "text_to_image"
+                && binding["overlay"] == "none"
+                && binding["inferenceRevision"] == "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        }));
+
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let candidates = verified_candidates(
+            manifest,
+            "flux2_dev",
+            "flux2_dev",
+            "q4",
+            "text_to_image",
+            "none",
+            geometry,
+        )
+        .expect("packaged FLUX.2-dev evidence");
+        assert_eq!(candidates.len(), 5);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.key.strategy)
+                .collect::<Vec<_>>(),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
+                MemoryStrategy::BoundedTransformerResidency,
+            ]
+        );
+        assert!(verified_candidates(
+            manifest,
+            "flux2_dev",
+            "flux2_dev",
+            "q4",
+            "text_to_image",
+            "control",
+            geometry,
+        )
+        .expect("uncertified FLUX.2-dev control query")
+        .is_empty());
+    }
+
+    #[test]
     fn uncertified_flux_identity_artifacts_fall_back_to_resident() {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("alternate-flux-q4")))
             .with_ip_adapter(WeightsSource::File(PathBuf::from(
