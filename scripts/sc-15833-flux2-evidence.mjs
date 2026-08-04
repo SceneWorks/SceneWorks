@@ -703,15 +703,25 @@ async function ingestRouteSession(descriptor, capture, reader) {
   if (!text.includes(done)) {
     fail(`${sourcePath} did not pass the exact ${descriptor.route} smoke`);
   }
-  const stdMatch = text.match(new RegExp(`\\[smoke\\] dev ${descriptor.route} 512x512 std ([0-9.]+)`));
-  if (!stdMatch || Number(stdMatch[1]) <= 0) fail(`${sourcePath} is missing a non-degenerate output diagnostic`);
+  const diagnostic = text.match(new RegExp(
+    `\\[smoke\\] dev ${descriptor.route} 512x512 std ([0-9.]+) -> ([^\\r\\n]+) sha256=([0-9a-f]{64})`,
+  ));
+  if (!diagnostic || Number(diagnostic[1]) <= 0) {
+    fail(`${sourcePath} is missing a digest-bound non-degenerate output diagnostic`);
+  }
+  if (diagnostic[2].replaceAll("\\", "/") !== outputPath) {
+    fail(`${sourcePath} output diagnostic names a path other than ${outputPath}`);
+  }
   const image = inspectPng(outputBytes, outputPath);
   if (image.stdDev <= 0) fail(`${outputPath} is a degenerate image`);
-  const loggedStdDev = Number(stdMatch[1]);
+  const loggedStdDev = Number(diagnostic[1]);
   if (Math.abs(image.stdDev - loggedStdDev) > 0.0051) {
     fail(`${sourcePath} output diagnostic does not match the accepted PNG pixels`);
   }
   const outputSha256 = sha256(outputBytes);
+  if (diagnostic[3] !== outputSha256) {
+    fail(`${sourcePath} output digest does not match the accepted PNG bytes`);
+  }
   const session = sourceSession({
     kind: "physical_cuda",
     command: descriptor.command,

@@ -241,7 +241,7 @@ function pngChunk(type, data) {
   return chunk;
 }
 
-function routePng(route, width = 512, height = 512) {
+function routePng(route, width = 512, height = 512, permuted = false) {
   const pixels = Buffer.alloc(width * height * 3);
   let sum = 0;
   for (let y = 0; y < height; y += 1) {
@@ -253,6 +253,7 @@ function routePng(route, width = 512, height = 512) {
       sum += pixels[at] + pixels[at + 1] + pixels[at + 2];
     }
   }
+  if (permuted) pixels.reverse();
   const mean = sum / pixels.length;
   let squared = 0;
   for (const value of pixels) squared += (value - mean) ** 2;
@@ -276,13 +277,15 @@ function routePng(route, width = 512, height = 512) {
   return { bytes, stdDev: Math.sqrt(squared / pixels.length) };
 }
 
-function routeLog(route, capturedAt, stdDev) {
+function routeLog(route, capturedAt, stdDev, outputBytes) {
   const testName = route === "edit"
     ? "flux2_dev_edit_candle_gpu_smoke"
     : "flux2_dev_control_candle_gpu_smoke";
+  const outputPath = `docs/calibration/sc-15833/flux2_dev_${route}_candle.png`;
+  const outputSha256 = createHash("sha256").update(outputBytes).digest("hex");
   return Buffer.from(
     `${sourceHeader(capturedAt, route === "control" ? [BASE_INPUT, CONTROL_INPUT] : [BASE_INPUT])}running 1 test\n` +
-    `[smoke] dev ${route} 512x512 std ${stdDev.toFixed(2)} -> output.png\n` +
+    `[smoke] dev ${route} 512x512 std ${stdDev.toFixed(2)} -> ${outputPath} sha256=${outputSha256}\n` +
     `[smoke] DONE: flux2_dev ${route} (candle) coherent\n` +
     `test flux2_dev_gpu_smoke::${testName} ... ok\n` +
     "test result: ok. 1 passed; 0 failed\n",
@@ -313,7 +316,7 @@ function fixture({ promotionIntent = "runtime_complete" } = {}) {
     const outputPath = `docs/calibration/sc-15833/flux2_dev_${route}_candle.png`;
     const capturedAt = `2026-08-04T04:1${index}:00Z`;
     const output = routePng(route);
-    files.set(sourcePath, routeLog(route, capturedAt, output.stdDev));
+    files.set(sourcePath, routeLog(route, capturedAt, output.stdDev, output.bytes));
     files.set(outputPath, output.bytes);
     return {
       route,
@@ -491,7 +494,7 @@ test("SC-15833 rejects arbitrary route bytes and PNG diagnostics not derived fro
   const output = routePng("edit");
   mismatched.files.set(
     "docs/calibration/sc-15833/edit-q4-resident.log",
-    routeLog("edit", "2026-08-04T04:10:00Z", output.stdDev + 1),
+    routeLog("edit", "2026-08-04T04:10:00Z", output.stdDev + 1, output.bytes),
   );
   await assert.rejects(
     ingestFlux2Capture(mismatched.capture, { reader: mismatched.reader }),
@@ -512,11 +515,19 @@ test("SC-15833 rejects arbitrary route bytes and PNG diagnostics not derived fro
   wrongDimensions.files.set("docs/calibration/sc-15833/flux2_dev_edit_candle.png", narrow.bytes);
   wrongDimensions.files.set(
     "docs/calibration/sc-15833/edit-q4-resident.log",
-    routeLog("edit", "2026-08-04T04:10:00Z", narrow.stdDev),
+    routeLog("edit", "2026-08-04T04:10:00Z", narrow.stdDev, narrow.bytes),
   );
   await assert.rejects(
     ingestFlux2Capture(wrongDimensions.capture, { reader: wrongDimensions.reader }),
     /must be a non-interlaced 512x512/,
+  );
+
+  const permutedPixels = fixture();
+  const permuted = routePng("edit", 512, 512, true);
+  permutedPixels.files.set("docs/calibration/sc-15833/flux2_dev_edit_candle.png", permuted.bytes);
+  await assert.rejects(
+    ingestFlux2Capture(permutedPixels.capture, { reader: permutedPixels.reader }),
+    /output digest does not match the accepted PNG bytes/,
   );
 });
 

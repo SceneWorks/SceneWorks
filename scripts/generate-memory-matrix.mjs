@@ -559,6 +559,12 @@ export function mlxRequiredHostBytes(record) {
   return Number.isSafeInteger(required) ? required : null;
 }
 
+export function observedPeakBytes(record) {
+  const overall = record?.observedMemory?.overall;
+  const value = overall?.deviceBytes ?? overall?.activeBytes;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 function parseExpectedImageIds(source) {
   const match = source.match(/const EXPECTED_IMAGE_IDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\n\s*\];/);
   if (!match) throw new Error("could not locate EXPECTED_IMAGE_IDS in engines.rs");
@@ -1789,7 +1795,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                 calibrationPlan,
               });
               const runSummary = (record) => {
-                const overall = record.observedMemory?.overall?.deviceBytes;
+                const overall = observedPeakBytes(record);
                 const requiredHostBytes = mlxRequiredHostBytes(record);
                 return {
                   source: `docs/generated/memory-calibration-evidence.json#${record.id}`,

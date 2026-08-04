@@ -19,6 +19,7 @@ import {
   familyGroup,
   familyStory,
   mlxRequiredHostBytes,
+  observedPeakBytes,
   modelStory,
 } from "./generate-memory-matrix.mjs";
 import { recordId } from "./memory-calibration-harness.mjs";
@@ -46,6 +47,15 @@ test("a comment-only manifest edit produces no generated matrix change", async (
 
   assert.deepEqual(commentOnly, baseline);
   assert.deepEqual(withoutAnyComments, baseline);
+});
+
+test("runtime-only CUDA telemetry surfaces its measured active-byte peak", () => {
+  assert.equal(observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234 } } }), 1234);
+  assert.equal(
+    observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234, deviceBytes: 5678 } } }),
+    5678,
+  );
+  assert.equal(observedPeakBytes({ observedMemory: { overall: {} } }), null);
 });
 
 test("self-stamped manifest matrix revisions do not rotate the source fingerprint", async () => {

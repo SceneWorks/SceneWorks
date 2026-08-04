@@ -63,7 +63,7 @@ pub struct EvidenceRecord {
     pub sweep: Sweep,
     pub scenarios: Vec<Scenario>,
     pub predicted_peak_bytes: RequiredNullable<PredictedPeakBytes>,
-    pub observed_memory: RequiredNullable<PhaseMetrics>,
+    pub observed_memory: RequiredNullable<ObservedMemory>,
     pub quality: Quality,
     pub negative_mutation: RequiredNullable<NegativeMutation>,
     pub loadability: Loadability,
@@ -407,12 +407,90 @@ pub enum ScenarioResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum PredictedPeakBytes {
+    Full(FullPredictedPeakBytes),
+    RuntimeOverall(RuntimePredictedPeakBytes),
+}
+
+impl PredictedPeakBytes {
+    pub fn overall(&self) -> u64 {
+        match self {
+            Self::Full(value) => value.overall,
+            Self::RuntimeOverall(value) => value.overall,
+        }
+    }
+
+    pub fn full(&self) -> Option<&FullPredictedPeakBytes> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+
+    pub fn full_mut(&mut self) -> Option<&mut FullPredictedPeakBytes> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PredictedPeakBytes {
+pub struct FullPredictedPeakBytes {
     pub conditioning: u64,
     pub denoise: u64,
     pub decode: u64,
     pub overall: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimePredictedPeakBytes {
+    pub overall: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ObservedMemory {
+    Full(PhaseMetrics),
+    RuntimeOverall(RuntimeObservedMemory),
+}
+
+impl ObservedMemory {
+    pub fn full(&self) -> Option<&PhaseMetrics> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+
+    pub fn full_mut(&mut self) -> Option<&mut PhaseMetrics> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+
+    pub fn overall_device_or_active_bytes(&self) -> u64 {
+        match self {
+            Self::Full(value) => value.overall.device_bytes,
+            Self::RuntimeOverall(value) => value.overall.active_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeObservedMemory {
+    pub overall: RuntimeObservedOverall,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeObservedOverall {
+    pub active_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -790,9 +868,11 @@ impl EvidenceRecord {
         let RequiredNullable::Value(predicted) = &self.predicted_peak_bytes else {
             return None;
         };
+        let predicted = predicted.full()?;
         let RequiredNullable::Value(observed) = &self.observed_memory else {
             return None;
         };
+        let observed = observed.full()?;
         let process_ceiling = hardware
             .mlx_memory_limit_bytes
             .min(hardware.wired_limit_bytes)
@@ -1302,20 +1382,24 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
         &record.id,
         "predictedPeakBytes",
     )?;
-    if predicted.overall
-        < predicted
-            .conditioning
-            .max(predicted.denoise)
-            .max(predicted.decode)
-    {
-        return Err(format!(
-            "{} predicted overall does not cover phase peaks",
-            record.id
-        ));
+    if let Some(predicted) = predicted.full() {
+        if predicted.overall
+            < predicted
+                .conditioning
+                .max(predicted.denoise)
+                .max(predicted.decode)
+        {
+            return Err(format!(
+                "{} predicted overall does not cover phase peaks",
+                record.id
+            ));
+        }
     }
     let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
-    validate_phase_metrics(observed, &record.id)?;
-    if observed.overall.device_bytes > record.hardware.memory_bytes() {
+    if let Some(observed) = observed.full() {
+        validate_phase_metrics(observed, &record.id)?;
+    }
+    if observed.overall_device_or_active_bytes() > record.hardware.memory_bytes() {
         return Err(format!(
             "{} observed device memory exceeds hardware",
             record.id
@@ -1569,6 +1653,12 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         &record.id,
         "predictedPeakBytes",
     )?;
+    let predicted = predicted.full().ok_or_else(|| {
+        format!(
+            "{} complete evidence requires full predicted phase telemetry",
+            record.id
+        )
+    })?;
     if predicted.overall
         < predicted
             .conditioning
@@ -1581,6 +1671,12 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         ));
     }
     let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
+    let observed = observed.full().ok_or_else(|| {
+        format!(
+            "{} complete evidence requires full observed phase telemetry",
+            record.id
+        )
+    })?;
     validate_phase_metrics(observed, &record.id)?;
     if observed.overall.device_bytes > record.hardware.memory_bytes() {
         return Err(format!(
@@ -1964,7 +2060,8 @@ mod tests {
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        RecordStatus, StaleBundleReason, StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
+        ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable, StaleBundleReason,
+        StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
         PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
@@ -2319,6 +2416,65 @@ mod tests {
             load_bundle(&mismatch.to_string()),
             Err(BundleLoadError::Invalid(message))
                 if message.contains("exactly one passed case matching its strategy parameters")
+        ));
+    }
+
+    #[test]
+    fn runtime_complete_accepts_overall_only_telemetry_but_complete_requires_full_phases() {
+        fn runtime_record(raw: &mut Value) -> &mut Value {
+            raw["records"]
+                .as_array_mut()
+                .expect("records array")
+                .iter_mut()
+                .find(|record| record["status"] == "runtime_complete")
+                .expect("packaged runtime-complete record")
+        }
+
+        let mut sparse: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        let record = runtime_record(&mut sparse);
+        let record_id = record["id"].as_str().expect("record id").to_owned();
+        let predicted = record["predictedPeakBytes"]["overall"]
+            .as_u64()
+            .expect("predicted overall");
+        let observed = record["observedMemory"]["overall"]["deviceBytes"]
+            .as_u64()
+            .expect("observed device overall");
+        record["predictedPeakBytes"] = json!({ "overall": predicted });
+        record["observedMemory"] = json!({ "overall": { "activeBytes": observed } });
+
+        let bundle = match load_bundle(&sparse.to_string()).expect("sparse telemetry parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("sparse bundle must be current: {reason:?}"),
+        };
+        let record = bundle
+            .records
+            .iter()
+            .find(|record| record.id == record_id)
+            .expect("sparse record survives");
+        assert!(matches!(
+            record.predicted_peak_bytes,
+            RequiredNullable::Value(PredictedPeakBytes::RuntimeOverall(_))
+        ));
+        assert!(matches!(
+            record.observed_memory,
+            RequiredNullable::Value(ObservedMemory::RuntimeOverall(_))
+        ));
+
+        let mut overclaimed = sparse.clone();
+        runtime_record(&mut overclaimed)["status"] = json!("complete");
+        assert!(matches!(
+            load_bundle(&overclaimed.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("complete evidence requires full predicted phase telemetry")
+        ));
+
+        let mut partial = sparse;
+        runtime_record(&mut partial)["predictedPeakBytes"] =
+            json!({ "conditioning": 1, "overall": predicted });
+        assert!(matches!(
+            load_bundle(&partial.to_string()),
+            Err(BundleLoadError::Json(_))
         ));
     }
 
