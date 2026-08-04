@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:3a0880a278a333ed009f3a62ed1a536830711b7fcdc4fdb8cda4ef17e088ab23",
-    "matrixRevision": "source-tree:928e9614dad7165bb8b15ca731f87b7316a01327c2f0f4c72a07844b7bbf01bd",
-    "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+    "sceneWorksRevision": "source-tree:0e40f95dfaf8bd39526e026e2355c77b85e1747636237738d028987022fa90e5",
+    "matrixRevision": "source-tree:ca4728b72a54434cf08beffd556992cd263e65e391cc81a64a0df47ead52b29e",
+    "inferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "4ba40f555df8874ac6feeab0e4573b139df1722093769e66da8e7b3ab71f3977"
+        "sha256": "6fa61b3ccc7ed677ed885b18d48ccdcfe269576e649b491718eaafc09d5ee9bc"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -67,9 +67,9 @@
     "runtimeCompleteRecords": 15,
     "activationEligibleRecords": 48,
     "matrixSummaryCalibrationRuns": 48,
-    "matrixSummaryCurrentCalibrationRuns": 5,
+    "matrixSummaryCurrentCalibrationRuns": 0,
     "verifiedCells": 0,
-    "note": "33 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 5 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "note": "33 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -391,9 +391,8 @@
   "cells": {
     "total": 9140,
     "byState": {
-      "Implemented/unverified": 2997,
+      "Implemented/unverified": 3002,
       "Missing": 6132,
-      "Runtime verified": 5,
       "Structurally N/A": 6
     },
     "byBackend": {
@@ -401,11 +400,10 @@
       "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 1048,
+      "Implemented/unverified @ candle": 1053,
       "Implemented/unverified @ mlx": 1949,
       "Missing @ candle": 3461,
       "Missing @ mlx": 2671,
-      "Runtime verified @ candle": 5,
       "Structurally N/A @ candle": 6
     },
     "byRung": {

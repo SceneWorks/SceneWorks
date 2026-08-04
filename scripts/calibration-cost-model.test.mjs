@@ -510,18 +510,41 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.equal(model.completedBaseline.completeRecords, 33);
   assert.equal(model.completedBaseline.runtimeCompleteRecords, 15);
   assert.equal(model.completedBaseline.activationEligibleRecords, 48);
-  // "Runtime-current" is measured against the shipped inference pin. The MLX wave advances that
-  // pin, but SC-15833's checked-in dependency-closure audit proves the Candle FLUX.2 provider trees
-  // byte-identical at 5ffd and 277f. Those five records are current through that exact compatibility
-  // binding; every other retained record remains historical.
+  // "Runtime-current" is measured against the shipped inference pin. SC-15833's checked-in
+  // dependency-closure audit proves the Candle FLUX.2 provider trees byte-identical at 5ffd and
+  // 277f, so those five records are current through that exact compatibility binding — but ONLY
+  // while 277f is still the live pin. The audit is a window, not a permanent grant: once the pin
+  // moves past it the five join every other retained record as historical, which is the fail-closed
+  // rule `sc-15833-flux2-evidence.test.mjs` asserts directly.
+  //
+  // Derived from the live pin rather than hardcoded, so a bump does not make this test wrong. It
+  // asserted a flat `5`, which was only ever true at 277f; sc-17393's bump to 35251a88 is the first
+  // bump to arrive after SC-15833 landed. Re-certifying FLUX.2 needs a new
+  // `inference-compatibility-<rev>.json` proof — and that proof's audited-object set includes
+  // `crates/media/candle-gen/candle-gen`, which 277f→35251a88 changes — so the count must fall to
+  // zero here until the window is re-audited by measurement.
+  const AUDITED_LIVE_REVISION = "277f423822bf1899340ed3d867c3d6a773473d7b";
+  const workerCargo = readFileSync(
+    new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url),
+    "utf8",
+  );
+  const livePin = workerCargo.match(
+    /github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/,
+  )?.[1];
+  assert.ok(livePin, "could not read the pinned inference revision from the worker manifest");
+  const expectedCurrentRuns = livePin === AUDITED_LIVE_REVISION ? 5 : 0;
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    5,
-    "only the five explicitly compatible FLUX.2 records may authorize the later runtime",
+    expectedCurrentRuns,
+    "only the five explicitly compatible FLUX.2 records may authorize the later runtime, and only " +
+      "while the audited compatibility window is still the live pin",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
   assert.match(model.completedBaseline.note, /33 Full complete and 15 base-only runtime-complete/);
-  assert.match(model.completedBaseline.note, /5 current calibration run\(s\)/);
+  assert.match(
+    model.completedBaseline.note,
+    new RegExp(`${expectedCurrentRuns} current calibration run\\(s\\)`),
+  );
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
   assert.match(model.biggestUncertainties[0].why, /Only 9 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
