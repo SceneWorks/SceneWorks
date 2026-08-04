@@ -103,7 +103,7 @@ import { pathToFileURL } from "node:url";
  * not at the repo root and is not a manifest. Cargo reads it for every build in the worktree, and
  * a `[build] rustflags`, a `[target.*]` linker override or an `[env]` entry a build script consumes
  * changes the compiled code while moving none of the crate trees. It is inert across every window
- * audited so far — object `61d7be37…` at 5ffd7612, 277f4238 and 06e0c5e9, and it declares no
+ * in play — object `61d7be37…` at 5ffd7612, 277f4238, 06e0c5e9 and a4f409ae, and it declares no
  * rustflags — but "has not bitten yet" is what was said about the lockfile too. See
  * `assertNoConfigRustflags` for the one part of it this tool cannot honestly adjudicate.
  */
@@ -460,7 +460,7 @@ export function closureRelativePath(root, manifestPath, platformPath = path) {
  * sc-17524 considered switching the audited artifact to `runtime-cuda`'s test binary instead, to
  * make the whole closure adjudicable by compile coverage alone. Measured and rejected: that binary
  * links the ENTIRE CUDA bundle, so its digest moves on any commit to any of ~50 provider crates.
- * Over the very window this had to adjudicate (`5ffd7612` -> `06e0c5e9`) `candle-gen-catalog`,
+ * Over the first window this had to adjudicate (`5ffd7612` -> `06e0c5e9`) `candle-gen-catalog`,
  * `candle-gen-chroma`, `candle-gen-sdxl` and `candle-gen-sensenova` all moved, none of them in
  * FLUX.2's closure. It would have reported "the compiled code changed, re-capture" for FLUX.2 code
  * that did not change — the 47.6 GB false positive this epic exists to remove, with a wider trigger.

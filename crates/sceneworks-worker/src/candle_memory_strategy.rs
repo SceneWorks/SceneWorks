@@ -934,7 +934,7 @@ mod tests {
                 && binding["overlay"] == "none"
                 && binding["inferenceRevision"] == "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
                 && binding["compatibleInferenceRevision"]
-                    == "06e0c5e919918aeb7cec966a83ce6fe394feec5e"
+                    == "a4f409ae8ce73eda2ee8117b89b5f479666606b8"
         }));
 
         let geometry = MemoryGeometry {
@@ -1074,7 +1074,7 @@ mod tests {
         //
         // Deliberately NOT "fixed" by widening `FLUX2_COMPATIBLE_INFERENCE_REVISION`: re-certifying
         // needs a new `inference-compatibility-<rev>.json` proof. sc-17524 produced one for the
-        // window ending at the live `06e0c5e9` pin, by measuring the compiled artifact on the RTX
+        // window ending at the live `a4f409ae` pin, by measuring the compiled artifact on the RTX
         // box — three closure paths moved and the measurement binary was byte-identical at both
         // ends. That is what a re-certification looks like; editing this constant is not.
         if crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION

@@ -11,9 +11,9 @@ use serde_json::Value;
 pub(crate) const FLUX2_CAPTURED_INFERENCE_REVISION: &str =
     "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
 pub(crate) const FLUX2_COMPATIBLE_INFERENCE_REVISION: &str =
-    "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
+    "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
 pub(crate) const FLUX2_INFERENCE_COMPATIBILITY_AUDIT: &str =
-    include_str!("../../../docs/calibration/sc-15833/inference-compatibility-06e0.json");
+    include_str!("../../../docs/calibration/sc-15833/inference-compatibility-a4f4.json");
 /// sc-17524: v3 is the ten-path closure. v1 and v2 describe sc-15833's seven-path one, which omits
 /// `Cargo.lock` and `rust-toolchain.toml`; accepting one would read it as evidence about two build
 /// inputs it never looked at.

@@ -65,7 +65,7 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
   modelId: "flux2_dev",
   provider: "flux2_dev",
   capturedInferenceRevision: "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-  compatibleInferenceRevision: "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
+  compatibleInferenceRevision: "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
   // sc-17524: measured on the RTX PRO 6000 box (rustc 1.96.0, nvcc 12.9, `--features cuda`). Three
   // closure paths moved across this window — `Cargo.lock`, gen-core and candle-gen — and the
   // `candle-gen-flux2` lib test binary is byte-identical at both ends, so the compiled code the
@@ -1832,7 +1832,7 @@ export const SOURCE_PATHS = Object.freeze({
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
   calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
   calibrationPlan: "config/memory-calibration-plan.json",
-  inferenceCompatibility: "docs/calibration/sc-15833/inference-compatibility-06e0.json",
+  inferenceCompatibility: "docs/calibration/sc-15833/inference-compatibility-a4f4.json",
   rung4Survey: "config/rung4-applicability-survey.json",
   cargo: "Cargo.toml",
 });

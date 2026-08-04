@@ -80,7 +80,8 @@ transitive dependency the measurement binary links moves **only** the lockfile.
 `.cargo/config.toml` is the same class and the easiest to miss, being neither at the repo root nor a
 manifest — cargo reads it for every build in the worktree, and a `[build] rustflags`, a `[target.*]`
 linker override or an `[env]` entry a build script consumes changes the compiled code while moving
-no crate tree. It is object `61d7be37…` at every revision audited so far. One part of it the tool
+no crate tree. It is object `61d7be37…` at every revision in play — `5ffd7612`, `277f4238`,
+`06e0c5e9`, `a4f409ae`. One part of it the tool
 cannot honestly adjudicate: `CARGO_ENCODED_RUSTFLAGS`, which this script must set for the path
 remaps, **replaces** config-declared rustflags rather than merging them. So the audit refuses to run
 against a config that declares any (`assertNoConfigRustflags`) rather than certify a build it had
@@ -129,7 +130,7 @@ sc-17524 considered switching the audited artifact to one that links the *whole*
 would make `runtime-cuda` adjudicable by compile coverage alone. Measured and rejected. That binary
 links the entire CUDA bundle — `candle-gen-catalog` plus every provider and the audio lane — so its
 digest moves on a commit to any of ~50 crates that have nothing to do with FLUX.2. Across the very
-window this had to adjudicate, `5ffd7612` → `06e0c5e9`, four of them moved
+window this first had to adjudicate, `5ffd7612` → `06e0c5e9`, four of them moved
 (`candle-gen-catalog`, `candle-gen-chroma`, `candle-gen-sdxl`, `candle-gen-sensenova`). It would
 have demanded a 47.6 GB re-capture for FLUX.2 code that did not change: the exact false positive
 this epic exists to remove, with a far wider trigger.
@@ -211,7 +212,9 @@ two-link experiment on a hello-world binary settled directly:
 Dropping it does not weaken the claim — the audited binary is built `--no-run` and never executes,
 debug info is not code, and `.text` is byte-identical with and without it. Verified at real scale:
 two builds of `5ffd7612` differ in **0 of 181,235,712 bytes**, and the shipped record's digest
-`d80844f2…` reproduced across five independent builds in four separate runs.
+`d80844f2…` came back from **eleven builds across three separate runs** — both revisions of the
+`5ffd7612 → 06e0c5e9` window in both build orders, a same-revision round trip, and both revisions of
+the shipped `5ffd7612 → a4f409ae` window.
 
 **Stable is not the same as blind**, and the flag that bought stability is the one most likely to
 over-normalize — so the other direction was measured too. Mutating a production constant in the
@@ -236,7 +239,7 @@ seven-path artifact layer) are **refused**, not re-graded: a record produced bef
 would reject them on size regardless; the version check is the legible version of the same refusal.
 
 Superseded record files stay on disk — `inference-compatibility-277f.json` is the v1 one, and the
-current window `5ffd7612 → 06e0c5e9` strictly contains the window it proved. They are history, not
+current window `5ffd7612 → a4f409ae` strictly contains the window it proved. They are history, not
 fallbacks: pointing `SOURCE_PATHS.inferenceCompatibility` back at one is a hard failure, because
 `validatedInferenceCompatibility` throws rather than degrading.
 

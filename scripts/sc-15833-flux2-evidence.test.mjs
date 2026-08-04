@@ -21,12 +21,12 @@ import {
 
 const SCENEWORKS_REVISION = "1".repeat(40);
 const INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
-const LIVE_INFERENCE_REVISION = "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
+const LIVE_INFERENCE_REVISION = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
 const MODEL_REVISION = "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 const MODEL_INVENTORY = "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b";
 const CONTROL_REVISION = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 const CONTROL_SHA = "516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a7a794";
-const RECORD_PATH = "docs/calibration/sc-15833/inference-compatibility-06e0.json";
+const RECORD_PATH = "docs/calibration/sc-15833/inference-compatibility-a4f4.json";
 const MATRIX_SOURCE = `source-tree:${"7".repeat(64)}`;
 const FINGERPRINT = "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
 
@@ -491,7 +491,7 @@ test("SC-15833 requires a unique ordered Cargo nocapture route result", async ()
   );
 });
 
-test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-06e0 compatibility", async () => {
+test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-a4f4 compatibility", async () => {
   const manifestSource = await readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8");
   const manifest = JSON.parse(stripJsoncComments(manifestSource));
   const model = manifest.models.find(({ id }) => id === "flux2_dev");
@@ -519,8 +519,8 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
 
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
   // The audited compatibility is a WINDOW — captured at `INFERENCE_REVISION` (5ffd), audited
-  // against the live pin `LIVE_INFERENCE_REVISION` (06e0) by
-  // docs/calibration/sc-15833/inference-compatibility-06e0.json. Inside that window the five cells
+  // against the live pin `LIVE_INFERENCE_REVISION` (a4f4) by
+  // docs/calibration/sc-15833/inference-compatibility-a4f4.json. Inside that window the five cells
   // ride CURRENT evidence and are Runtime verified. Once the pin moves past it the records are
   // retained but no longer authorize the new pin, which is the same fail-closed rule the sibling
   // test "refuses to authorize capture promotion against a newer live inference pin" asserts
@@ -535,7 +535,7 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
   //
   // Re-certifying FLUX.2 on a newer pin is deliberately NOT something this test can do by relaxing:
   // it needs a new `inference-compatibility-<rev>.json` proof. sc-17524 produced one for the window
-  // ending at 06e0c5e9 by MEASURING the compiled artifact on the RTX box — `Cargo.lock`, gen-core
+  // ending at a4f409ae by MEASURING the compiled artifact on the RTX box — `Cargo.lock`, gen-core
   // and candle-gen all moved and the `candle-gen-flux2` lib test binary was byte-identical at both
   // ends. That is the only thing that re-opens this window; editing a constant is not.
   const workerCargo = await readFile(new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url), "utf8");
@@ -568,7 +568,7 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
       cell.evidence.historicalVerification[0].recordStatus === "runtime_complete")));
 
   const proof = JSON.parse(await readFile(
-    new URL("../docs/calibration/sc-15833/inference-compatibility-06e0.json", import.meta.url),
+    new URL("../docs/calibration/sc-15833/inference-compatibility-a4f4.json", import.meta.url),
   ));
   assert.equal(proof.capturedInferenceRevision, INFERENCE_REVISION);
   assert.equal(proof.compatibleInferenceRevision, LIVE_INFERENCE_REVISION);
@@ -615,7 +615,7 @@ test("SC-15833 compatibility admission rejects a missing or fabricated closure a
     /JSON|compatibility audit/,
   );
   const proof = JSON.parse(await readFile(
-    new URL("../docs/calibration/sc-15833/inference-compatibility-06e0.json", import.meta.url),
+    new URL("../docs/calibration/sc-15833/inference-compatibility-a4f4.json", import.meta.url),
   ));
   proof.auditedObjects[0].capturedObject = "a".repeat(40);
   proof.auditedObjects[0].compatibleObject = "a".repeat(40);
@@ -957,7 +957,7 @@ const PROOF = { digest: ARTIFACT_DIGEST, adjudicates: ADJUDICATES };
 
 async function shippedAudit() {
   return JSON.parse(await readFile(
-    new URL("../docs/calibration/sc-15833/inference-compatibility-06e0.json", import.meta.url),
+    new URL("../docs/calibration/sc-15833/inference-compatibility-a4f4.json", import.meta.url),
   ));
 }
 

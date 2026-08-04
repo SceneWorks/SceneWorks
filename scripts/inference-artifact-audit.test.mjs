@@ -247,7 +247,7 @@ test("a rustc bump between the two revisions is a hard stop, not a comparison", 
   // sc-17524 put `rust-toolchain.toml` in the closure so a rustc bump can no longer take the free
   // path — it forces the build, and this is what the build then does with it. Asserted directly
   // because inside `main` it sits behind two real CUDA builds, so nothing ever reached it.
-  const args = { captured: "5ffd7612", compatible: "06e0c5e9" };
+  const args = { captured: "5ffd7612", compatible: "a4f409ae" };
   assert.equal(
     assertComparableToolchains({ ...args, capturedRustc: "rustc 1.96.0", compatibleRustc: "rustc 1.96.0" }),
     "rustc 1.96.0",
@@ -260,7 +260,7 @@ test("a rustc bump between the two revisions is a hard stop, not a comparison", 
   // The message has to name both, or an operator cannot tell which side moved.
   assert.throws(
     () => assertComparableToolchains({ ...args, capturedRustc: "rustc 1.96.0", compatibleRustc: "rustc 1.97.0" }),
-    /5ffd7612: rustc 1\.96\.0[\s\S]*06e0c5e9: rustc 1\.97\.0/,
+    /5ffd7612: rustc 1\.96\.0[\s\S]*a4f409ae: rustc 1\.97\.0/,
   );
 });
 

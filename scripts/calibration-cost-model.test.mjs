@@ -519,10 +519,10 @@ test("published cost model distinguishes complete history from runtime-current e
   //
   // Derived from the live pin rather than hardcoded, so a bump does not make this test wrong; it
   // falls to zero on its own and comes back when the window is re-audited. sc-17524 did exactly
-  // that for 06e0c5e9 — `Cargo.lock`, gen-core and candle-gen all moved, and the compiled
+  // that for a4f409ae — `Cargo.lock`, gen-core and candle-gen all moved, and the compiled
   // measurement binary was byte-identical at both ends — which is why the count is 5 again. Only a
   // measurement re-opens this window; editing the constant below does not.
-  const AUDITED_LIVE_REVISION = "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
+  const AUDITED_LIVE_REVISION = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
   const workerCargo = readFileSync(
     new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url),
     "utf8",
