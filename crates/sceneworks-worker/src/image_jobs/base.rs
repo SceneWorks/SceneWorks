@@ -6839,7 +6839,10 @@ mod krea_turbo_memory_route_tests {
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
 
         let manifest = historical_builtin_krea_turbo_manifest();
-        let available_gb = 8.95;
+        // sc-17097 re-measurement moved both streamed floors (q4 6.32 GiB, q8 7.01 GiB including the
+        // 2 GiB reserve). This budget still sits in the only window that makes the test meaningful:
+        // Q8 cannot fit at any rung while Q4 can, so a downtier is available and must NOT be taken.
+        let available_gb = 7.00;
         let budget = Some(VramBudget {
             free_gb: available_gb,
             total_gb: available_gb,
@@ -6881,7 +6884,9 @@ mod krea_turbo_memory_route_tests {
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
 
         let manifest = historical_builtin_krea_turbo_manifest();
-        let available_gb = 10.63;
+        // sc-17097: BF16's streamed floor is 10.41 GiB after the re-measurement, so this budget keeps
+        // BF16 unfittable while BOTH lower tiers fit - the case where downtiering is most tempting.
+        let available_gb = 10.40;
         let budget = Some(VramBudget {
             free_gb: available_gb,
             total_gb: available_gb,

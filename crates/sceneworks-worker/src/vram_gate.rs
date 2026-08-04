@@ -2564,11 +2564,14 @@ mod tests {
                 ..
             })
         ));
+        // sc-17097: bounded-decode re-measured 15.41 -> 13.32 GiB at 1024^2, so a 16 GiB card now
+        // stops one rung EARLIER than it did under the ABI-1 curves - it no longer has to chunk
+        // attention to fit. The ladder order is unchanged; the rung that fits moved.
         assert!(matches!(
             fit(16.0),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
-                    strategy: MemoryStrategy::BoundedAttention,
+                    strategy: MemoryStrategy::BoundedDecode,
                     ..
                 },
                 ..
@@ -2640,8 +2643,20 @@ mod tests {
                 ..
             })
         ));
+        // sc-17097: the Q8 tiled-VAE rung is no longer a measured no-op (see below), so 24 GiB now
+        // fits bounded-decode and 20 GiB fits bounded-attention - each card stops one rung earlier.
         assert!(matches!(
             fit(24.0),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(20.0),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedAttention,
@@ -2650,7 +2665,7 @@ mod tests {
                 ..
             })
         ));
-        for free_gb in [20.0, 12.0] {
+        for free_gb in [12.0] {
             assert!(matches!(
                 fit(free_gb),
                 Some(KreaTurboFit::Fits {
@@ -2669,13 +2684,26 @@ mod tests {
         let tiled =
             krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::BoundedDecode, 1024, 1024)
                 .expect("Q8 tiled-VAE evidence");
+        // sc-17097 INVERTS this assertion, and the inversion is the finding. Under the ABI-1
+        // capture the Q8 decode peak was identical with and without tiling (16.514 -> 16.514), so
+        // tiled VAE was a measured no-op that had to be prevented from displacing the cheaper
+        // three-stage rung. Re-measured under ABI 3 it is a real saving: three-stage peaks at 25.92
+        // GiB (decode-bound) against tiled VAE's 19.04. Keeping the old direction would now assert
+        // that a rung which demonstrably helps must not be offered.
         assert!(
-            tiled.peak_gb() >= three_stage.peak_gb(),
-            "the measured Q8 tiled-VAE no-op must never displace the cheaper three-stage rung"
+            tiled.peak_gb() < three_stage.peak_gb(),
+            "the re-measured Q8 tiled-VAE rung is a real decode saving ({:.3} GiB against \
+             three-stage {:.3}) and must be selectable",
+            tiled.peak_gb(),
+            three_stage.peak_gb()
         );
 
+        // sc-17097: the Q8 streamed-block floor re-measured 6.85 -> 5.01 GiB, so the admit/reject
+        // boundary moved from ~8.95 to ~7.01 GiB (peak plus the 2 GiB reserve). Probed 0.01 GiB clear
+        // of the boundary on each side rather than exactly on it: the byte-exact tie is decided by
+        // f64 rounding of `free_gb - headroom`, which is not the behaviour under test.
         assert!(matches!(
-            fit(8.96),
+            fit(7.02),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedTransformerResidency,
@@ -2684,10 +2712,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(fit(8.95), Some(KreaTurboFit::Reject { .. })));
+        assert!(matches!(fit(7.00), Some(KreaTurboFit::Reject { .. })));
         let budget = Some(VramBudget {
-            free_gb: 8.95,
-            total_gb: 8.95,
+            free_gb: 7.00,
+            total_gb: 7.00,
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "q8", 1024, 1024, budget, true),
@@ -2695,8 +2723,8 @@ mod tests {
             "lower-aspect curves without exact parity records must not be recommended"
         );
         let no_escape_budget = Some(VramBudget {
-            free_gb: 8.5,
-            total_gb: 8.5,
+            free_gb: 6.5,
+            total_gb: 6.5,
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "q8", 1024, 1024, no_escape_budget, true,),
@@ -2924,13 +2952,21 @@ mod tests {
         let tiled =
             krea_rung_phase_peaks(&manifest, "bf16", MemoryStrategy::BoundedDecode, 1024, 1024)
                 .expect("BF16 tiled-VAE evidence");
+        // sc-17097 inverts this for the same reason as the Q8 sibling: the ABI-1 BF16 decode peak
+        // was flat across tiling (26.446 -> 26.446), so tiled VAE measured as a no-op. Re-measured
+        // it is a real saving - three-stage 36.73 GiB against tiled VAE 29.86.
         assert!(
-            tiled.peak_gb() >= three_stage.peak_gb(),
-            "the measured BF16 tiled-VAE no-op must never displace the cheaper three-stage rung"
+            tiled.peak_gb() < three_stage.peak_gb(),
+            "the re-measured BF16 tiled-VAE rung is a real decode saving ({:.3} GiB against \
+             three-stage {:.3}) and must be selectable",
+            tiled.peak_gb(),
+            three_stage.peak_gb()
         );
 
+        // sc-17097: the BF16 streamed floor re-measured 8.53 -> 8.41 GiB, moving the boundary from
+        // ~10.63 to ~10.41. Probed 0.01 GiB clear on each side, as for Q8.
         assert!(matches!(
-            fit(10.64),
+            fit(10.42),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedTransformerResidency,
@@ -2939,10 +2975,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(fit(10.63), Some(KreaTurboFit::Reject { .. })));
+        assert!(matches!(fit(10.40), Some(KreaTurboFit::Reject { .. })));
         let immediate_below = Some(VramBudget {
-            free_gb: 10.63,
-            total_gb: 10.63,
+            free_gb: 10.40,
+            total_gb: 10.40,
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "bf16", 1024, 1024, immediate_below, true),
