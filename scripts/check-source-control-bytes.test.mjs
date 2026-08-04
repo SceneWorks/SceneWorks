@@ -52,6 +52,7 @@ const DECLARED_BINARY_EXTENSIONS = [
   ".pdf",
   ".png",
   ".pt",
+  ".rgb",
   ".safetensors",
   ".ttf",
   ".webm",

@@ -85,7 +85,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
     records_by_status = Counter(record["status"] for record in calibration["records"])
-    assert records_by_status == {"complete": 33, "runtime_complete": 10}
+    assert records_by_status == {"complete": 33, "runtime_complete": 15}
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -98,8 +98,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "runtimeComplete": records_by_status["runtime_complete"],
     }
 
-    # `current` vs `historical` is decided against the shipped inference pin. The MLX shared-ladder
-    # wave advances that pin beyond all 43 retained records, so none may authorize the new runtime.
+    # `current` vs `historical` is decided against the shipped inference pin plus exact audited
+    # compatibility. SC-15833 proves the Candle FLUX.2 dependency closure tree-identical at 5ffd
+    # and 277f, so only its five records may authorize the later runtime.
     full_runs = [
         run for run in matrix["calibrationRuns"] if run["record"]["status"] == "complete"
     ]
@@ -109,14 +110,64 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         if run["record"]["status"] == "runtime_complete"
     ]
     assert {run["semantics"] for run in full_runs} == {"historical"}
-    assert {run["semantics"] for run in runtime_complete_runs} == {"historical"}
+    expected_flux2_runtime = {
+        "imc-998b89c5d76dbcc84332": "bounded_attention",
+        "imc-b4113eedf503e409ad1b": "resident",
+        "imc-b62adbfca64f277414e1": "bounded_decode",
+        "imc-bfb890dff959eaf09183": "staged_residency",
+        "imc-f5c3d06f30ebf3723f13": "bounded_transformer_residency",
+    }
+    flux2_runtime = [
+        run
+        for run in runtime_complete_runs
+        if run["record"]["target"]["modelId"] == "flux2_dev"
+    ]
+    assert {
+        run["record"]["id"]: run["record"]["strategy"]["rung"]
+        for run in flux2_runtime
+    } == expected_flux2_runtime
+    assert {run["semantics"] for run in flux2_runtime} == {"current"}
+    assert {
+        run["record"]["repositories"]["inference"]["revision"]
+        for run in flux2_runtime
+    } == {"5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"}
+
+    historical_flux1_runtime = [
+        run
+        for run in runtime_complete_runs
+        if run["record"]["target"]["modelId"] in {"flux_schnell", "flux_dev"}
+    ]
+    assert Counter(
+        (
+            run["record"]["target"]["modelId"],
+            run["record"]["strategy"]["rung"],
+        )
+        for run in historical_flux1_runtime
+    ) == Counter(
+        (model_id, rung)
+        for model_id in ("flux_schnell", "flux_dev")
+        for rung in (
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+        )
+    )
+    assert {run["semantics"] for run in historical_flux1_runtime} == {"historical"}
+    assert len(runtime_complete_runs) == len(flux2_runtime) + len(
+        historical_flux1_runtime
+    )
+    assert {run["semantics"] for run in runtime_complete_runs} == {"current", "historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert current_eligible == []
+    assert {run["record"]["id"] for run in current_eligible} == set(
+        expected_flux2_runtime
+    )
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.
@@ -538,7 +589,19 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         (15512, "mlx"),
         (15517, "candle"),
         (15517, "mlx"),
+        (15519, "candle"),
     ]
+    assert next(
+        row
+        for row in rows
+        if row["familyStory"] == 15519 and row["backend"] == "candle"
+    ) == {
+        "familyStory": 15519,
+        "backend": "candle",
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+    }
     assert all(
         row["implementation"] != "none"
         for row in rows

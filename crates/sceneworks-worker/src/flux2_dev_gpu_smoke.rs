@@ -19,7 +19,7 @@
 //! cargo test -p sceneworks-worker --features backend-candle --release flux2_dev_candle_gpu_smoke -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
 
@@ -56,6 +56,15 @@ fn env_path(key: &str) -> PathBuf {
             .unwrap_or_else(|_| panic!("set ${key}"))
             .trim(),
     )
+}
+
+fn file_sha256(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let bytes = std::fs::read(path).unwrap_or_else(|error| {
+        panic!("read generated smoke artifact {}: {error}", path.display())
+    });
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// The requested quant tier + its lowercase label (for the output filename). `q4` -> Q4 (the shipped
@@ -257,12 +266,14 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     let std = image_std(&image);
     let png = out_dir.join("flux2_dev_edit_candle.png");
     save_png(&image, &png);
+    let png_sha256 = file_sha256(&png);
     println!(
-        "[smoke] dev edit {}x{} std {:.2} -> {}",
+        "[smoke] dev edit {}x{} std {:.2} -> {} sha256={}",
         image.width,
         image.height,
         std,
-        png.display()
+        png.display(),
+        png_sha256,
     );
     assert_eq!((image.width, image.height), (w, h));
     assert!(
@@ -343,12 +354,14 @@ fn flux2_dev_control_candle_gpu_smoke() {
     let std = image_std(&image);
     let png = out_dir.join("flux2_dev_control_candle.png");
     save_png(&image, &png);
+    let png_sha256 = file_sha256(&png);
     println!(
-        "[smoke] dev control {}x{} std {:.2} -> {}",
+        "[smoke] dev control {}x{} std {:.2} -> {} sha256={}",
         image.width,
         image.height,
         std,
-        png.display()
+        png.display(),
+        png_sha256,
     );
     assert_eq!((image.width, image.height), (w, h));
     assert!(
