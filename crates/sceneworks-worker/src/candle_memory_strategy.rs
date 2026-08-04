@@ -24,6 +24,37 @@ const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request
 const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
 const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
 const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
+const FLUX2_CAPTURED_INFERENCE_REVISION: &str = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
+const FLUX2_COMPATIBLE_INFERENCE_REVISION: &str = "277f423822bf1899340ed3d867c3d6a773473d7b";
+const FLUX2_INFERENCE_COMPATIBILITY_AUDIT: &str =
+    include_str!("../../../docs/calibration/sc-15833/inference-compatibility-277f.json");
+const FLUX2_AUDITED_OBJECTS: [(&str, &str); 7] = [
+    ("Cargo.toml", "8f5af6b9d53bbfe3be5d9d79b8949364138a087c"),
+    (
+        "crates/contracts/gen-core",
+        "9a7e86f5893e584a8d0d656147abc4ae93af6922",
+    ),
+    (
+        "crates/bundles/runtime-cuda",
+        "aba807f775872760e72fd98f28a5a0d2853cf00f",
+    ),
+    (
+        "crates/media/candle-gen/candle-gen",
+        "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
+    ),
+    (
+        "crates/media/candle-gen/candle-gen-pid",
+        "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
+    ),
+    (
+        "crates/media/candle-gen/candle-gen-flux2",
+        "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
+    ),
+    (
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "3b8327cf01d346c8068a5e9d096dcdddca440e99",
+    ),
+];
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -151,6 +182,59 @@ fn text<'a>(object: &'a JsonObject<String, Value>, key: &str) -> Option<&'a str>
         .filter(|value| !value.is_empty())
 }
 
+fn immutable_revision(object: &JsonObject<String, Value>, key: &str) -> Option<String> {
+    let revision = text(object, key)?;
+    (revision.len() == 40
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    .then(|| revision.to_owned())
+}
+
+fn audited_compatible_inference_revision(
+    model_id: &str,
+    provider: &str,
+    captured_revision: &str,
+    binding: &JsonObject<String, Value>,
+) -> Option<String> {
+    let claimed = immutable_revision(binding, "compatibleInferenceRevision")?;
+    if model_id != "flux2_dev"
+        || provider != "flux2_dev"
+        || captured_revision != FLUX2_CAPTURED_INFERENCE_REVISION
+        || claimed != FLUX2_COMPATIBLE_INFERENCE_REVISION
+    {
+        return None;
+    }
+    let audit: Value = serde_json::from_str(FLUX2_INFERENCE_COMPATIBILITY_AUDIT).ok()?;
+    if audit.get("schemaVersion")?.as_u64()? != 1
+        || audit.get("story")?.as_str()? != "SC-15833"
+        || audit.get("capturedInferenceRevision")?.as_str()? != FLUX2_CAPTURED_INFERENCE_REVISION
+        || audit.get("compatibleInferenceRevision")?.as_str()?
+            != FLUX2_COMPATIBLE_INFERENCE_REVISION
+        || audit.get("method")?.as_str()?
+            != "git object identity across the complete Candle FLUX.2 runtime dependency closure"
+    {
+        return None;
+    }
+    let objects = audit.get("auditedObjects")?.as_array()?;
+    if objects.len() != FLUX2_AUDITED_OBJECTS.len() {
+        return None;
+    }
+    for (path, object_id) in FLUX2_AUDITED_OBJECTS {
+        let matching = objects
+            .iter()
+            .filter(|entry| entry.get("path").and_then(Value::as_str) == Some(path))
+            .collect::<Vec<_>>();
+        if matching.len() != 1
+            || matching[0].get("capturedObject").and_then(Value::as_str) != Some(object_id)
+            || matching[0].get("compatibleObject").and_then(Value::as_str) != Some(object_id)
+        {
+            return None;
+        }
+    }
+    Some(claimed)
+}
+
 fn binding(object: &JsonObject<String, Value>) -> Option<CalibrationBinding> {
     let abi = u32::try_from(object.get("abi")?.as_u64()?).ok()?;
     let load_shape = match object.get("loadShape").and_then(Value::as_str) {
@@ -273,6 +357,22 @@ fn verified_candidates(
         let Some(calibration) = binding(item) else {
             continue;
         };
+        // Capture provenance remains `inferenceRevision`. A later runtime pin may be used for
+        // admission only when the manifest carries an exact provider-closure compatibility audit.
+        // Malformed compatibility claims fail closed instead of falling back to captured provenance.
+        let effective_inference_revision = if item.contains_key("compatibleInferenceRevision") {
+            let Some(revision) = audited_compatible_inference_revision(
+                model_id,
+                evidence_provider,
+                &calibration.inference_revision,
+                item,
+            ) else {
+                continue;
+            };
+            revision
+        } else {
+            calibration.inference_revision.clone()
+        };
         let query = EvidenceQuery {
             backend: CalibrationBackend::Candle,
             model_id: model_id.to_owned(),
@@ -323,7 +423,7 @@ fn verified_candidates(
             calibration_abi: calibration.abi,
             calibration_fingerprint: calibration.fingerprint,
             sceneworks_revision: calibration.scene_works_revision,
-            inference_revision: calibration.inference_revision,
+            inference_revision: effective_inference_revision,
             harness_version: record.harness_version.clone(),
             predicted_peak_bytes: predicted.overall(),
             observed_peak_bytes: match &record.observed_memory {
@@ -883,6 +983,8 @@ mod tests {
                 && binding["mode"] == "text_to_image"
                 && binding["overlay"] == "none"
                 && binding["inferenceRevision"] == "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+                && binding["compatibleInferenceRevision"]
+                    == "277f423822bf1899340ed3d867c3d6a773473d7b"
         }));
 
         let geometry = MemoryGeometry {
@@ -934,6 +1036,25 @@ mod tests {
                 .observed_peak_bytes
                 .is_some_and(|active| candidate.predicted_peak_bytes > active)
         }));
+        let mut unaudited_manifest = manifest.clone();
+        for binding in unaudited_manifest["candle"]["calibrations"]
+            .as_array_mut()
+            .expect("mutable FLUX.2-dev calibration bindings")
+        {
+            binding["compatibleInferenceRevision"] =
+                json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        }
+        assert!(verified_candidates(
+            &unaudited_manifest,
+            "flux2_dev",
+            "flux2_dev",
+            "q4",
+            "text_to_image",
+            "none",
+            geometry,
+        )
+        .expect("unaudited compatibility query")
+        .is_empty());
         assert_eq!(
             candidates
                 .iter()

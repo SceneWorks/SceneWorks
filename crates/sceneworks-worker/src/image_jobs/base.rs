@@ -2557,7 +2557,10 @@ fn optimized_shared_memory_context(
 /// The registered FLUX.2-dev generator is a text-to-image provider even when the catalog surface
 /// originated from a style-variation prompt. Keep that provider-specific canonicalization here so
 /// Z-Image, Qwen, and FLUX.1 retain their established mode/evidence semantics.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -> &'a str {
     if engine_id == "flux2_dev" {
         "text_to_image"

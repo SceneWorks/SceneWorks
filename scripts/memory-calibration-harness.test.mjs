@@ -390,6 +390,15 @@ test("calibration ABI binding owns SceneWorks invalidation while inference SHA r
     "matrixSourceRevision is exact provenance; calibrationBinding separately enforces the SceneWorks ABI fingerprint",
   );
   assert.equal(evidenceSemantics(record, { ...revisions, inference: "c".repeat(40) }), "historical");
+  assert.equal(
+    evidenceSemantics(record, {
+      ...revisions,
+      inference: "c".repeat(40),
+      compatibleCapturedInferenceRevisions: [record.repositories.inference.revision],
+    }),
+    "current",
+    "an explicit provider-closure audit may admit captured provenance at one later runtime pin",
+  );
 });
 
 test("matrix binding rejects batch and frame mismatches even when width and height match", () => {

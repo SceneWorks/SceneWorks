@@ -32,6 +32,23 @@ const RUNGS = [
   "bounded_transformer_residency",
 ];
 
+const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
+  story: "SC-15833",
+  modelId: "flux2_dev",
+  provider: "flux2_dev",
+  capturedInferenceRevision: "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+  compatibleInferenceRevision: "277f423822bf1899340ed3d867c3d6a773473d7b",
+  auditedObjects: Object.freeze({
+    "Cargo.toml": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
+    "crates/contracts/gen-core": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
+    "crates/bundles/runtime-cuda": "aba807f775872760e72fd98f28a5a0d2853cf00f",
+    "crates/media/candle-gen/candle-gen": "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
+    "crates/media/candle-gen/candle-gen-pid": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
+    "crates/media/candle-gen/candle-gen-flux2": "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
+    "crates/media/candle-gen/vendor/candle-kernels": "3b8327cf01d346c8068a5e9d096dcdddca440e99",
+  }),
+});
+
 const GENERATION_CAPABILITIES = new Set([
   "text_to_image",
   "edit_image",
@@ -1211,6 +1228,50 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
+function validatedInferenceCompatibility(body) {
+  const audit = JSON.parse(body);
+  const expected = FLUX2_COMPATIBILITY_AUDIT;
+  if (
+    audit.schemaVersion !== 1 ||
+    audit.story !== expected.story ||
+    audit.capturedInferenceRevision !== expected.capturedInferenceRevision ||
+    audit.compatibleInferenceRevision !== expected.compatibleInferenceRevision ||
+    audit.method !== "git object identity across the complete Candle FLUX.2 runtime dependency closure" ||
+    audit.command !== "git rev-parse <revision>:<path>" ||
+    !Array.isArray(audit.auditedObjects)
+  ) {
+    throw new Error("SC-15833 inference compatibility audit identity is invalid");
+  }
+  const objects = new Map();
+  for (const entry of audit.auditedObjects) {
+    if (
+      !entry ||
+      typeof entry.path !== "string" ||
+      typeof entry.capturedObject !== "string" ||
+      entry.capturedObject !== entry.compatibleObject ||
+      objects.has(entry.path)
+    ) {
+      throw new Error("SC-15833 inference compatibility audit object pair is invalid");
+    }
+    objects.set(entry.path, entry.capturedObject);
+  }
+  if (
+    objects.size !== Object.keys(expected.auditedObjects).length ||
+    Object.entries(expected.auditedObjects).some(([objectPath, objectId]) => objects.get(objectPath) !== objectId)
+  ) {
+    throw new Error("SC-15833 inference compatibility audit closure is incomplete or unrecognized");
+  }
+  return expected;
+}
+
+function compatibilityAuthorizes(binding, { modelId, provider, inferenceRevision, audit }) {
+  return modelId === audit.modelId &&
+    provider === audit.provider &&
+    binding.inferenceRevision === audit.capturedInferenceRevision &&
+    binding.compatibleInferenceRevision === audit.compatibleInferenceRevision &&
+    inferenceRevision === audit.compatibleInferenceRevision;
+}
+
 function strategyStatus({
   backend,
   rung,
@@ -1224,6 +1285,7 @@ function strategyStatus({
   rung4Survey,
   manifestById,
   inferenceRevision,
+  inferenceCompatibilityAudit,
 }) {
   // `z_image_edit` is a catalog alias, not an inference provider. Its MLX jobs resolve to the
   // `z_image_turbo` descriptor and therefore must consume that provider's static contract just as
@@ -1265,7 +1327,13 @@ function strategyStatus({
       staticRung4Allowed,
   );
   const currentDeclaredCalibrations = allDeclaredCalibrations.filter(
-    (binding) => binding.inferenceRevision === inferenceRevision,
+    (binding) => binding.inferenceRevision === inferenceRevision ||
+      compatibilityAuthorizes(binding, {
+        modelId: model.id,
+        provider,
+        inferenceRevision,
+        audit: inferenceCompatibilityAudit,
+      }),
   );
   const calibrationStatus = (bindings, source, evidenceAdmissionCurrent) => {
     const fingerprints = sortedUnique(bindings.map((binding) => binding.fingerprint));
@@ -1291,6 +1359,16 @@ function strategyStatus({
       engagedRungs: staticImplementation?.engagedRungs,
       requiresCurrentCalibrationBinding: true,
       evidenceAdmissionCurrent,
+      compatibleCapturedInferenceRevisions: sortedUnique(
+        bindings
+          .filter((binding) => compatibilityAuthorizes(binding, {
+            modelId: model.id,
+            provider,
+            inferenceRevision,
+            audit: inferenceCompatibilityAudit,
+          }))
+          .map((binding) => binding.inferenceRevision),
+      ),
     };
   };
   if (currentDeclaredCalibrations.length) {
@@ -1605,6 +1683,7 @@ export const SOURCE_PATHS = Object.freeze({
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
   calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
   calibrationPlan: "config/memory-calibration-plan.json",
+  inferenceCompatibility: "docs/calibration/sc-15833/inference-compatibility-277f.json",
   rung4Survey: "config/rung4-applicability-survey.json",
   cargo: "Cargo.toml",
 });
@@ -1650,6 +1729,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const calibrationPlan = JSON.parse(bodies.calibrationPlan);
+  const inferenceCompatibilityAudit = validatedInferenceCompatibility(
+    bodies.inferenceCompatibility,
+  );
   const rung4Survey = parseRung4Survey(bodies.rung4Survey, { familyGroups: familyGroup });
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's
@@ -1756,6 +1838,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                 rung4Survey,
                 manifestById,
                 inferenceRevision: pin,
+                inferenceCompatibilityAudit,
               });
               const fingerprint =
                 status.state === "Missing"
@@ -1840,6 +1923,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                   evidenceSemantics(record, {
                     sceneWorks: sceneWorksRevision,
                     inference: pin,
+                    compatibleCapturedInferenceRevisions:
+                      status.compatibleCapturedInferenceRevisions,
                   }) === "historical",
               );
               const currentRuns = eligibleRuns.filter(
@@ -1847,6 +1932,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                   evidenceSemantics(record, {
                     sceneWorks: sceneWorksRevision,
                     inference: pin,
+                    compatibleCapturedInferenceRevisions:
+                      status.compatibleCapturedInferenceRevisions,
                   }) === "current" && ["complete", "runtime_complete"].includes(record.status),
               );
               const currentFullRuns = currentRuns.filter((record) => record.status === "complete");
@@ -1955,10 +2042,14 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     return {
       cellId: cell.id,
       binding: calibrationBinding(record, cell),
-      semantics: evidenceSemantics(record, {
-        sceneWorks: sceneWorksRevision,
-        inference: pin,
-      }),
+      semantics: cell.evidence.currentEnvironmentVerification.some(
+        (evidence) => evidence.source === `docs/generated/memory-calibration-evidence.json#${record.id}`,
+      )
+        ? "current"
+        : evidenceSemantics(record, {
+            sceneWorks: sceneWorksRevision,
+            inference: pin,
+          }),
       record,
     };
   });

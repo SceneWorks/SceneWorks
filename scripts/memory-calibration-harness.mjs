@@ -620,7 +620,8 @@ export function evidenceSemantics(record, revisions) {
   // SceneWorks invalidation is owned by calibrationBinding's provider ABI fingerprint. The exact
   // matrixSourceRevision remains captured provenance, but treating it as a second invalidation gate
   // would stale every measurement on comments, formatting, or unrelated source edits.
-  return record.repositories.inference.revision === revisions.inference
+  return record.repositories.inference.revision === revisions.inference ||
+    revisions.compatibleCapturedInferenceRevisions?.includes(record.repositories.inference.revision)
     ? "current" : "historical";
 }
 

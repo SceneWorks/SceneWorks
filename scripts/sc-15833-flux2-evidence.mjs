@@ -910,8 +910,11 @@ function makeRuntimeCompleteRecord(base, capture) {
   return record;
 }
 
-export async function ingestFlux2Capture(capture, { reader = (relative) => readFile(path.join(ROOT, relative)) } = {}) {
-  await validateLiveInferencePins();
+export async function ingestFlux2Capture(capture, {
+  reader = (relative) => readFile(path.join(ROOT, relative)),
+  enforceLivePin = true,
+} = {}) {
+  if (enforceLivePin) await validateLiveInferencePins();
   validateCaptureEnvelope(capture);
   const base = await Promise.all(capture.baseSessions.map((item) => ingestBaseSession(item, capture, reader)));
   const route = await Promise.all(capture.routeSessions.map((item) => ingestRouteSession(item, capture, reader)));
@@ -953,14 +956,17 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
   }
   if (excludedAttempts.length === 0) blockers.push("excluded attempts must be explicitly enumerated with reasons and hashes");
 
-  const promotionEligible = blockers.length === 0;
-  const records = promotionEligible
+  const evidenceValid = blockers.length === 0;
+  const authorization = enforceLivePin ? "live_pin_validated" : "historical_replay";
+  const promotionEligible = evidenceValid && authorization === "live_pin_validated";
+  const records = evidenceValid
     ? RUNGS.map((rung) => makeRuntimeCompleteRecord(baseByRung.get(rung), capture))
     : [];
   const sourceSessions = [...base, ...route].map((item) => item.session);
   const report = {
     schemaVersion: 1,
     story: STORY,
+    authorization,
     promotionEligible,
     blockers,
     repositories: capture.repositories,
@@ -1017,6 +1023,9 @@ export function flux2CalibrationPlans(records) {
 }
 
 export function updateBundle(existing, ingestion) {
+  if (ingestion.report.authorization !== "live_pin_validated") {
+    fail("refusing evidence update: historical replay is not promotion-authorized");
+  }
   if (!ingestion.report.promotionEligible || ingestion.records.length !== RUNGS.length) {
     fail(`refusing evidence update: ${ingestion.report.blockers.join("; ") || "incomplete record set"}`);
   }
@@ -1039,6 +1048,9 @@ export function updateBundle(existing, ingestion) {
 }
 
 export function updatePlan(existing, ingestion) {
+  if (ingestion.report.authorization !== "live_pin_validated") {
+    fail("refusing plan update: historical replay is not promotion-authorized");
+  }
   if (!ingestion.report.promotionEligible || ingestion.records.length !== RUNGS.length) {
     fail("refusing plan update without a complete promotion-eligible record set");
   }

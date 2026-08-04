@@ -112,6 +112,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "cargo",
     "engines",
     "imageRouting",
+    "inferenceCompatibility",
     "instantId",
     "manifest",
     "memoryStrategy",

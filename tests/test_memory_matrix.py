@@ -98,10 +98,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "runtimeComplete": records_by_status["runtime_complete"],
     }
 
-    # `current` vs `historical` is decided against the shipped inference pin. The 33 Full records
-    # predate it and remain retained history. SC-15823's ten base-only FLUX.1 records are retained
-    # runtime history after the inference bump; SC-15833 contributes the five exact current FLUX.2
-    # base rungs without over-promoting either family to Full verification.
+    # `current` vs `historical` is decided against the shipped inference pin plus exact audited
+    # compatibility. SC-15833 proves the Candle FLUX.2 dependency closure tree-identical at 5ffd
+    # and 277f, so only its five records may authorize the later runtime.
     full_runs = [
         run for run in matrix["calibrationRuns"] if run["record"]["status"] == "complete"
     ]
@@ -159,6 +158,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert len(runtime_complete_runs) == len(flux2_runtime) + len(
         historical_flux1_runtime
     )
+    assert {run["semantics"] for run in runtime_complete_runs} == {"current", "historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run

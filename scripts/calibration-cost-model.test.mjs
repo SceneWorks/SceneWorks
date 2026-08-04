@@ -510,17 +510,14 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.equal(model.completedBaseline.completeRecords, 33);
   assert.equal(model.completedBaseline.runtimeCompleteRecords, 15);
   assert.equal(model.completedBaseline.activationEligibleRecords, 48);
-  // "Runtime-current" is measured against the SHIPPED inference pin. sc-16353's four exact Qwen
-  // Q4/Q8 rung records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so they are
-  // historical. SC-15510's five exact Z-Image records were captured at `d4802320`; SC-15815 then
-  // moved the shared pin to `bf06bb56` for the Candle repair. The Mac recapture runner was absent,
-  // so all 33 Full records remain retained history. SC-15823's ten exact FLUX.1 records were
-  // captured at `5f973a73`; the live `5ffd7612` pin makes all ten historical. SC-15833's five exact
-  // FLUX.2-dev records match the live pin and are the only current runtime evidence.
+  // "Runtime-current" is measured against the shipped inference pin. The MLX wave advances that
+  // pin, but SC-15833's checked-in dependency-closure audit proves the Candle FLUX.2 provider trees
+  // byte-identical at 5ffd and 277f. Those five records are current through that exact compatibility
+  // binding; every other retained record remains historical.
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
     5,
-    "only the five current runtime-complete FLUX.2-dev records should survive",
+    "only the five explicitly compatible FLUX.2 records may authorize the later runtime",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
   assert.match(model.completedBaseline.note, /33 Full complete and 15 base-only runtime-complete/);

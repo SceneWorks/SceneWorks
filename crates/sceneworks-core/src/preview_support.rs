@@ -163,7 +163,7 @@ mod tests {
     // reintroduces the bug.
     #[test]
     fn distinguishes_wired_false_from_unknown() {
-        // Bernini is registered in the current Candle facts but does not advertise preview.
+        // Bernini Image is registered in the current Candle facts but does not advertise preview.
         // This is a declared false route, not an inference from a provider being absent.
         assert_eq!(supports_preview("bernini_image", "candle"), Some(false));
         // A backend with no facts file is UNKNOWN, not false. Asserted against a name that can

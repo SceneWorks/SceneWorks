@@ -5,22 +5,31 @@ import test from "node:test";
 import { deflateSync } from "node:zlib";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { buildMatrix } from "./generate-memory-matrix.mjs";
 import { validateRecord } from "./memory-calibration-harness.mjs";
 import {
   flux2CalibrationPlans,
-  ingestFlux2Capture,
+  ingestFlux2Capture as ingestFlux2CaptureStrict,
   updateBundle,
   updatePlan,
 } from "./sc-15833-flux2-evidence.mjs";
 
 const SCENEWORKS_REVISION = "1".repeat(40);
 const INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
+const LIVE_INFERENCE_REVISION = "277f423822bf1899340ed3d867c3d6a773473d7b";
 const MODEL_REVISION = "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 const MODEL_INVENTORY = "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b";
 const CONTROL_REVISION = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 const CONTROL_SHA = "516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a7a794";
 const MATRIX_SOURCE = `source-tree:${"7".repeat(64)}`;
 const FINGERPRINT = "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
+
+// These tests replay immutable 5ffd capture fixtures. Live-pin authorization is tested separately;
+// replay must continue validating the captured bytes after a later runtime pin makes them historical.
+const ingestFlux2Capture = (capture, options = {}) => ingestFlux2CaptureStrict(capture, {
+  ...options,
+  enforceLivePin: false,
+});
 const OUTPUT = Buffer.alloc(1024 * 1024 * 3, 17);
 const OUTPUT_SHA = createHash("sha256").update(OUTPUT).digest("hex");
 const REPOSITORIES = {
@@ -369,7 +378,8 @@ function fixture({ promotionIntent = "runtime_complete" } = {}) {
 test("SC-15833 ingests five strict physical base rungs plus real edit/control PNGs", async () => {
   const { capture, reader } = fixture();
   const ingestion = await ingestFlux2Capture(capture, { reader });
-  assert.equal(ingestion.report.promotionEligible, true);
+  assert.equal(ingestion.report.authorization, "historical_replay");
+  assert.equal(ingestion.report.promotionEligible, false);
   assert.deepEqual(ingestion.report.blockers, []);
   assert.equal(ingestion.records.length, 5);
   assert.equal(ingestion.sourceSessions.length, 7);
@@ -475,7 +485,7 @@ test("SC-15833 requires a unique ordered Cargo nocapture route result", async ()
   );
 });
 
-test("SC-15833 binds exactly five current Q4 base cells into the manifest and matrix", async () => {
+test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-277f compatibility", async () => {
   const manifestSource = await readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8");
   const manifest = JSON.parse(stripJsoncComments(manifestSource));
   const model = manifest.models.find(({ id }) => id === "flux2_dev");
@@ -490,6 +500,7 @@ test("SC-15833 binds exactly five current Q4 base cells into the manifest and ma
     assert.equal(binding.loadShape, "deferred_materialization");
     assert.equal(binding.fingerprint, FINGERPRINT);
     assert.equal(binding.inferenceRevision, INFERENCE_REVISION);
+    assert.equal(binding.compatibleInferenceRevision, LIVE_INFERENCE_REVISION);
     assert.equal(binding.provider, "flux2_dev");
     assert.equal(binding.tier, "q4");
     assert.equal(binding.mode, "text_to_image");
@@ -501,7 +512,8 @@ test("SC-15833 binds exactly five current Q4 base cells into the manifest and ma
   }
 
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
-  assert.equal(matrix.generatedFrom.inferenceRevision, INFERENCE_REVISION);
+  assert.equal(matrix.generatedFrom.inferenceRevision, LIVE_INFERENCE_REVISION);
+  assert.notEqual(matrix.generatedFrom.inferenceRevision, INFERENCE_REVISION);
   const runs = matrix.calibrationRuns.filter(({ record }) => record.target.provider === "flux2_dev");
   assert.equal(runs.length, 5);
   assert.ok(runs.every(({ binding, semantics, record }) =>
@@ -515,8 +527,67 @@ test("SC-15833 binds exactly five current Q4 base cells into the manifest and ma
   assert.ok(cells.every((cell) => cell.state === "Runtime verified"));
   assert.ok(cells.every((cell) =>
     cell.evidence.currentEnvironmentVerification.length === 1 &&
-    cell.evidence.currentEnvironmentVerification[0].recordStatus === "runtime_complete",
+    cell.evidence.currentEnvironmentVerification[0].recordStatus === "runtime_complete" &&
+    cell.evidence.historicalVerification.length === 0,
   ));
+
+  const proof = JSON.parse(await readFile(
+    new URL("../docs/calibration/sc-15833/inference-compatibility-277f.json", import.meta.url),
+  ));
+  assert.equal(proof.capturedInferenceRevision, INFERENCE_REVISION);
+  assert.equal(proof.compatibleInferenceRevision, LIVE_INFERENCE_REVISION);
+  assert.deepEqual(
+    proof.auditedObjects.map(({ path }) => path).sort(),
+    [
+      "Cargo.toml",
+      "crates/bundles/runtime-cuda",
+      "crates/contracts/gen-core",
+      "crates/media/candle-gen/candle-gen",
+      "crates/media/candle-gen/candle-gen-flux2",
+      "crates/media/candle-gen/candle-gen-pid",
+      "crates/media/candle-gen/vendor/candle-kernels",
+    ].sort(),
+  );
+  assert.ok(proof.auditedObjects.every(({ capturedObject, compatibleObject }) =>
+    /^[0-9a-f]{40}$/.test(capturedObject) && capturedObject === compatibleObject));
+  assert.equal(
+    matrix.generatedFrom.sources.inferenceCompatibility.path,
+    "docs/calibration/sc-15833/inference-compatibility-277f.json",
+  );
+  assert.match(proof.changedPathDisposition["candle-gen-catalog"], /SenseNova preview registration/);
+  assert.match(proof.changedPathDisposition["mlx-flux2"], /outside the Candle\/CUDA dependency closure/);
+});
+
+test("SC-15833 compatibility admission rejects a missing or fabricated closure audit", async () => {
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { inferenceCompatibility: "" } }),
+    /JSON|compatibility audit/,
+  );
+  const proof = JSON.parse(await readFile(
+    new URL("../docs/calibration/sc-15833/inference-compatibility-277f.json", import.meta.url),
+  ));
+  proof.auditedObjects[0].capturedObject = "a".repeat(40);
+  proof.auditedObjects[0].compatibleObject = "a".repeat(40);
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { inferenceCompatibility: JSON.stringify(proof) } }),
+    /closure is incomplete or unrecognized/,
+  );
+});
+
+test("SC-15833 refuses to authorize capture promotion against a newer live inference pin", async () => {
+  const { capture, reader } = fixture();
+  await assert.rejects(
+    ingestFlux2CaptureStrict(capture, { reader }),
+    new RegExp(`Cargo\\.toml contains a SceneWorks/inference pin other than ${INFERENCE_REVISION}`),
+  );
+  const replay = await ingestFlux2Capture(capture, { reader });
+  assert.equal(replay.records.length, 5, "historical replay still validates the immutable records");
+  assert.equal(replay.report.authorization, "historical_replay");
+  assert.equal(replay.report.promotionEligible, false);
+  const existing = JSON.parse(await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url)));
+  const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+  assert.throws(() => updateBundle(existing, replay), /historical replay is not promotion-authorized/);
+  assert.throws(() => updatePlan(plan, replay), /historical replay is not promotion-authorized/);
 });
 
 test("SC-15833 report-only validation can never update promotion artifacts", async () => {
@@ -761,7 +832,7 @@ test("SC-15833 rejects dirty naming, dirty repositories, malformed provenance, a
   await assert.rejects(ingestFlux2Capture(overlap.capture, { reader: overlap.reader }), /both accepted and excluded/);
 });
 
-test("SC-15833 bundle and plan updates preserve all unrelated evidence structurally", async () => {
+test("SC-15833 committed bundle and plan preserve all unrelated evidence structurally", async () => {
   const { capture, reader } = fixture();
   const ingestion = await ingestFlux2Capture(capture, { reader });
   const existing = JSON.parse(await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url)));
@@ -777,25 +848,17 @@ test("SC-15833 bundle and plan updates preserve all unrelated evidence structura
   const unrelatedSessions = (existing.sourceSessions ?? []).filter(
     (session) => !session.sourcePath.startsWith("docs/calibration/sc-15833/"),
   );
-  const updated = updateBundle(existing, ingestion);
-  for (const record of unrelatedRecords) {
-    assert.deepEqual(updated.records.find(({ id }) => id === record.id), record);
-  }
-  for (const session of unrelatedSessions) {
-    assert.deepEqual(updated.sourceSessions.find(({ id }) => id === session.id), session);
-  }
-  assert.equal(updated.records.filter((record) => record.target.provider === "flux2_dev").length, 5);
+  assert.equal(existing.records.filter((record) => record.target.provider === "flux2_dev").length, 5);
   assert.equal(
-    updated.sourceSessions.filter((session) => session.sourcePath.startsWith("docs/calibration/sc-15833/")).length,
+    existing.sourceSessions.filter((session) => session.sourcePath.startsWith("docs/calibration/sc-15833/")).length,
     7,
   );
 
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
-  const updatedPlan = updatePlan(plan, ingestion);
   const plans = flux2CalibrationPlans(ingestion.records);
   const unrelatedPlanItems = plan.providers.filter((item) => item.target.provider !== "flux2_dev");
   assert.deepEqual(
-    updatedPlan.providers.filter((item) => item.target.provider !== "flux2_dev"),
+    plan.providers.filter((item) => item.target.provider !== "flux2_dev"),
     unrelatedPlanItems,
   );
   for (const provider of ["qwen_image", "qwen_image_edit", "z_image", "z_image_turbo"]) {
@@ -805,6 +868,6 @@ test("SC-15833 bundle and plan updates preserve all unrelated evidence structura
     );
   }
   assert.equal(plans.length, 5);
-  assert.equal(updatedPlan.providers.filter((item) => item.target.provider === "flux2_dev").length, 5);
+  assert.equal(plan.providers.filter((item) => item.target.provider === "flux2_dev").length, 5);
   assert.deepEqual(plans.map(({ rung }) => rung), RUNGS);
 });
