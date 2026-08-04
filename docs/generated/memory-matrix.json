@@ -34,7 +34,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "7ddf4fab17363c3ab46acd7a3eebe520549cf8c4827539cf2c2741abf9285bfd"
+        "sha256": "ef2a9a581ee216119a11b48c05f0217bfb21c129325414c74e545208af17ab41"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",

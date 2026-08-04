@@ -9550,5 +9550,505 @@
     }
   ],
   "schemaVersion": 4,
-  "sourceSessions": []
+  "sourceSessions": [
+    {
+      "capturedAt": "2026-08-04T02:41:17.5460869Z",
+      "claims": [
+        "quality",
+        "lifecycle",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_pulid --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-4fbfb599c1fc3e3e9dfb",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "comparison",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-resident.ppm",
+          "sha256": "dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-quality.log",
+      "stdoutSha256": "fea85504ad351c036c6fc995ee3c581036cc9120974117ebe25fb9402626f518",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:34:08.0906417Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=bounded_attention PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-5cf99e7d2a0b88e1dfcf",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-bounded-attention.ppm",
+          "sha256": "5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-bounded-attention.log",
+      "stdoutSha256": "116909fbe310a98e485094169642b2cc709533795c01ad23aab675a480340bc1",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "bounded_attention",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:29:51.2909184Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=staged_residency PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-ae9e9a0008dea92bd123",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-staged-residency.ppm",
+          "sha256": "dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-staged-residency.log",
+      "stdoutSha256": "b27e2b851aa22c588fbc9d1aa5ba57daf219baf7199667a3e1c4e5aad67f5960",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "staged_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:38:29.6882449Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=bounded_transformer_residency PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-b11bcf06f6f086d942c5",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-bounded-transformer-residency.ppm",
+          "sha256": "5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-bounded-transformer-residency.log",
+      "stdoutSha256": "c05e995b48bedea2819d3a62203ca3ba2a9099d7188aebc1a973fe08ca70d09a",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "bounded_transformer_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:28:14.6594764Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=resident PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-d0895f08dc090ac204c5",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-resident.ppm",
+          "sha256": "dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-resident.log",
+      "stdoutSha256": "5530f3f666fb0e88e6fa898c93166e789b5efc2b3d129f3ac457a2081f7eb19f",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:31:48.9200405Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=bounded_decode PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-d498c23a453aae2d8f8b",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-bounded-decode.ppm",
+          "sha256": "5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-bounded-decode.log",
+      "stdoutSha256": "3b390c27367c52b7ea1ca462d204b38f9dc92923991f12de747b134da490c451",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    }
+  ]
 }
