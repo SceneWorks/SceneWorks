@@ -227,17 +227,6 @@ jobs:
       # SDPA guard, which is this lane's original reason to exist. sc-17026.
       - name: Workspace tests incl. the NAX 16-bit SDPA guard
         run: cargo test
-      - name: Export MLX capability facts for sc-17439
-        if: ${{ github.event_name == 'pull_request' }}
-        run: cargo run -p sceneworks-worker --bin dump-engine-capabilities
-      - name: Upload MLX capability facts for sc-17439
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sc-17439-mlx-capabilities
-          path: config/engine-capabilities/capabilities.mlx.json
-          if-no-files-found: error
-          retention-days: 1
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
