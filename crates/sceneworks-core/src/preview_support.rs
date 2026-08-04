@@ -158,14 +158,14 @@ mod tests {
     // reintroduces the bug.
     #[test]
     fn distinguishes_wired_false_from_unknown() {
-        // SD3.5 Medium is registered in the current Candle facts but does not advertise preview.
+        // Bernini Image is registered in the current Candle facts but does not advertise preview.
         // This is a declared false route, not an inference from a provider being absent.
-        assert_eq!(supports_preview("sd3_5_medium", "candle"), Some(false));
+        assert_eq!(supports_preview("bernini_image", "candle"), Some(false));
         // A backend with no facts file is UNKNOWN, not false. Asserted against a name that can
         // never be dumped rather than against `mlx`: `mlx` is exactly the backend the macOS lane is
         // expected to add, and pinning "mlx is absent" here would turn that follow-up into a red
         // test with a comment claiming the absence was intentional.
-        assert_eq!(supports_preview("sd3_5_medium", "no_such_backend"), None);
+        assert_eq!(supports_preview("bernini_image", "no_such_backend"), None);
         assert_eq!(supports_preview("not_a_model", "candle"), None);
     }
 
