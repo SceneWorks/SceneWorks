@@ -906,6 +906,37 @@ mod tests {
         assert_eq!(
             candidates
                 .iter()
+                .map(|candidate| candidate.predicted_peak_bytes)
+                .collect::<Vec<_>>(),
+            vec![
+                47_700_000_000,
+                44_300_000_000,
+                34_700_000_000,
+                25_200_000_000,
+                14_300_000_000
+            ]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.observed_peak_bytes)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(44_911_779_404),
+                Some(34_070_566_540),
+                Some(30_325_300_672),
+                Some(23_724_359_104),
+                Some(13_537_107_920),
+            ]
+        );
+        assert!(candidates.iter().all(|candidate| {
+            candidate
+                .observed_peak_bytes
+                .is_some_and(|active| candidate.predicted_peak_bytes > active)
+        }));
+        assert_eq!(
+            candidates
+                .iter()
                 .map(|candidate| candidate.key.strategy)
                 .collect::<Vec<_>>(),
             vec![
@@ -927,6 +958,44 @@ mod tests {
         )
         .expect("uncertified FLUX.2-dev control query")
         .is_empty());
+
+        // At 40 GiB free, the staged allocator high-water plus the selector's 2 GiB reserve
+        // would fit, but its 44.3 GB conservative device peak does not. Admission must advance
+        // to bounded decode, whose 34.7 GB device peak does fit.
+        let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("flux2-dev-q4-fixture")))
+            .with_quant(Quant::Q4);
+        spec.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        let evaluation = evaluate_shared_image(
+            "flux2_dev",
+            "flux2_dev",
+            &spec,
+            true,
+            manifest,
+            "q4",
+            "text_to_image",
+            None,
+            geometry,
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 40.0,
+                total_gb: 96.0,
+            }),
+            Some(44.0),
+            0,
+            MemoryCacheState::Cold,
+        )
+        .expect("FLUX.2-dev safe-device-peak evaluation")
+        .expect("bounded decode must fit");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedDecode
+        );
+        assert_eq!(
+            (evaluation.predicted_peak_gb * BYTES_PER_GIB).round() as u64,
+            34_700_000_000
+        );
     }
 
     #[test]

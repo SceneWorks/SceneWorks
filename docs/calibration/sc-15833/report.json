@@ -155,6 +155,9 @@
   },
   "baseRungs": [
     {
+      "activeAllocationPeakBytes": 44911779404,
+      "devicePeakReportedGb": 47.6,
+      "devicePeakUpperBoundBytes": 47700000000,
       "diagnostics": null,
       "outputSha256": "1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977",
       "parity": {
@@ -163,10 +166,13 @@
       "parityResult": {
         "kind": "not_run"
       },
-      "peakBytes": 44911779404,
-      "rung": "resident"
+      "rung": "resident",
+      "selectorPredictedPeakBytes": 47700000000
     },
     {
+      "activeAllocationPeakBytes": 34070566540,
+      "devicePeakReportedGb": 44.2,
+      "devicePeakUpperBoundBytes": 44300000000,
       "diagnostics": {
         "changedFraction": 0,
         "maximumError": 0,
@@ -183,10 +189,13 @@
       "parityResult": {
         "kind": "passed"
       },
-      "peakBytes": 34070566540,
-      "rung": "staged_residency"
+      "rung": "staged_residency",
+      "selectorPredictedPeakBytes": 44300000000
     },
     {
+      "activeAllocationPeakBytes": 30325300672,
+      "devicePeakReportedGb": 34.6,
+      "devicePeakUpperBoundBytes": 34700000000,
       "diagnostics": {
         "changedFraction": 0.040744145711,
         "maximumError": 2,
@@ -205,10 +214,13 @@
       "parityResult": {
         "kind": "passed"
       },
-      "peakBytes": 30325300672,
-      "rung": "bounded_decode"
+      "rung": "bounded_decode",
+      "selectorPredictedPeakBytes": 34700000000
     },
     {
+      "activeAllocationPeakBytes": 23724359104,
+      "devicePeakReportedGb": 25.1,
+      "devicePeakUpperBoundBytes": 25200000000,
       "diagnostics": {
         "changedFraction": 0.040744145711,
         "maximumError": 2,
@@ -227,10 +239,13 @@
       "parityResult": {
         "kind": "passed"
       },
-      "peakBytes": 23724359104,
-      "rung": "bounded_attention"
+      "rung": "bounded_attention",
+      "selectorPredictedPeakBytes": 25200000000
     },
     {
+      "activeAllocationPeakBytes": 13537107920,
+      "devicePeakReportedGb": 14.2,
+      "devicePeakUpperBoundBytes": 14300000000,
       "diagnostics": {
         "changedFraction": 0.040744145711,
         "maximumError": 2,
@@ -249,8 +264,8 @@
       "parityResult": {
         "kind": "passed"
       },
-      "peakBytes": 13537107920,
-      "rung": "bounded_transformer_residency"
+      "rung": "bounded_transformer_residency",
+      "selectorPredictedPeakBytes": 14300000000
     }
   ],
   "blockers": [],

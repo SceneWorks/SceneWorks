@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d216d9fd0ee71d5a17058eeb85dc397d556e29544637adc29ec46c6f02077d81",
+    "sceneWorksRevision": "source-tree:8fd738791fe2466541adbffd309cff6948520caedc43ac8dbb62b4ec44fe86f2",
     "matrixRevision": "source-tree:0a2fc1a1c167b741d1ea2661aa8f08f58f07fb17e816b48b9851a59d43da46d6",
     "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "31d03f3a95ab7b868b79292d1f323fef0564b44887022dfc2e0732b5f98ba045"
+        "sha256": "102adbd65c678f346ff59775e4a0cd30bb011d2a466c8d409917839ea843d884"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -39,7 +39,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "bdc2a2de4ebf7b82cf79cdfc12eb1c0953a9ce238911176e86dff9a6003a8ad0"
+        "sha256": "2ea1d75722c2703e2393056a9c93dcb8282c6442b4cec0952feb89e713afe570"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",

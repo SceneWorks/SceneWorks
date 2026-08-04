@@ -95,6 +95,13 @@ const RUNG_ENV = {
   bounded_attention: "attention",
   bounded_transformer_residency: "blocks",
 };
+const DEVICE_PEAK_GB = {
+  resident: "21.0",
+  staged_residency: "20.0",
+  bounded_decode: "19.0",
+  bounded_attention: "18.0",
+  bounded_transformer_residency: "17.0",
+};
 
 function parametersFor(rung) {
   const [decodeTileEdge, decodeOverlap, attentionChunkSize, transformerWindowSize, transformerWindowComponent] = PARAMS[rung];
@@ -214,6 +221,7 @@ function baseLog(rung, capturedAt, overrides = {}) {
   }
   return Buffer.from(
     `${sourceHeader(capturedAt, [BASE_INPUT])}running 1 test\nMEMORY_EVIDENCE_V1 ${wrappedJson(record)}\n${diagnostic}` +
+    `MEMORY_EVIDENCE_DIAGNOSTIC gpu=0 load-peak 0.5 GB | steady 0.5 GB | overall-peak ${DEVICE_PEAK_GB[rung]} GB (baseline 0.0 GB) bytes=${OUTPUT.length} 1024x1024 out=docs/calibration/sc-15833/base-q4-${rung}.rgb\n` +
     "test tests::flux2_dev_probed_generate_for_offload_ab ... ok\n" +
     "test result: ok. 1 passed; 0 failed\n",
   );
@@ -374,7 +382,13 @@ test("SC-15833 ingests five strict physical base rungs plus real edit/control PN
     assert.deepEqual(Object.keys(record.predictedPeakBytes), ["overall"]);
     assert.deepEqual(Object.keys(record.observedMemory), ["overall"]);
     assert.deepEqual(Object.keys(record.observedMemory.overall), ["activeBytes"]);
-    assert.equal(record.predictedPeakBytes.overall, record.observedMemory.overall.activeBytes);
+    const displayed = Number(DEVICE_PEAK_GB[record.strategy.rung]);
+    assert.equal(record.predictedPeakBytes.overall, displayed * 1_000_000_000 + 100_000_000);
+    assert.ok(record.predictedPeakBytes.overall > record.observedMemory.overall.activeBytes);
+    assert.equal(
+      record.diagnostics.measurements.find(({ name }) => name === "requestDevicePeakUpperBound").value,
+      record.predictedPeakBytes.overall,
+    );
     assert.equal(record.negativeMutation, null);
     for (const name of ["warm_repeat", "cancel", "error"]) {
       assert.equal(record.scenarios.find((scenario) => scenario.name === name).result, "not_run");
@@ -387,6 +401,11 @@ test("SC-15833 ingests five strict physical base rungs plus real edit/control PN
     ingestion.report.baseRungs.map(({ rung }) => rung),
     RUNGS,
   );
+  for (const rung of ingestion.report.baseRungs) {
+    assert.equal(rung.devicePeakReportedGb, Number(DEVICE_PEAK_GB[rung.rung]));
+    assert.equal(rung.devicePeakUpperBoundBytes, rung.selectorPredictedPeakBytes);
+    assert.ok(rung.devicePeakUpperBoundBytes > rung.activeAllocationPeakBytes);
+  }
   assert.equal(ingestion.report.baseRungs[1].parity.kind, "exact");
   assert.equal(ingestion.report.baseRungs[1].parityResult.kind, "passed");
   for (const rung of ingestion.report.baseRungs.slice(2)) {
@@ -406,6 +425,30 @@ test("SC-15833 ingests five strict physical base rungs plus real edit/control PN
   assert.ok(ingestion.report.routes.every((route) =>
     route.outputFormat === "png" && route.outputWidth === 512 && route.outputHeight === 512
     && route.outputStdDev > 0));
+});
+
+test("SC-15833 requires the device-level peak and conservatively covers display rounding", async () => {
+  const missing = fixture();
+  const path = "docs/calibration/sc-15833/base-q4-staged_residency.log";
+  missing.files.set(
+    path,
+    Buffer.from(missing.files.get(path).toString("utf8").replace(/^MEMORY_EVIDENCE_DIAGNOSTIC gpu=.*\n/m, "")),
+  );
+  await assert.rejects(
+    ingestFlux2Capture(missing.capture, { reader: missing.reader }),
+    /exactly one complete device-level MEMORY_EVIDENCE_DIAGNOSTIC/,
+  );
+
+  const understated = fixture();
+  const residentPath = "docs/calibration/sc-15833/base-q4-resident.log";
+  understated.files.set(
+    residentPath,
+    Buffer.from(understated.files.get(residentPath).toString("utf8").replace("overall-peak 21.0 GB", "overall-peak 20.0 GB")),
+  );
+  const ingestion = await ingestFlux2Capture(understated.capture, { reader: understated.reader });
+  const resident = ingestion.records.find(({ strategy }) => strategy.rung === "resident");
+  assert.equal(resident.predictedPeakBytes.overall, 20_100_000_000);
+  assert.ok(resident.predictedPeakBytes.overall >= resident.observedMemory.overall.activeBytes);
 });
 
 test("SC-15833 requires a unique ordered Cargo nocapture route result", async () => {

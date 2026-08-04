@@ -34,7 +34,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "bdc2a2de4ebf7b82cf79cdfc12eb1c0953a9ce238911176e86dff9a6003a8ad0"
+        "sha256": "2ea1d75722c2703e2393056a9c93dcb8282c6442b4cec0952feb89e713afe570"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
@@ -541409,6 +541409,11 @@
               "value": 23724359104
             },
             {
+              "name": "requestDevicePeakUpperBound",
+              "unit": "bytes",
+              "value": 25200000000
+            },
+            {
               "name": "outputRgbBytes",
               "unit": "bytes",
               "value": 3145728
@@ -541446,7 +541451,7 @@
           }
         },
         "predictedPeakBytes": {
-          "overall": 23724359104
+          "overall": 25200000000
         },
         "quality": {
           "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; provider-owned rgb8_max_abs_error <= 2",
@@ -541472,9 +541477,9 @@
         },
         "scenarios": [
           {
-            "effectiveBudgetBytes": 23724359104,
+            "effectiveBudgetBytes": 25200000000,
             "name": "exact_fit",
-            "predictedBytes": 23724359104,
+            "predictedBytes": 25200000000,
             "result": "passed"
           },
           {
@@ -542347,6 +542352,11 @@
               "value": 44911779404
             },
             {
+              "name": "requestDevicePeakUpperBound",
+              "unit": "bytes",
+              "value": 47700000000
+            },
+            {
               "name": "outputRgbBytes",
               "unit": "bytes",
               "value": 3145728
@@ -542384,7 +542394,7 @@
           }
         },
         "predictedPeakBytes": {
-          "overall": 44911779404
+          "overall": 47700000000
         },
         "quality": {
           "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; RGB8 must be byte-exact to resident",
@@ -542410,9 +542420,9 @@
         },
         "scenarios": [
           {
-            "effectiveBudgetBytes": 44911779404,
+            "effectiveBudgetBytes": 47700000000,
             "name": "exact_fit",
-            "predictedBytes": 44911779404,
+            "predictedBytes": 47700000000,
             "result": "passed"
           },
           {
@@ -542509,6 +542519,11 @@
               "value": 30325300672
             },
             {
+              "name": "requestDevicePeakUpperBound",
+              "unit": "bytes",
+              "value": 34700000000
+            },
+            {
               "name": "outputRgbBytes",
               "unit": "bytes",
               "value": 3145728
@@ -542546,7 +542561,7 @@
           }
         },
         "predictedPeakBytes": {
-          "overall": 30325300672
+          "overall": 34700000000
         },
         "quality": {
           "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; provider-owned rgb8_max_abs_error <= 2",
@@ -542572,9 +542587,9 @@
         },
         "scenarios": [
           {
-            "effectiveBudgetBytes": 30325300672,
+            "effectiveBudgetBytes": 34700000000,
             "name": "exact_fit",
-            "predictedBytes": 30325300672,
+            "predictedBytes": 34700000000,
             "result": "passed"
           },
           {
@@ -542887,6 +542902,11 @@
               "value": 34070566540
             },
             {
+              "name": "requestDevicePeakUpperBound",
+              "unit": "bytes",
+              "value": 44300000000
+            },
+            {
               "name": "outputRgbBytes",
               "unit": "bytes",
               "value": 3145728
@@ -542924,7 +542944,7 @@
           }
         },
         "predictedPeakBytes": {
-          "overall": 34070566540
+          "overall": 44300000000
         },
         "quality": {
           "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; RGB8 must be byte-exact to resident",
@@ -542950,9 +542970,9 @@
         },
         "scenarios": [
           {
-            "effectiveBudgetBytes": 34070566540,
+            "effectiveBudgetBytes": 44300000000,
             "name": "exact_fit",
-            "predictedBytes": 34070566540,
+            "predictedBytes": 44300000000,
             "result": "passed"
           },
           {
@@ -545133,6 +545153,11 @@
               "value": 13537107920
             },
             {
+              "name": "requestDevicePeakUpperBound",
+              "unit": "bytes",
+              "value": 14300000000
+            },
+            {
               "name": "outputRgbBytes",
               "unit": "bytes",
               "value": 3145728
@@ -545170,7 +545195,7 @@
           }
         },
         "predictedPeakBytes": {
-          "overall": 13537107920
+          "overall": 14300000000
         },
         "quality": {
           "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; provider-owned rgb8_max_abs_error <= 2",
@@ -545196,9 +545221,9 @@
         },
         "scenarios": [
           {
-            "effectiveBudgetBytes": 13537107920,
+            "effectiveBudgetBytes": 14300000000,
             "name": "exact_fit",
-            "predictedBytes": 13537107920,
+            "predictedBytes": 14300000000,
             "result": "passed"
           },
           {

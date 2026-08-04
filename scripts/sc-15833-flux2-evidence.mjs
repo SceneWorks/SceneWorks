@@ -282,6 +282,37 @@ function parityDiagnostic(text, filename) {
   };
 }
 
+function displayedGbUpperBoundBytes(token, label) {
+  const match = /^(\d+)\.(\d)$/.exec(token);
+  if (!match) fail(`${label} must use the VramReport one-decimal base-10 GB format`);
+  const bytes = Number(match[1]) * 1_000_000_000 + Number(match[2]) * 100_000_000 + 100_000_000;
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) fail(`${label} upper bound is invalid`);
+  // VramReport rounds an integer-MiB device delta to one decimal base-10 GB. Promote the
+  // next complete 0.1 GB boundary, rather than treating the rounded display point as exact.
+  return bytes;
+}
+
+function devicePeakDiagnostic(text, filename, outputPath, outputBytes) {
+  const matches = [...text.matchAll(
+    /MEMORY_EVIDENCE_DIAGNOSTIC\s+gpu=(\d+)\s+load-peak\s+(\d+\.\d)\s+GB\s+\|\s+steady\s+(\d+\.\d)\s+GB\s+\|\s+overall-peak\s+(\d+\.\d)\s+GB\s+\(baseline\s+(\d+\.\d)\s+GB\)\s+bytes=(\d+)\s+(\d+)x(\d+)\s+out=([^\s]+)/g,
+  )];
+  if (matches.length !== 1) fail(`${filename} must contain exactly one complete device-level MEMORY_EVIDENCE_DIAGNOSTIC`);
+  const [, gpu, load, steady, overall, baseline, bytes, width, height, out] = matches[0];
+  if (gpu !== "0" || Number(bytes) !== outputBytes || width !== "1024" || height !== "1024" || out !== outputPath) {
+    fail(`${filename} device diagnostic has the wrong GPU, output shape, byte count, or path`);
+  }
+  const reportedGb = parseFinite(overall, `${filename} device overall peak`);
+  const baselineGb = parseFinite(baseline, `${filename} device baseline`);
+  if (baselineGb >= 1.0) fail(`${filename} device baseline is not an idle-GPU capture`);
+  return {
+    loadPeakGb: parseFinite(load, `${filename} device load peak`),
+    steadyGb: parseFinite(steady, `${filename} device steady`),
+    reportedGb,
+    baselineGb,
+    upperBoundBytes: displayedGbUpperBoundBytes(overall, `${filename} device overall peak`),
+  };
+}
+
 function rgb8Parity(reference, candidate, filename) {
   if (reference.length !== candidate.length || reference.length === 0) {
     fail(`${filename} cannot be compared with the resident RGB8 output`);
@@ -382,7 +413,12 @@ function validateMemoryRecord(record, rung, capture, filename, diagnostic) {
   if (!Number.isSafeInteger(record.predicted_peak_bytes) || record.predicted_peak_bytes <= 0) {
     fail(`${filename} predicted peak is invalid`);
   }
-  if (record.predicted_peak_bytes !== record.observed_peak_bytes) fail(`${filename} predicted/observed peaks differ`);
+  if (!Number.isSafeInteger(record.observed_peak_bytes) || record.observed_peak_bytes <= 0) {
+    fail(`${filename} observed active-allocation peak is invalid`);
+  }
+  if (record.predicted_peak_bytes < record.observed_peak_bytes) {
+    fail(`${filename} provider prediction does not cover its observed active-allocation peak`);
+  }
   if (
     record.inference_revision !== capture.repositories.inference.revision ||
     record.sceneworks_revision !== capture.repositories.sceneWorks.revision ||
@@ -665,6 +701,7 @@ async function ingestBaseSession(descriptor, capture, reader) {
   const outputSha256 = sha256(outputBytes);
   if (outputSha256 !== record.output_sha256) fail(`${outputPath} does not match the harness output digest`);
   if (outputBytes.length !== 1024 * 1024 * 3) fail(`${outputPath} is not a 1024x1024 RGB8 output`);
+  const devicePeak = devicePeakDiagnostic(text, sourcePath, outputPath, outputBytes.length);
   const session = sourceSession({
     kind: "physical_cuda",
     command: descriptor.command,
@@ -681,7 +718,7 @@ async function ingestBaseSession(descriptor, capture, reader) {
     outputs: [{ path: outputPath, sha256: outputSha256 }],
     claims: ["memory", "quality", "loadability", "overlay"],
   });
-  return { descriptor, record, diagnostic, outputBytes, session };
+  return { descriptor, record, diagnostic, devicePeak, outputBytes, session };
 }
 
 async function ingestRouteSession(descriptor, capture, reader) {
@@ -798,8 +835,8 @@ function qualityFor(base) {
 
 function makeRuntimeCompleteRecord(base, capture) {
   const rung = base.descriptor.rung;
-  const peak = base.record.observed_peak_bytes;
-  const predictedPeak = base.record.predicted_peak_bytes;
+  const activePeak = base.record.observed_peak_bytes;
+  const predictedPeak = Math.max(base.record.predicted_peak_bytes, base.devicePeak.upperBoundBytes);
   const quality = qualityFor(base);
   const parameters = PARAMETERS[rung];
   const record = {
@@ -845,7 +882,7 @@ function makeRuntimeCompleteRecord(base, capture) {
       { name: "overlay", result: "not_applicable", reason: "the base request has no runtime overlay" },
     ],
     predictedPeakBytes: { overall: predictedPeak },
-    observedMemory: { overall: { activeBytes: peak } },
+    observedMemory: { overall: { activeBytes: activePeak } },
     quality,
     negativeMutation: null,
     loadability: {
@@ -857,7 +894,8 @@ function makeRuntimeCompleteRecord(base, capture) {
       execution: "executed",
       blockers: [],
       measurements: [
-        { name: "requestLiveAllocationPeak", unit: "bytes", value: peak },
+        { name: "requestLiveAllocationPeak", unit: "bytes", value: activePeak },
+        { name: "requestDevicePeakUpperBound", unit: "bytes", value: base.devicePeak.upperBoundBytes },
         { name: "outputRgbBytes", unit: "bytes", value: 1024 * 1024 * 3 },
         { name: "rgb8MaximumError", unit: "RGB8 levels", value: quality.maximumError },
       ],
@@ -940,7 +978,10 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
     })),
     baseRungs: base.map((item) => ({
       rung: item.descriptor.rung,
-      peakBytes: item.record.observed_peak_bytes,
+      activeAllocationPeakBytes: item.record.observed_peak_bytes,
+      devicePeakReportedGb: item.devicePeak.reportedGb,
+      devicePeakUpperBoundBytes: item.devicePeak.upperBoundBytes,
+      selectorPredictedPeakBytes: Math.max(item.record.predicted_peak_bytes, item.devicePeak.upperBoundBytes),
       outputSha256: item.record.output_sha256,
       parity: item.record.parity,
       parityResult: item.record.parity_result,
