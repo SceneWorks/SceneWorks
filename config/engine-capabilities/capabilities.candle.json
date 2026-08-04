@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+    "inferenceRevision": "fc85415b1af292b64cda849360cf31528da5d92f",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -168,12 +168,12 @@
     {
       "id": "sana_1600m",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "sana_sprint_1600m",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "scail2_14b",
@@ -183,17 +183,17 @@
     {
       "id": "sd3_5_large",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "sd3_5_large_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "sd3_5_medium",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "sdxl",

@@ -2554,6 +2554,18 @@ fn optimized_shared_memory_context(
     context.selection.strategy.is_optimized().then_some(context)
 }
 
+/// The registered FLUX.2-dev generator is a text-to-image provider even when the catalog surface
+/// originated from a style-variation prompt. Keep that provider-specific canonicalization here so
+/// Z-Image, Qwen, and FLUX.1 retain their established mode/evidence semantics.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -> &'a str {
+    if engine_id == "flux2_dev" {
+        "text_to_image"
+    } else {
+        request_mode
+    }
+}
+
 /// The generation tiers (`bf16`/`q8`/`q4`) currently INSTALLED for `request`'s model, in DESCENDING
 /// fidelity (bf16 → q8 → q4). Each is confirmed by [`resolve_tier_dir`] (a forced-bits probe of the
 /// real family resolver), so the list is exactly what the loader could load. Empty for a model with no
@@ -6248,11 +6260,12 @@ fn apply_request_scoped_candle_residency(
     test,
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn rejects_unverified_zimage_optimized_fallback(
+fn rejects_unverified_shared_memory_fallback(
     engine_id: &str,
     optimized_strategy_selected: bool,
 ) -> bool {
-    matches!(engine_id, "z_image" | "z_image_turbo") && !optimized_strategy_selected
+    matches!(engine_id, "z_image" | "z_image_turbo" | "flux2_dev")
+        && !optimized_strategy_selected
 }
 
 #[cfg(any(
@@ -6260,7 +6273,11 @@ fn rejects_unverified_zimage_optimized_fallback(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn verified_only_memory_family_label(engine_id: &str) -> Option<&'static str> {
-    matches!(engine_id, "z_image" | "z_image_turbo").then_some("Z-Image")
+    match engine_id {
+        "z_image" | "z_image_turbo" => Some("Z-Image"),
+        "flux2_dev" => Some("FLUX.2-dev"),
+        _ => None,
+    }
 }
 
 /// Caller-visible explanation for the one Krea memory decision whose latency would otherwise look
@@ -6427,23 +6444,49 @@ mod candle_request_residency_tests {
     }
 
     #[test]
-    fn zimage_never_falls_back_to_an_unverified_optimized_strategy() {
-        assert!(rejects_unverified_zimage_optimized_fallback(
+    fn verified_only_families_never_fall_back_to_an_unverified_optimized_strategy() {
+        assert!(rejects_unverified_shared_memory_fallback(
             "z_image", false
         ));
-        assert!(!rejects_unverified_zimage_optimized_fallback(
+        assert!(rejects_unverified_shared_memory_fallback(
+            "flux2_dev",
+            false
+        ));
+        assert!(!rejects_unverified_shared_memory_fallback(
             "z_image", true
         ));
-        assert!(!rejects_unverified_zimage_optimized_fallback(
+        assert!(!rejects_unverified_shared_memory_fallback(
+            "flux2_dev",
+            true
+        ));
+        assert!(!rejects_unverified_shared_memory_fallback(
             "qwen_image",
             false
         ));
+        assert_eq!(
+            verified_only_memory_family_label("flux2_dev"),
+            Some("FLUX.2-dev")
+        );
+    }
+
+    #[test]
+    fn flux2_base_mode_is_canonicalized_without_changing_other_families() {
+        assert_eq!(
+            candle_base_memory_request_mode("flux2_dev", "style_variations"),
+            "text_to_image"
+        );
+        for engine in ["z_image", "qwen_image", "flux1_dev"] {
+            assert_eq!(
+                candle_base_memory_request_mode(engine, "style_variations"),
+                "style_variations"
+            );
+        }
     }
 
     #[test]
     fn flux_without_exact_evidence_preserves_sequential_fallback_and_never_names_zimage() {
         for engine in ["flux1_schnell", "flux1_dev"] {
-            assert!(!rejects_unverified_zimage_optimized_fallback(engine, false));
+            assert!(!rejects_unverified_shared_memory_fallback(engine, false));
             assert_eq!(verified_only_memory_family_label(engine), None);
         }
         assert_eq!(verified_only_memory_family_label("z_image"), Some("Z-Image"));
@@ -7655,6 +7698,7 @@ async fn generate_candle_stream(
         zimage_contract_spec = zimage_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
     zimage_contract_spec = apply_candle_image_load_shape(engine_id, zimage_contract_spec);
+    let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
     let zimage_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
@@ -7662,7 +7706,7 @@ async fn generate_candle_stream(
         candle_certified_artifact_path(engine_id, settings, &weights_dir, tier),
         &request.model_manifest_entry,
         tier,
-        &request.mode,
+        shared_request_mode,
         (adapter_count > 0).then_some("lora"),
         gen_core::MemoryGeometry {
             width,
@@ -7934,11 +7978,11 @@ async fn generate_candle_stream(
                 } else {
                     false
                 };
-                let zimage_selected = memory_strategy_selection
+                let shared_memory_selected = memory_strategy_selection
                     .is_some_and(|selection| selection.strategy.is_optimized());
-                if rejects_unverified_zimage_optimized_fallback(
+                if rejects_unverified_shared_memory_fallback(
                     engine_id,
-                    zimage_selected,
+                    shared_memory_selected,
                 ) {
                     let family = verified_only_memory_family_label(engine_id)
                         .expect("verified-only rejection is restricted to a named family");
@@ -7954,7 +7998,7 @@ async fn generate_candle_stream(
                         family = family,
                     )));
                 }
-                if !krea_selected && !zimage_selected {
+                if !krea_selected && !shared_memory_selected {
                     if let Some(seq_gb) =
                         crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
                     {

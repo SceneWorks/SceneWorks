@@ -342,11 +342,17 @@ async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
         Value::Bool(true),
         "sdxl must advertise its current candle live-preview support in the /models response"
     );
-    // A wired candle route that does NOT preview — `false`, which is a different claim from absent.
+    assert_eq!(
+        entry("flux2_dev")["preview"]["byBackend"]["candle"],
+        Value::Bool(true),
+        "flux2_dev must advertise its current candle live-preview support in the /models response"
+    );
+    // The authoritative pin now wires SD3.5 preview too; this assertion moves with the generated
+    // capability facts instead of preserving the previous pin's `false`.
     assert_eq!(
         entry("sd3_5_medium")["preview"]["byBackend"]["candle"],
-        Value::Bool(false),
-        "sd3_5_medium is wired on candle without preview — served as false, not omitted"
+        Value::Bool(true),
+        "sd3_5_medium must serve the current pin's candle preview capability"
     );
     // A backend with no facts file is UNKNOWN. It must be ABSENT rather than false: inventing
     // `false` would make the UI claim a route cannot preview when the catalog has no measurement

@@ -50,10 +50,7 @@ fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
 fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     match mode {
         "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
-        "style_variations" => (
-            MemoryMode::Other("style_variations".to_owned()),
-            "style_variations",
-        ),
+        "style_variations" => (MemoryMode::ImageToImage, "style_variations"),
         // `ImageToImage` serializes as `image_to_image`; retain the catalog's narrower character
         // axis in `Other` so the typed evidence key and exact calibration lookup share one spelling.
         "character_image" => (
@@ -711,7 +708,7 @@ mod tests {
     #[test]
     fn style_variations_preserves_its_exact_evidence_key() {
         let (mode, key) = request_mode("style_variations");
-        assert_eq!(mode, MemoryMode::Other("style_variations".to_owned()));
+        assert_eq!(mode, MemoryMode::ImageToImage);
         assert_eq!(key, "style_variations");
     }
 

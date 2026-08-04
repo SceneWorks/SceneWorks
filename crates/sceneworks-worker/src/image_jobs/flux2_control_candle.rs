@@ -113,6 +113,13 @@ pub(super) fn flux2_control_candle_available(request: &ImageRequest, settings: &
         && matches!(resolve_flux2_control_base(request, settings), Ok(Some(_)))
 }
 
+/// Strict control consumes a control-map overlay, not an image-reference edit route. Character
+/// Studio and style-variation entrypoints therefore share the provider's canonical text-to-image,
+/// zero-reference memory behavior rather than minting unsupported catalog-mode contexts.
+fn flux2_control_memory_request_mode(_catalog_mode: &str) -> &'static str {
+    "text_to_image"
+}
+
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=50) → manifest `steps` → default (28).
 fn flux2_control_candle_steps(request: &ImageRequest) -> u32 {
     resolve_advanced_or_manifest_u32(request, "steps", FLUX2_CONTROL_CANDLE_DEFAULT_STEPS, 1..=50)
@@ -478,7 +485,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         artifact_is_certified,
         &request.model_manifest_entry,
         tier,
-        &request.mode,
+        flux2_control_memory_request_mode(&request.mode),
         Some("control"),
         gen_core::MemoryGeometry {
             width,
@@ -549,4 +556,16 @@ pub(super) async fn generate_candle_flux2_control_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod memory_route_tests {
+    use super::flux2_control_memory_request_mode;
+
+    #[test]
+    fn every_eligible_non_edit_pose_mode_uses_the_control_contract_route() {
+        for mode in ["image_generation", "character_image", "style_variations"] {
+            assert_eq!(flux2_control_memory_request_mode(mode), "text_to_image");
+        }
+    }
 }

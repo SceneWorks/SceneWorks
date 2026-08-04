@@ -6,7 +6,7 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+      "inferenceRevision": "fc85415b1af292b64cda849360cf31528da5d92f"
     }
   },
   "models": {
@@ -113,19 +113,19 @@
       "candle": true
     },
     "sana_1600m": {
-      "candle": false
+      "candle": true
     },
     "sana_sprint_1600m": {
-      "candle": false
+      "candle": true
     },
     "sd3_5_large": {
-      "candle": false
+      "candle": true
     },
     "sd3_5_large_turbo": {
-      "candle": false
+      "candle": true
     },
     "sd3_5_medium": {
-      "candle": false
+      "candle": true
     },
     "sdxl": {
       "candle": true
