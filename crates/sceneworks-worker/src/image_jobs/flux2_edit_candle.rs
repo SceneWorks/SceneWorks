@@ -1,11 +1,11 @@
 use super::{
-    admit_candle_base, consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image,
-    mlx_model, model_repo, non_empty, pid_effective_dims, pid_output_tier,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
-    resolve_quant, resolve_seed, resolve_weights_dir, start_gen_stream, ApiClient,
-    CandleBaseEvidence, Flux2Edit, Flux2EditPaths, Flux2EditRequest, Image, ImagePlan,
-    ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
-    WorkerResult,
+    admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
+    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
+    model_repo, non_empty, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
+    resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
+    resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
+    Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    Path, PathBuf, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -293,6 +293,60 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     } else {
         (None, None)
     };
+    let mut strategy_spec =
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux2_base.clone()))
+            .with_offload_policy(gen_core::OffloadPolicy::Sequential);
+    strategy_spec.quantize = quant;
+    let strategy_spec = apply_candle_image_load_shape("flux2_dev", strategy_spec);
+    let mut generation_memory = gen_core::GenerationMemory::default();
+    let memory_evaluation = if is_dev {
+        let tier = match flux2_base.file_name().and_then(|name| name.to_str()) {
+            Some("q4") => "q4",
+            Some("q8") => "q8",
+            _ => "bf16",
+        };
+        let raw_budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            0,
+        );
+        crate::candle_memory_strategy::evaluate_shared_image(
+            "flux2_dev",
+            &request.model,
+            &strategy_spec,
+            candle_certified_artifact_path("flux2_dev", settings, &flux2_base, tier),
+            &request.model_manifest_entry,
+            tier,
+            &request.mode,
+            None,
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: references.len() as u32,
+            },
+            true,
+            use_pid,
+            false,
+            raw_budget,
+            predicted_peak,
+            0,
+            gen_core::MemoryCacheState::Cold,
+        )?
+    } else {
+        None
+    };
+    if let Some(evaluation) = &memory_evaluation {
+        generation_memory = evaluation.memory.unwrap_or_default();
+    }
+    let memory_context = memory_evaluation
+        .as_ref()
+        .map(|evaluation| evaluation.context.clone());
     let steps = flux2_edit_candle_steps(
         request,
         if is_dev {
@@ -322,6 +376,12 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     );
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
+    if let Some(evaluation) = &memory_evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+    }
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -337,7 +397,15 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         move || {
             let paths = Flux2EditPaths { root: flux2_base };
             let model = if is_dev {
-                Flux2Edit::load_dev(&paths, quant)
+                match &memory_context {
+                    Some(context) => Flux2Edit::load_dev_with_memory_context(
+                        &paths,
+                        quant,
+                        &strategy_spec,
+                        context,
+                    ),
+                    None => Flux2Edit::load_dev_with_memory(&paths, quant, generation_memory),
+                }
             } else {
                 Flux2Edit::load(&paths)
             }
@@ -349,9 +417,9 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                 })?,
                 None => model,
             };
-            Ok((model, references))
+            Ok((model, references, memory_context))
         },
-        move |(model, references), tx, cancel| {
+        move |(model, references, memory_context), tx, cancel| {
             drive_gen_items(
                 tx,
                 work,
@@ -372,7 +440,15 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         preview: preview.clone(),
                         cancel: cancel.clone(),
                     };
-                    let result = model.generate(&req, &references, &mut *on_progress);
+                    let result = match memory_context.as_ref() {
+                        Some(context) => model.generate_with_memory_context(
+                            context,
+                            &req,
+                            &references,
+                            &mut *on_progress,
+                        ),
+                        None => model.generate(&req, &references, &mut *on_progress),
+                    };
                     let out = match result {
                         Ok(out) => out,
                         Err(_) if cancel.is_cancelled() => return Ok(None),

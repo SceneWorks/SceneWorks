@@ -5994,6 +5994,195 @@
     },
     {
       "artifact": {
+        "inventorySha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-08-04T12:05:57.7968729Z",
+      "diagnostics": {
+        "adapter": "candle-flux2-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 23724359104
+          },
+          {
+            "name": "requestDevicePeakUpperBound",
+            "unit": "bytes",
+            "value": 25200000000
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          },
+          {
+            "name": "rgb8MaximumError",
+            "unit": "RGB8 levels",
+            "value": 2
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-998b89c5d76dbcc84332",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-f2292dd7dccdc2e045a6",
+      "negativeMutation": null,
+      "observedMemory": {
+        "overall": {
+          "activeBytes": 23724359104
+        }
+      },
+      "predictedPeakBytes": {
+        "overall": 25200000000
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; provider-owned rgb8_max_abs_error <= 2",
+        "identicalInputs": true,
+        "maximumError": 2,
+        "maximumErrorThreshold": 2,
+        "meanError": 0.040746370951,
+        "meanErrorThreshold": 2,
+        "result": "passed",
+        "rootMeanSquareError": 0.201868326965,
+        "rootMeanSquareErrorThreshold": 2
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 25200000000,
+          "name": "exact_fit",
+          "predictedBytes": 25200000000,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "not exercised by this physical CUDA campaign",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the base request has no runtime overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 1,
+          "decodeTileEdge": 1024
+        },
+        "rung": "bounded_attention"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              1024
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              1
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 1,
+              "decodeTileEdge": 1024
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"
@@ -6716,6 +6905,345 @@
     },
     {
       "artifact": {
+        "inventorySha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-08-04T11:54:58.0633774Z",
+      "diagnostics": {
+        "adapter": "candle-flux2-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 44911779404
+          },
+          {
+            "name": "requestDevicePeakUpperBound",
+            "unit": "bytes",
+            "value": 47700000000
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          },
+          {
+            "name": "rgb8MaximumError",
+            "unit": "RGB8 levels",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-b4113eedf503e409ad1b",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ac7c6cf4332ea837fd48",
+      "negativeMutation": null,
+      "observedMemory": {
+        "overall": {
+          "activeBytes": 44911779404
+        }
+      },
+      "predictedPeakBytes": {
+        "overall": 47700000000
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; RGB8 must be byte-exact to resident",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0,
+        "meanError": 0,
+        "meanErrorThreshold": 0,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 47700000000,
+          "name": "exact_fit",
+          "predictedBytes": 47700000000,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "not exercised by this physical CUDA campaign",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the base request has no runtime overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-08-04T12:02:04.1133882Z",
+      "diagnostics": {
+        "adapter": "candle-flux2-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 30325300672
+          },
+          {
+            "name": "requestDevicePeakUpperBound",
+            "unit": "bytes",
+            "value": 34700000000
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          },
+          {
+            "name": "rgb8MaximumError",
+            "unit": "RGB8 levels",
+            "value": 2
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-b62adbfca64f277414e1",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-60796758eef6ad2b4260",
+      "negativeMutation": null,
+      "observedMemory": {
+        "overall": {
+          "activeBytes": 30325300672
+        }
+      },
+      "predictedPeakBytes": {
+        "overall": 34700000000
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; provider-owned rgb8_max_abs_error <= 2",
+        "identicalInputs": true,
+        "maximumError": 2,
+        "maximumErrorThreshold": 2,
+        "meanError": 0.040746370951,
+        "meanErrorThreshold": 2,
+        "result": "passed",
+        "rootMeanSquareError": 0.201868326965,
+        "rootMeanSquareErrorThreshold": 2
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 34700000000,
+          "name": "exact_fit",
+          "predictedBytes": 34700000000,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "not exercised by this physical CUDA campaign",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the base request has no runtime overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode"
+        ],
+        "parameters": {
+          "decodeOverlap": 1,
+          "decodeTileEdge": 1024
+        },
+        "rung": "bounded_decode"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              1024
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "decodeOverlap": 1,
+              "decodeTileEdge": 1024
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
         "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
         "repository": "SceneWorks/flux1-dev-mlx",
         "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
@@ -6898,6 +7426,166 @@
         "modelId": "flux_dev",
         "overlay": "none",
         "provider": "flux1_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-08-04T11:58:48.5030861Z",
+      "diagnostics": {
+        "adapter": "candle-flux2-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 34070566540
+          },
+          {
+            "name": "requestDevicePeakUpperBound",
+            "unit": "bytes",
+            "value": 44300000000
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          },
+          {
+            "name": "rgb8MaximumError",
+            "unit": "RGB8 levels",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-bfb890dff959eaf09183",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-c113a61adfcb30e2c269",
+      "negativeMutation": null,
+      "observedMemory": {
+        "overall": {
+          "activeBytes": 34070566540
+        }
+      },
+      "predictedPeakBytes": {
+        "overall": 44300000000
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; RGB8 must be byte-exact to resident",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0,
+        "meanError": 0,
+        "meanErrorThreshold": 0,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 44300000000,
+          "name": "exact_fit",
+          "predictedBytes": 44300000000,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "not exercised by this physical CUDA campaign",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the base request has no runtime overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
         "tier": "q4"
       }
     },
@@ -8904,6 +9592,206 @@
     },
     {
       "artifact": {
+        "inventorySha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-08-04T12:12:04.2896734Z",
+      "diagnostics": {
+        "adapter": "candle-flux2-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 13537107920
+          },
+          {
+            "name": "requestDevicePeakUpperBound",
+            "unit": "bytes",
+            "value": 14300000000
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          },
+          {
+            "name": "rgb8MaximumError",
+            "unit": "RGB8 levels",
+            "value": 2
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-q4-seed42-1024x1024-output-1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-f5c3d06f30ebf3723f13",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-79eec1cdf75dcbf27150",
+      "negativeMutation": null,
+      "observedMemory": {
+        "overall": {
+          "activeBytes": 13537107920
+        }
+      },
+      "predictedPeakBytes": {
+        "overall": 14300000000
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, precision, and conditioning; provider-owned rgb8_max_abs_error <= 2",
+        "identicalInputs": true,
+        "maximumError": 2,
+        "maximumErrorThreshold": 2,
+        "meanError": 0.040746370951,
+        "meanErrorThreshold": 2,
+        "result": "passed",
+        "rootMeanSquareError": 0.201868326965,
+        "rootMeanSquareErrorThreshold": 2
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 14300000000,
+          "name": "exact_fit",
+          "predictedBytes": 14300000000,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "not exercised by this physical CUDA campaign",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "deferred to exhaustive lifecycle certification in SC-15922",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the base request has no runtime overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 1,
+          "decodeTileEdge": 1024,
+          "transformerWindowComponent": "dit",
+          "transformerWindowSize": 1
+        },
+        "rung": "bounded_transformer_residency"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              1024
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              1
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          },
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 1,
+              "decodeTileEdge": 1024,
+              "transformerWindowComponent": "dit",
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"
@@ -9552,6 +10440,120 @@
   "schemaVersion": 4,
   "sourceSessions": [
     {
+      "capturedAt": "2026-08-04T11:54:58.0633774Z",
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146 FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=resident FLUX2_OUT=docs/calibration/sc-15833/base-q4-resident.rgb MEMORY_EXPECTED_ABI=3 MEMORY_EXPECTED_FINGERPRINT=flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2 INFERENCE_REVISION=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d SCENEWORKS_REVISION=a9bb7303420855aeb276da33b31aa826a5d09faa MEMORY_MODEL_REVISION=2868b1461b2b6e6e05d84e52534df3632b4c7d5d MEMORY_MODEL_INVENTORY_SHA256=896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-35c1264644b37f2f655b",
+      "inputs": [
+        {
+          "bytes": 33582076196,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "role": "base",
+          "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": "docs/calibration/sc-15833/base-q4-resident.rgb",
+          "sha256": "1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15833/base-q4-resident.log",
+      "stdoutSha256": "ad00d596d568c2c51ee108b14ae6bdd973a04b44f1db0db04eaa19713f548bc2",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T12:12:04.2896734Z",
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146 FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=blocks FLUX2_OUT=docs/calibration/sc-15833/base-q4-bounded_transformer_residency.rgb FLUX2_PARITY_REFERENCE=docs/calibration/sc-15833/base-q4-resident.rgb MEMORY_EXPECTED_ABI=3 MEMORY_EXPECTED_FINGERPRINT=flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2 INFERENCE_REVISION=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d SCENEWORKS_REVISION=a9bb7303420855aeb276da33b31aa826a5d09faa MEMORY_MODEL_REVISION=2868b1461b2b6e6e05d84e52534df3632b4c7d5d MEMORY_MODEL_INVENTORY_SHA256=896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-450a73e0b9599f0bf598",
+      "inputs": [
+        {
+          "bytes": 33582076196,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "role": "base",
+          "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": "docs/calibration/sc-15833/base-q4-bounded_transformer_residency.rgb",
+          "sha256": "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15833/base-q4-bounded_transformer_residency.log",
+      "stdoutSha256": "120dfb3300721ec80a89a75f1db1f99cb00866f2dce34baa0f97591d8c93b1aa",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_transformer_residency",
+        "tier": "q4"
+      }
+    },
+    {
       "capturedAt": "2026-08-04T03:13:09.7107643Z",
       "claims": [
         "memory",
@@ -9995,6 +10997,125 @@
         "mode": "text_to_image",
         "overlay": "none",
         "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T12:31:17.9472172Z",
+      "claims": [
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146 FLUX2_CONTROL=E:/huggingface/sceneworks-staging/sc15833-flux2-control-b3dcd783/FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors FLUX2_DEV_OUT_DIR=docs/calibration/sc-15833 FLUX2_DEV_W=512 FLUX2_DEV_H=512 cargo test -p sceneworks-worker --release --no-default-features --features backend-candle flux2_dev_gpu_smoke::flux2_dev_control_candle_gpu_smoke -- --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-714a8c8533b53fddfbe6",
+      "inputs": [
+        {
+          "bytes": 33582076196,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "role": "base",
+          "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+          "variant": "q4"
+        },
+        {
+          "bytes": 8232506680,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-control-b3dcd783/FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors",
+          "repository": "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
+          "resolvedRevision": "b3dcd7836a0e926248dac3ccba8fc0853495764b",
+          "role": "control",
+          "sha256": "516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a7a794",
+          "variant": "union-2602"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": "docs/calibration/sc-15833/flux2_dev_control_candle.png",
+          "sha256": "926038aaa404b70e47c54991d77c831db5b88826bf52784d3bb40a0c2eeb7088"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15833/control-q4-resident.log",
+      "stdoutSha256": "df7f5ff3b900a15d5458e3847b27143c8a98042588b9203d60d96cafbf0d926e",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "control",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T12:22:32.1937972Z",
+      "claims": [
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146 FLUX2_DEV_OUT_DIR=docs/calibration/sc-15833 FLUX2_DEV_W=512 FLUX2_DEV_H=512 cargo test -p sceneworks-worker --release --no-default-features --features backend-candle flux2_dev_gpu_smoke::flux2_dev_edit_candle_gpu_smoke -- --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-7c281ce84d1447b7a533",
+      "inputs": [
+        {
+          "bytes": 33582076196,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "role": "base",
+          "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": "docs/calibration/sc-15833/flux2_dev_edit_candle.png",
+          "sha256": "51500fa92ba68f72f366ab8f82e170164a12bf79336d858568f917e55138eb03"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15833/edit-q4-resident.log",
+      "stdoutSha256": "e7cdd96d9cb2bb3d8600fa62d70f94bd2127d1024e3c66b05cbc9a957476bb8f",
+      "target": {
+        "mode": "image_to_image",
+        "overlay": "none",
+        "rung": "resident",
         "tier": "q4"
       }
     },
@@ -10445,6 +11566,120 @@
       }
     },
     {
+      "capturedAt": "2026-08-04T12:02:04.1133882Z",
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146 FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=decode FLUX2_OUT=docs/calibration/sc-15833/base-q4-bounded_decode.rgb FLUX2_PARITY_REFERENCE=docs/calibration/sc-15833/base-q4-resident.rgb MEMORY_EXPECTED_ABI=3 MEMORY_EXPECTED_FINGERPRINT=flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2 INFERENCE_REVISION=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d SCENEWORKS_REVISION=a9bb7303420855aeb276da33b31aa826a5d09faa MEMORY_MODEL_REVISION=2868b1461b2b6e6e05d84e52534df3632b4c7d5d MEMORY_MODEL_INVENTORY_SHA256=896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-c18f56bfccc12f00acfd",
+      "inputs": [
+        {
+          "bytes": 33582076196,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "role": "base",
+          "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": "docs/calibration/sc-15833/base-q4-bounded_decode.rgb",
+          "sha256": "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15833/base-q4-bounded_decode.log",
+      "stdoutSha256": "399e3680931b746a8a9825961b752fbdb890495faac492f2427811aa0e6be151",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T11:58:48.5030861Z",
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146 FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=staged FLUX2_OUT=docs/calibration/sc-15833/base-q4-staged_residency.rgb FLUX2_PARITY_REFERENCE=docs/calibration/sc-15833/base-q4-resident.rgb MEMORY_EXPECTED_ABI=3 MEMORY_EXPECTED_FINGERPRINT=flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2 INFERENCE_REVISION=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d SCENEWORKS_REVISION=a9bb7303420855aeb276da33b31aa826a5d09faa MEMORY_MODEL_REVISION=2868b1461b2b6e6e05d84e52534df3632b4c7d5d MEMORY_MODEL_INVENTORY_SHA256=896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-c232abf85a9aa537fc14",
+      "inputs": [
+        {
+          "bytes": 33582076196,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "role": "base",
+          "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": "docs/calibration/sc-15833/base-q4-staged_residency.rgb",
+          "sha256": "1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15833/base-q4-staged_residency.log",
+      "stdoutSha256": "4949e8ae5a9dd0023a73aae8c8ad73d1a43568d27853e652f221180d728d12f5",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "staged_residency",
+        "tier": "q4"
+      }
+    },
+    {
       "capturedAt": "2026-08-04T02:28:14.6594764Z",
       "claims": [
         "memory",
@@ -10607,6 +11842,63 @@
         "mode": "character_image",
         "overlay": "identity",
         "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T12:05:57.7968729Z",
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146 FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=attention FLUX2_OUT=docs/calibration/sc-15833/base-q4-bounded_attention.rgb FLUX2_PARITY_REFERENCE=docs/calibration/sc-15833/base-q4-resident.rgb MEMORY_EXPECTED_ABI=3 MEMORY_EXPECTED_FINGERPRINT=flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2 INFERENCE_REVISION=5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d SCENEWORKS_REVISION=a9bb7303420855aeb276da33b31aa826a5d09faa MEMORY_MODEL_REVISION=2868b1461b2b6e6e05d84e52534df3632b4c7d5d MEMORY_MODEL_INVENTORY_SHA256=896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-dd71e09b38731b5a6c92",
+      "inputs": [
+        {
+          "bytes": 33582076196,
+          "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "role": "base",
+          "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": "docs/calibration/sc-15833/base-q4-bounded_attention.rgb",
+          "sha256": "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15833/base-q4-bounded_attention.log",
+      "stdoutSha256": "b11dec175db2220e4a2d10f448fe94d929a3641a53c9b082bcd889071fd76eaf",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_attention",
         "tier": "q4"
       }
     }

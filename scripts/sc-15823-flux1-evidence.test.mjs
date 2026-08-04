@@ -164,7 +164,18 @@ test("FLUX.1 manifest has ten base bindings and zero overlay bindings", async ()
 test("generated matrix retains superseded runtime evidence without authorizing the new pin", async () => {
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
   assert.equal(matrix.schemaVersion, 6);
-  assert.equal(matrix.summary.calibrationRunsByStatus.runtimeComplete, 10);
+  const runs = matrix.calibrationRuns.filter(({ record }) =>
+    ["flux1_schnell", "flux1_dev"].includes(record.target.provider),
+  );
+  assert.equal(runs.length, 10);
+  assert.deepEqual(
+    runs.map(({ record }) => `${record.target.provider}:${record.strategy.rung}`).sort(),
+    Object.keys(EXPECTED).flatMap((provider) => [
+      "bounded_attention", "bounded_decode", "bounded_transformer_residency", "resident", "staged_residency",
+    ].map((rung) => `${provider}:${rung}`)).sort(),
+  );
+  assert.ok(runs.every(({ record }) => record.status === "runtime_complete"));
+  assert.ok(runs.every(({ semantics }) => semantics === "historical"));
   assert.ok(matrix.summary.calibrationRunsByStatus.complete > 0);
   const cells = matrix.cells.filter((cell) =>
     ["flux_schnell", "flux_dev"].includes(cell.modelId) &&

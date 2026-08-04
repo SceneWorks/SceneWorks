@@ -1,0 +1,353 @@
+{
+  "acceptedSessions": [
+    {
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "id": "ims-35c1264644b37f2f655b",
+      "kind": "physical_cuda",
+      "outputSha256": [
+        "1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977"
+      ],
+      "sourcePath": "docs/calibration/sc-15833/base-q4-resident.log",
+      "stdoutSha256": "ad00d596d568c2c51ee108b14ae6bdd973a04b44f1db0db04eaa19713f548bc2",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "id": "ims-c232abf85a9aa537fc14",
+      "kind": "physical_cuda",
+      "outputSha256": [
+        "1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977"
+      ],
+      "sourcePath": "docs/calibration/sc-15833/base-q4-staged_residency.log",
+      "stdoutSha256": "4949e8ae5a9dd0023a73aae8c8ad73d1a43568d27853e652f221180d728d12f5",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "staged_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "id": "ims-c18f56bfccc12f00acfd",
+      "kind": "physical_cuda",
+      "outputSha256": [
+        "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2"
+      ],
+      "sourcePath": "docs/calibration/sc-15833/base-q4-bounded_decode.log",
+      "stdoutSha256": "399e3680931b746a8a9825961b752fbdb890495faac492f2427811aa0e6be151",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    },
+    {
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "id": "ims-dd71e09b38731b5a6c92",
+      "kind": "physical_cuda",
+      "outputSha256": [
+        "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2"
+      ],
+      "sourcePath": "docs/calibration/sc-15833/base-q4-bounded_attention.log",
+      "stdoutSha256": "b11dec175db2220e4a2d10f448fe94d929a3641a53c9b082bcd889071fd76eaf",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_attention",
+        "tier": "q4"
+      }
+    },
+    {
+      "claims": [
+        "memory",
+        "quality",
+        "loadability",
+        "overlay"
+      ],
+      "id": "ims-450a73e0b9599f0bf598",
+      "kind": "physical_cuda",
+      "outputSha256": [
+        "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2"
+      ],
+      "sourcePath": "docs/calibration/sc-15833/base-q4-bounded_transformer_residency.log",
+      "stdoutSha256": "120dfb3300721ec80a89a75f1db1f99cb00866f2dce34baa0f97591d8c93b1aa",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_transformer_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "claims": [
+        "loadability",
+        "overlay"
+      ],
+      "id": "ims-7c281ce84d1447b7a533",
+      "kind": "physical_cuda",
+      "outputSha256": [
+        "51500fa92ba68f72f366ab8f82e170164a12bf79336d858568f917e55138eb03"
+      ],
+      "sourcePath": "docs/calibration/sc-15833/edit-q4-resident.log",
+      "stdoutSha256": "e7cdd96d9cb2bb3d8600fa62d70f94bd2127d1024e3c66b05cbc9a957476bb8f",
+      "target": {
+        "mode": "image_to_image",
+        "overlay": "none",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "claims": [
+        "loadability",
+        "overlay"
+      ],
+      "id": "ims-714a8c8533b53fddfbe6",
+      "kind": "physical_cuda",
+      "outputSha256": [
+        "926038aaa404b70e47c54991d77c831db5b88826bf52784d3bb40a0c2eeb7088"
+      ],
+      "sourcePath": "docs/calibration/sc-15833/control-q4-resident.log",
+      "stdoutSha256": "df7f5ff3b900a15d5458e3847b27143c8a98042588b9203d60d96cafbf0d926e",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "control",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    }
+  ],
+  "artifact": {
+    "bytes": 33582076196,
+    "path": "E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146",
+    "repository": "SceneWorks/flux2-dev-mlx",
+    "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+    "role": "base",
+    "sha256": "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b",
+    "variant": "q4"
+  },
+  "baseRungs": [
+    {
+      "activeAllocationPeakBytes": 44911779404,
+      "devicePeakReportedGb": 47.6,
+      "devicePeakUpperBoundBytes": 47700000000,
+      "diagnostics": null,
+      "outputSha256": "1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977",
+      "parity": {
+        "kind": "exact"
+      },
+      "parityResult": {
+        "kind": "not_run"
+      },
+      "rung": "resident",
+      "selectorPredictedPeakBytes": 47700000000
+    },
+    {
+      "activeAllocationPeakBytes": 34070566540,
+      "devicePeakReportedGb": 44.2,
+      "devicePeakUpperBoundBytes": 44300000000,
+      "diagnostics": {
+        "changedFraction": 0,
+        "maximumError": 0,
+        "meanError": 0,
+        "psnrDb": null,
+        "reference": "docs/calibration/sc-15833/base-q4-resident.rgb",
+        "rootMeanSquareError": 0,
+        "strategy": "StagedResidency"
+      },
+      "outputSha256": "1e284e748f8da7321950c03e2516fcfe148282645740bdf32db7c8fbd0c28977",
+      "parity": {
+        "kind": "exact"
+      },
+      "parityResult": {
+        "kind": "passed"
+      },
+      "rung": "staged_residency",
+      "selectorPredictedPeakBytes": 44300000000
+    },
+    {
+      "activeAllocationPeakBytes": 30325300672,
+      "devicePeakReportedGb": 34.6,
+      "devicePeakUpperBoundBytes": 34700000000,
+      "diagnostics": {
+        "changedFraction": 0.040744145711,
+        "maximumError": 2,
+        "meanError": 0.040746370951,
+        "psnrDb": 62.029439934468,
+        "reference": "docs/calibration/sc-15833/base-q4-resident.rgb",
+        "rootMeanSquareError": 0.201868326965,
+        "strategy": "BoundedDecode"
+      },
+      "outputSha256": "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "parity": {
+        "kind": "tolerance",
+        "maximum_error": 2,
+        "metric": "rgb8_max_abs_error"
+      },
+      "parityResult": {
+        "kind": "passed"
+      },
+      "rung": "bounded_decode",
+      "selectorPredictedPeakBytes": 34700000000
+    },
+    {
+      "activeAllocationPeakBytes": 23724359104,
+      "devicePeakReportedGb": 25.1,
+      "devicePeakUpperBoundBytes": 25200000000,
+      "diagnostics": {
+        "changedFraction": 0.040744145711,
+        "maximumError": 2,
+        "meanError": 0.040746370951,
+        "psnrDb": 62.029439934468,
+        "reference": "docs/calibration/sc-15833/base-q4-resident.rgb",
+        "rootMeanSquareError": 0.201868326965,
+        "strategy": "BoundedAttention"
+      },
+      "outputSha256": "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "parity": {
+        "kind": "tolerance",
+        "maximum_error": 2,
+        "metric": "rgb8_max_abs_error"
+      },
+      "parityResult": {
+        "kind": "passed"
+      },
+      "rung": "bounded_attention",
+      "selectorPredictedPeakBytes": 25200000000
+    },
+    {
+      "activeAllocationPeakBytes": 13537107920,
+      "devicePeakReportedGb": 14.2,
+      "devicePeakUpperBoundBytes": 14300000000,
+      "diagnostics": {
+        "changedFraction": 0.040744145711,
+        "maximumError": 2,
+        "meanError": 0.040746370951,
+        "psnrDb": 62.029439934468,
+        "reference": "docs/calibration/sc-15833/base-q4-resident.rgb",
+        "rootMeanSquareError": 0.201868326965,
+        "strategy": "BoundedTransformerResidency"
+      },
+      "outputSha256": "1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac8184758a2",
+      "parity": {
+        "kind": "tolerance",
+        "maximum_error": 2,
+        "metric": "rgb8_max_abs_error"
+      },
+      "parityResult": {
+        "kind": "passed"
+      },
+      "rung": "bounded_transformer_residency",
+      "selectorPredictedPeakBytes": 14300000000
+    }
+  ],
+  "blockers": [],
+  "calibrationFingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
+  "excludedAttempts": [
+    {
+      "reason": "The first resident launch could not read the pinned E:/huggingface artifact inside the restricted shell; no accepted CUDA session was produced.",
+      "sourcePath": "docs/calibration/sc-15833/excluded/excluded-resident-sandbox-access-denied.log",
+      "stdoutSha256": "da393697f231c49e2489f949d49c1dc36036543b459a3d9dd5149d005c0afaa7"
+    },
+    {
+      "reason": "The output parent directory was absent, so the harness could not persist an authoritative RGB artifact.",
+      "sourcePath": "docs/calibration/sc-15833/excluded/excluded-resident-output-parent-missing.log",
+      "stdoutSha256": "bafc3c955884b0379411b3e24055d207f032ce5b202a30de65b54f2a5cdefa17"
+    },
+    {
+      "reason": "The attempt predated the mandatory expected ABI and fingerprint environment binding and is excluded from calibration evidence.",
+      "sourcePath": "docs/calibration/sc-15833/excluded/excluded-resident-missing-expected-calibration.log",
+      "stdoutSha256": "37dcb4a5d2c4be77ec7fe31761fa0aeb2dd87ef76c279f794093f825e23999bc"
+    },
+    {
+      "reason": "The attempt used obsolete repository revision environment variable names and failed the immutable provenance contract.",
+      "sourcePath": "docs/calibration/sc-15833/excluded/excluded-resident-obsolete-revision-env.log",
+      "stdoutSha256": "498a395cf3d088534320a2054532843f8b878486adaaf6ec693b1dcd3b783151"
+    },
+    {
+      "reason": "The fresh worker build could not find cl.exe; Cargo failed before the edit route acquired the GPU.",
+      "sourcePath": "docs/calibration/sc-15833/excluded/excluded-edit-missing-cl.log",
+      "stdoutSha256": "f49b08c7c590c2d531e0fb76604d6cfc23e6c78e4106e8d1021302324d5ac955"
+    },
+    {
+      "reason": "CUDA 12.9 rejected the automatically selected Visual Studio 2026 compiler before route execution.",
+      "sourcePath": "docs/calibration/sc-15833/excluded/excluded-edit-unsupported-vs.log",
+      "stdoutSha256": "95860fdd1444dd722bebeb49b0a5876d3f1bb955a9c0cbc758a6abb0158354de"
+    },
+    {
+      "reason": "The NVIDIA compiler override passed its version guard, but the Visual Studio 2026 STL remained incompatible with CUDA 12.9; the route never executed.",
+      "sourcePath": "docs/calibration/sc-15833/excluded/excluded-edit-vs2026-stl.log",
+      "stdoutSha256": "7b59eb97183640c3feb6c7265f2e275b11fc8908d28710018b06c1d2341aee50"
+    }
+  ],
+  "hardware": {
+    "computeCapability": "12.0",
+    "deviceId": "0",
+    "driverVersion": "596.36",
+    "memoryBytes": 102641958912,
+    "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version",
+    "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+  },
+  "promotionEligible": true,
+  "repositories": {
+    "inference": {
+      "dirty": false,
+      "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+    },
+    "sceneWorks": {
+      "dirty": false,
+      "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
+      "revision": "a9bb7303420855aeb276da33b31aa826a5d09faa"
+    }
+  },
+  "routes": [
+    {
+      "outputFormat": "png",
+      "outputHeight": 512,
+      "outputSha256": "51500fa92ba68f72f366ab8f82e170164a12bf79336d858568f917e55138eb03",
+      "outputStdDev": 81.54442303614324,
+      "outputWidth": 512,
+      "route": "edit",
+      "sourceSessionId": "ims-7c281ce84d1447b7a533"
+    },
+    {
+      "outputFormat": "png",
+      "outputHeight": 512,
+      "outputSha256": "926038aaa404b70e47c54991d77c831db5b88826bf52784d3bb40a0c2eeb7088",
+      "outputStdDev": 35.878538863011634,
+      "outputWidth": 512,
+      "route": "control",
+      "sourceSessionId": "ims-714a8c8533b53fddfbe6"
+    }
+  ],
+  "schemaVersion": 1,
+  "story": "SC-15833"
+}

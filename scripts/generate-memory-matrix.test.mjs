@@ -19,6 +19,7 @@ import {
   familyGroup,
   familyStory,
   mlxRequiredHostBytes,
+  observedPeakBytes,
   modelStory,
 } from "./generate-memory-matrix.mjs";
 import { recordId } from "./memory-calibration-harness.mjs";
@@ -46,6 +47,15 @@ test("a comment-only manifest edit produces no generated matrix change", async (
 
   assert.deepEqual(commentOnly, baseline);
   assert.deepEqual(withoutAnyComments, baseline);
+});
+
+test("runtime-only CUDA telemetry surfaces its measured active-byte peak", () => {
+  assert.equal(observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234 } } }), 1234);
+  assert.equal(
+    observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234, deviceBytes: 5678 } } }),
+    5678,
+  );
+  assert.equal(observedPeakBytes({ observedMemory: { overall: {} } }), null);
 });
 
 test("self-stamped manifest matrix revisions do not rotate the source fingerprint", async () => {
@@ -102,6 +112,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "cargo",
     "engines",
     "imageRouting",
+    "inferenceCompatibility",
     "instantId",
     "manifest",
     "memoryStrategy",
@@ -1104,7 +1115,10 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
-    ["15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx"],
+    [
+      "15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx",
+      "15519:candle",
+    ],
   );
   assert.equal(
     matrix.rung4SurveyRows.find((row) => row.familyStory === 15511 && row.backend === "mlx")

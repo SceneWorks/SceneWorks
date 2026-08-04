@@ -153,6 +153,11 @@ mod tests {
         assert_eq!(supports_preview("sdxl", "candle"), Some(true));
     }
 
+    #[test]
+    fn flux2_dev_now_advertises_its_wired_preview_route() {
+        assert_eq!(supports_preview("flux2_dev", "candle"), Some(true));
+    }
+
     // The distinction the whole story exists for: a wired route that does NOT preview answers
     // `Some(false)`, and an unknown backend/model answers `None`. Collapsing either into the other
     // reintroduces the bug.

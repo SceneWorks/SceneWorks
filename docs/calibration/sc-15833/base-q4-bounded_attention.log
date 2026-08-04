@@ -1,0 +1,73 @@
+SC15833_CAPTURED_AT=2026-08-04T12:05:57.7968729Z
+SC15833_SOURCE_V1 {"schema_version":1,"captured_at":"2026-08-04T12:05:57.7968729Z","repositories":{"sceneWorks":{"revision":"a9bb7303420855aeb276da33b31aa826a5d09faa","dirty":false,"matrixSourceRevision":"source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5"},"inference":{"revision":"5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d","dirty":false}},"hardware":{"probe":"CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version","memoryBytes":102641958912,"deviceId":"0","name":"NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition","computeCapability":"12.0","driverVersion":"596.36","runtimeVersion":"CUDA 12.9 (nvcc V12.9.41)"},"inputs":[{"role":"base","path":"E:/huggingface/sceneworks-staging/sc15833-flux2-dev-q4-2868b146","bytes":33582076196,"sha256":"896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b","repository":"SceneWorks/flux2-dev-mlx","resolvedRevision":"2868b1461b2b6e6e05d84e52534df3632b4c7d5d","variant":"q4"}]}
+cargo : warning: candle-kernels@0.10.2: All PTX kernels up-to-date, skipping compilation
+At line:2 char:1221
++ ... videnceLog; cargo test -p candle-gen-flux2 --release --features cuda  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: candle...ing compilation:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: candle-kernels@0.10.2: Using 24 threads for compilation
+warning: candle-kernels@0.10.2: All library kernels up-to-date, skipping compilation
+    Finished `release` profile [optimized] target(s) in 0.28s
+     Running unittests src\lib.rs (target\release\deps\candle_gen_flux2-c8f76db6ff8f2782.exe)
+
+running 1 test
+MEMORY_PARITY_DIAGNOSTIC strategy=BoundedAttention reference=docs/calibration/sc-15833/base-q4-resident.rgb 
+changed_fraction=0.040744145711 max_abs=2 mean_abs=0.040746370951 rmse=0.201868326965 psnr_db=62.029439934468
+MEMORY_EVIDENCE_V1 {"schema_version":1,"key":{"resolved_route":"flux2_dev","backend":"candle","tier":{"precision":"bf16
+","quant":"q4","component_precision_floors":[]},"load_shape":"deferred_materialization","mode":"text_to_image","overlay
+":null,"geometry":{"width":1024,"height":1024,"batch":1,"frames":1,"reference_count":0},"strategy":"bounded_attention",
+"engaged_composition":["resident","staged_residency","bounded_decode","bounded_attention"],"parameters":{"decode_tile_e
+dge":1024,"decode_overlap":1,"attention_chunk_size":67108864,"transformer_window_size":null,"transformer_window_compone
+nt":null}},"declared_calibration":{"abi":3,"fingerprint":"flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention
+-device-format-blocks-v2","load_shape":"deferred_materialization"},"observed_calibration":{"abi":3,"fingerprint":"flux2
+-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2","load_shape":"deferred_materializatio
+n"},"predicted_peak_bytes":23724359104,"observed_peak_bytes":23724359104,"inference_revision":"5ffd7612e7de4e76b6db00a7
+148ed3d9c15b4c0d","sceneworks_revision":"a9bb7303420855aeb276da33b31aa826a5d09faa","model_revision":"2868b1461b2b6e6e05
+d84e52534df3632b4c7d5d","model_inventory_sha256":"896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b","ha
+rness_version":"candle-flux2-memory-ladder-v1","output_sha256":"1e015762f74f78525419d07e7c03ee15b9ad48bb783ca409ef3ffac
+8184758a2","parity":{"kind":"tolerance","metric":"rgb8_max_abs_error","maximum_error":2.0},"parity_result":{"kind":"pas
+sed"}}
+MEMORY_EVIDENCE_DIAGNOSTIC gpu=0 load-peak 0.5 GB | steady 0.5 GB | overall-peak 25.1 GB (baseline 0.0 GB) 
+bytes=3145728 1024x1024 out=docs/calibration/sc-15833/base-q4-bounded_attention.rgb
+test tests::flux2_dev_probed_generate_for_offload_ab ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 94 filtered out; finished in 175.14s
+
+     Running tests\comfyui_fold_probe.rs (target\release\deps\comfyui_fold_probe-20aba3e739048d28.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\conformance.rs (target\release\deps\conformance-4c7afeaee375569a.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\control_parity.rs (target\release\deps\control_parity-f7a78b9cc6eaa1de.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests\convert_real_weights.rs (target\release\deps\convert_real_weights-787e98361858b0ec.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests\preview_real_weights.rs (target\release\deps\preview_real_weights-c326eaffb53c0a66.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests\vae_encode_parity.rs (target\release\deps\vae_encode_parity-c63d2eab528898a8.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+

@@ -63,7 +63,7 @@ pub struct EvidenceRecord {
     pub sweep: Sweep,
     pub scenarios: Vec<Scenario>,
     pub predicted_peak_bytes: RequiredNullable<PredictedPeakBytes>,
-    pub observed_memory: RequiredNullable<PhaseMetrics>,
+    pub observed_memory: RequiredNullable<ObservedMemory>,
     pub quality: Quality,
     pub negative_mutation: RequiredNullable<NegativeMutation>,
     pub loadability: Loadability,
@@ -407,12 +407,90 @@ pub enum ScenarioResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum PredictedPeakBytes {
+    Full(FullPredictedPeakBytes),
+    RuntimeOverall(RuntimePredictedPeakBytes),
+}
+
+impl PredictedPeakBytes {
+    pub fn overall(&self) -> u64 {
+        match self {
+            Self::Full(value) => value.overall,
+            Self::RuntimeOverall(value) => value.overall,
+        }
+    }
+
+    pub fn full(&self) -> Option<&FullPredictedPeakBytes> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+
+    pub fn full_mut(&mut self) -> Option<&mut FullPredictedPeakBytes> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PredictedPeakBytes {
+pub struct FullPredictedPeakBytes {
     pub conditioning: u64,
     pub denoise: u64,
     pub decode: u64,
     pub overall: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimePredictedPeakBytes {
+    pub overall: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ObservedMemory {
+    Full(PhaseMetrics),
+    RuntimeOverall(RuntimeObservedMemory),
+}
+
+impl ObservedMemory {
+    pub fn full(&self) -> Option<&PhaseMetrics> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+
+    pub fn full_mut(&mut self) -> Option<&mut PhaseMetrics> {
+        match self {
+            Self::Full(value) => Some(value),
+            Self::RuntimeOverall(_) => None,
+        }
+    }
+
+    pub fn overall_device_or_active_bytes(&self) -> u64 {
+        match self {
+            Self::Full(value) => value.overall.device_bytes,
+            Self::RuntimeOverall(value) => value.overall.active_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeObservedMemory {
+    pub overall: RuntimeObservedOverall,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeObservedOverall {
+    pub active_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -790,9 +868,11 @@ impl EvidenceRecord {
         let RequiredNullable::Value(predicted) = &self.predicted_peak_bytes else {
             return None;
         };
+        let predicted = predicted.full()?;
         let RequiredNullable::Value(observed) = &self.observed_memory else {
             return None;
         };
+        let observed = observed.full()?;
         let process_ceiling = hardware
             .mlx_memory_limit_bytes
             .min(hardware.wired_limit_bytes)
@@ -1302,20 +1382,24 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
         &record.id,
         "predictedPeakBytes",
     )?;
-    if predicted.overall
-        < predicted
-            .conditioning
-            .max(predicted.denoise)
-            .max(predicted.decode)
-    {
-        return Err(format!(
-            "{} predicted overall does not cover phase peaks",
-            record.id
-        ));
+    if let Some(predicted) = predicted.full() {
+        if predicted.overall
+            < predicted
+                .conditioning
+                .max(predicted.denoise)
+                .max(predicted.decode)
+        {
+            return Err(format!(
+                "{} predicted overall does not cover phase peaks",
+                record.id
+            ));
+        }
     }
     let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
-    validate_phase_metrics(observed, &record.id)?;
-    if observed.overall.device_bytes > record.hardware.memory_bytes() {
+    if let Some(observed) = observed.full() {
+        validate_phase_metrics(observed, &record.id)?;
+    }
+    if observed.overall_device_or_active_bytes() > record.hardware.memory_bytes() {
         return Err(format!(
             "{} observed device memory exceeds hardware",
             record.id
@@ -1569,6 +1653,12 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         &record.id,
         "predictedPeakBytes",
     )?;
+    let predicted = predicted.full().ok_or_else(|| {
+        format!(
+            "{} complete evidence requires full predicted phase telemetry",
+            record.id
+        )
+    })?;
     if predicted.overall
         < predicted
             .conditioning
@@ -1581,6 +1671,12 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
         ));
     }
     let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
+    let observed = observed.full().ok_or_else(|| {
+        format!(
+            "{} complete evidence requires full observed phase telemetry",
+            record.id
+        )
+    })?;
     validate_phase_metrics(observed, &record.id)?;
     if observed.overall.device_bytes > record.hardware.memory_bytes() {
         return Err(format!(
@@ -1959,12 +2055,15 @@ fn is_rfc3339_datetime(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use serde_json::{json, Map, Value};
 
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        RecordStatus, StaleBundleReason, StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
+        ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable, SourceSessionKind,
+        StaleBundleReason, StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
         PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
@@ -2215,13 +2314,123 @@ mod tests {
         // Existing MLX measurements remain available as history under their truthful load shapes;
         // their old inference revisions cannot become a current fit. SC-15510 adds four eager and
         // one deferred current-pin Z-Image records without rewriting that historical provenance.
-        // SC-15823 then adds ten base-only runtime-complete FLUX records (eight eager, two deferred)
-        // without promoting them to Full completion.
+        // SC-15823 then adds ten base-only runtime-complete FLUX.1 records (eight eager, two
+        // deferred) without promoting them to Full completion. SC-15833 adds five deferred FLUX.2
+        // runtime records and seven physical sessions without replacing any prior source receipt.
         let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
         };
-        assert_eq!(bundle.source_sessions.len(), 16);
+        let preserved_session_ids = BTreeSet::from([
+            "ims-4b4ab770efa632199d23",
+            "ims-4fbfb599c1fc3e3e9dfb",
+            "ims-5cf99e7d2a0b88e1dfcf",
+            "ims-689c72239ec5bb84594f",
+            "ims-68cd302c4d981863ae34",
+            "ims-6ba27c6bb1b02924f919",
+            "ims-6d120db7e473577a8666",
+            "ims-7e019daeae73957fa26c",
+            "ims-7e8d2d3865ddc7416364",
+            "ims-80d540a194d518ccd289",
+            "ims-864721b19f3af847b3b0",
+            "ims-ae9e9a0008dea92bd123",
+            "ims-b11bcf06f6f086d942c5",
+            "ims-bd6bf873c3afa366ebbc",
+            "ims-d0895f08dc090ac204c5",
+            "ims-d498c23a453aae2d8f8b",
+        ]);
+        let flux2_sessions = BTreeMap::from([
+            (
+                "ims-35c1264644b37f2f655b",
+                (
+                    "docs/calibration/sc-15833/base-q4-resident.log",
+                    StrategyRung::Resident,
+                    "text_to_image",
+                    "none",
+                ),
+            ),
+            (
+                "ims-c232abf85a9aa537fc14",
+                (
+                    "docs/calibration/sc-15833/base-q4-staged_residency.log",
+                    StrategyRung::StagedResidency,
+                    "text_to_image",
+                    "none",
+                ),
+            ),
+            (
+                "ims-c18f56bfccc12f00acfd",
+                (
+                    "docs/calibration/sc-15833/base-q4-bounded_decode.log",
+                    StrategyRung::BoundedDecode,
+                    "text_to_image",
+                    "none",
+                ),
+            ),
+            (
+                "ims-dd71e09b38731b5a6c92",
+                (
+                    "docs/calibration/sc-15833/base-q4-bounded_attention.log",
+                    StrategyRung::BoundedAttention,
+                    "text_to_image",
+                    "none",
+                ),
+            ),
+            (
+                "ims-450a73e0b9599f0bf598",
+                (
+                    "docs/calibration/sc-15833/base-q4-bounded_transformer_residency.log",
+                    StrategyRung::BoundedTransformerResidency,
+                    "text_to_image",
+                    "none",
+                ),
+            ),
+            (
+                "ims-7c281ce84d1447b7a533",
+                (
+                    "docs/calibration/sc-15833/edit-q4-resident.log",
+                    StrategyRung::Resident,
+                    "image_to_image",
+                    "none",
+                ),
+            ),
+            (
+                "ims-714a8c8533b53fddfbe6",
+                (
+                    "docs/calibration/sc-15833/control-q4-resident.log",
+                    StrategyRung::Resident,
+                    "text_to_image",
+                    "control",
+                ),
+            ),
+        ]);
+        let actual_session_ids = bundle
+            .source_sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected_session_ids = preserved_session_ids
+            .iter()
+            .copied()
+            .chain(flux2_sessions.keys().copied())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_session_ids, expected_session_ids);
+        assert_eq!(
+            bundle.source_sessions.len(),
+            preserved_session_ids.len() + flux2_sessions.len()
+        );
+        for session in &bundle.source_sessions {
+            let Some((path, rung, mode, overlay)) = flux2_sessions.get(session.id.as_str()) else {
+                continue;
+            };
+            assert_eq!(session.kind, SourceSessionKind::PhysicalCuda);
+            assert_eq!(&session.source_path, path);
+            let target = session.target.as_ref().expect("SC-15833 target receipt");
+            assert_eq!(target.tier, "q4");
+            assert_eq!(target.rung, *rung);
+            assert_eq!(target.mode, *mode);
+            assert_eq!(target.overlay, *overlay);
+        }
         assert!(bundle.source_sessions.iter().all(|session| {
             session.hardware.extensions.contains_key("deviceId")
                 && session
@@ -2231,23 +2440,28 @@ mod tests {
                 && session.hardware.extensions.contains_key("driverVersion")
                 && session.hardware.extensions.contains_key("runtimeVersion")
         }));
-        assert_eq!(bundle.records.len(), 43);
-        assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.status == RecordStatus::Complete)
-                .count(),
-            33
-        );
-        assert_eq!(
-            bundle
-                .records
-                .iter()
-                .filter(|record| record.status == RecordStatus::RuntimeComplete)
-                .count(),
-            10
-        );
+        let complete_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::Complete)
+            .count();
+        assert_eq!(complete_count, 33);
+        let runtime_keys = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::RuntimeComplete)
+            .map(|record| (record.target.model_id.as_str(), record.strategy.rung))
+            .collect::<BTreeSet<_>>();
+        let expected_runtime_keys = ["flux_schnell", "flux_dev", "flux2_dev"]
+            .into_iter()
+            .flat_map(|model_id| {
+                StrategyRung::ALL
+                    .into_iter()
+                    .map(move |rung| (model_id, rung))
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(runtime_keys, expected_runtime_keys);
+        assert_eq!(bundle.records.len(), complete_count + runtime_keys.len());
         assert_eq!(
             bundle
                 .records
@@ -2262,7 +2476,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            7
+            12
         );
     }
 
@@ -2319,6 +2533,65 @@ mod tests {
             load_bundle(&mismatch.to_string()),
             Err(BundleLoadError::Invalid(message))
                 if message.contains("exactly one passed case matching its strategy parameters")
+        ));
+    }
+
+    #[test]
+    fn runtime_complete_accepts_overall_only_telemetry_but_complete_requires_full_phases() {
+        fn runtime_record(raw: &mut Value) -> &mut Value {
+            raw["records"]
+                .as_array_mut()
+                .expect("records array")
+                .iter_mut()
+                .find(|record| record["status"] == "runtime_complete")
+                .expect("packaged runtime-complete record")
+        }
+
+        let mut sparse: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        let record = runtime_record(&mut sparse);
+        let record_id = record["id"].as_str().expect("record id").to_owned();
+        let predicted = record["predictedPeakBytes"]["overall"]
+            .as_u64()
+            .expect("predicted overall");
+        let observed = record["observedMemory"]["overall"]["deviceBytes"]
+            .as_u64()
+            .expect("observed device overall");
+        record["predictedPeakBytes"] = json!({ "overall": predicted });
+        record["observedMemory"] = json!({ "overall": { "activeBytes": observed } });
+
+        let bundle = match load_bundle(&sparse.to_string()).expect("sparse telemetry parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("sparse bundle must be current: {reason:?}"),
+        };
+        let record = bundle
+            .records
+            .iter()
+            .find(|record| record.id == record_id)
+            .expect("sparse record survives");
+        assert!(matches!(
+            record.predicted_peak_bytes,
+            RequiredNullable::Value(PredictedPeakBytes::RuntimeOverall(_))
+        ));
+        assert!(matches!(
+            record.observed_memory,
+            RequiredNullable::Value(ObservedMemory::RuntimeOverall(_))
+        ));
+
+        let mut overclaimed = sparse.clone();
+        runtime_record(&mut overclaimed)["status"] = json!("complete");
+        assert!(matches!(
+            load_bundle(&overclaimed.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("complete evidence requires full predicted phase telemetry")
+        ));
+
+        let mut partial = sparse;
+        runtime_record(&mut partial)["predictedPeakBytes"] =
+            json!({ "conditioning": 1, "overall": predicted });
+        assert!(matches!(
+            load_bundle(&partial.to_string()),
+            Err(BundleLoadError::Json(_))
         ));
     }
 

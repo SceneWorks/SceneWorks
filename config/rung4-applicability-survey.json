@@ -1197,8 +1197,24 @@
         },
         "candle": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "Same 8-double + 48-single topology; no Candle block-window path.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "flux2_dev"
+          ],
+          "implementedTiers": [
+            "q4"
+          ],
+          "implementedModes": [
+            "text_to_image"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "SC-15833 wires the 8-double + 48-single Candle dev trunk through the shared block-window primitive for the exact Q4 base text-to-image route.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -1221,8 +1237,12 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
-              "reason": "The Candle FLUX.2 provider declares no memory_strategy_contract and carries no streamed-block loader."
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs",
+              "reason": "At pinned inference revision 5ffd7612, the FLUX.2-dev CUDA contract publishes BoundedTransformerResidency with a one-block DiT window and the exact calibration fingerprint used by SC-15833."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/block_stream.rs",
+              "reason": "The streamed loader reconstructs one exact double- or single-stream block window from the re-openable snapshot and delegates scheduling and teardown to candle_gen::block_window."
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/transformer.rs#Flux2ControlBranch",
@@ -1231,7 +1251,22 @@
           ],
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "No rung-4 run exists for FLUX.2 dev."
+            "scopes": [
+              {
+                "entries": ["flux2_dev"],
+                "tiers": ["q4"],
+                "modes": ["text_to_image"],
+                "overlays": ["none"],
+                "finding": "moves"
+              }
+            ],
+            "reason": "SC-15833's exact Q4 base capture measured the bounded-attention request peak at 23,724,359,104 bytes and the one-block transformer composition at 13,537,107,920 bytes, with RGB8 max-absolute error 2 against the resident output. Other tiers, modes, and overlays remain unmeasured.",
+            "evidence": [
+              {
+                "source": "docs/calibration/sc-15833/report.json",
+                "reason": "Strictly ingested real-weight CUDA sessions bind both request peaks, immutable artifact and repository revisions, and independently recomputed output parity."
+              }
+            ]
           },
           "findings": []
         }
