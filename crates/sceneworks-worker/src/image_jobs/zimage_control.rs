@@ -424,10 +424,8 @@ impl CandleStrictControl for ZImageStrictControl {
         control: &Image,
         seed: u64,
         cancel: &CancelFlag,
-        // `ZImageControlRequest` has no `preview` field yet — candle Z-Image is not preview-wired
-        // upstream (epic 16948 Tier 1, sc-16957). `no_candle_image_lane_defaults_its_preview_sink`
-        // sweeps this file, so the guard fails the moment the field appears without being fed.
-        _preview: &gen_core::PreviewSink,
+        // Forward the per-item preview sink into the provider; `None` remains the zero-cost default.
+        preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
         // `guidance` + `negative_prompt` drive the base-mode real-CFG denoise; the distilled Turbo path
@@ -453,6 +451,7 @@ impl CandleStrictControl for ZImageStrictControl {
             // default is documented upstream as keeping the historical resident, unbounded path
             // byte-for-byte unchanged. Wiring the control route to the fit gate is separate work.
             memory: Default::default(),
+            preview: preview.clone(),
             cancel: cancel.clone(),
         };
         model.generate(&req, control, on_progress).map_err(|error| {

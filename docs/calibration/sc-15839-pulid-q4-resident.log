@@ -1,0 +1,10 @@
+SC-15839 PuLID-FLUX Candle/CUDA full-request raw receipt
+capturedAt=2026-08-04T02:28:14.6594764Z
+command=CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\huggingface HUGGINGFACE_HUB_CACHE=E:\huggingface\hub PULID_MEMORY_STRATEGY=resident PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1
+sceneWorks=a87a977d89b44f11dd02921404873f98a04ed192
+inference=5f973a73bf00307240afd81d2778ba9d89349e51
+testResult=passed
+SC15839_RECEIPT provider=pulid_flux strategy=resident tier=Some(Q4) overlay=identity geometry=1024x1024x1 reference_count=1 calibration=pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1 elapsed_ms=19123
+externalSampler={"baselineMiB":19,"peakMiB":26680,"deltaPeakMiB":26661,"wallElapsedMs":93502,"samplePeriodMs":500}
+outputSha256=dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575
+referenceSha256=475cf7e86e0470a026efe12ae19b71286a283603c8bb0d0bea80a369b0e2645f

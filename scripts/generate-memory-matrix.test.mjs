@@ -1383,6 +1383,59 @@ test("an implemented family is Implemented/unverified only where the provider ac
   );
 });
 
+test("Candle PuLID exposes every rung only for its exact identity route", async () => {
+  const matrix = await buildMatrix();
+  const pulid = matrix.cells.filter(
+    (cell) => cell.modelId === "pulid_flux_dev" && cell.backend === "candle",
+  );
+
+  assert.deepEqual([...new Set(pulid.map((cell) => cell.tier))].sort(), ["bf16", "q4", "q8"]);
+  assert.deepEqual([...new Set(pulid.map((cell) => cell.mode))], ["character_image"]);
+  assert.deepEqual(
+    [...new Set(pulid.map((cell) => cell.rung))].sort(),
+    [
+      "bounded_attention",
+      "bounded_decode",
+      "bounded_transformer_residency",
+      "resident",
+      "staged_residency",
+    ],
+  );
+  assert.ok(
+    pulid.every((cell) =>
+      cell.overlay === "identity"
+        ? cell.state === "Implemented/unverified"
+        : cell.state === "Missing",
+    ),
+    "base and LoRA cells must not inherit the bespoke identity provider's capability",
+  );
+});
+
+test("PuLID's closed overlay contract does not redefine legacy Candle resident coverage", async () => {
+  const matrix = await buildMatrix();
+  const expectedResident = [
+    "flux_dev:flux1_dev:candle:q4:text_to_image:lora:resident",
+    "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
+    "z_image_turbo:z_image_turbo:candle:q4:text_to_image:control:resident",
+  ];
+  for (const id of expectedResident) {
+    assert.equal(
+      matrix.cells.find((cell) => cell.id === id)?.state,
+      "Implemented/unverified",
+      `${id} keeps its pre-PuLID generic resident fallback`,
+    );
+  }
+
+  assert.equal(
+    matrix.cells.find(
+      (cell) =>
+        cell.id === "flux_dev:flux1_dev:candle:q4:text_to_image:lora:staged_residency",
+    )?.state,
+    "Missing",
+    "the scope fix must not broaden legacy staged-overlay support",
+  );
+});
+
 test("Candle Krea's Implemented cells report the shared backend that makes them reachable", async () => {
   const matrix = await buildMatrix();
   const source = await surveyFixture();

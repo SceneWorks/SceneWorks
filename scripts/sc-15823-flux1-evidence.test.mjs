@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -7,11 +8,11 @@ import {
   evidenceSemantics, logicalCaseId, recordId, validateBundle, validateRecord,
 } from "./memory-calibration-harness.mjs";
 import {
-  flux1CalibrationPlans, flux1EvidenceRecords, updateBundle,
+  flux1CalibrationPlans, flux1EvidenceRecords, flux1SourceSessions, updateBundle,
 } from "./sc-15823-flux1-evidence.mjs";
 
-const INFERENCE_REVISION = "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b";
-const SCENEWORKS_REVISION = "002e19717c322ba0520ebff28c96c71d0dea21eb";
+const INFERENCE_REVISION = "5f973a73bf00307240afd81d2778ba9d89349e51";
+const SCENEWORKS_REVISION = "f936e7e6a17a0b592752f634d21db17f5e8f2db7";
 const BOUNDED = new Set(["bounded_decode", "bounded_attention", "bounded_transformer_residency"]);
 const EXPECTED = {
   flux1_schnell: {
@@ -102,6 +103,38 @@ test("SC-15823 replaces only its exact provider records", async () => {
   const updated = updateBundle(existing);
   assert.equal(updated.records.length, existing.records.length);
   assert.equal(updated.records.filter((record) => Object.hasOwn(EXPECTED, record.target.provider)).length, 10);
+  const existingRefreshSessions = (existing.sourceSessions ?? []).filter(
+    (session) => session.sourcePath.startsWith("docs/calibration/sc-15823-refresh-"),
+  );
+  assert.equal(
+    updated.sourceSessions.length,
+    (existing.sourceSessions ?? []).length - existingRefreshSessions.length + 10,
+  );
+  assert.equal(
+    updated.sourceSessions.filter((session) => session.sourcePath.startsWith("docs/calibration/sc-15823-refresh-")).length,
+    10,
+  );
+  assert.deepEqual(
+    updated.sourceSessions.filter((session) => !session.sourcePath.startsWith("docs/calibration/sc-15823-refresh-")),
+    (existing.sourceSessions ?? []).filter(
+      (session) => !session.sourcePath.startsWith("docs/calibration/sc-15823-refresh-"),
+    ),
+    "PuLID and every unrelated source session are preserved exactly",
+  );
+});
+
+test("SC-15823 source sessions bind the ten immutable current-pin logs", async () => {
+  const sessions = flux1SourceSessions();
+  assert.equal(sessions.length, 10);
+  for (const session of sessions) {
+    const bytes = await readFile(new URL(`../${session.sourcePath}`, import.meta.url));
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), session.stdoutSha256);
+    assert.equal(session.repositories.sceneWorks.revision, SCENEWORKS_REVISION);
+    assert.equal(session.repositories.inference.revision, INFERENCE_REVISION);
+    assert.deepEqual(session.claims, ["memory", "loadability", "overlay"]);
+    assert.equal(session.inputs.length, 1);
+    assert.equal(session.inputs[0].variant, "q4");
+  }
 });
 
 test("FLUX.1 manifest has ten base bindings and zero overlay bindings", async () => {

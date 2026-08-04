@@ -2271,7 +2271,7 @@
       "paths": {},
       "preview": {
         "byBackend": {
-          "candle": false
+          "candle": true
         }
       },
       "removable": false,
