@@ -2,160 +2,225 @@
   "version": 1,
   "generatedBy": "apps/web/scripts/generate-preview-support.mjs",
   "backends": [
-    "candle"
+    "candle",
+    "mlx"
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+      "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b"
+    },
+    "mlx": {
+      "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b"
     }
   },
   "models": {
     "anima_aesthetic": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "anima_base": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "anima_turbo": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "bernini_image": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "boogu_image": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "boogu_image_edit": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "boogu_image_turbo": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "chroma1_base": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "chroma1_flash": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "chroma1_hd": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "flux2_dev": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "flux2_klein_9b": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "flux2_klein_9b_kv": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "flux2_klein_9b_true_v2": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "flux_dev": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "flux_schnell": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "ideogram_4": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "ideogram_4_turbo": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "illustrious_xl_v1": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "illustrious_xl_v2": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "kolors": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "krea_2_raw": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "krea_2_turbo": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "lens": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "lens_turbo": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "mage_flow": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "mage_flow_base": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "mage_flow_edit": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "mage_flow_edit_base": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "mage_flow_edit_turbo": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "mage_flow_turbo": {
-      "candle": false
+      "candle": false,
+      "mlx": false
     },
     "qwen_image": {
-      "candle": true
+      "candle": true,
+      "mlx": true
+    },
+    "qwen_image_edit": {
+      "mlx": true
+    },
+    "qwen_image_edit_2509": {
+      "mlx": true
+    },
+    "qwen_image_edit_2511": {
+      "mlx": true
+    },
+    "qwen_image_edit_2511_lightning": {
+      "mlx": true
     },
     "realvisxl": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "realvisxl_lightning": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "sana_1600m": {
-      "candle": false
+      "candle": true,
+      "mlx": true
     },
     "sana_sprint_1600m": {
-      "candle": false
+      "candle": true,
+      "mlx": true
     },
     "sd3_5_large": {
-      "candle": false
+      "candle": true,
+      "mlx": true
     },
     "sd3_5_large_turbo": {
-      "candle": false
+      "candle": true,
+      "mlx": true
     },
     "sd3_5_medium": {
-      "candle": false
+      "candle": true,
+      "mlx": true
     },
     "sdxl": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "sensenova_u1_8b": {
-      "candle": false
+      "candle": true,
+      "mlx": false
     },
     "sensenova_u1_8b_fast": {
-      "candle": false
+      "candle": true,
+      "mlx": false
     },
     "sensenova_u1_8b_infographic_v2": {
-      "candle": false
+      "candle": true,
+      "mlx": false
     },
     "sensenova_u1_8b_infographic_v2_fast": {
-      "candle": false
+      "candle": true,
+      "mlx": false
     },
     "sensenova_u1_8b_infographic_v3": {
-      "candle": false
+      "candle": true,
+      "mlx": false
     },
     "sensenova_u1_8b_infographic_v3_fast": {
-      "candle": false
+      "candle": true,
+      "mlx": false
     },
     "z_image": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "z_image_edit": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "z_image_turbo": {
-      "candle": true
+      "candle": true,
+      "mlx": true
     }
   }
 }

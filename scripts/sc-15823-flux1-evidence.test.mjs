@@ -161,7 +161,7 @@ test("FLUX.1 manifest has ten base bindings and zero overlay bindings", async ()
   }
 });
 
-test("generated matrix exposes runtime activation without Full sibling signoff", async () => {
+test("generated matrix retains superseded runtime evidence without authorizing the new pin", async () => {
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
   assert.equal(matrix.schemaVersion, 6);
   assert.equal(matrix.summary.calibrationRunsByStatus.runtimeComplete, 10);
@@ -172,10 +172,11 @@ test("generated matrix exposes runtime activation without Full sibling signoff",
     cell.mode === "text_to_image" && cell.overlay === "none",
   );
   assert.equal(cells.length, 10);
-  assert.ok(cells.every((cell) => cell.state === "Runtime verified"));
+  assert.ok(cells.every((cell) => cell.state === "Implemented/unverified"));
   assert.equal(cells.filter((cell) => cell.state === "Verified").length, 0);
   assert.ok(cells.every((cell) =>
-    cell.evidence.currentEnvironmentVerification.some(
+    cell.evidence.currentEnvironmentVerification.length === 0 &&
+    cell.evidence.historicalVerification.some(
       (evidence) => evidence.recordStatus === "runtime_complete",
     ),
   ));
@@ -187,8 +188,8 @@ test("generated matrix exposes runtime activation without Full sibling signoff",
 
   const markdown = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
   assert.match(markdown, /`Runtime verified` means the exact base-only coordinate is production-admissible/);
-  assert.match(markdown, /\| `flux_dev` \| candle .*\| Runtime verified \|/);
-  assert.match(markdown, /\| `flux_schnell` \| candle .*\| Runtime verified \|/);
+  assert.match(markdown, /\| `flux_dev` \| candle .*\| Implemented\/unverified \|/);
+  assert.match(markdown, /\| `flux_schnell` \| candle .*\| Implemented\/unverified \|/);
 });
 
 test("runtime_complete rejects overclaimed lifecycle or overlay coverage", () => {

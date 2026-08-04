@@ -197,74 +197,83 @@
     {
       "model": "chroma1_base",
       "component": "textEncoder",
-      "residentTier": "f32",
+      "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "resolve_quant packs ONLY the transformer; the T5-XXL text encoder stays dense — chroma never quantizes its T5, and on the MLX lane it stays f32, not bf16.",
+      "reason": "resolve_quant packs ONLY the transformer; the T5-XXL text encoder ships dense at the artifact's native bf16 in every tier — chroma never quantizes its T5.",
       "evidence": {
         "state": "measured",
         "costBytesByTier": {
-          "q4": 19049242624,
-          "q8": 19049242624
+          "q4": 9524621312,
+          "q8": 9524621312
         },
-        "source": "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs — \"T5/VAE stay f32 in every tier (their quant is a measurably-0% memory-only win and not wired)\"; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — chroma1_base tier subdirs bundle a dense (bf16, never quantized) T5-XXL text encoder; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; all 219 tensors are BF16 (text_encoder/config.json torch_dtype=bfloat16) and mlx-gen loads them at that native width — mlx-gen-flux/src/text_encoder.rs returns the native bf16 embedding and promotes only ACTIVATIONS to f32 — so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
-        "triageNote": "Eliminate under sc-16462: the provider documents T5/VAE packing as a measurably-0% memory-only win that is not yet wired. This exact measurement remains only to account for the currently shipping artifact until that repack lands."
-      }
+        "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands."
+      },
+      "backends": [
+        "mlx"
+      ]
     },
     {
       "model": "chroma1_hd",
       "component": "textEncoder",
-      "residentTier": "f32",
+      "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "Same chroma packing policy as the base entry: transformer packed per tier, T5-XXL dense.",
+      "reason": "Same chroma packing policy as the base entry: transformer packed per tier, T5-XXL dense at its native bf16.",
       "evidence": {
         "state": "measured",
         "costBytesByTier": {
-          "q4": 19049242624,
-          "q8": 19049242624
+          "q4": 9524621312,
+          "q8": 9524621312
         },
-        "source": "crates/media/mlx-gen/mlx-gen-chroma/src/quant.rs; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — chroma1_hd tier subdirs bundle a dense (bf16, never quantized) T5-XXL text encoder; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; all 219 tensors are BF16 (text_encoder/config.json torch_dtype=bfloat16) and mlx-gen loads them at that native width — mlx-gen-flux/src/text_encoder.rs returns the native bf16 embedding and promotes only ACTIVATIONS to f32 — so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
-        "triageNote": "Eliminate under sc-16462: the provider documents T5/VAE packing as a measurably-0% memory-only win that is not yet wired. This exact measurement remains only to account for the currently shipping artifact until that repack lands."
-      }
+        "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands."
+      },
+      "backends": [
+        "mlx"
+      ]
     },
     {
       "model": "chroma1_flash",
       "component": "textEncoder",
-      "residentTier": "f32",
+      "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "Same chroma packing policy as the base entry: transformer packed per tier, T5-XXL dense.",
+      "reason": "Same chroma packing policy as the base entry: transformer packed per tier, T5-XXL dense at its native bf16.",
       "evidence": {
         "state": "measured",
         "costBytesByTier": {
-          "q4": 19049242624,
-          "q8": 19049242624
+          "q4": 9524621312,
+          "q8": 9524621312
         },
-        "source": "crates/media/mlx-gen/mlx-gen-chroma/src/quant.rs; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — chroma1_flash tier subdirs bundle a dense (bf16, never quantized) T5-XXL text encoder; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/text_encoder/model-00001-of-00002.safetensors, q8/text_encoder/model-00002-of-00002.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/text_encoder/model-00001-of-00002.safetensors + q8/text_encoder/model-00002-of-00002.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; all 219 tensors are BF16 (text_encoder/config.json torch_dtype=bfloat16) and mlx-gen loads them at that native width — mlx-gen-flux/src/text_encoder.rs returns the native bf16 embedding and promotes only ACTIVATIONS to f32 — so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
-        "triageNote": "Eliminate under sc-16462: the provider documents T5/VAE packing as a measurably-0% memory-only win that is not yet wired. This exact measurement remains only to account for the currently shipping artifact until that repack lands."
-      }
+        "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands."
+      },
+      "backends": [
+        "mlx"
+      ]
     },
     {
       "model": "qwen_image",
@@ -1520,74 +1529,83 @@
     {
       "model": "chroma1_base",
       "component": "vae",
-      "residentTier": "f32",
+      "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "Chroma packs only the transformer; the VAE stays f32 in every tier (its quant is a measurably-0% memory-only win and is not wired).",
+      "reason": "Chroma packs only the transformer; the FLUX.1 AutoencoderKL stays dense at its native bf16 in every tier.",
       "evidence": {
         "state": "measured",
         "costBytesByTier": {
-          "q4": 335278732,
-          "q8": 335278732
+          "q4": 167639366,
+          "q8": 167639366
         },
-        "source": "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — chroma1_base tier subdirs bundle a dense VAE; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
-        "triageNote": "Eliminate under sc-16462: the provider documents T5/VAE packing as a measurably-0% memory-only win that is not yet wired. This exact measurement remains only to account for the currently shipping artifact until that repack lands."
-      }
+        "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands."
+      },
+      "backends": [
+        "mlx"
+      ]
     },
     {
       "model": "chroma1_hd",
       "component": "vae",
-      "residentTier": "f32",
+      "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "Same chroma packing policy: transformer packed, VAE f32.",
+      "reason": "Same chroma packing policy: transformer packed, VAE dense at its native bf16.",
       "evidence": {
         "state": "measured",
         "costBytesByTier": {
-          "q4": 335278732,
-          "q8": 335278732
+          "q4": 167639366,
+          "q8": 167639366
         },
-        "source": "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — chroma1_hd tier subdirs bundle a dense VAE; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
-        "triageNote": "Eliminate under sc-16462: the provider documents T5/VAE packing as a measurably-0% memory-only win that is not yet wired. This exact measurement remains only to account for the currently shipping artifact until that repack lands."
-      }
+        "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands."
+      },
+      "backends": [
+        "mlx"
+      ]
     },
     {
       "model": "chroma1_flash",
       "component": "vae",
-      "residentTier": "f32",
+      "residentTier": "bf16",
       "appliesToTiers": [
         "q4",
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "Same chroma packing policy: transformer packed, VAE f32.",
+      "reason": "Same chroma packing policy: transformer packed, VAE dense at its native bf16.",
       "evidence": {
         "state": "measured",
         "costBytesByTier": {
-          "q4": 335278732,
-          "q8": 335278732
+          "q4": 167639366,
+          "q8": 167639366
         },
-        "source": "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "config/manifests/builtin.models.jsonc — chroma1_flash tier subdirs bundle a dense VAE; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
-        "triageNote": "Eliminate under sc-16462: the provider documents T5/VAE packing as a measurably-0% memory-only win that is not yet wired. This exact measurement remains only to account for the currently shipping artifact until that repack lands."
-      }
+        "triageNote": "Eliminate under sc-16462: the mlx lane can pack this component to the selected tier exactly as mlx-gen-flux's `prequantize_turnkey` already does for the SAME T5-XXL and AutoencoderKL (flux1_* carry no textEncoder row at all). This supersedes the sc-15799 note, which read the since-deleted provider comment \"a measurably-0% memory-only win\" as a zero-QUALITY-cost claim; the codebase idiom (mlx-gen-sana uses the same phrase for the DC-AE decoder's Linear-attention) means a zero-MEMORY win. The measurement below accounts for the currently shipping bf16 artifact until that repack lands."
+      },
+      "backends": [
+        "mlx"
+      ]
     },
     {
       "model": "lens",
