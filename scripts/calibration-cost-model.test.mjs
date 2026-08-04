@@ -523,7 +523,7 @@ test("published cost model distinguishes complete history from runtime-current e
   // `inference-compatibility-<rev>.json` proof — and that proof's audited-object set includes
   // `crates/media/candle-gen/candle-gen`, which 277f→35251a88 changes — so the count must fall to
   // zero here until the window is re-audited by measurement.
-  const AUDITED_LIVE_REVISION = "277f423822bf1899340ed3d867c3d6a773473d7b";
+  const AUDITED_LIVE_REVISION = "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
   const workerCargo = readFileSync(
     new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url),
     "utf8",

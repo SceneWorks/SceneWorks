@@ -51,15 +51,41 @@ const RUNGS = [
 // audited binary LINKS: `runtime-cuda` depends on `candle-gen-flux2`, not the reverse, so a commit
 // into the CUDA bundle leaves the measurement binary byte-identical. Pinning the adjudicable set
 // here keeps an unchanged digest from being read as proof over a path it never compiled.
-const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
+// Exported so the tests can assert against what is FROZEN IN SOURCE rather than re-deriving their
+// expectations from the record under test — which would grade the record against itself.
+export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
   story: "SC-15833",
   modelId: "flux2_dev",
   provider: "flux2_dev",
   capturedInferenceRevision: "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-  compatibleInferenceRevision: "277f423822bf1899340ed3d867c3d6a773473d7b",
-  artifactProof: null,
+  compatibleInferenceRevision: "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
+  // sc-17524: measured on the RTX PRO 6000 box (rustc 1.96.0, nvcc 12.9, `--features cuda`). Three
+  // closure paths moved across this window — `Cargo.lock`, gen-core and candle-gen — and the
+  // `candle-gen-flux2` lib test binary is byte-identical at both ends, so the compiled code the
+  // measurements ran did not change. `adjudicates` is what that binary speaks for: the crate trees
+  // it compiles, plus the build inputs that reach it only through the build.
+  artifactProof: Object.freeze({
+    digest: "sha256:d80844f24dcb95f957c1cd893f9238c9d753db8e1e40c5deefe9f6b6f740f9aa",
+    adjudicates: Object.freeze([
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "crates/contracts/gen-core",
+      "crates/media/candle-gen/candle-gen",
+      "crates/media/candle-gen/candle-gen-pid",
+      "crates/media/candle-gen/candle-gen-flux2",
+      "crates/media/candle-gen/vendor/candle-kernels",
+    ]),
+  }),
+  // sc-17524: `Cargo.lock` and `rust-toolchain.toml` join the seven crate trees. They are build
+  // INPUTS rather than packages — cargo's `compiler-artifact` stream can never name them — but they
+  // feed every one of those builds, and the lockfile had already moved inside the authorized window
+  // while all seven trees stayed byte-identical. Leaving them out meant the free path could report
+  // "no build needed" over a `cargo update` that moved a dependency the measured binary links.
   auditedObjects: Object.freeze({
     "Cargo.toml": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
+    "Cargo.lock": "8ab01e00f01607a99845d875ed60275ae033450c",
+    "rust-toolchain.toml": "ae829f875c68c03c367ce92cc05e041036a92d0a",
     "crates/contracts/gen-core": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
     "crates/bundles/runtime-cuda": "aba807f775872760e72fd98f28a5a0d2853cf00f",
     "crates/media/candle-gen/candle-gen": "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
@@ -1245,19 +1271,21 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-const V1_AUDIT_METHOD = "git object identity across the complete Candle FLUX.2 runtime dependency closure";
-const V2_AUDIT_METHOD =
+const AUDIT_SCHEMA_VERSION = 3;
+const V3_AUDIT_METHOD =
   "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
-  "the complete Candle FLUX.2 runtime dependency closure";
+  "the complete Candle FLUX.2 runtime dependency closure and its workspace build inputs";
 
 /**
- * sc-17497: accept either audit shape, and require the artifact layer exactly when object identity
- * has stopped being sufficient.
- *
- * v1 records carry no artifact proof, so they remain valid only while every closure object is
- * byte-identical — which is all v1 ever asserted. v2 adds `auditedArtifact`; it becomes MANDATORY
- * the moment a path moves, and it must agree with the digest frozen in `FLUX2_COMPATIBILITY_AUDIT`.
+ * sc-17497: object identity is the cheap layer; the compiled-artifact layer is required exactly when
+ * object identity has stopped being sufficient. `auditedArtifact` becomes MANDATORY the moment a
+ * closure path moves, and it must agree with the digest frozen in `FLUX2_COMPATIBILITY_AUDIT`.
  * Freezing it in source is what stops the checked-in record from authorizing itself.
+ *
+ * sc-17524: only v3 is accepted. v1 and v2 describe sc-15833's SEVEN-path closure, which omits
+ * `Cargo.lock` and `rust-toolchain.toml`; re-grading such a record against the nine-path
+ * expectations would read it as evidence about two inputs it never looked at. The closure-identity
+ * check below would reject them on size anyway — this is the loud version of the same refusal.
  *
  * Only the PROOF is injectable, and only so the tests can exercise the ACCEPTING side of the artifact
  * layer while the shipped constant still carries `artifactProof: null` — a validator exercised solely
@@ -1268,14 +1296,12 @@ const V2_AUDIT_METHOD =
 export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMPATIBILITY_AUDIT.artifactProof) {
   const expected = FLUX2_COMPATIBILITY_AUDIT;
   const audit = JSON.parse(body);
-  const schemaVersion = audit.schemaVersion;
   if (
-    (schemaVersion !== 1 && schemaVersion !== 2) ||
+    audit.schemaVersion !== AUDIT_SCHEMA_VERSION ||
     audit.story !== expected.story ||
     audit.capturedInferenceRevision !== expected.capturedInferenceRevision ||
     audit.compatibleInferenceRevision !== expected.compatibleInferenceRevision ||
-    audit.method !== (schemaVersion === 1 ? V1_AUDIT_METHOD : V2_AUDIT_METHOD) ||
-    (schemaVersion === 1 && audit.command !== "git rev-parse <revision>:<path>") ||
+    audit.method !== V3_AUDIT_METHOD ||
     typeof audit.command !== "string" ||
     !Array.isArray(audit.auditedObjects)
   ) {
@@ -1305,14 +1331,7 @@ export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMP
   ) {
     throw new Error("SC-15833 inference compatibility audit closure is incomplete or unrecognized");
   }
-  if (schemaVersion === 1 && changed.length > 0) {
-    throw new Error("SC-15833 inference compatibility audit object pair is invalid");
-  }
-  if (schemaVersion === 2) {
-    validatedCompatibilityArtifact(audit, changed, expectedProof);
-  } else if (expectedProof !== null) {
-    throw new Error("SC-15833 inference compatibility audit is missing its expected artifact proof");
-  }
+  validatedCompatibilityArtifact(audit, changed, expectedProof);
   return expected;
 }
 
@@ -1804,7 +1823,7 @@ export const SOURCE_PATHS = Object.freeze({
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
   calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
   calibrationPlan: "config/memory-calibration-plan.json",
-  inferenceCompatibility: "docs/calibration/sc-15833/inference-compatibility-277f.json",
+  inferenceCompatibility: "docs/calibration/sc-15833/inference-compatibility-06e0.json",
   rung4Survey: "config/rung4-applicability-survey.json",
   cargo: "Cargo.toml",
 });

@@ -5,8 +5,12 @@ import test from "node:test";
 import { deflateSync } from "node:zlib";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { buildMatrix, validatedInferenceCompatibility } from "./generate-memory-matrix.mjs";
-import { AUDIT_CLOSURE_PATHS, AUDIT_METHOD } from "./inference-artifact-audit.mjs";
+import {
+  FLUX2_COMPATIBILITY_AUDIT,
+  buildMatrix,
+  validatedInferenceCompatibility,
+} from "./generate-memory-matrix.mjs";
+import { AUDIT_CLOSURE_PATHS, AUDIT_METHOD, SCHEMA_VERSION } from "./inference-artifact-audit.mjs";
 import { validateRecord } from "./memory-calibration-harness.mjs";
 import {
   flux2CalibrationPlans,
@@ -17,11 +21,12 @@ import {
 
 const SCENEWORKS_REVISION = "1".repeat(40);
 const INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
-const LIVE_INFERENCE_REVISION = "277f423822bf1899340ed3d867c3d6a773473d7b";
+const LIVE_INFERENCE_REVISION = "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
 const MODEL_REVISION = "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 const MODEL_INVENTORY = "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b";
 const CONTROL_REVISION = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 const CONTROL_SHA = "516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a7a794";
+const RECORD_PATH = "docs/calibration/sc-15833/inference-compatibility-06e0.json";
 const MATRIX_SOURCE = `source-tree:${"7".repeat(64)}`;
 const FINGERPRINT = "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
 
@@ -486,7 +491,7 @@ test("SC-15833 requires a unique ordered Cargo nocapture route result", async ()
   );
 });
 
-test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-277f compatibility", async () => {
+test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-06e0 compatibility", async () => {
   const manifestSource = await readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8");
   const manifest = JSON.parse(stripJsoncComments(manifestSource));
   const model = manifest.models.find(({ id }) => id === "flux2_dev");
@@ -514,8 +519,8 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
 
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
   // The audited compatibility is a WINDOW — captured at `INFERENCE_REVISION` (5ffd), audited
-  // against the live pin `LIVE_INFERENCE_REVISION` (277f) by
-  // docs/calibration/sc-15833/inference-compatibility-277f.json. Inside that window the five cells
+  // against the live pin `LIVE_INFERENCE_REVISION` (06e0) by
+  // docs/calibration/sc-15833/inference-compatibility-06e0.json. Inside that window the five cells
   // ride CURRENT evidence and are Runtime verified. Once the pin moves past it the records are
   // retained but no longer authorize the new pin, which is the same fail-closed rule the sibling
   // test "refuses to authorize capture promotion against a newer live inference pin" asserts
@@ -529,9 +534,10 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
   // re-stamped fixture rather than against whichever pin happened to be live.
   //
   // Re-certifying FLUX.2 on a newer pin is deliberately NOT something this test can do by relaxing:
-  // it needs a new `inference-compatibility-<rev>.json` proof, and that proof's audited-object set
-  // includes `crates/media/candle-gen/candle-gen`, which 277f→35251a88 changes. So the window must
-  // be re-audited by measurement, not extended by assertion.
+  // it needs a new `inference-compatibility-<rev>.json` proof. sc-17524 produced one for the window
+  // ending at 06e0c5e9 by MEASURING the compiled artifact on the RTX box — `Cargo.lock`, gen-core
+  // and candle-gen all moved and the `candle-gen-flux2` lib test binary was byte-identical at both
+  // ends. That is the only thing that re-opens this window; editing a constant is not.
   const workerCargo = await readFile(new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url), "utf8");
   const livePin = workerCargo.match(
     /github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/,
@@ -562,7 +568,7 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
       cell.evidence.historicalVerification[0].recordStatus === "runtime_complete")));
 
   const proof = JSON.parse(await readFile(
-    new URL("../docs/calibration/sc-15833/inference-compatibility-277f.json", import.meta.url),
+    new URL("../docs/calibration/sc-15833/inference-compatibility-06e0.json", import.meta.url),
   ));
   assert.equal(proof.capturedInferenceRevision, INFERENCE_REVISION);
   assert.equal(proof.compatibleInferenceRevision, LIVE_INFERENCE_REVISION);
@@ -570,6 +576,8 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
     proof.auditedObjects.map(({ path }) => path).sort(),
     [
       "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
       "crates/bundles/runtime-cuda",
       "crates/contracts/gen-core",
       "crates/media/candle-gen/candle-gen",
@@ -577,15 +585,27 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
       "crates/media/candle-gen/candle-gen-pid",
       "crates/media/candle-gen/vendor/candle-kernels",
     ].sort(),
+    "sc-17524: the two workspace build inputs are part of the closure the record must cover",
   );
   assert.ok(proof.auditedObjects.every(({ capturedObject, compatibleObject }) =>
-    /^[0-9a-f]{40}$/.test(capturedObject) && capturedObject === compatibleObject));
+    /^[0-9a-f]{40}$/.test(capturedObject) && /^[0-9a-f]{40}$/.test(compatibleObject)));
+  // sc-17524: this window is NOT object-identical, which is the point — the paths that moved are
+  // adjudicated by the compiled-artifact digest instead, and the record must declare exactly them.
+  assert.deepEqual(
+    [...proof.changedClosurePaths].sort(),
+    proof.auditedObjects
+      .filter(({ capturedObject, compatibleObject }) => capturedObject !== compatibleObject)
+      .map(({ path }) => path)
+      .sort(),
+  );
+  assert.ok(proof.changedClosurePaths.length > 0, "a record with a quiet closure would need no digest");
+  assert.equal(proof.auditedArtifact.lane, "cuda");
+  assert.equal(proof.auditedArtifact.capturedDigest, proof.auditedArtifact.compatibleDigest);
+  assert.equal(proof.auditedArtifact.capturedDigest, FLUX2_COMPATIBILITY_AUDIT.artifactProof.digest);
   assert.equal(
     matrix.generatedFrom.sources.inferenceCompatibility.path,
-    "docs/calibration/sc-15833/inference-compatibility-277f.json",
+    RECORD_PATH,
   );
-  assert.match(proof.changedPathDisposition["candle-gen-catalog"], /SenseNova preview registration/);
-  assert.match(proof.changedPathDisposition["mlx-flux2"], /outside the Candle\/CUDA dependency closure/);
 });
 
 test("SC-15833 compatibility admission rejects a missing or fabricated closure audit", async () => {
@@ -594,7 +614,7 @@ test("SC-15833 compatibility admission rejects a missing or fabricated closure a
     /JSON|compatibility audit/,
   );
   const proof = JSON.parse(await readFile(
-    new URL("../docs/calibration/sc-15833/inference-compatibility-277f.json", import.meta.url),
+    new URL("../docs/calibration/sc-15833/inference-compatibility-06e0.json", import.meta.url),
   ));
   proof.auditedObjects[0].capturedObject = "a".repeat(40);
   proof.auditedObjects[0].compatibleObject = "a".repeat(40);
@@ -911,16 +931,20 @@ test("SC-15833 committed bundle and plan preserve all unrelated evidence structu
 // produce a compiled-artifact digest that matches the one frozen in source.
 // ---------------------------------------------------------------------------------------------
 
-const V2_METHOD =
+const V3_METHOD =
   "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
-  "the complete Candle FLUX.2 runtime dependency closure";
-const V1_METHOD = "git object identity across the complete Candle FLUX.2 runtime dependency closure";
+  "the complete Candle FLUX.2 runtime dependency closure and its workspace build inputs";
 const ARTIFACT_DIGEST = `sha256:${"c".repeat(64)}`;
 const CANDLE_GEN = "crates/media/candle-gen/candle-gen";
 const RUNTIME_CUDA = "crates/bundles/runtime-cuda";
-// What the `candle-gen-flux2` lib test binary links. `runtime-cuda` is deliberately absent: it
-// depends on the provider, not the other way round.
+const CARGO_LOCK = "Cargo.lock";
+// What the `candle-gen-flux2` lib test binary speaks for: the crate trees it COMPILES, plus the
+// three workspace build inputs, which reach the measured code only by being inputs to that build.
+// `runtime-cuda` is deliberately absent: it depends on the provider, not the other way round.
 const ADJUDICATES = [
+  "Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
   "crates/contracts/gen-core",
   "crates/media/candle-gen/candle-gen",
   "crates/media/candle-gen/candle-gen-pid",
@@ -931,18 +955,18 @@ const PROOF = { digest: ARTIFACT_DIGEST, adjudicates: ADJUDICATES };
 
 async function shippedAudit() {
   return JSON.parse(await readFile(
-    new URL("../docs/calibration/sc-15833/inference-compatibility-277f.json", import.meta.url),
+    new URL("../docs/calibration/sc-15833/inference-compatibility-06e0.json", import.meta.url),
   ));
 }
 
-/** A v2 record in which `moved` closure paths carry a different compatible object. */
-function v2Record(audit, { moved = [], artifact = undefined } = {}) {
+/** A v3 record in which `moved` closure paths carry a different compatible object. */
+function v3Record(audit, { moved = [], artifact = undefined } = {}) {
   const record = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     story: "SC-15833",
     capturedInferenceRevision: INFERENCE_REVISION,
     compatibleInferenceRevision: LIVE_INFERENCE_REVISION,
-    method: V2_METHOD,
+    method: V3_METHOD,
     command: "node scripts/inference-artifact-audit.mjs --repo PATH --captured SHA40 --compatible SHA40",
     changedClosurePaths: [...moved],
     auditedObjects: audit.auditedObjects.map(({ path, capturedObject }) => ({
@@ -979,42 +1003,90 @@ test("SC-17497 the audit script and both validators agree on the strings they al
   // The method string is duplicated across the emitting script, the JS validator and the Rust
   // validator; the closure set across all three. Only the script<->JS pair was pinned, so Rust could
   // drift into refusing records the matrix had already published as `Runtime verified`.
-  assert.equal(AUDIT_METHOD, V2_METHOD, "a drift here would reject every record the script emits");
+  assert.equal(AUDIT_METHOD, V3_METHOD, "a drift here would reject every record the script emits");
   const rust = await readFile(
     new URL("../crates/sceneworks-worker/src/inference_compatibility_audit.rs", import.meta.url),
     "utf8",
   );
-  const rustMethod = /FLUX2_V2_AUDIT_METHOD: &str = concat!\(\s*"([^"]*)",\s*"([^"]*)"/.exec(rust);
-  assert.ok(rustMethod, "the Rust v2 method constant must stay machine-readable from this test");
-  assert.equal(`${rustMethod[1]}${rustMethod[2]}`, V2_METHOD);
-  assert.match(rust, new RegExp(`FLUX2_V1_AUDIT_METHOD: &str =\\s*\n?\\s*"${V1_METHOD}"`));
+  const rustMethod = /FLUX2_V3_AUDIT_METHOD: &str = concat!\(\s*"([^"]*)",\s*"([^"]*)"/.exec(rust);
+  assert.ok(rustMethod, "the Rust v3 method constant must stay machine-readable from this test");
+  assert.equal(`${rustMethod[1]}${rustMethod[2]}`, V3_METHOD);
+  assert.equal(SCHEMA_VERSION, 3);
+  assert.match(rust, new RegExp(`FLUX2_AUDIT_SCHEMA_VERSION: u64 = ${SCHEMA_VERSION};`));
+  // sc-17524: the two build inputs are FILES at the repo root, so the old
+  // `Cargo\.toml|crates/…` alternation silently stopped matching two of the nine entries and the
+  // set comparison would have gone green on a Rust table that had never been widened.
   assert.deepEqual(
-    [...rust.matchAll(/\(\s*"((?:Cargo\.toml|crates\/[^"]+))",\s*\n?\s*"[0-9a-f]{40}"/g)]
+    [...rust.matchAll(/\(\s*"((?:[A-Za-z][\w.-]*\.(?:toml|lock)|crates\/[^"]+))",\s*\n?\s*"[0-9a-f]{40}"/g)]
       .map(([, objectPath]) => objectPath)
       .sort(),
     [...AUDIT_CLOSURE_PATHS].sort(),
     "the Rust closure set must match the one the script audits",
   );
+  assert.equal(AUDIT_CLOSURE_PATHS.length, 9, "and both must be the widened nine-path closure");
 });
 
-test("SC-17497 the shipped v1 record still validates, and still may not carry a moved object", async () => {
+test("SC-17524 the shipped record validates only against the proof frozen in source", async () => {
   const audit = await shippedAudit();
-  assert.ok(accepts(audit, null));
+  assert.ok(accepts(audit, FLUX2_COMPATIBILITY_AUDIT.artifactProof));
+  assert.ok(FLUX2_COMPATIBILITY_AUDIT.artifactProof, "the shipped closure is not quiet, so a digest is owed");
+  // The negative is the load-bearing half: a validator that accepts the shipped record whatever is
+  // frozen would still pass with the entire artifact layer deleted.
+  rejects(audit, null, /compiled-artifact proof is invalid/, "the record may not authorize itself");
+  // Flip the first hex nibble to a value it demonstrably is not, rather than to a fixed letter —
+  // a fixed one silently becomes a no-op the day the real digest happens to start with it, which
+  // is exactly what it did here (`d80844f2…`).
+  const digest = FLUX2_COMPATIBILITY_AUDIT.artifactProof.digest;
+  const flipped = `sha256:${digest[7] === "0" ? "1" : "0"}${digest.slice(8)}`;
+  assert.notEqual(flipped, digest, "the mutation must actually mutate");
+  const off = { ...FLUX2_COMPATIBILITY_AUDIT.artifactProof, digest: flipped };
+  rejects(audit, off, /compiled-artifact proof is invalid/, "one character of the digest is fatal");
+  rejects({ ...audit, command: 7 }, FLUX2_COMPATIBILITY_AUDIT.artifactProof, /identity is invalid/, "a non-string command");
+});
 
-  const moved = structuredClone(audit);
-  moved.auditedObjects.find(({ path }) => path === CANDLE_GEN).compatibleObject = "e".repeat(40);
-  rejects(moved, null, /object pair is invalid/, "v1 asserts object identity and nothing else");
+test("SC-17524 the seven-path schema versions are refused rather than re-graded", async () => {
+  // v1 and v2 record sc-15833's seven-path closure, which never looked at `Cargo.lock` or
+  // `rust-toolchain.toml`. Accepting one would read it as evidence about inputs it did not audit.
+  const audit = await shippedAudit();
+  for (const stale of [1, 2]) {
+    rejects(
+      { ...audit, schemaVersion: stale },
+      FLUX2_COMPATIBILITY_AUDIT.artifactProof,
+      /identity is invalid/,
+      `a v${stale} record describes a closure this validator no longer recognizes`,
+    );
+  }
+});
 
-  // Both validators require v1's exact `command`; only JS used to.
-  rejects({ ...audit, command: "git rev-parse" }, null, /identity is invalid/, "v1 command is pinned");
-  rejects({ ...audit, command: 7 }, null, /identity is invalid/, "a non-string command is not a command");
+test("SC-17524 a moved build input demands a digest, and is adjudicated by one", async () => {
+  const audit = await shippedAudit();
+  for (const input of [CARGO_LOCK, "rust-toolchain.toml"]) {
+    rejects(
+      v3Record(audit, { moved: [input] }),
+      PROOF,
+      /compiled-artifact proof is invalid/,
+      `${input} moving must force the artifact layer, not sail through the free path`,
+    );
+    assert.ok(
+      accepts(v3Record(audit, { moved: [input], artifact: cudaArtifact() }), PROOF),
+      `${input} reaches the measured binary only through the build, so its digest decides`,
+    );
+  }
+  // ...and only a binary whose own report claims the input may adjudicate it. The frozen set alone
+  // must not be able to grant it, because the frozen set is a human transcription.
+  rejects(
+    v3Record(audit, { moved: [CARGO_LOCK], artifact: cudaArtifact({ adjudicates: [CANDLE_GEN] }) }),
+    PROOF,
+    /cannot adjudicate Cargo\.lock/,
+    "a record that does not claim the lockfile must not have it granted by the frozen set",
+  );
 });
 
 test("SC-17497 a v2 record with an unmoved closure needs no build and no artifact block", async () => {
   const audit = await shippedAudit();
-  assert.ok(accepts(v2Record(audit), null));
+  assert.ok(accepts(v3Record(audit), null));
   rejects(
-    v2Record(audit),
+    v3Record(audit),
     PROOF,
     /missing its expected artifact proof/,
     "a proof left frozen after the closure went quiet demands a build that is not due",
@@ -1024,12 +1096,12 @@ test("SC-17497 a v2 record with an unmoved closure needs no build and no artifac
 test("SC-17497 a doc-comment move is authorized by a matching compiled-artifact digest", async () => {
   // The sc-16961 shape exactly: one crate tree moved, identical compiled code.
   const audit = await shippedAudit();
-  assert.ok(accepts(v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), PROOF));
+  assert.ok(accepts(v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), PROOF));
 
   // Mutation check: the digest is the whole proof, so one character must be fatal.
   const off = `sha256:d${"c".repeat(63)}`;
   rejects(
-    v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact({ capturedDigest: off, compatibleDigest: off }) }),
+    v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact({ capturedDigest: off, compatibleDigest: off }) }),
     PROOF,
     /compiled-artifact proof is invalid/,
   );
@@ -1038,7 +1110,7 @@ test("SC-17497 a doc-comment move is authorized by a matching compiled-artifact 
 test("SC-17497 every way of faking the artifact proof is refused", async () => {
   const audit = await shippedAudit();
   const bad = (label, overrides, pattern = /compiled-artifact proof is invalid/) =>
-    rejects(v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact(overrides) }), PROOF, pattern, label);
+    rejects(v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact(overrides) }), PROOF, pattern, label);
 
   bad("a Metal build is not proof of the CUDA artifact the capture ran", { lane: "metal", features: ["metal"] });
   bad("digests that disagree are a re-capture, not an authorization", {
@@ -1053,18 +1125,18 @@ test("SC-17497 every way of faking the artifact proof is refused", async () => {
   bad("a record whose own adjudicable set is not a list of paths", { adjudicates: "everything" });
 
   rejects(
-    v2Record(audit, { moved: [CANDLE_GEN] }),
+    v3Record(audit, { moved: [CANDLE_GEN] }),
     PROOF,
     /compiled-artifact proof is invalid/,
     "a moved path with no artifact block at all",
   );
   rejects(
-    { ...v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), changedClosurePaths: [] },
+    { ...v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), changedClosurePaths: [] },
     PROOF,
     /misdeclares which closure paths changed/,
     "understating which paths moved hides a second, unproven change",
   );
-  const tamperedCapture = v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() });
+  const tamperedCapture = v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() });
   tamperedCapture.auditedObjects[0].capturedObject = "a".repeat(40);
   rejects(
     tamperedCapture,
@@ -1073,21 +1145,21 @@ test("SC-17497 every way of faking the artifact proof is refused", async () => {
     "a captured object that does not match the code the measurements ran on",
   );
   rejects(
-    { ...v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), schemaVersion: 3 },
+    { ...v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), schemaVersion: 4 },
     PROOF,
     /identity is invalid/,
-    "a v3 nobody has defined",
+    "a v4 nobody has defined",
   );
-  // v2 does not pin `command` to a literal, so this is the only thing standing between the record
+  // v3 does not pin `command` to a literal, so this is the only thing standing between the record
   // and a non-string in the field both languages read.
   rejects(
-    { ...v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), command: 7 },
+    { ...v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), command: 7 },
     PROOF,
     /identity is invalid/,
-    "a v2 command that is not a string",
+    "a v3 command that is not a string",
   );
   rejects(
-    v2Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }),
+    v3Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }),
     null,
     /compiled-artifact proof is invalid/,
     "the record may not authorize itself: with no proof frozen in source there is no proof",
@@ -1100,12 +1172,12 @@ test("SC-17497 a digest cannot speak for a closure path the audited binary never
   // green — strictly worse than the false positive this story removes.
   const audit = await shippedAudit();
   rejects(
-    v2Record(audit, { moved: [RUNTIME_CUDA], artifact: cudaArtifact() }),
+    v3Record(audit, { moved: [RUNTIME_CUDA], artifact: cudaArtifact() }),
     PROOF,
     /cannot adjudicate crates\/bundles\/runtime-cuda/,
   );
   rejects(
-    v2Record(audit, { moved: [CANDLE_GEN, RUNTIME_CUDA], artifact: cudaArtifact() }),
+    v3Record(audit, { moved: [CANDLE_GEN, RUNTIME_CUDA], artifact: cudaArtifact() }),
     PROOF,
     /cannot adjudicate crates\/bundles\/runtime-cuda/,
     "riding along with an adjudicable path does not launder it",
@@ -1114,14 +1186,14 @@ test("SC-17497 a digest cannot speak for a closure path the audited binary never
   // The frozen set is a HUMAN TRANSCRIPTION, and unlike the digest an over-wide one fails OPEN.
   // Intersecting it with the record's own set means both halves must be wrong the same way.
   rejects(
-    v2Record(audit, { moved: [RUNTIME_CUDA], artifact: cudaArtifact() }),
+    v3Record(audit, { moved: [RUNTIME_CUDA], artifact: cudaArtifact() }),
     { digest: ARTIFACT_DIGEST, adjudicates: [...ADJUDICATES, RUNTIME_CUDA] },
     /cannot adjudicate crates\/bundles\/runtime-cuda/,
     "an over-wide frozen set is still checked against what the build reported linking",
   );
   assert.ok(
     accepts(
-      v2Record(audit, {
+      v3Record(audit, {
         moved: [RUNTIME_CUDA],
         artifact: cudaArtifact({ adjudicates: [...ADJUDICATES, RUNTIME_CUDA] }),
       }),

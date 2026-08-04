@@ -113,7 +113,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # `inference-compatibility-<rev>.json` proof, and that proof's audited-object set includes
     # `crates/media/candle-gen/candle-gen`, which 277f->35251a88 changes -- so the window has to be
     # re-audited by measurement, not widened by editing this assertion.
-    audited_live_revision = "277f423822bf1899340ed3d867c3d6a773473d7b"
+    audited_live_revision = "06e0c5e919918aeb7cec966a83ce6fe394feec5e"
     worker_manifest = (
         ROOT / "crates" / "sceneworks-worker" / "Cargo.toml"
     ).read_text(encoding="utf-8")

@@ -7,15 +7,20 @@ import test from "node:test";
 
 import {
   AUDIT_ARTIFACT_TARGET,
+  AUDIT_CLOSURE_BUILD_INPUTS,
+  AUDIT_CLOSURE_CRATES,
   AUDIT_CLOSURE_PATHS,
+  assertComparableToolchains,
   assertRealCudaCompiler,
   auditRecord,
   buildMeasurementBinary,
   changedClosurePaths,
   closureObjectPairs,
+  closureRelativePath,
   coveredClosurePaths,
-  encodedRustflags,
   digestBytes,
+  encodedRustflags,
+  reproducibleLinkFlags,
   resolveRevision,
   selectMeasurementExecutable,
 } from "./inference-artifact-audit.mjs";
@@ -46,7 +51,12 @@ function closureRepo() {
   git("config", "user.email", "test@example.com");
   git("config", "user.name", "test");
   for (const objectPath of AUDIT_CLOSURE_PATHS) {
-    const file = objectPath.endsWith(".toml") ? path.join(repo, objectPath) : path.join(repo, objectPath, "src.rs");
+    // Build inputs are FILES at the repo root; crate trees are directories. Getting that backwards
+    // makes `git rev-parse <rev>:Cargo.lock` name a tree object and the fixture stops resembling
+    // the thing under test.
+    const file = AUDIT_CLOSURE_BUILD_INPUTS.includes(objectPath)
+      ? path.join(repo, objectPath)
+      : path.join(repo, objectPath, "src.rs");
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, `fn ${objectPath.replace(/[^a-z]/g, "_")}() {}\n`);
   }
@@ -90,7 +100,7 @@ test("a revision that is not a commit is refused rather than recorded as an abbr
 
 test("the fast path emits no artifact block, and a moved path cannot emit a record without one", () => {
   const clean = auditRecord({ captured: OBJECT("a"), compatible: OBJECT("b"), pairs: pairs() });
-  assert.equal(clean.schemaVersion, 2);
+  assert.equal(clean.schemaVersion, 3);
   assert.deepEqual(clean.changedClosurePaths, []);
   assert.ok(!("auditedArtifact" in clean), "claiming an artifact proof that was never built would be a lie");
 
@@ -214,6 +224,11 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
     const flags = env.CARGO_ENCODED_RUSTFLAGS.split("\u001f");
     assert.ok(flags.includes("--remap-path-prefix=/w=/inference"));
     assert.ok(flags.some((flag) => /^--remap-path-prefix=.*=\/cargo$/.test(flag)));
+    assert.deepEqual(
+      flags.filter((flag) => flag.startsWith("-Clink-arg=")),
+      reproducibleLinkFlags(),
+      "the host's reproducibility flags ride every build, not just the first",
+    );
   }
   assert.notEqual(first.digest, second.digest, "different bytes, different digest");
   assert.equal(first.executable, "/w/target/deps/candle_gen_flux2-1");
@@ -222,6 +237,27 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
   // single up-front read would record one that did not build both artifacts.
   assert.deepEqual(toolchains, [["/w", 1], ["/w", 2]]);
   assert.equal(first.rustc, second.rustc);
+});
+
+test("a rustc bump between the two revisions is a hard stop, not a comparison", () => {
+  // sc-17524 put `rust-toolchain.toml` in the closure so a rustc bump can no longer take the free
+  // path — it forces the build, and this is what the build then does with it. Asserted directly
+  // because inside `main` it sits behind two real CUDA builds, so nothing ever reached it.
+  const args = { captured: "5ffd7612", compatible: "06e0c5e9" };
+  assert.equal(
+    assertComparableToolchains({ ...args, capturedRustc: "rustc 1.96.0", compatibleRustc: "rustc 1.96.0" }),
+    "rustc 1.96.0",
+  );
+  assert.throws(
+    () => assertComparableToolchains({ ...args, capturedRustc: "rustc 1.96.0", compatibleRustc: "rustc 1.97.0" }),
+    /different toolchains.*not comparable/s,
+    "two compilers cannot produce comparable digests, so this may never fall through to a compare",
+  );
+  // The message has to name both, or an operator cannot tell which side moved.
+  assert.throws(
+    () => assertComparableToolchains({ ...args, capturedRustc: "rustc 1.96.0", compatibleRustc: "rustc 1.97.0" }),
+    /5ffd7612: rustc 1\.96\.0[\s\S]*06e0c5e9: rustc 1\.97\.0/,
+  );
 });
 
 test("two revisions built under different toolchains are refused, not quietly compared", async () => {
@@ -263,6 +299,11 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
   ];
   const covered = coveredClosurePaths(compiled, "/w");
   assert.deepEqual(covered, [
+    // sc-17524: the three build inputs are covered because they are inputs to THIS build — cargo
+    // never names them, so compile coverage alone would leave them permanently unadjudicable.
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
     "crates/contracts/gen-core",
     "crates/media/candle-gen/candle-gen",
     "crates/media/candle-gen/candle-gen-pid",
@@ -273,6 +314,21 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
     !covered.includes("crates/bundles/runtime-cuda"),
     "runtime-cuda depends on the provider, not the reverse — the measurement binary never links it",
   );
+
+  // The build-input inference is anchored to the audited package, not to "some build happened".
+  // Without that anchor an empty or unrecognized cargo report still hands back three adjudicable
+  // paths, which is a digest signing for inputs to a build it cannot be shown to have come from.
+  const withoutTheTarget = compiled.filter((line) => !line.includes(`${AUDIT_ARTIFACT_TARGET.package}/Cargo.toml`));
+  assert.deepEqual(coveredClosurePaths(withoutTheTarget, "/w"), [
+    "crates/contracts/gen-core",
+    "crates/media/candle-gen/candle-gen",
+    "crates/media/candle-gen/candle-gen-pid",
+    "crates/media/candle-gen/vendor/candle-kernels",
+  ]);
+  assert.deepEqual(coveredClosurePaths([], "/w"), [], "a report that compiled nothing covers nothing");
+  for (const input of AUDIT_CLOSURE_BUILD_INPUTS) {
+    assert.ok(!coveredClosurePaths(withoutTheTarget, "/w").includes(input), `${input} needs the audited target`);
+  }
 
   // Regression: `os.tmpdir()` is `/var/folders/...` on macOS while cargo reports manifests under the
   // canonical `/private/var/folders/...`. Comparing those two spellings resolved EVERY closure path
@@ -310,6 +366,42 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
   );
 });
 
+test("a manifest path is compared in POSIX form on every host, not in the host's own separators", () => {
+  // sc-17587. `path.relative` returns NATIVE separators, so on Windows every manifest resolved to
+  // "outside the worktree", the covered set came back empty, and the audit refused its own build —
+  // on the only box that can produce a `cuda` record. It reached main green because on the
+  // Linux/macOS `check` lanes `path.sep` is already "/", so a test using the host implementation
+  // passes with or without the normalisation. Driving `path.win32` explicitly is what makes this
+  // guard bite everywhere instead of only on the machine that was already broken.
+  assert.equal(
+    closureRelativePath("D:\\w", "D:\\w\\crates\\contracts\\gen-core\\Cargo.toml", path.win32),
+    "crates/contracts/gen-core/Cargo.toml",
+  );
+  assert.equal(
+    closureRelativePath("/w", "/w/crates/contracts/gen-core/Cargo.toml", path.posix),
+    "crates/contracts/gen-core/Cargo.toml",
+  );
+  // Out-of-tree stays out of tree in both dialects — the normalisation must not widen coverage.
+  assert.equal(closureRelativePath("D:\\w", "D:\\elsewhere\\Cargo.toml", path.win32), null);
+  assert.equal(closureRelativePath("/w", "/elsewhere/Cargo.toml", path.posix), null);
+  assert.equal(closureRelativePath("D:\\w", "C:\\w\\crates\\x\\Cargo.toml", path.win32), null);
+});
+
+test("the Windows link timestamp is stamped out, because a digest that moves on its own proves nothing", () => {
+  // Found by running the audit for real on the RTX box. `link.exe` writes the LINK TIME into the
+  // PE header, so the same inference revision built twice hashed differently (5ffd7612 gave
+  // sha256:2164e988… then sha256:57f15abb…) and the cuda lane could only ever report ARTIFACTS
+  // DIFFER — an unfalsifiable "re-capture on an RTX PRO 6000" for code that had not changed.
+  // Asserted per-platform rather than against `process.platform`, so this stays meaningful on the
+  // Linux/macOS CI that runs it and cannot pass by agreeing with itself.
+  // /Brepro ALONE does not fix it — measured, not assumed: it hashes the image, and the image still
+  // carries a varying PDB signature. /DEBUG:NONE is the flag that decides, by stopping link.exe
+  // emitting a PDB at all. Asserting both means dropping either one goes red.
+  assert.deepEqual(reproducibleLinkFlags("win32"), ["-Clink-arg=/Brepro", "-Clink-arg=/DEBUG:NONE"]);
+  assert.deepEqual(reproducibleLinkFlags("darwin"), [], "Mach-O carries no link timestamp");
+  assert.deepEqual(reproducibleLinkFlags("linux"), [], "nor does ELF");
+});
+
 test("a remap path containing a space survives, because the CUDA box is Windows", () => {
   // cargo splits RUSTFLAGS on WHITESPACE. The only machine that can produce a `cuda` record is the
   // Windows RTX box, whose default temp directory sits under a profile path that routinely contains
@@ -328,5 +420,23 @@ test("the audited artifact names the target that actually produced the measureme
   assert.equal(AUDIT_ARTIFACT_TARGET.package, "candle-gen-flux2");
   assert.equal(AUDIT_ARTIFACT_TARGET.test, "tests::flux2_dev_probed_generate_for_offload_ab");
   assert.equal(AUDIT_ARTIFACT_TARGET.profile, "release");
-  assert.equal(AUDIT_CLOSURE_PATHS.length, 7);
+  assert.ok(
+    AUDIT_CLOSURE_CRATES.includes(AUDIT_ARTIFACT_TARGET.closurePath),
+    "the build-input gate is anchored to this path, so it has to be one of the audited crate trees",
+  );
+});
+
+test("the closure covers the workspace build inputs, not only the crate trees", () => {
+  // sc-17524. `Cargo.lock` is the realized gap: it moved between 5ffd7612 and 277f4238 while all
+  // seven crate trees stayed byte-identical, so the free path reported "no build needed" over a
+  // changed build input. Asserting the membership rather than only the length means dropping one
+  // and adding another cannot keep this green.
+  assert.deepEqual([...AUDIT_CLOSURE_BUILD_INPUTS], ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]);
+  assert.equal(AUDIT_CLOSURE_PATHS.length, 9);
+  assert.deepEqual([...AUDIT_CLOSURE_PATHS], [...AUDIT_CLOSURE_BUILD_INPUTS, ...AUDIT_CLOSURE_CRATES]);
+  assert.equal(
+    new Set(AUDIT_CLOSURE_PATHS).size,
+    AUDIT_CLOSURE_PATHS.length,
+    "a duplicated path would be audited twice and validated as a closure one entry short",
+  );
 });
