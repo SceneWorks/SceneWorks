@@ -3892,9 +3892,9 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
-            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+            "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -3905,9 +3905,9 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
-            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+            "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -3918,9 +3918,9 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
-            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+            "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -3931,9 +3931,9 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
-            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+            "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -3945,9 +3945,9 @@
           {
             "abi": 3, "loadShape": "deferred_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
-            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
+            "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4097,7 +4097,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4106,7 +4106,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4115,7 +4115,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4124,7 +4124,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4133,7 +4133,7 @@
           {
             "abi": 3, "loadShape": "deferred_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -9106,6 +9106,28 @@
       "mlx": {
         "minMemoryGb": 44,
         "quantize": 4
+      },
+      // SC-15839: static capability for the bespoke Candle route is separate from calibration and
+      // measurement. The provider/worker execute the full ladder only for the exact identity request;
+      // no base-FLUX, LoRA, no-overlay, or PiD cell inherits it. `vramGbByTier` and `calibrations` are
+      // intentionally absent until a current full PuLID request has been measured and promoted, so
+      // production admission still fails closed to the established resident path.
+      "candle": {
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "overlays": ["identity"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["identity"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["identity"]
+          }
+        }
       },
       // sc-10103 (epic 9083): the backbone now rides the ungated `SceneWorks/flux1-dev-mlx` re-host
       // (FLUX.1 [dev] Non-Commercial License redistributed with LICENSE + NOTICE) — no HF token /

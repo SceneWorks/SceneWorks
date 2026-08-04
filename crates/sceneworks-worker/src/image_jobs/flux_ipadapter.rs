@@ -464,7 +464,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -477,6 +477,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                         ip_adapter_scale: ip_scale,
                         seed: seed as u64,
                         memory: generation_memory,
+                        preview: preview.clone(),
                         cancel: cancel.clone(),
                     };
                     let out = match model.generate(&req, &reference, &mut *on_progress) {

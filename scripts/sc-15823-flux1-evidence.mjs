@@ -11,9 +11,9 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EVIDENCE = path.join(ROOT, "docs/generated/memory-calibration-evidence.json");
 const PLAN = path.join(ROOT, "config/memory-calibration-plan.json");
-const SCENEWORKS_REVISION = "002e19717c322ba0520ebff28c96c71d0dea21eb";
-const MATRIX_SOURCE_REVISION = "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2";
-const INFERENCE_REVISION = "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b";
+const SCENEWORKS_REVISION = "f936e7e6a17a0b592752f634d21db17f5e8f2db7";
+const MATRIX_SOURCE_REVISION = "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5";
+const INFERENCE_REVISION = "5f973a73bf00307240afd81d2778ba9d89349e51";
 const FINGERPRINT = "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1";
 
 const HARDWARE = {
@@ -33,13 +33,16 @@ const MODELS = [
     repository: "SceneWorks/flux1-schnell-mlx",
     revision: "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
     inventorySha256: "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+    cachePath: "E:/huggingface/hub/models--SceneWorks--flux1-schnell-mlx/snapshots/bba3ae01dfd94089f173c05edd4e1a4c551f2599/q4",
+    cacheBytes: 17008176476,
+    sourceSlug: "schnell",
     boundedQuality: { maximumError: 29, meanError: 0.2289120356241862, rootMeanSquareError: 0.5452312653086621 },
     rungs: [
-      ["resident", 17642573594, 271, "fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0", "2026-08-03T20:15:23.1475905Z"],
-      ["staged_residency", 14588695430, 208, "fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0", "2026-08-03T20:20:57.7832478Z"],
-      ["bounded_decode", 9608827400, 104, "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef", "2026-08-03T20:27:39.0831092Z"],
-      ["bounded_attention", 8234088968, 91, "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef", "2026-08-03T20:34:09.7226597Z"],
-      ["bounded_transformer_residency", 3843456916, 45, "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef", "2026-08-03T20:42:36.5323063Z"],
+      ["resident", 17642573594, 236, "fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0", "2026-08-04T03:10:32.1204629Z", "ims-6ba27c6bb1b02924f919", "233c14cbf39c2d9a351fad195424f9c3a56ffcbdde4f72a69625a93f3d92d861"],
+      ["staged_residency", 14588695430, 208, "fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0", "2026-08-04T03:11:36.9096164Z", "ims-68cd302c4d981863ae34", "6296ad15ea78b71c50020f743dcfd3fa32697eb749078e62b5070e704e40269b"],
+      ["bounded_decode", 9608827400, 105, "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef", "2026-08-04T03:13:09.7107643Z", "ims-4b4ab770efa632199d23", "4a0931e528f5a88095281daa8a27622846ddfbb1f5b6be4e0aadf906044fc8d9"],
+      ["bounded_attention", 8234088968, 91, "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef", "2026-08-04T03:14:30.0191249Z", "ims-689c72239ec5bb84594f", "7a916bfa98f6186594c725244a7834a15bdc739dd7ac984caa5a66936d497b36"],
+      ["bounded_transformer_residency", 3843456916, 45, "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef", "2026-08-04T03:16:29.1439468Z", "ims-bd6bf873c3afa366ebbc", "5d0e6f0f0bd3170450781a500d95227d1082cd481cff42929c19b4db85c9db63"],
     ],
   },
   {
@@ -48,13 +51,16 @@ const MODELS = [
     repository: "SceneWorks/flux1-dev-mlx",
     revision: "323fd12d79f78ad444e882e8d8e871914584f2b9",
     inventorySha256: "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+    cachePath: "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+    cacheBytes: 17013959875,
+    sourceSlug: "dev",
     boundedQuality: { maximumError: 21, meanError: 0.26471201578776044, rootMeanSquareError: 0.5180919471938068 },
     rungs: [
-      ["resident", 17651074970, 224, "009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964", "2026-08-03T20:47:21.3279383Z"],
-      ["staged_residency", 14597196806, 191, "009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964", "2026-08-03T20:53:15.6360456Z"],
-      ["bounded_decode", 9858108040, 117, "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4", "2026-08-03T20:58:25.7002488Z"],
-      ["bounded_attention", 8272605832, 91, "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4", "2026-08-03T21:03:34.2004891Z"],
-      ["bounded_transformer_residency", 3843457940, 45, "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4", "2026-08-03T21:09:20.3699677Z"],
+      ["resident", 17651074970, 238, "009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964", "2026-08-04T03:17:40.2449084Z", "ims-864721b19f3af847b3b0", "da72dc96457dd513765ae9f8b818eb65aa418f1e5ff28dc24c06ec9e12098ed7"],
+      ["staged_residency", 14597196806, 205, "009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964", "2026-08-04T03:18:38.1717537Z", "ims-7e019daeae73957fa26c", "53b2a9e3ca35a94b37e79b562da2d08204b6e0f241ac82643968d88c3275fab8"],
+      ["bounded_decode", 9858108040, 107, "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4", "2026-08-04T03:24:22.5234271Z", "ims-6d120db7e473577a8666", "dbe87150385cc27055a0bda7af9634edaad59c69375ea432a0bd36dfae33a0eb"],
+      ["bounded_attention", 8272605832, 94, "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4", "2026-08-04T03:25:55.8294237Z", "ims-7e8d2d3865ddc7416364", "0ca7e56af43e6cc04631ee1a8c6ddc090c25f9841837887ceb08b38137aaf7af"],
+      ["bounded_transformer_residency", 3843457940, 45, "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4", "2026-08-04T03:27:45.5391525Z", "ims-80d540a194d518ccd289", "7a632e0c15bb6f69a4cfe63f1256de316425e03b873fdb0e0d29d063489c96fc"],
     ],
   },
 ];
@@ -78,6 +84,20 @@ const RUNG_COMPOSITIONS = {
     "resident", "staged_residency", "bounded_decode", "bounded_attention",
     "bounded_transformer_residency",
   ],
+};
+const RUNG_LOG_SUFFIX = {
+  resident: "resident",
+  staged_residency: "staged-residency",
+  bounded_decode: "bounded-decode",
+  bounded_attention: "bounded-attention",
+  bounded_transformer_residency: "bounded-transformer-residency",
+};
+const RUNG_ENV = {
+  resident: "resident",
+  staged_residency: "staged",
+  bounded_decode: "bounded-decode",
+  bounded_attention: "bounded-attention",
+  bounded_transformer_residency: "bounded-transformer",
 };
 
 const phase = (peak) => ({
@@ -178,6 +198,47 @@ export function flux1EvidenceRecords() {
   return MODELS.flatMap((model) => model.rungs.map((rung) => makeRecord(model, rung)));
 }
 
+function makeSourceSession(model, rungTuple) {
+  const [rung, , , outputSha256, capturedAt, id, stdoutSha256] = rungTuple;
+  const testName = model.sourceSlug === "schnell"
+    ? "flux_schnell_probed_generate_for_offload_ab"
+    : "flux_dev_probed_generate_for_offload_ab";
+  return {
+    id,
+    kind: "physical_cuda",
+    command: `CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=${RUNG_ENV[rung]} candle_gen_flux-d39d12fd79fcc5dc.exe tests::${testName} --ignored --nocapture --test-threads=1`,
+    sourcePath: `docs/calibration/sc-15823-refresh-${model.sourceSlug}-q4-${RUNG_LOG_SUFFIX[rung]}.log`,
+    capturedAt,
+    repositories: {
+      sceneWorks: { revision: SCENEWORKS_REVISION, dirty: false },
+      // The physical outputs and device-format sidecars lived in inference/.tmp during capture.
+      inference: { revision: INFERENCE_REVISION, dirty: true },
+    },
+    hardware: HARDWARE,
+    target: { tier: "q4", mode: "text_to_image", overlay: "none", rung },
+    stdoutSha256,
+    inputs: [{
+      role: "base",
+      path: model.cachePath,
+      bytes: model.cacheBytes,
+      sha256: model.inventorySha256,
+      repository: model.repository,
+      resolvedRevision: model.revision,
+      variant: "q4",
+    }],
+    outputs: [{
+      path: `.tmp/sc-15823-refresh-outputs/${model.sourceSlug}-${RUNG_ENV[rung]}.rgb`,
+      sha256: outputSha256,
+    }],
+    claims: ["memory", "loadability", "overlay"],
+    result: "passed",
+  };
+}
+
+export function flux1SourceSessions() {
+  return MODELS.flatMap((model) => model.rungs.map((rung) => makeSourceSession(model, rung)));
+}
+
 export function flux1CalibrationPlans() {
   return flux1EvidenceRecords().map((record) => ({
     name: `candle-${record.target.modelId}-q4-${record.strategy.rung}-sc15823`,
@@ -210,10 +271,14 @@ export function updateBundle(existing) {
     !(record.backend === "candle" && ["flux1_schnell", "flux1_dev"].includes(record.target.provider)),
   );
   records.push(...flux1EvidenceRecords());
+  const sourceSessions = (existing.sourceSessions ?? []).filter(
+    (session) => !session.sourcePath.startsWith("docs/calibration/sc-15823-refresh-"),
+  );
+  sourceSessions.push(...flux1SourceSessions());
   const bundle = {
     schemaVersion: 4,
     harnessVersion: HARNESS_VERSION,
-    sourceSessions: existing.sourceSessions ?? [],
+    sourceSessions: sourceSessions.sort((left, right) => left.id.localeCompare(right.id)),
     records: records.sort((left, right) => left.id.localeCompare(right.id)),
   };
   validateBundle(bundle);

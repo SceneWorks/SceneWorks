@@ -26,13 +26,13 @@
       "candle": false
     },
     "chroma1_base": {
-      "candle": false
+      "candle": true
     },
     "chroma1_flash": {
-      "candle": false
+      "candle": true
     },
     "chroma1_hd": {
-      "candle": false
+      "candle": true
     },
     "flux2_dev": {
       "candle": true
@@ -47,10 +47,10 @@
       "candle": true
     },
     "flux_dev": {
-      "candle": false
+      "candle": true
     },
     "flux_schnell": {
-      "candle": false
+      "candle": true
     },
     "ideogram_4": {
       "candle": true
@@ -143,13 +143,13 @@
       "candle": false
     },
     "z_image": {
-      "candle": false
+      "candle": true
     },
     "z_image_edit": {
-      "candle": false
+      "candle": true
     },
     "z_image_turbo": {
-      "candle": false
+      "candle": true
     }
   }
 }

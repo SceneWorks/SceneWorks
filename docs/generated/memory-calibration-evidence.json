@@ -3,6 +3,233 @@
   "records": [
     {
       "artifact": {
+        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+        "repository": "SceneWorks/flux1-schnell-mlx",
+        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "capturedAt": "2026-08-04T03:16:29.1439468Z",
+      "diagnostics": {
+        "adapter": "candle-flux1-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 3843456916
+          },
+          {
+            "name": "driverRenderedOverallPeak",
+            "unit": "0.1 GB (diagnostic display)",
+            "value": 45
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux_schnell-q4-seed42-1024x1024-output-b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-04b9d90be4e8b1e6d62b",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ce7057c1bf5435821694",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 3843456916,
+          "allocatorBytes": 3843456916,
+          "deviceBytes": 3843456916,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843456916
+        },
+        "decode": {
+          "activeBytes": 3843456916,
+          "allocatorBytes": 3843456916,
+          "deviceBytes": 3843456916,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843456916
+        },
+        "denoise": {
+          "activeBytes": 3843456916,
+          "allocatorBytes": 3843456916,
+          "deviceBytes": 3843456916,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843456916
+        },
+        "overall": {
+          "activeBytes": 3843456916,
+          "allocatorBytes": 3843456916,
+          "deviceBytes": 3843456916,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843456916
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 3843456916,
+        "decode": 3843456916,
+        "denoise": 3843456916,
+        "overall": 3843456916
+      },
+      "quality": {
+        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
+        "identicalInputs": true,
+        "maximumError": 29,
+        "maximumErrorThreshold": 29,
+        "meanError": 0.2289120356241862,
+        "meanErrorThreshold": 0.2289120356241862,
+        "result": "passed",
+        "rootMeanSquareError": 0.5452312653086621,
+        "rootMeanSquareErrorThreshold": 0.5452312653086621
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 3843456916,
+          "name": "exact_fit",
+          "predictedBytes": 3843456916,
+          "reason": "selector equality boundary is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "selector refuses unverifiable budgets in conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "cancellation cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "fault cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512,
+          "transformerWindowComponent": "dit",
+          "transformerWindowSize": 1
+        },
+        "rung": "bounded_transformer_residency"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              128
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          },
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 128,
+              "decodeTileEdge": 512,
+              "transformerWindowComponent": "dit",
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_schnell",
+        "overlay": "none",
+        "provider": "flux1_schnell",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
         "repository": "SceneWorks/krea-2-turbo-mlx",
         "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
         "variant": "q4"
@@ -675,14 +902,14 @@
     },
     {
       "artifact": {
-        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
-        "repository": "SceneWorks/flux1-dev-mlx",
-        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+        "repository": "SceneWorks/flux1-schnell-mlx",
+        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
         "variant": "q4"
       },
       "backend": "candle",
       "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T21:03:34.2004891Z",
+      "capturedAt": "2026-08-04T03:10:32.1204629Z",
       "diagnostics": {
         "adapter": "candle-flux1-memory-ladder-v1",
         "blockers": [],
@@ -691,12 +918,12 @@
           {
             "name": "requestLiveAllocationPeak",
             "unit": "bytes",
-            "value": 8272605832
+            "value": 17642573594
           },
           {
             "name": "driverRenderedOverallPeak",
             "unit": "0.1 GB (diagnostic display)",
-            "value": 91
+            "value": 236
           },
           {
             "name": "outputRgbBytes",
@@ -706,7 +933,7 @@
         ]
       },
       "evidenceScope": "authoritative",
-      "fixture": "flux_dev-q4-seed42-1024x1024-output-3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4",
+      "fixture": "flux_schnell-q4-seed42-1024x1024-output-fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0",
       "hardware": {
         "computeCapability": "12.0",
         "deviceId": "0",
@@ -717,77 +944,77 @@
         "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
       },
       "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-387942f2416dbce52259",
+      "id": "imc-3e535b3422a162b35758",
       "loadShape": "eager_materialization",
       "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
+        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
         "result": "passed"
       },
-      "logicalCaseId": "implan-1d219abed133ede83bdc",
+      "logicalCaseId": "implan-bccf3cc170fa2bbfcf63",
       "negativeMutation": null,
       "observedMemory": {
         "conditioning": {
-          "activeBytes": 8272605832,
-          "allocatorBytes": 8272605832,
-          "deviceBytes": 8272605832,
+          "activeBytes": 17642573594,
+          "allocatorBytes": 17642573594,
+          "deviceBytes": 17642573594,
           "reclaimableBytes": 0,
-          "wiredBytes": 8272605832
+          "wiredBytes": 17642573594
         },
         "decode": {
-          "activeBytes": 8272605832,
-          "allocatorBytes": 8272605832,
-          "deviceBytes": 8272605832,
+          "activeBytes": 17642573594,
+          "allocatorBytes": 17642573594,
+          "deviceBytes": 17642573594,
           "reclaimableBytes": 0,
-          "wiredBytes": 8272605832
+          "wiredBytes": 17642573594
         },
         "denoise": {
-          "activeBytes": 8272605832,
-          "allocatorBytes": 8272605832,
-          "deviceBytes": 8272605832,
+          "activeBytes": 17642573594,
+          "allocatorBytes": 17642573594,
+          "deviceBytes": 17642573594,
           "reclaimableBytes": 0,
-          "wiredBytes": 8272605832
+          "wiredBytes": 17642573594
         },
         "overall": {
-          "activeBytes": 8272605832,
-          "allocatorBytes": 8272605832,
-          "deviceBytes": 8272605832,
+          "activeBytes": 17642573594,
+          "allocatorBytes": 17642573594,
+          "deviceBytes": 17642573594,
           "reclaimableBytes": 0,
-          "wiredBytes": 8272605832
+          "wiredBytes": 17642573594
         }
       },
       "predictedPeakBytes": {
-        "conditioning": 8272605832,
-        "decode": 8272605832,
-        "denoise": 8272605832,
-        "overall": 8272605832
+        "conditioning": 17642573594,
+        "decode": 17642573594,
+        "denoise": 17642573594,
+        "overall": 17642573594
       },
       "quality": {
         "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
         "identicalInputs": true,
-        "maximumError": 21,
-        "maximumErrorThreshold": 21,
-        "meanError": 0.26471201578776044,
-        "meanErrorThreshold": 0.26471201578776044,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0,
+        "meanError": 0,
+        "meanErrorThreshold": 0,
         "result": "passed",
-        "rootMeanSquareError": 0.5180919471938068,
-        "rootMeanSquareErrorThreshold": 0.5180919471938068
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0
       },
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
         }
       },
       "scenarios": [
         {
-          "effectiveBudgetBytes": 8272605832,
+          "effectiveBudgetBytes": 17642573594,
           "name": "exact_fit",
-          "predictedBytes": 8272605832,
+          "predictedBytes": 17642573594,
           "reason": "selector equality boundary is covered by conformance tests",
           "result": "passed"
         },
@@ -830,46 +1057,16 @@
       "status": "runtime_complete",
       "strategy": {
         "engagedRungs": [
-          "resident",
-          "staged_residency",
-          "bounded_decode",
-          "bounded_attention"
+          "resident"
         ],
-        "parameters": {
-          "attentionChunkSize": 67108864,
-          "decodeOverlap": 128,
-          "decodeTileEdge": 512
-        },
-        "rung": "bounded_attention"
+        "parameters": {},
+        "rung": "resident"
       },
       "sweep": {
-        "axes": [
-          {
-            "parameter": "decodeTileEdge",
-            "testedValues": [
-              512
-            ]
-          },
-          {
-            "parameter": "decodeOverlap",
-            "testedValues": [
-              128
-            ]
-          },
-          {
-            "parameter": "attentionChunkSize",
-            "testedValues": [
-              67108864
-            ]
-          }
-        ],
+        "axes": [],
         "cases": [
           {
-            "parameters": {
-              "attentionChunkSize": 67108864,
-              "decodeOverlap": 128,
-              "decodeTileEdge": 512
-            },
+            "parameters": {},
             "result": "passed"
           }
         ],
@@ -883,9 +1080,9 @@
           "width": 1024
         },
         "mode": "text_to_image",
-        "modelId": "flux_dev",
+        "modelId": "flux_schnell",
         "overlay": "none",
-        "provider": "flux1_dev",
+        "provider": "flux1_schnell",
         "tier": "q4"
       }
     },
@@ -1537,213 +1734,6 @@
     },
     {
       "artifact": {
-        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
-        "repository": "SceneWorks/flux1-schnell-mlx",
-        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-        "variant": "q4"
-      },
-      "backend": "candle",
-      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:27:39.0831092Z",
-      "diagnostics": {
-        "adapter": "candle-flux1-memory-ladder-v1",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "requestLiveAllocationPeak",
-            "unit": "bytes",
-            "value": 9608827400
-          },
-          {
-            "name": "driverRenderedOverallPeak",
-            "unit": "0.1 GB (diagnostic display)",
-            "value": 104
-          },
-          {
-            "name": "outputRgbBytes",
-            "unit": "bytes",
-            "value": 3145728
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "flux_schnell-q4-seed42-1024x1024-output-b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef",
-      "hardware": {
-        "computeCapability": "12.0",
-        "deviceId": "0",
-        "driverVersion": "596.36",
-        "memoryBytes": 102641958912,
-        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
-        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
-      },
-      "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-58ec83b9a6037bdf7ba1",
-      "loadShape": "eager_materialization",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-81ced0929c7095473bcc",
-      "negativeMutation": null,
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 9608827400,
-          "allocatorBytes": 9608827400,
-          "deviceBytes": 9608827400,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9608827400
-        },
-        "decode": {
-          "activeBytes": 9608827400,
-          "allocatorBytes": 9608827400,
-          "deviceBytes": 9608827400,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9608827400
-        },
-        "denoise": {
-          "activeBytes": 9608827400,
-          "allocatorBytes": 9608827400,
-          "deviceBytes": 9608827400,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9608827400
-        },
-        "overall": {
-          "activeBytes": 9608827400,
-          "allocatorBytes": 9608827400,
-          "deviceBytes": 9608827400,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9608827400
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 9608827400,
-        "decode": 9608827400,
-        "denoise": 9608827400,
-        "overall": 9608827400
-      },
-      "quality": {
-        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
-        "identicalInputs": true,
-        "maximumError": 29,
-        "maximumErrorThreshold": 29,
-        "meanError": 0.2289120356241862,
-        "meanErrorThreshold": 0.2289120356241862,
-        "result": "passed",
-        "rootMeanSquareError": 0.5452312653086621,
-        "rootMeanSquareErrorThreshold": 0.5452312653086621
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 9608827400,
-          "name": "exact_fit",
-          "predictedBytes": 9608827400,
-          "reason": "selector equality boundary is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "selector refuses unverifiable budgets in conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
-          "result": "not_run"
-        },
-        {
-          "name": "cancel",
-          "reason": "cancellation cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "error",
-          "reason": "fault cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "loadability",
-          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
-          "result": "not_applicable"
-        }
-      ],
-      "status": "runtime_complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident",
-          "staged_residency",
-          "bounded_decode"
-        ],
-        "parameters": {
-          "decodeOverlap": 128,
-          "decodeTileEdge": 512
-        },
-        "rung": "bounded_decode"
-      },
-      "sweep": {
-        "axes": [
-          {
-            "parameter": "decodeTileEdge",
-            "testedValues": [
-              512
-            ]
-          },
-          {
-            "parameter": "decodeOverlap",
-            "testedValues": [
-              128
-            ]
-          }
-        ],
-        "cases": [
-          {
-            "parameters": {
-              "decodeOverlap": 128,
-              "decodeTileEdge": 512
-            },
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 1024,
-          "width": 1024
-        },
-        "mode": "text_to_image",
-        "modelId": "flux_schnell",
-        "overlay": "none",
-        "provider": "flux1_schnell",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"
@@ -2168,213 +2158,6 @@
     },
     {
       "artifact": {
-        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
-        "repository": "SceneWorks/flux1-dev-mlx",
-        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
-        "variant": "q4"
-      },
-      "backend": "candle",
-      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:58:25.7002488Z",
-      "diagnostics": {
-        "adapter": "candle-flux1-memory-ladder-v1",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "requestLiveAllocationPeak",
-            "unit": "bytes",
-            "value": 9858108040
-          },
-          {
-            "name": "driverRenderedOverallPeak",
-            "unit": "0.1 GB (diagnostic display)",
-            "value": 117
-          },
-          {
-            "name": "outputRgbBytes",
-            "unit": "bytes",
-            "value": 3145728
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "flux_dev-q4-seed42-1024x1024-output-3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4",
-      "hardware": {
-        "computeCapability": "12.0",
-        "deviceId": "0",
-        "driverVersion": "596.36",
-        "memoryBytes": 102641958912,
-        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
-        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
-      },
-      "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-638a0768d17889c4e8e7",
-      "loadShape": "eager_materialization",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-9c74db534ec5022ea27d",
-      "negativeMutation": null,
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 9858108040,
-          "allocatorBytes": 9858108040,
-          "deviceBytes": 9858108040,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9858108040
-        },
-        "decode": {
-          "activeBytes": 9858108040,
-          "allocatorBytes": 9858108040,
-          "deviceBytes": 9858108040,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9858108040
-        },
-        "denoise": {
-          "activeBytes": 9858108040,
-          "allocatorBytes": 9858108040,
-          "deviceBytes": 9858108040,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9858108040
-        },
-        "overall": {
-          "activeBytes": 9858108040,
-          "allocatorBytes": 9858108040,
-          "deviceBytes": 9858108040,
-          "reclaimableBytes": 0,
-          "wiredBytes": 9858108040
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 9858108040,
-        "decode": 9858108040,
-        "denoise": 9858108040,
-        "overall": 9858108040
-      },
-      "quality": {
-        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
-        "identicalInputs": true,
-        "maximumError": 21,
-        "maximumErrorThreshold": 21,
-        "meanError": 0.26471201578776044,
-        "meanErrorThreshold": 0.26471201578776044,
-        "result": "passed",
-        "rootMeanSquareError": 0.5180919471938068,
-        "rootMeanSquareErrorThreshold": 0.5180919471938068
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 9858108040,
-          "name": "exact_fit",
-          "predictedBytes": 9858108040,
-          "reason": "selector equality boundary is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "selector refuses unverifiable budgets in conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
-          "result": "not_run"
-        },
-        {
-          "name": "cancel",
-          "reason": "cancellation cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "error",
-          "reason": "fault cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "loadability",
-          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
-          "result": "not_applicable"
-        }
-      ],
-      "status": "runtime_complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident",
-          "staged_residency",
-          "bounded_decode"
-        ],
-        "parameters": {
-          "decodeOverlap": 128,
-          "decodeTileEdge": 512
-        },
-        "rung": "bounded_decode"
-      },
-      "sweep": {
-        "axes": [
-          {
-            "parameter": "decodeTileEdge",
-            "testedValues": [
-              512
-            ]
-          },
-          {
-            "parameter": "decodeOverlap",
-            "testedValues": [
-              128
-            ]
-          }
-        ],
-        "cases": [
-          {
-            "parameters": {
-              "decodeOverlap": 128,
-              "decodeTileEdge": 512
-            },
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 1024,
-          "width": 1024
-        },
-        "mode": "text_to_image",
-        "modelId": "flux_dev",
-        "overlay": "none",
-        "provider": "flux1_dev",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"
@@ -2597,6 +2380,408 @@
         "overlay": "none",
         "provider": "qwen_image",
         "tier": "bf16"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+        "repository": "SceneWorks/flux1-dev-mlx",
+        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "capturedAt": "2026-08-04T03:25:55.8294237Z",
+      "diagnostics": {
+        "adapter": "candle-flux1-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 8272605832
+          },
+          {
+            "name": "driverRenderedOverallPeak",
+            "unit": "0.1 GB (diagnostic display)",
+            "value": 94
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux_dev-q4-seed42-1024x1024-output-3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-66c9c10f744bde1b9cdf",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-1d219abed133ede83bdc",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 8272605832,
+          "allocatorBytes": 8272605832,
+          "deviceBytes": 8272605832,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8272605832
+        },
+        "decode": {
+          "activeBytes": 8272605832,
+          "allocatorBytes": 8272605832,
+          "deviceBytes": 8272605832,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8272605832
+        },
+        "denoise": {
+          "activeBytes": 8272605832,
+          "allocatorBytes": 8272605832,
+          "deviceBytes": 8272605832,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8272605832
+        },
+        "overall": {
+          "activeBytes": 8272605832,
+          "allocatorBytes": 8272605832,
+          "deviceBytes": 8272605832,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8272605832
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 8272605832,
+        "decode": 8272605832,
+        "denoise": 8272605832,
+        "overall": 8272605832
+      },
+      "quality": {
+        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
+        "identicalInputs": true,
+        "maximumError": 21,
+        "maximumErrorThreshold": 21,
+        "meanError": 0.26471201578776044,
+        "meanErrorThreshold": 0.26471201578776044,
+        "result": "passed",
+        "rootMeanSquareError": 0.5180919471938068,
+        "rootMeanSquareErrorThreshold": 0.5180919471938068
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 8272605832,
+          "name": "exact_fit",
+          "predictedBytes": 8272605832,
+          "reason": "selector equality boundary is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "selector refuses unverifiable budgets in conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "cancellation cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "fault cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512
+        },
+        "rung": "bounded_attention"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              128
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 128,
+              "decodeTileEdge": 512
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_dev",
+        "overlay": "none",
+        "provider": "flux1_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+        "repository": "SceneWorks/flux1-dev-mlx",
+        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "capturedAt": "2026-08-04T03:17:40.2449084Z",
+      "diagnostics": {
+        "adapter": "candle-flux1-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 17651074970
+          },
+          {
+            "name": "driverRenderedOverallPeak",
+            "unit": "0.1 GB (diagnostic display)",
+            "value": 238
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux_dev-q4-seed42-1024x1024-output-009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-674e1b40640dbf345cce",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-736f2208d4609c042438",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 17651074970,
+          "allocatorBytes": 17651074970,
+          "deviceBytes": 17651074970,
+          "reclaimableBytes": 0,
+          "wiredBytes": 17651074970
+        },
+        "decode": {
+          "activeBytes": 17651074970,
+          "allocatorBytes": 17651074970,
+          "deviceBytes": 17651074970,
+          "reclaimableBytes": 0,
+          "wiredBytes": 17651074970
+        },
+        "denoise": {
+          "activeBytes": 17651074970,
+          "allocatorBytes": 17651074970,
+          "deviceBytes": 17651074970,
+          "reclaimableBytes": 0,
+          "wiredBytes": 17651074970
+        },
+        "overall": {
+          "activeBytes": 17651074970,
+          "allocatorBytes": 17651074970,
+          "deviceBytes": 17651074970,
+          "reclaimableBytes": 0,
+          "wiredBytes": 17651074970
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 17651074970,
+        "decode": 17651074970,
+        "denoise": 17651074970,
+        "overall": 17651074970
+      },
+      "quality": {
+        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0,
+        "meanError": 0,
+        "meanErrorThreshold": 0,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 17651074970,
+          "name": "exact_fit",
+          "predictedBytes": 17651074970,
+          "reason": "selector equality boundary is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "selector refuses unverifiable budgets in conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "cancellation cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "fault cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_dev",
+        "overlay": "none",
+        "provider": "flux1_dev",
+        "tier": "q4"
       }
     },
     {
@@ -4231,192 +4416,6 @@
     },
     {
       "artifact": {
-        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
-        "repository": "SceneWorks/flux1-schnell-mlx",
-        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-        "variant": "q4"
-      },
-      "backend": "candle",
-      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:15:23.1475905Z",
-      "diagnostics": {
-        "adapter": "candle-flux1-memory-ladder-v1",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "requestLiveAllocationPeak",
-            "unit": "bytes",
-            "value": 17642573594
-          },
-          {
-            "name": "driverRenderedOverallPeak",
-            "unit": "0.1 GB (diagnostic display)",
-            "value": 271
-          },
-          {
-            "name": "outputRgbBytes",
-            "unit": "bytes",
-            "value": 3145728
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "flux_schnell-q4-seed42-1024x1024-output-fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0",
-      "hardware": {
-        "computeCapability": "12.0",
-        "deviceId": "0",
-        "driverVersion": "596.36",
-        "memoryBytes": 102641958912,
-        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
-        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
-      },
-      "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-834fad357ab2bd34fe45",
-      "loadShape": "eager_materialization",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-bccf3cc170fa2bbfcf63",
-      "negativeMutation": null,
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 17642573594,
-          "allocatorBytes": 17642573594,
-          "deviceBytes": 17642573594,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17642573594
-        },
-        "decode": {
-          "activeBytes": 17642573594,
-          "allocatorBytes": 17642573594,
-          "deviceBytes": 17642573594,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17642573594
-        },
-        "denoise": {
-          "activeBytes": 17642573594,
-          "allocatorBytes": 17642573594,
-          "deviceBytes": 17642573594,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17642573594
-        },
-        "overall": {
-          "activeBytes": 17642573594,
-          "allocatorBytes": 17642573594,
-          "deviceBytes": 17642573594,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17642573594
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 17642573594,
-        "decode": 17642573594,
-        "denoise": 17642573594,
-        "overall": 17642573594
-      },
-      "quality": {
-        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
-        "identicalInputs": true,
-        "maximumError": 0,
-        "maximumErrorThreshold": 0,
-        "meanError": 0,
-        "meanErrorThreshold": 0,
-        "result": "passed",
-        "rootMeanSquareError": 0,
-        "rootMeanSquareErrorThreshold": 0
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 17642573594,
-          "name": "exact_fit",
-          "predictedBytes": 17642573594,
-          "reason": "selector equality boundary is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "selector refuses unverifiable budgets in conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
-          "result": "not_run"
-        },
-        {
-          "name": "cancel",
-          "reason": "cancellation cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "error",
-          "reason": "fault cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "loadability",
-          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
-          "result": "not_applicable"
-        }
-      ],
-      "status": "runtime_complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident"
-        ],
-        "parameters": {},
-        "rung": "resident"
-      },
-      "sweep": {
-        "axes": [],
-        "cases": [
-          {
-            "parameters": {},
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 1024,
-          "width": 1024
-        },
-        "mode": "text_to_image",
-        "modelId": "flux_schnell",
-        "overlay": "none",
-        "provider": "flux1_schnell",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
         "repository": "SceneWorks/z-image-turbo-mlx",
         "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
         "variant": "q4"
@@ -5795,7 +5794,7 @@
       },
       "backend": "candle",
       "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:42:36.5323063Z",
+      "capturedAt": "2026-08-04T03:13:09.7107643Z",
       "diagnostics": {
         "adapter": "candle-flux1-memory-ladder-v1",
         "blockers": [],
@@ -5804,12 +5803,12 @@
           {
             "name": "requestLiveAllocationPeak",
             "unit": "bytes",
-            "value": 3843456916
+            "value": 9608827400
           },
           {
             "name": "driverRenderedOverallPeak",
             "unit": "0.1 GB (diagnostic display)",
-            "value": 45
+            "value": 105
           },
           {
             "name": "outputRgbBytes",
@@ -5830,276 +5829,49 @@
         "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
       },
       "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-9116edac3258fbde7426",
-      "loadShape": "deferred_materialization",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-ce7057c1bf5435821694",
-      "negativeMutation": null,
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 3843456916,
-          "allocatorBytes": 3843456916,
-          "deviceBytes": 3843456916,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843456916
-        },
-        "decode": {
-          "activeBytes": 3843456916,
-          "allocatorBytes": 3843456916,
-          "deviceBytes": 3843456916,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843456916
-        },
-        "denoise": {
-          "activeBytes": 3843456916,
-          "allocatorBytes": 3843456916,
-          "deviceBytes": 3843456916,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843456916
-        },
-        "overall": {
-          "activeBytes": 3843456916,
-          "allocatorBytes": 3843456916,
-          "deviceBytes": 3843456916,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843456916
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 3843456916,
-        "decode": 3843456916,
-        "denoise": 3843456916,
-        "overall": 3843456916
-      },
-      "quality": {
-        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
-        "identicalInputs": true,
-        "maximumError": 29,
-        "maximumErrorThreshold": 29,
-        "meanError": 0.2289120356241862,
-        "meanErrorThreshold": 0.2289120356241862,
-        "result": "passed",
-        "rootMeanSquareError": 0.5452312653086621,
-        "rootMeanSquareErrorThreshold": 0.5452312653086621
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 3843456916,
-          "name": "exact_fit",
-          "predictedBytes": 3843456916,
-          "reason": "selector equality boundary is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "selector refuses unverifiable budgets in conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
-          "result": "not_run"
-        },
-        {
-          "name": "cancel",
-          "reason": "cancellation cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "error",
-          "reason": "fault cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "loadability",
-          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
-          "result": "not_applicable"
-        }
-      ],
-      "status": "runtime_complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident",
-          "staged_residency",
-          "bounded_decode",
-          "bounded_attention",
-          "bounded_transformer_residency"
-        ],
-        "parameters": {
-          "attentionChunkSize": 67108864,
-          "decodeOverlap": 128,
-          "decodeTileEdge": 512,
-          "transformerWindowComponent": "dit",
-          "transformerWindowSize": 1
-        },
-        "rung": "bounded_transformer_residency"
-      },
-      "sweep": {
-        "axes": [
-          {
-            "parameter": "decodeTileEdge",
-            "testedValues": [
-              512
-            ]
-          },
-          {
-            "parameter": "decodeOverlap",
-            "testedValues": [
-              128
-            ]
-          },
-          {
-            "parameter": "attentionChunkSize",
-            "testedValues": [
-              67108864
-            ]
-          },
-          {
-            "parameter": "transformerWindowSize",
-            "testedValues": [
-              1
-            ]
-          }
-        ],
-        "cases": [
-          {
-            "parameters": {
-              "attentionChunkSize": 67108864,
-              "decodeOverlap": 128,
-              "decodeTileEdge": 512,
-              "transformerWindowComponent": "dit",
-              "transformerWindowSize": 1
-            },
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 1024,
-          "width": 1024
-        },
-        "mode": "text_to_image",
-        "modelId": "flux_schnell",
-        "overlay": "none",
-        "provider": "flux1_schnell",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
-        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
-        "repository": "SceneWorks/flux1-schnell-mlx",
-        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-        "variant": "q4"
-      },
-      "backend": "candle",
-      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:34:09.7226597Z",
-      "diagnostics": {
-        "adapter": "candle-flux1-memory-ladder-v1",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "requestLiveAllocationPeak",
-            "unit": "bytes",
-            "value": 8234088968
-          },
-          {
-            "name": "driverRenderedOverallPeak",
-            "unit": "0.1 GB (diagnostic display)",
-            "value": 91
-          },
-          {
-            "name": "outputRgbBytes",
-            "unit": "bytes",
-            "value": 3145728
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "flux_schnell-q4-seed42-1024x1024-output-b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef",
-      "hardware": {
-        "computeCapability": "12.0",
-        "deviceId": "0",
-        "driverVersion": "596.36",
-        "memoryBytes": 102641958912,
-        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
-        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
-      },
-      "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-92e112724eceda4db8bc",
+      "id": "imc-92212c877a82616193db",
       "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
         "result": "passed"
       },
-      "logicalCaseId": "implan-5340d1eea8885593b0d7",
+      "logicalCaseId": "implan-81ced0929c7095473bcc",
       "negativeMutation": null,
       "observedMemory": {
         "conditioning": {
-          "activeBytes": 8234088968,
-          "allocatorBytes": 8234088968,
-          "deviceBytes": 8234088968,
+          "activeBytes": 9608827400,
+          "allocatorBytes": 9608827400,
+          "deviceBytes": 9608827400,
           "reclaimableBytes": 0,
-          "wiredBytes": 8234088968
+          "wiredBytes": 9608827400
         },
         "decode": {
-          "activeBytes": 8234088968,
-          "allocatorBytes": 8234088968,
-          "deviceBytes": 8234088968,
+          "activeBytes": 9608827400,
+          "allocatorBytes": 9608827400,
+          "deviceBytes": 9608827400,
           "reclaimableBytes": 0,
-          "wiredBytes": 8234088968
+          "wiredBytes": 9608827400
         },
         "denoise": {
-          "activeBytes": 8234088968,
-          "allocatorBytes": 8234088968,
-          "deviceBytes": 8234088968,
+          "activeBytes": 9608827400,
+          "allocatorBytes": 9608827400,
+          "deviceBytes": 9608827400,
           "reclaimableBytes": 0,
-          "wiredBytes": 8234088968
+          "wiredBytes": 9608827400
         },
         "overall": {
-          "activeBytes": 8234088968,
-          "allocatorBytes": 8234088968,
-          "deviceBytes": 8234088968,
+          "activeBytes": 9608827400,
+          "allocatorBytes": 9608827400,
+          "deviceBytes": 9608827400,
           "reclaimableBytes": 0,
-          "wiredBytes": 8234088968
+          "wiredBytes": 9608827400
         }
       },
       "predictedPeakBytes": {
-        "conditioning": 8234088968,
-        "decode": 8234088968,
-        "denoise": 8234088968,
-        "overall": 8234088968
+        "conditioning": 9608827400,
+        "decode": 9608827400,
+        "denoise": 9608827400,
+        "overall": 9608827400
       },
       "quality": {
         "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
@@ -6115,19 +5887,19 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
         }
       },
       "scenarios": [
         {
-          "effectiveBudgetBytes": 8234088968,
+          "effectiveBudgetBytes": 9608827400,
           "name": "exact_fit",
-          "predictedBytes": 8234088968,
+          "predictedBytes": 9608827400,
           "reason": "selector equality boundary is covered by conformance tests",
           "result": "passed"
         },
@@ -6172,15 +5944,13 @@
         "engagedRungs": [
           "resident",
           "staged_residency",
-          "bounded_decode",
-          "bounded_attention"
+          "bounded_decode"
         ],
         "parameters": {
-          "attentionChunkSize": 67108864,
           "decodeOverlap": 128,
           "decodeTileEdge": 512
         },
-        "rung": "bounded_attention"
+        "rung": "bounded_decode"
       },
       "sweep": {
         "axes": [
@@ -6195,18 +5965,11 @@
             "testedValues": [
               128
             ]
-          },
-          {
-            "parameter": "attentionChunkSize",
-            "testedValues": [
-              67108864
-            ]
           }
         ],
         "cases": [
           {
             "parameters": {
-              "attentionChunkSize": 67108864,
               "decodeOverlap": 128,
               "decodeTileEdge": 512
             },
@@ -6419,6 +6182,233 @@
         "overlay": "none",
         "provider": "qwen_image",
         "tier": "bf16"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+        "repository": "SceneWorks/flux1-dev-mlx",
+        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "capturedAt": "2026-08-04T03:27:45.5391525Z",
+      "diagnostics": {
+        "adapter": "candle-flux1-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 3843457940
+          },
+          {
+            "name": "driverRenderedOverallPeak",
+            "unit": "0.1 GB (diagnostic display)",
+            "value": 45
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux_dev-q4-seed42-1024x1024-output-3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-9dd755c6c45400459d01",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-44f782e8d8fceeff77f6",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 3843457940,
+          "allocatorBytes": 3843457940,
+          "deviceBytes": 3843457940,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843457940
+        },
+        "decode": {
+          "activeBytes": 3843457940,
+          "allocatorBytes": 3843457940,
+          "deviceBytes": 3843457940,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843457940
+        },
+        "denoise": {
+          "activeBytes": 3843457940,
+          "allocatorBytes": 3843457940,
+          "deviceBytes": 3843457940,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843457940
+        },
+        "overall": {
+          "activeBytes": 3843457940,
+          "allocatorBytes": 3843457940,
+          "deviceBytes": 3843457940,
+          "reclaimableBytes": 0,
+          "wiredBytes": 3843457940
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 3843457940,
+        "decode": 3843457940,
+        "denoise": 3843457940,
+        "overall": 3843457940
+      },
+      "quality": {
+        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
+        "identicalInputs": true,
+        "maximumError": 21,
+        "maximumErrorThreshold": 21,
+        "meanError": 0.26471201578776044,
+        "meanErrorThreshold": 0.26471201578776044,
+        "result": "passed",
+        "rootMeanSquareError": 0.5180919471938068,
+        "rootMeanSquareErrorThreshold": 0.5180919471938068
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 3843457940,
+          "name": "exact_fit",
+          "predictedBytes": 3843457940,
+          "reason": "selector equality boundary is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "selector refuses unverifiable budgets in conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "cancellation cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "fault cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512,
+          "transformerWindowComponent": "dit",
+          "transformerWindowSize": 1
+        },
+        "rung": "bounded_transformer_residency"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              128
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          },
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 128,
+              "decodeTileEdge": 512,
+              "transformerWindowComponent": "dit",
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_dev",
+        "overlay": "none",
+        "provider": "flux1_dev",
+        "tier": "q4"
       }
     },
     {
@@ -6733,234 +6723,7 @@
       },
       "backend": "candle",
       "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T21:09:20.3699677Z",
-      "diagnostics": {
-        "adapter": "candle-flux1-memory-ladder-v1",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "requestLiveAllocationPeak",
-            "unit": "bytes",
-            "value": 3843457940
-          },
-          {
-            "name": "driverRenderedOverallPeak",
-            "unit": "0.1 GB (diagnostic display)",
-            "value": 45
-          },
-          {
-            "name": "outputRgbBytes",
-            "unit": "bytes",
-            "value": 3145728
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "flux_dev-q4-seed42-1024x1024-output-3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4",
-      "hardware": {
-        "computeCapability": "12.0",
-        "deviceId": "0",
-        "driverVersion": "596.36",
-        "memoryBytes": 102641958912,
-        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
-        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
-      },
-      "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-b7de12a1fa5bd3ab6357",
-      "loadShape": "deferred_materialization",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-44f782e8d8fceeff77f6",
-      "negativeMutation": null,
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 3843457940,
-          "allocatorBytes": 3843457940,
-          "deviceBytes": 3843457940,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843457940
-        },
-        "decode": {
-          "activeBytes": 3843457940,
-          "allocatorBytes": 3843457940,
-          "deviceBytes": 3843457940,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843457940
-        },
-        "denoise": {
-          "activeBytes": 3843457940,
-          "allocatorBytes": 3843457940,
-          "deviceBytes": 3843457940,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843457940
-        },
-        "overall": {
-          "activeBytes": 3843457940,
-          "allocatorBytes": 3843457940,
-          "deviceBytes": 3843457940,
-          "reclaimableBytes": 0,
-          "wiredBytes": 3843457940
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 3843457940,
-        "decode": 3843457940,
-        "denoise": 3843457940,
-        "overall": 3843457940
-      },
-      "quality": {
-        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
-        "identicalInputs": true,
-        "maximumError": 21,
-        "maximumErrorThreshold": 21,
-        "meanError": 0.26471201578776044,
-        "meanErrorThreshold": 0.26471201578776044,
-        "result": "passed",
-        "rootMeanSquareError": 0.5180919471938068,
-        "rootMeanSquareErrorThreshold": 0.5180919471938068
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 3843457940,
-          "name": "exact_fit",
-          "predictedBytes": 3843457940,
-          "reason": "selector equality boundary is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "selector refuses unverifiable budgets in conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
-          "result": "not_run"
-        },
-        {
-          "name": "cancel",
-          "reason": "cancellation cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "error",
-          "reason": "fault cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "loadability",
-          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
-          "result": "not_applicable"
-        }
-      ],
-      "status": "runtime_complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident",
-          "staged_residency",
-          "bounded_decode",
-          "bounded_attention",
-          "bounded_transformer_residency"
-        ],
-        "parameters": {
-          "attentionChunkSize": 67108864,
-          "decodeOverlap": 128,
-          "decodeTileEdge": 512,
-          "transformerWindowComponent": "dit",
-          "transformerWindowSize": 1
-        },
-        "rung": "bounded_transformer_residency"
-      },
-      "sweep": {
-        "axes": [
-          {
-            "parameter": "decodeTileEdge",
-            "testedValues": [
-              512
-            ]
-          },
-          {
-            "parameter": "decodeOverlap",
-            "testedValues": [
-              128
-            ]
-          },
-          {
-            "parameter": "attentionChunkSize",
-            "testedValues": [
-              67108864
-            ]
-          },
-          {
-            "parameter": "transformerWindowSize",
-            "testedValues": [
-              1
-            ]
-          }
-        ],
-        "cases": [
-          {
-            "parameters": {
-              "attentionChunkSize": 67108864,
-              "decodeOverlap": 128,
-              "decodeTileEdge": 512,
-              "transformerWindowComponent": "dit",
-              "transformerWindowSize": 1
-            },
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 1024,
-          "width": 1024
-        },
-        "mode": "text_to_image",
-        "modelId": "flux_dev",
-        "overlay": "none",
-        "provider": "flux1_dev",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
-        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
-        "repository": "SceneWorks/flux1-dev-mlx",
-        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
-        "variant": "q4"
-      },
-      "backend": "candle",
-      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:53:15.6360456Z",
+      "capturedAt": "2026-08-04T03:18:38.1717537Z",
       "diagnostics": {
         "adapter": "candle-flux1-memory-ladder-v1",
         "blockers": [],
@@ -6974,7 +6737,7 @@
           {
             "name": "driverRenderedOverallPeak",
             "unit": "0.1 GB (diagnostic display)",
-            "value": 191
+            "value": 205
           },
           {
             "name": "outputRgbBytes",
@@ -6995,7 +6758,7 @@
         "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
       },
       "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-bb84f4155514b19fa259",
+      "id": "imc-bda727dba0b51b494b23",
       "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
@@ -7053,12 +6816,12 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
         }
       },
       "scenarios": [
@@ -7113,192 +6876,6 @@
         ],
         "parameters": {},
         "rung": "staged_residency"
-      },
-      "sweep": {
-        "axes": [],
-        "cases": [
-          {
-            "parameters": {},
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 1024,
-          "width": 1024
-        },
-        "mode": "text_to_image",
-        "modelId": "flux_dev",
-        "overlay": "none",
-        "provider": "flux1_dev",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
-        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
-        "repository": "SceneWorks/flux1-dev-mlx",
-        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
-        "variant": "q4"
-      },
-      "backend": "candle",
-      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:47:21.3279383Z",
-      "diagnostics": {
-        "adapter": "candle-flux1-memory-ladder-v1",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "requestLiveAllocationPeak",
-            "unit": "bytes",
-            "value": 17651074970
-          },
-          {
-            "name": "driverRenderedOverallPeak",
-            "unit": "0.1 GB (diagnostic display)",
-            "value": 224
-          },
-          {
-            "name": "outputRgbBytes",
-            "unit": "bytes",
-            "value": 3145728
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "flux_dev-q4-seed42-1024x1024-output-009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964",
-      "hardware": {
-        "computeCapability": "12.0",
-        "deviceId": "0",
-        "driverVersion": "596.36",
-        "memoryBytes": 102641958912,
-        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
-        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
-      },
-      "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-be5ceac78caeb45ca489",
-      "loadShape": "eager_materialization",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-736f2208d4609c042438",
-      "negativeMutation": null,
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 17651074970,
-          "allocatorBytes": 17651074970,
-          "deviceBytes": 17651074970,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17651074970
-        },
-        "decode": {
-          "activeBytes": 17651074970,
-          "allocatorBytes": 17651074970,
-          "deviceBytes": 17651074970,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17651074970
-        },
-        "denoise": {
-          "activeBytes": 17651074970,
-          "allocatorBytes": 17651074970,
-          "deviceBytes": 17651074970,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17651074970
-        },
-        "overall": {
-          "activeBytes": 17651074970,
-          "allocatorBytes": 17651074970,
-          "deviceBytes": 17651074970,
-          "reclaimableBytes": 0,
-          "wiredBytes": 17651074970
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 17651074970,
-        "decode": 17651074970,
-        "denoise": 17651074970,
-        "overall": 17651074970
-      },
-      "quality": {
-        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
-        "identicalInputs": true,
-        "maximumError": 0,
-        "maximumErrorThreshold": 0,
-        "meanError": 0,
-        "meanErrorThreshold": 0,
-        "result": "passed",
-        "rootMeanSquareError": 0,
-        "rootMeanSquareErrorThreshold": 0
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 17651074970,
-          "name": "exact_fit",
-          "predictedBytes": 17651074970,
-          "reason": "selector equality boundary is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "selector refuses unverifiable budgets in conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
-          "result": "not_run"
-        },
-        {
-          "name": "cancel",
-          "reason": "cancellation cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "error",
-          "reason": "fault cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "loadability",
-          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
-          "result": "not_applicable"
-        }
-      ],
-      "status": "runtime_complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident"
-        ],
-        "parameters": {},
-        "rung": "resident"
       },
       "sweep": {
         "axes": [],
@@ -7563,193 +7140,6 @@
     },
     {
       "artifact": {
-        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
-        "repository": "SceneWorks/flux1-schnell-mlx",
-        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-        "variant": "q4"
-      },
-      "backend": "candle",
-      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-      "capturedAt": "2026-08-03T20:20:57.7832478Z",
-      "diagnostics": {
-        "adapter": "candle-flux1-memory-ladder-v1",
-        "blockers": [],
-        "execution": "executed",
-        "measurements": [
-          {
-            "name": "requestLiveAllocationPeak",
-            "unit": "bytes",
-            "value": 14588695430
-          },
-          {
-            "name": "driverRenderedOverallPeak",
-            "unit": "0.1 GB (diagnostic display)",
-            "value": 208
-          },
-          {
-            "name": "outputRgbBytes",
-            "unit": "bytes",
-            "value": 3145728
-          }
-        ]
-      },
-      "evidenceScope": "authoritative",
-      "fixture": "flux_schnell-q4-seed42-1024x1024-output-fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0",
-      "hardware": {
-        "computeCapability": "12.0",
-        "deviceId": "0",
-        "driverVersion": "596.36",
-        "memoryBytes": 102641958912,
-        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
-        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
-      },
-      "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-c582e601423b62050a6d",
-      "loadShape": "eager_materialization",
-      "loadability": {
-        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
-        "result": "passed"
-      },
-      "logicalCaseId": "implan-736d26dea0b493223c23",
-      "negativeMutation": null,
-      "observedMemory": {
-        "conditioning": {
-          "activeBytes": 14588695430,
-          "allocatorBytes": 14588695430,
-          "deviceBytes": 14588695430,
-          "reclaimableBytes": 0,
-          "wiredBytes": 14588695430
-        },
-        "decode": {
-          "activeBytes": 14588695430,
-          "allocatorBytes": 14588695430,
-          "deviceBytes": 14588695430,
-          "reclaimableBytes": 0,
-          "wiredBytes": 14588695430
-        },
-        "denoise": {
-          "activeBytes": 14588695430,
-          "allocatorBytes": 14588695430,
-          "deviceBytes": 14588695430,
-          "reclaimableBytes": 0,
-          "wiredBytes": 14588695430
-        },
-        "overall": {
-          "activeBytes": 14588695430,
-          "allocatorBytes": 14588695430,
-          "deviceBytes": 14588695430,
-          "reclaimableBytes": 0,
-          "wiredBytes": 14588695430
-        }
-      },
-      "predictedPeakBytes": {
-        "conditioning": 14588695430,
-        "decode": 14588695430,
-        "denoise": 14588695430,
-        "overall": 14588695430
-      },
-      "quality": {
-        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
-        "identicalInputs": true,
-        "maximumError": 0,
-        "maximumErrorThreshold": 0,
-        "meanError": 0,
-        "meanErrorThreshold": 0,
-        "result": "passed",
-        "rootMeanSquareError": 0,
-        "rootMeanSquareErrorThreshold": 0
-      },
-      "repositories": {
-        "inference": {
-          "dirty": false,
-          "revision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b"
-        },
-        "sceneWorks": {
-          "dirty": false,
-          "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
-          "revision": "002e19717c322ba0520ebff28c96c71d0dea21eb"
-        }
-      },
-      "scenarios": [
-        {
-          "effectiveBudgetBytes": 14588695430,
-          "name": "exact_fit",
-          "predictedBytes": 14588695430,
-          "reason": "selector equality boundary is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "unknown_budget",
-          "reason": "selector refuses unverifiable budgets in conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "stale_evidence",
-          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
-          "result": "passed"
-        },
-        {
-          "name": "warm_repeat",
-          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
-          "result": "not_run"
-        },
-        {
-          "name": "cancel",
-          "reason": "cancellation cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "error",
-          "reason": "fault cleanup was not executed in this physical evidence session",
-          "result": "not_run"
-        },
-        {
-          "name": "loadability",
-          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
-          "result": "passed"
-        },
-        {
-          "name": "overlay",
-          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
-          "result": "not_applicable"
-        }
-      ],
-      "status": "runtime_complete",
-      "strategy": {
-        "engagedRungs": [
-          "resident",
-          "staged_residency"
-        ],
-        "parameters": {},
-        "rung": "staged_residency"
-      },
-      "sweep": {
-        "axes": [],
-        "cases": [
-          {
-            "parameters": {},
-            "result": "passed"
-          }
-        ],
-        "rangeVerified": true
-      },
-      "target": {
-        "geometry": {
-          "batch": 1,
-          "frames": 1,
-          "height": 1024,
-          "width": 1024
-        },
-        "mode": "text_to_image",
-        "modelId": "flux_schnell",
-        "overlay": "none",
-        "provider": "flux1_schnell",
-        "tier": "q4"
-      }
-    },
-    {
-      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"
@@ -7962,6 +7352,193 @@
         "overlay": "none",
         "provider": "qwen_image",
         "tier": "bf16"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+        "repository": "SceneWorks/flux1-schnell-mlx",
+        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "capturedAt": "2026-08-04T03:11:36.9096164Z",
+      "diagnostics": {
+        "adapter": "candle-flux1-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 14588695430
+          },
+          {
+            "name": "driverRenderedOverallPeak",
+            "unit": "0.1 GB (diagnostic display)",
+            "value": 208
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux_schnell-q4-seed42-1024x1024-output-fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-d07d715f205f108adcb4",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-736d26dea0b493223c23",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 14588695430,
+          "allocatorBytes": 14588695430,
+          "deviceBytes": 14588695430,
+          "reclaimableBytes": 0,
+          "wiredBytes": 14588695430
+        },
+        "decode": {
+          "activeBytes": 14588695430,
+          "allocatorBytes": 14588695430,
+          "deviceBytes": 14588695430,
+          "reclaimableBytes": 0,
+          "wiredBytes": 14588695430
+        },
+        "denoise": {
+          "activeBytes": 14588695430,
+          "allocatorBytes": 14588695430,
+          "deviceBytes": 14588695430,
+          "reclaimableBytes": 0,
+          "wiredBytes": 14588695430
+        },
+        "overall": {
+          "activeBytes": 14588695430,
+          "allocatorBytes": 14588695430,
+          "deviceBytes": 14588695430,
+          "reclaimableBytes": 0,
+          "wiredBytes": 14588695430
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 14588695430,
+        "decode": 14588695430,
+        "denoise": 14588695430,
+        "overall": 14588695430
+      },
+      "quality": {
+        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0,
+        "meanError": 0,
+        "meanErrorThreshold": 0,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 14588695430,
+          "name": "exact_fit",
+          "predictedBytes": 14588695430,
+          "reason": "selector equality boundary is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "selector refuses unverifiable budgets in conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "cancellation cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "fault cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_schnell",
+        "overlay": "none",
+        "provider": "flux1_schnell",
+        "tier": "q4"
       }
     },
     {
@@ -8391,6 +7968,429 @@
         "overlay": "none",
         "provider": "qwen_image",
         "tier": "bf16"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+        "repository": "SceneWorks/flux1-dev-mlx",
+        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "capturedAt": "2026-08-04T03:24:22.5234271Z",
+      "diagnostics": {
+        "adapter": "candle-flux1-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 9858108040
+          },
+          {
+            "name": "driverRenderedOverallPeak",
+            "unit": "0.1 GB (diagnostic display)",
+            "value": 107
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux_dev-q4-seed42-1024x1024-output-3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-e2e856ffd1c68b5c483a",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-9c74db534ec5022ea27d",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 9858108040,
+          "allocatorBytes": 9858108040,
+          "deviceBytes": 9858108040,
+          "reclaimableBytes": 0,
+          "wiredBytes": 9858108040
+        },
+        "decode": {
+          "activeBytes": 9858108040,
+          "allocatorBytes": 9858108040,
+          "deviceBytes": 9858108040,
+          "reclaimableBytes": 0,
+          "wiredBytes": 9858108040
+        },
+        "denoise": {
+          "activeBytes": 9858108040,
+          "allocatorBytes": 9858108040,
+          "deviceBytes": 9858108040,
+          "reclaimableBytes": 0,
+          "wiredBytes": 9858108040
+        },
+        "overall": {
+          "activeBytes": 9858108040,
+          "allocatorBytes": 9858108040,
+          "deviceBytes": 9858108040,
+          "reclaimableBytes": 0,
+          "wiredBytes": 9858108040
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 9858108040,
+        "decode": 9858108040,
+        "denoise": 9858108040,
+        "overall": 9858108040
+      },
+      "quality": {
+        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
+        "identicalInputs": true,
+        "maximumError": 21,
+        "maximumErrorThreshold": 21,
+        "meanError": 0.26471201578776044,
+        "meanErrorThreshold": 0.26471201578776044,
+        "result": "passed",
+        "rootMeanSquareError": 0.5180919471938068,
+        "rootMeanSquareErrorThreshold": 0.5180919471938068
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 9858108040,
+          "name": "exact_fit",
+          "predictedBytes": 9858108040,
+          "reason": "selector equality boundary is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "selector refuses unverifiable budgets in conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "cancellation cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "fault cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode"
+        ],
+        "parameters": {
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512
+        },
+        "rung": "bounded_decode"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              128
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "decodeOverlap": 128,
+              "decodeTileEdge": 512
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_dev",
+        "overlay": "none",
+        "provider": "flux1_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "inventorySha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+        "repository": "SceneWorks/flux1-schnell-mlx",
+        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+      "capturedAt": "2026-08-04T03:14:30.0191249Z",
+      "diagnostics": {
+        "adapter": "candle-flux1-memory-ladder-v1",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "requestLiveAllocationPeak",
+            "unit": "bytes",
+            "value": 8234088968
+          },
+          {
+            "name": "driverRenderedOverallPeak",
+            "unit": "0.1 GB (diagnostic display)",
+            "value": 91
+          },
+          {
+            "name": "outputRgbBytes",
+            "unit": "bytes",
+            "value": 3145728
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux_schnell-q4-seed42-1024x1024-output-b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-e2f3ea2668ba6f1331b7",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-5340d1eea8885593b0d7",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 8234088968,
+          "allocatorBytes": 8234088968,
+          "deviceBytes": 8234088968,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8234088968
+        },
+        "decode": {
+          "activeBytes": 8234088968,
+          "allocatorBytes": 8234088968,
+          "deviceBytes": 8234088968,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8234088968
+        },
+        "denoise": {
+          "activeBytes": 8234088968,
+          "allocatorBytes": 8234088968,
+          "deviceBytes": 8234088968,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8234088968
+        },
+        "overall": {
+          "activeBytes": 8234088968,
+          "allocatorBytes": 8234088968,
+          "deviceBytes": 8234088968,
+          "reclaimableBytes": 0,
+          "wiredBytes": 8234088968
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 8234088968,
+        "decode": 8234088968,
+        "denoise": 8234088968,
+        "overall": 8234088968
+      },
+      "quality": {
+        "contract": "same model snapshot, prompt, seed 42, geometry, step count, precision, and conditioning; selected-rung RGB8 output versus resident",
+        "identicalInputs": true,
+        "maximumError": 29,
+        "maximumErrorThreshold": 29,
+        "meanError": 0.2289120356241862,
+        "meanErrorThreshold": 0.2289120356241862,
+        "result": "passed",
+        "rootMeanSquareError": 0.5452312653086621,
+        "rootMeanSquareErrorThreshold": 0.5452312653086621
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 8234088968,
+          "name": "exact_fit",
+          "predictedBytes": 8234088968,
+          "reason": "selector equality boundary is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "selector refuses unverifiable budgets in conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "exact revision and fingerprint mismatch rejection is covered by conformance tests",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the physical session used a fresh process and did not execute a same-process warm repeat",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "cancellation cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "fault cleanup was not executed in this physical evidence session",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "the exact pinned q4 artifact inventory loaded and rendered",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "this exact base-only request executed no identity, control, LoRA, or PuLID overlay",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 128,
+          "decodeTileEdge": 512
+        },
+        "rung": "bounded_attention"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              128
+            ]
+          },
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 128,
+              "decodeTileEdge": 512
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_schnell",
+        "overlay": "none",
+        "provider": "flux1_schnell",
+        "tier": "q4"
       }
     },
     {
@@ -9550,5 +9550,1065 @@
     }
   ],
   "schemaVersion": 4,
-  "sourceSessions": []
+  "sourceSessions": [
+    {
+      "capturedAt": "2026-08-04T03:13:09.7107643Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=bounded-decode candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_schnell_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-4b4ab770efa632199d23",
+      "inputs": [
+        {
+          "bytes": 17008176476,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-schnell-mlx/snapshots/bba3ae01dfd94089f173c05edd4e1a4c551f2599/q4",
+          "repository": "SceneWorks/flux1-schnell-mlx",
+          "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "role": "base",
+          "sha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/schnell-bounded-decode.rgb",
+          "sha256": "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-schnell-q4-bounded-decode.log",
+      "stdoutSha256": "4a0931e528f5a88095281daa8a27622846ddfbb1f5b6be4e0aadf906044fc8d9",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:41:17.5460869Z",
+      "claims": [
+        "quality",
+        "lifecycle",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_pulid --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-4fbfb599c1fc3e3e9dfb",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "comparison",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-resident.ppm",
+          "sha256": "dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-quality.log",
+      "stdoutSha256": "fea85504ad351c036c6fc995ee3c581036cc9120974117ebe25fb9402626f518",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:34:08.0906417Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=bounded_attention PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-5cf99e7d2a0b88e1dfcf",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-bounded-attention.ppm",
+          "sha256": "5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-bounded-attention.log",
+      "stdoutSha256": "116909fbe310a98e485094169642b2cc709533795c01ad23aab675a480340bc1",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "bounded_attention",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:14:30.0191249Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=bounded-attention candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_schnell_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-689c72239ec5bb84594f",
+      "inputs": [
+        {
+          "bytes": 17008176476,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-schnell-mlx/snapshots/bba3ae01dfd94089f173c05edd4e1a4c551f2599/q4",
+          "repository": "SceneWorks/flux1-schnell-mlx",
+          "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "role": "base",
+          "sha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/schnell-bounded-attention.rgb",
+          "sha256": "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-schnell-q4-bounded-attention.log",
+      "stdoutSha256": "7a916bfa98f6186594c725244a7834a15bdc739dd7ac984caa5a66936d497b36",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_attention",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:11:36.9096164Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=staged candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_schnell_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-68cd302c4d981863ae34",
+      "inputs": [
+        {
+          "bytes": 17008176476,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-schnell-mlx/snapshots/bba3ae01dfd94089f173c05edd4e1a4c551f2599/q4",
+          "repository": "SceneWorks/flux1-schnell-mlx",
+          "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "role": "base",
+          "sha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/schnell-staged.rgb",
+          "sha256": "fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-schnell-q4-staged-residency.log",
+      "stdoutSha256": "6296ad15ea78b71c50020f743dcfd3fa32697eb749078e62b5070e704e40269b",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "staged_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:10:32.1204629Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=resident candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_schnell_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-6ba27c6bb1b02924f919",
+      "inputs": [
+        {
+          "bytes": 17008176476,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-schnell-mlx/snapshots/bba3ae01dfd94089f173c05edd4e1a4c551f2599/q4",
+          "repository": "SceneWorks/flux1-schnell-mlx",
+          "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "role": "base",
+          "sha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/schnell-resident.rgb",
+          "sha256": "fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-schnell-q4-resident.log",
+      "stdoutSha256": "233c14cbf39c2d9a351fad195424f9c3a56ffcbdde4f72a69625a93f3d92d861",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:24:22.5234271Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=bounded-decode candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_dev_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-6d120db7e473577a8666",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/dev-bounded-decode.rgb",
+          "sha256": "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-dev-q4-bounded-decode.log",
+      "stdoutSha256": "dbe87150385cc27055a0bda7af9634edaad59c69375ea432a0bd36dfae33a0eb",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:18:38.1717537Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=staged candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_dev_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-7e019daeae73957fa26c",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/dev-staged.rgb",
+          "sha256": "009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-dev-q4-staged-residency.log",
+      "stdoutSha256": "53b2a9e3ca35a94b37e79b562da2d08204b6e0f241ac82643968d88c3275fab8",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "staged_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:25:55.8294237Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=bounded-attention candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_dev_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-7e8d2d3865ddc7416364",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/dev-bounded-attention.rgb",
+          "sha256": "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-dev-q4-bounded-attention.log",
+      "stdoutSha256": "0ca7e56af43e6cc04631ee1a8c6ddc090c25f9841837887ceb08b38137aaf7af",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_attention",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:27:45.5391525Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=bounded-transformer candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_dev_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-80d540a194d518ccd289",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/dev-bounded-transformer.rgb",
+          "sha256": "3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-dev-q4-bounded-transformer-residency.log",
+      "stdoutSha256": "7a632e0c15bb6f69a4cfe63f1256de316425e03b873fdb0e0d29d063489c96fc",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_transformer_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:17:40.2449084Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=resident candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_dev_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-864721b19f3af847b3b0",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "38892dfdd0177068e4996834a3ef6666309db5a0034f2548bd13f814e742b341",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/dev-resident.rgb",
+          "sha256": "009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-dev-q4-resident.log",
+      "stdoutSha256": "da72dc96457dd513765ae9f8b818eb65aa418f1e5ff28dc24c06ec9e12098ed7",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:29:51.2909184Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=staged_residency PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-ae9e9a0008dea92bd123",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-staged-residency.ppm",
+          "sha256": "dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-staged-residency.log",
+      "stdoutSha256": "b27e2b851aa22c588fbc9d1aa5ba57daf219baf7199667a3e1c4e5aad67f5960",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "staged_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:38:29.6882449Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=bounded_transformer_residency PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-b11bcf06f6f086d942c5",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-bounded-transformer-residency.ppm",
+          "sha256": "5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-bounded-transformer-residency.log",
+      "stdoutSha256": "c05e995b48bedea2819d3a62203ca3ba2a9099d7188aebc1a973fe08ca70d09a",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "bounded_transformer_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T03:16:29.1439468Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 FLUX_MEMORY_RUNG=bounded-transformer candle_gen_flux-d39d12fd79fcc5dc.exe tests::flux_schnell_probed_generate_for_offload_ab --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "CUDA_VISIBLE_DEVICES=0; nvidia-smi + nvcc --version; Microsoft Windows NT 10.0.26200.0",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-bd6bf873c3afa366ebbc",
+      "inputs": [
+        {
+          "bytes": 17008176476,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-schnell-mlx/snapshots/bba3ae01dfd94089f173c05edd4e1a4c551f2599/q4",
+          "repository": "SceneWorks/flux1-schnell-mlx",
+          "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "role": "base",
+          "sha256": "3157f5cdd80246daf0dd5f7c07694e8e8ee2845ec01bec8b9edb8a02b4bd8f62",
+          "variant": "q4"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15823-refresh-outputs/schnell-bounded-transformer.rgb",
+          "sha256": "b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15823-refresh-schnell-q4-bounded-transformer-residency.log",
+      "stdoutSha256": "5d0e6f0f0bd3170450781a500d95227d1082cd481cff42929c19b4db85c9db63",
+      "target": {
+        "mode": "text_to_image",
+        "overlay": "none",
+        "rung": "bounded_transformer_residency",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:28:14.6594764Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=resident PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-d0895f08dc090ac204c5",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-resident.ppm",
+          "sha256": "dc2b53f22ec052f5f28ee45e988495ee5841702a7cf91ff80284aea7d4ae2575"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-resident.log",
+      "stdoutSha256": "5530f3f666fb0e88e6fa898c93166e789b5efc2b3d129f3ac457a2081f7eb19f",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "resident",
+        "tier": "q4"
+      }
+    },
+    {
+      "capturedAt": "2026-08-04T02:31:48.9200405Z",
+      "claims": [
+        "memory",
+        "loadability",
+        "overlay"
+      ],
+      "command": "CUDA_VISIBLE_DEVICES=0 HF_HOME=E:\\huggingface HUGGINGFACE_HUB_CACHE=E:\\huggingface\\hub PULID_MEMORY_STRATEGY=bounded_decode PULID_STEPS=4 candle_gen_pulid-c779c5b6e8a9d58f.exe validate::real_weight_memory_rung --ignored --nocapture --test-threads=1",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "nvidia-smi --query-gpu=index,uuid,name,memory.total,compute_cap,driver_version",
+        "runtimeVersion": "CUDA 12.9 (nvcc V12.9.41)"
+      },
+      "id": "ims-d498c23a453aae2d8f8b",
+      "inputs": [
+        {
+          "bytes": 17013959875,
+          "path": "E:/huggingface/hub/models--SceneWorks--flux1-dev-mlx/snapshots/323fd12d79f78ad444e882e8d8e871914584f2b9/q4",
+          "repository": "SceneWorks/flux1-dev-mlx",
+          "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+          "role": "base",
+          "sha256": "ca76b88ccb101284b734a6a7a894a3caec98e3a191507e8c9bd12980aff39459",
+          "variant": "q4"
+        },
+        {
+          "bytes": 1142099520,
+          "path": "E:/huggingface/hub/models--guozinan--PuLID/snapshots/492b1451255dc9d9bc3c857259690b5f8b998d4a/pulid_flux_v0.9.1.safetensors",
+          "repository": "guozinan/PuLID",
+          "resolvedRevision": "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+          "role": "adapter",
+          "sha256": "92c41c3af322b02e58e1b32842e4601e08c8f16ec1fe80089dbe957df510f51d",
+          "variant": "pulid_flux_v0.9.1"
+        },
+        {
+          "bytes": 608914864,
+          "path": "E:/huggingface/hub/models--SceneWorks--pulid-flux-mlx/snapshots/78ef91f977eae16d66fb191caf003154b7a0a0b8/eva02_clip_l_336.safetensors",
+          "repository": "SceneWorks/pulid-flux-mlx",
+          "resolvedRevision": "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "69417ca25d214f5e93704475f3e2a7e235fd1f1bf4a5acdf3f39ec69b51513cd",
+          "variant": "eva02_clip_l_336"
+        },
+        {
+          "bytes": 330060828,
+          "path": "E:/huggingface/sc15839-face",
+          "repository": "SceneWorks/pulid-face-bundle",
+          "resolvedRevision": "bca0cacf8e5e04529bb2b326a521361b02be84fd+78ef91f977eae16d66fb191caf003154b7a0a0b8",
+          "role": "adapter",
+          "sha256": "0a7689698618a7bdffe3c9efcb49bd52e4c468456cecc074755ea4cdc515340c",
+          "variant": "scrfd10g+arcface100+bisenet"
+        }
+      ],
+      "kind": "physical_cuda",
+      "outputs": [
+        {
+          "path": ".tmp/sc-15839-evidence/q4-bounded-decode.ppm",
+          "sha256": "5759f6591526c29cef608c6235cd84b34757f9cd01463f3301e860480dcd283f"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "dirty": true,
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "revision": "a87a977d89b44f11dd02921404873f98a04ed192"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-15839-pulid-q4-bounded-decode.log",
+      "stdoutSha256": "3b390c27367c52b7ea1ca462d204b38f9dc92923991f12de747b134da490c451",
+      "target": {
+        "mode": "character_image",
+        "overlay": "identity",
+        "rung": "bounded_decode",
+        "tier": "q4"
+      }
+    }
+  ]
 }
