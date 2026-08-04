@@ -263,7 +263,7 @@ pub(super) async fn generate_candle_zimage_identity_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -274,6 +274,7 @@ pub(super) async fn generate_candle_zimage_identity_stream(
                         steps: steps as usize,
                         strength,
                         seed: seed as u64,
+                        preview: preview.clone(),
                         cancel: cancel.clone(),
                     };
                     let out = match model.generate(&req, &source, &mut *on_progress) {

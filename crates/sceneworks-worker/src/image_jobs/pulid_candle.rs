@@ -82,6 +82,34 @@ const PULID_CANDLE_DEFAULT_ID_WEIGHT: f32 = 1.0;
 /// `mlx_pulid_flux` label and the txt2img `candle_flux` lane).
 pub(super) const PULID_CANDLE_ENGINE: &str = "candle_pulid_flux";
 
+/// The shared ladder is calibrated only for the exact single-identity PuLID route. PiD adds a
+/// second decoder and LoRAs add request-specific weights that are not represented by that contract,
+/// so those requests deliberately keep the legacy resident load path until they have independent
+/// evidence rows and provider-owned safety contracts.
+fn pulid_memory_ladder_eligible(request: &ImageRequest, use_pid: bool) -> bool {
+    !use_pid && request.loras.is_empty()
+}
+
+/// Resolve the worker evidence key from the provider's inspection of the actual selected snapshot.
+/// App-managed model paths do not have to be named `q4`/`q8`, so directory basenames are never tier
+/// evidence; the packed transformer config is authoritative.
+fn pulid_memory_tier_key(paths: &PulidFluxPaths) -> WorkerResult<&'static str> {
+    let tier = runtime_cuda::providers::pulid::memory_strategy::resolved_numeric_tier(paths)
+        .map_err(|error| {
+            WorkerError::Engine(format!(
+                "PuLID-FLUX numeric tier resolution failed: {error}"
+            ))
+        })?;
+    match (tier.precision, tier.quant) {
+        (gen_core::Precision::Bf16, Some(gen_core::Quant::Q4)) => Ok("q4"),
+        (gen_core::Precision::Bf16, Some(gen_core::Quant::Q8)) => Ok("q8"),
+        (gen_core::Precision::Bf16, None) => Ok("bf16"),
+        (precision, quant) => Err(WorkerError::Engine(format!(
+            "PuLID-FLUX resolved unsupported numeric tier precision={precision:?} quant={quant:?}"
+        ))),
+    }
+}
+
 /// Resolve the FLUX.1-dev backbone snapshot for candle PuLID-FLUX: an explicit `modelPath` dir
 /// (advanced or manifest) wins (used verbatim — an app-managed override picks its own layout), else the
 /// HF cache snapshot for the manifest `repo` (default `SceneWorks/flux1-dev-mlx`) descended into the
@@ -391,17 +419,13 @@ pub(super) async fn generate_candle_pulid_stream(
     // SC-15839: build the bespoke provider's exact contract from the paths it will actually load.
     // The contract prices the full PuLID identity stack separately from the shared FLUX trunk, so
     // base FLUX evidence cannot authorize this route.
-    let tier = match flux_base.file_name().and_then(|name| name.to_str()) {
-        Some("q4") => "q4",
-        Some("q8") => "q8",
-        _ => "bf16",
-    };
     let contract_paths = PulidFluxPaths {
         flux_base: flux_base.clone(),
         pulid_weights: adapter.clone(),
         eva_weights: eva.clone(),
         face_dir: face_dir.clone(),
     };
+    let tier = pulid_memory_tier_key(&contract_paths)?;
     let pulid_contract =
         runtime_cuda::providers::pulid::memory_strategy::provider_contract(&contract_paths)
             .map_err(|error| {
@@ -440,31 +464,35 @@ pub(super) async fn generate_candle_pulid_stream(
                 &face_dir,
                 &settings.data_dir.join("cache").join("pulid-flux"),
             );
-    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_bespoke_image(
-        "pulid_flux",
-        PULID_CANDLE_MODEL,
-        &strategy_spec,
-        artifact_is_certified,
-        &request.model_manifest_entry,
-        tier,
-        "character_image",
-        Some("identity"),
-        gen_core::MemoryGeometry {
-            width,
-            height,
-            batch: 1,
-            frames: 1,
-            reference_count: 1,
-        },
-        true,
-        use_pid,
-        false,
-        raw_budget,
-        predicted_peak,
-        runtime_overlay_bytes,
-        gen_core::MemoryCacheState::Cold,
-        pulid_contract,
-    )?;
+    let memory_evaluation = if pulid_memory_ladder_eligible(request, use_pid) {
+        crate::candle_memory_strategy::evaluate_shared_bespoke_image(
+            "pulid_flux",
+            PULID_CANDLE_MODEL,
+            &strategy_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            tier,
+            "character_image",
+            Some("identity"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            raw_budget,
+            predicted_peak,
+            runtime_overlay_bytes,
+            gen_core::MemoryCacheState::Cold,
+            pulid_contract,
+        )?
+    } else {
+        None
+    };
     if let Some(evaluation) = &memory_evaluation {
         raw_settings.insert(
             "memoryStrategy".to_owned(),
@@ -615,4 +643,55 @@ pub(super) async fn generate_candle_pulid_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(loras: Value) -> ImageRequest {
+        ImageRequest::from_payload(
+            &json!({
+                "projectId": "project",
+                "model": PULID_CANDLE_MODEL,
+                "mode": "character_image",
+                "referenceAssetId": "face",
+                "loras": loras,
+            })
+            .as_object()
+            .cloned()
+            .expect("object"),
+        )
+    }
+
+    #[test]
+    fn memory_ladder_requires_exact_non_pid_non_lora_identity_route() {
+        let exact = request(json!([]));
+        assert!(pulid_memory_ladder_eligible(&exact, false));
+        assert!(!pulid_memory_ladder_eligible(&exact, true));
+
+        let with_lora = request(json!([{"path": "style.safetensors", "weight": 0.7}]));
+        assert!(!pulid_memory_ladder_eligible(&with_lora, false));
+    }
+
+    #[test]
+    fn memory_tier_comes_from_packed_config_not_directory_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_managed = temp.path().join("my-custom-flux-install");
+        std::fs::create_dir_all(app_managed.join("transformer")).expect("transformer dir");
+        std::fs::write(
+            app_managed.join("transformer/config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .expect("packed config");
+        let paths = PulidFluxPaths {
+            flux_base: app_managed,
+            pulid_weights: temp.path().join("pulid.safetensors"),
+            eva_weights: temp.path().join("eva.safetensors"),
+            face_dir: temp.path().join("face"),
+        };
+
+        assert_eq!(pulid_memory_tier_key(&paths).expect("q4 tier"), "q4");
+    }
 }
