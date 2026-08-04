@@ -9,23 +9,37 @@ description: >
 # WHY THIS EXISTS (sc-13166)
 # --------------------------
 # rustup's Windows proxies in %USERPROFILE%\.cargo\bin (cargo.exe, rustc.exe,
-# clippy-driver.exe, ... 13 of them) are 0-byte SYMLINKS to rustup.exe (rustup
-# dispatches by argv[0]). On this box that indirection is a recurring single point
-# of failure with TWO distinct failure modes, both of which turn the self-hosted
-# lanes red with a cryptic error that reads like a PR-code failure:
+# clippy-driver.exe, ... 13 of them) dispatch to rustup.exe by argv[0]; on this box
+# they were observed as 0-byte SYMLINKS (rustup prefers symlinks, but falls back to
+# hardlinks where symlinks are unavailable, so do not assume that shape holds
+# everywhere). That indirection is a recurring single point of failure with TWO
+# distinct failure modes, both of which turn the self-hosted lanes red with a
+# cryptic error that reads like a PR-code failure:
 #
-#   1. DANGLING shim: rustup self-updates and Defender (or something) deletes
-#      rustup.exe; every proxy now points at nothing, so `cargo` dies with the
-#      Windows ERROR_NO_ASSOCIATION ("No application is associated with the
-#      specified file for this operation"). Seen with rustup.exe entirely absent.
+#   1. DANGLING shim: rustup.exe goes missing; every proxy now points at nothing,
+#      so `cargo` dies with the Windows ERROR_NO_ASSOCIATION ("No application is
+#      associated with the specified file for this operation"). Seen with
+#      rustup.exe entirely absent.
+#      WHO DELETES IT — corrected. This used to say "rustup self-updates and
+#      Defender (or something) deletes rustup.exe". Both halves were wrong. It is
+#      `Swatinem/rust-cache`'s POST step: its cleanBin() removes every regular file
+#      in $CARGO_HOME/bin that is not listed in .crates2.json, and rustup is not a
+#      `cargo install` product. Harmless on ephemeral runners, destructive on
+#      self-hosted ones where CARGO_HOME is a real user profile. Diagnosed on a Mac
+#      (inference PR #467) — it is not a Windows or antivirus problem at all.
+#      The invariant lives in scripts/lib/rust-cache-bin.mjs, enforced by
+#      `npm run check`; that file is the canonical writeup.
 #   2. SYMLINK-in-service-context: even when rustup.exe is present, launching a
 #      *symlinked* .exe from the runner's Windows-service token throws the same
 #      ERROR_NO_ASSOCIATION. An interactive Git Bash follows the symlink fine, so a
 #      green interactive `cargo --version` does NOT mean the runner is healthy.
 #
 # The earlier sc-13166 mitigation (rewrite the proxies as real copies of rustup.exe)
-# does not survive a rustup self-update, which recreates the symlinks — so the lane
-# kept going red "after a while" and forced admin-override merges.
+# does not survive the next reinstall of rustup, which recreates the proxies — so the
+# lane kept going red "after a while" and forced admin-override merges. (That reinstall
+# is dtolnay/rust-toolchain's "install rustup if needed" step quietly repairing what
+# rust-cache's post step deleted, which is also why the breakage looked intermittent
+# and self-healing rather than like a standing misconfiguration.)
 #
 # The real toolchain under %USERPROFILE%\.rustup\toolchains\<tc>\bin is immune to
 # both modes: those are the REAL cargo/rustc/clippy binaries (not symlinks, not
