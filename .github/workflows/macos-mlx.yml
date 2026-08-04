@@ -46,6 +46,11 @@ on:
       # manifest-only edit can turn this suite red — gate on it (matches the
       # windows-candle.yml / desktop-windows.yml filters). sc-8617.
       - "config/manifests/**"
+      # The stage-1 MLX facts dump this lane is the sole producer of (sc-17119). Without this entry
+      # the "real dump, not a restamp" step below is unreachable for the one edit it exists to
+      # catch: a restamp touches ONLY config/engine-capabilities/capabilities.mlx.json, matching no
+      # other path here, so the lane would not run at all on the PR that made the file wrong.
+      - "config/engine-capabilities/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/config.toml"
@@ -227,6 +232,50 @@ jobs:
       # SDPA guard, which is this lane's original reason to exist. sc-17026.
       - name: Workspace tests incl. the NAX 16-bit SDPA guard
         run: cargo test
+      # sc-17119. THE ONLY LANE THAT CAN PRODUCE capabilities.mlx.json, so it is the only place the
+      # checked-in file can be checked against a real registry rather than taken on trust.
+      #
+      # Every other guard reads that file as a source: `verifyEngineCapabilityFacts` compares its
+      # `inferenceRevision` string to the pin, and the vitest drift guard re-derives the catalog from
+      # its contents. Both are satisfied by editing one line. That is not hypothetical -- the file was
+      # RESTAMPED (revision line rewritten, 334 lines of content untouched) through two consecutive
+      # pin bumps, 35251a88 and 06e0c5e9, because no Mac was available to re-dump it and nothing
+      # could tell the difference. The restamps happened to be correct; nothing proved it until this
+      # step existed.
+      #
+      # Cheap: the build and test steps above already built the mlx-gen graph, so this is a link plus
+      # a weights-free registry walk. Dumps to a scratch dir, never over the checked-in file, so a
+      # red run leaves a readable diff instead of a mutated tree.
+      #
+      # LAST, deliberately -- the same rule the clippy steps above are ordered by, applied to a step
+      # that fires on a PREDICTABLE, routine event. A step failure aborts the job, and this one goes
+      # red on exactly the pin-bump PRs where nobody re-dumped on a Mac. Placed earlier it would
+      # cancel both clippy steps and `cargo test` -- and this lane is the ONLY place in CI that runs
+      # `nax_guard`, so a stale facts file would cost the repo its entire NAX kernel verdict for that
+      # commit, on precisely the PRs where descriptors just moved. A missing dump must not suppress
+      # unrelated coverage; it is the least urgent signal in this job, so it reports last.
+      #
+      # When this fails after a pin bump, the fix is to commit the dump it just produced and re-run
+      # `npm run gen:preview-support` from apps/web -- not to restamp the revision line.
+      #
+      # capabilities.candle.json still has this hole (it was restamped by the same commits). The
+      # mirror does NOT belong here: it needs the CUDA box, and windows-candle.yml runs every step
+      # under `shell: cmd`/`powershell` -- its own header records that `bash` there resolves to the
+      # box's WSL stub, and `cmd` has no `diff`. Tracked as sc-17592 rather than written blind.
+      - name: Verify capabilities.mlx.json is a real dump, not a restamp
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$scratch"
+          if ! diff -u config/engine-capabilities/capabilities.mlx.json \
+                     "$scratch/capabilities.mlx.json"; then
+            echo "::error::config/engine-capabilities/capabilities.mlx.json does not match a fresh"\
+                 "dump at this pin. Re-dump it on a Mac:"\
+                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
+                 "then (cd apps/web && npm run gen:preview-support)."
+            exit 1
+          fi
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
