@@ -2904,7 +2904,50 @@
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 37.3, "q8": 42.0, "bf16": 52.0 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // SC-15819: exact packed q4/q8, no-overlay routes expose the shared Candle/CUDA ladder.
+        // This is implementation inventory only. SC-15874 still owns Lens-Turbo calibration and
+        // no current calibration binding is declared here.
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "lens_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            }
+          ]
+        }
       },
       "ui": {
         "label": "Lens-Turbo",

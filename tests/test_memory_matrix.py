@@ -613,6 +613,7 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         (15510, "candle"),
         (15510, "mlx"),
         (15511, "mlx"),
+        (15512, "candle"),
         (15512, "mlx"),
         (15517, "candle"),
         (15517, "mlx"),
