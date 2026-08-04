@@ -8,6 +8,11 @@
  * casual or accidental byte edit fail the checker instead of silently rewriting the measurement.
  * Mixed-runtime-dtype components have more than one term (the Candle SenseNova head is BF16 embeds
  * plus an F32 flow-matching head).
+ *
+ * Every `::vae::` receipt has a structured scope below. `full-autoencoder` counts encoder + decoder;
+ * `decoder-only` excludes encoder tensors that the entry's advertised routes never construct. The
+ * scope map is keyed identically to these terms, so the checker binds the row's declaration to the
+ * exact selected element count instead of trusting prose.
  */
 export const HEADER_MEASUREMENT_TERMS = Object.freeze({
   "flux2_klein_9b::textEncoder::mlx": [[8190735360, 2]],
@@ -49,18 +54,24 @@ export const HEADER_MEASUREMENT_TERMS = Object.freeze({
   "kolors::vae::mlx+candle": [[83653863, 4]],
   "sana_1600m::vae::mlx+candle": [[312250275, 4]],
   "sana_sprint_1600m::vae::mlx+candle": [[312250275, 4]],
-  "flux2_dev::vae::mlx+candle": [[84046373, 4]],
-  "flux2_klein_9b::vae::mlx+candle": [[84046373, 4]],
-  "flux2_klein_9b_kv::vae::mlx+candle": [[84046373, 4]],
+  "flux2_dev::vae::mlx+candle": [[84046371, 4]],
+  "flux2_klein_9b::vae::mlx+candle": [[84046371, 4]],
+  "flux2_klein_9b_kv::vae::mlx+candle": [[84046371, 4]],
   "qwen_image::vae::mlx": [[126892531, 2]],
-  "qwen_image::vae::candle": [[126892531, 4]],
+  "qwen_image::vae::candle": [[73295603, 4]],
   "krea_2_turbo::vae::mlx+candle": [[126892531, 4]],
   "krea_2_raw::vae::mlx+candle": [[126892531, 4]],
-  "ideogram_4::vae::mlx+candle": [[84046372, 4]],
-  "ideogram_4_turbo::vae::mlx+candle": [[84046372, 4]],
+  "ideogram_4::vae::mlx+candle": [[84046371, 4]],
+  "ideogram_4_turbo::vae::mlx+candle": [[84046371, 4]],
   "boogu_image::vae::mlx+candle": [[83819683, 4]],
   "boogu_image_turbo::vae::mlx+candle": [[83819683, 4]],
   "boogu_image_edit::vae::mlx+candle": [[83819683, 4]],
+  "mage_flow_base::vae::mlx+candle": [[70630211, 2]],
+  "mage_flow::vae::mlx+candle": [[70630211, 2]],
+  "mage_flow_turbo::vae::mlx+candle": [[70630211, 2]],
+  "mage_flow_edit_base::vae::mlx+candle": [[138052035, 2]],
+  "mage_flow_edit::vae::mlx+candle": [[138052035, 2]],
+  "mage_flow_edit_turbo::vae::mlx+candle": [[138052035, 2]],
   "sd3_5_large::vae::mlx": [[83819683, 4]],
   "sd3_5_large::vae::candle": [[83819683, 2]],
   "sd3_5_large_turbo::vae::mlx": [[83819683, 4]],
@@ -68,16 +79,21 @@ export const HEADER_MEASUREMENT_TERMS = Object.freeze({
   "sd3_5_medium::vae::mlx": [[83819683, 4]],
   "sd3_5_medium::vae::candle": [[83819683, 2]],
   "chroma1_base::vae::mlx": [[83819683, 2]],
-  "chroma1_base::vae::candle": [[83819683, 4]],
+  "chroma1_base::vae::candle": [[49545475, 4]],
   "chroma1_hd::vae::mlx": [[83819683, 2]],
-  "chroma1_hd::vae::candle": [[83819683, 4]],
+  "chroma1_hd::vae::candle": [[49545475, 4]],
   "chroma1_flash::vae::mlx": [[83819683, 2]],
-  "chroma1_flash::vae::candle": [[83819683, 4]],
-  "lens::vae::mlx+candle": [[84046373, 4]],
-  "lens_turbo::vae::mlx+candle": [[84046373, 4]],
-  "anima_base::vae::mlx+candle": [[126892531, 4]],
-  "anima_aesthetic::vae::mlx+candle": [[126892531, 4]],
-  "anima_turbo::vae::mlx+candle": [[126892531, 4]],
+  "chroma1_flash::vae::candle": [[49545475, 4]],
+  "lens::vae::mlx": [[84046371, 4]],
+  "lens::vae::candle": [[49620515, 4]],
+  "lens_turbo::vae::mlx": [[84046371, 4]],
+  "lens_turbo::vae::candle": [[49620515, 4]],
+  "anima_base::vae::mlx": [[126892531, 4]],
+  "anima_base::vae::candle": [[73295603, 4]],
+  "anima_aesthetic::vae::mlx": [[126892531, 4]],
+  "anima_aesthetic::vae::candle": [[73295603, 4]],
+  "anima_turbo::vae::mlx": [[126892531, 4]],
+  "anima_turbo::vae::candle": [[73295603, 4]],
   "sensenova_u1_8b::transformerHead::mlx": [[1274027008, 2]],
   "sensenova_u1_8b::transformerHead::candle": [[1244659712, 2], [29367296, 4]],
   "sensenova_u1_8b::visionTower::mlx": [[35137536, 2]],
@@ -102,4 +118,33 @@ export const HEADER_MEASUREMENT_TERMS = Object.freeze({
   "sensenova_u1_8b_infographic_v3_fast::transformerHead::candle": [[1244659712, 2], [29367296, 4]],
   "sensenova_u1_8b_infographic_v3_fast::visionTower::mlx": [[35137536, 2]],
   "sensenova_u1_8b_infographic_v3_fast::visionTower::candle": [[35137536, 4]],
+});
+
+export const VAE_SCOPES = Object.freeze({
+  FULL: "full-autoencoder",
+  DECODER: "decoder-only",
+});
+
+const DECODER_ONLY_VAE_RECEIPT_KEYS = Object.freeze([
+  "qwen_image::vae::candle",
+  "chroma1_base::vae::candle",
+  "chroma1_hd::vae::candle",
+  "chroma1_flash::vae::candle",
+  "lens::vae::candle",
+  "lens_turbo::vae::candle",
+  "anima_base::vae::candle",
+  "anima_aesthetic::vae::candle",
+  "anima_turbo::vae::candle",
+  "mage_flow_base::vae::mlx+candle",
+  "mage_flow::vae::mlx+candle",
+  "mage_flow_turbo::vae::mlx+candle",
+]);
+
+const decoderOnlyKeys = new Set(DECODER_ONLY_VAE_RECEIPT_KEYS);
+export const VAE_RESIDENCY_SCOPES = Object.freeze({
+  ...Object.fromEntries(
+    Object.keys(HEADER_MEASUREMENT_TERMS)
+      .filter((key) => key.includes("::vae::"))
+      .map((key) => [key, decoderOnlyKeys.has(key) ? VAE_SCOPES.DECODER : VAE_SCOPES.FULL]),
+  ),
 });
