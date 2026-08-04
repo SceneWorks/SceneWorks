@@ -41,9 +41,9 @@
       // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
       // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
       //
-      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
-      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
-      // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      // The shared VAE ARTIFACT is 0.345 GB on disk in every tier. Runtime residency is smaller and
+      // mode-dependent: txt2img constructs the decoder half only, while edit routes also construct
+      // `student.dconv_encoder.*`; config/tier-integrity.jsonc records those selected element counts.
       //
       // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
       // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a
@@ -5254,11 +5254,14 @@
           "loadShape": "deferred_materialization",
           "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
           "sceneWorksRevision": "sc-15449-contract-v1",
-          // Exact inference commit the sc-17097 campaign measured against, probed by the harness before
-          // and after every provider case. The fingerprint is unchanged because the provider's tensor
+          // Inference revision these curves are declared COMPATIBLE with. The campaign measured against
+          // 277f4238 (kept verbatim in every record's own `inferenceCommit` receipt, which is never
+          // rewritten); this declaration moved to the sc-17393 closeout pin only after verifying that the
+          // one-commit range has an EMPTY diff against both `candle-gen-krea` and
+          // `gen-core/src/memory_strategy.rs`. The fingerprint is unchanged because the provider's tensor
           // layout, quantization floors and execution structure did not move - only the shared contract
           // ABI did, which is precisely the split the two identity fields exist to express.
-          "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+          "inferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
@@ -5291,7 +5294,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5401,7 +5404,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5511,7 +5514,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5614,7 +5617,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5724,7 +5727,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5827,7 +5830,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",

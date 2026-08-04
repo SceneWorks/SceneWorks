@@ -1474,7 +1474,7 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "loadShape": "deferred_materialization",
         "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
         "sceneWorksRevision": "sc-15449-contract-v1",
-        "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+        "inferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
         "measured": True,
     }
     assert turbo_fit["strategyParameters"] == {

@@ -51,6 +51,10 @@
  *     so an unknown or misspelled key is an error rather than a silently ignored field. The schema was
  *     unenforced when it was written, which is how it drifted to draft-07 while every sibling requires
  *     2020-12; `scripts/check-scaffold.mjs` now pins its conventions and this script applies it.
+ *  9. Every VAE row declares a structured, receipt-bound scope. `full-autoencoder` counts encoder +
+ *     decoder for a route that constructs both; `decoder-only` excludes encoder tensors when no
+ *     advertised route on that row's backend constructs them. The receipt key binds that scope to the
+ *     selected element count, so prose cannot disguise a mixed convention (sc-17435).
  *
  * Usage:
  *   node scripts/check-tier-integrity.mjs            # regenerate docs/generated/tier-integrity.*
@@ -64,7 +68,11 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { HEADER_MEASUREMENT_TERMS } from "./tier-integrity-measurement-receipts.mjs";
+import {
+  HEADER_MEASUREMENT_TERMS,
+  VAE_RESIDENCY_SCOPES,
+  VAE_SCOPES,
+} from "./tier-integrity-measurement-receipts.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEDGER = "config/tier-integrity.jsonc";
@@ -326,6 +334,7 @@ export function validate({
   // naive `model::component::backends` key would let a both-lanes row and an mlx-only row coexist).
   const claimedLanes = new Map();
   const usedMeasurementReceipts = new Set();
+  const usedVaeScopeReceipts = new Set();
   for (const row of exceptions) {
     const where = `${row.model ?? "?"}/${row.component ?? "?"}`;
     const entry = byId.get(row.model);
@@ -457,8 +466,36 @@ export function validate({
     }
 
     const evidence = row.evidence ?? {};
+    const receiptKey = `${row.model}::${row.component}::${lanes.join("+")}`;
     if (typeof evidence.source !== "string" || evidence.source.trim().length === 0) {
       errors.push(`${where}: evidence.source must cite where the fact is recorded in-tree.`);
+    }
+    if (row.component === "vae") {
+      const receiptScope = VAE_RESIDENCY_SCOPES[receiptKey];
+      if (!receiptScope) {
+        errors.push(`${where}: VAE row has no structured residency-scope receipt for ${receiptKey}.`);
+      } else {
+        usedVaeScopeReceipts.add(receiptKey);
+        if (evidence.vaeScope !== receiptScope) {
+          errors.push(
+            `${where}: evidence.vaeScope=${JSON.stringify(evidence.vaeScope)} does not match the ` +
+              `numeric receipt scope ${JSON.stringify(receiptScope)} for ${receiptKey}.`,
+          );
+        }
+        const isolationMarker =
+          receiptScope === VAE_SCOPES.FULL
+            ? "full autoencoder (encoder + decoder)"
+            : "decoder only; encoder tensors are excluded";
+        if (
+          typeof evidence.isolation !== "string" ||
+          !evidence.isolation.includes(isolationMarker)
+        ) {
+          errors.push(
+            `${where}: VAE evidence.isolation must say ${JSON.stringify(isolationMarker)} for the ` +
+              `${JSON.stringify(receiptScope)} receipt scope.`,
+          );
+        }
+      }
     }
     if (evidence.state === "measured") {
       const scalarCost = evidence.costGb ?? evidence.costBytes;
@@ -473,7 +510,6 @@ export function validate({
         );
       }
       if (hasByTier) {
-        const receiptKey = `${row.model}::${row.component}::${lanes.join("+")}`;
         const terms = HEADER_MEASUREMENT_TERMS[receiptKey];
         if (!terms) {
           errors.push(
@@ -574,6 +610,7 @@ export function validate({
       costGb: evidence.costGb ?? null,
       costBytes: evidence.costBytes ?? null,
       costBytesByTier: evidence.costBytesByTier ?? null,
+      vaeScope: evidence.vaeScope ?? null,
       isolation: evidence.isolation ?? null,
       triageDecision: evidence.triageDecision ?? null,
       reviewedCause: evidence.reviewedCause ?? null,
@@ -588,6 +625,14 @@ export function validate({
       errors.push(
         `scripts/tier-integrity-measurement-receipts.mjs has stale receipt ${receiptKey} with no ` +
           `matching exact ledger measurement.`,
+      );
+    }
+  }
+  for (const receiptKey of Object.keys(VAE_RESIDENCY_SCOPES)) {
+    if (!usedVaeScopeReceipts.has(receiptKey)) {
+      errors.push(
+        `scripts/tier-integrity-measurement-receipts.mjs has stale VAE scope receipt ${receiptKey} ` +
+          `with no matching ledger row.`,
       );
     }
   }
@@ -972,6 +1017,72 @@ async function selfTest() {
       "per-tier measurement coverage",
       validate({ ...inputs, ledger }).errors,
       "must exactly match appliesToTiers",
+    );
+  }
+
+  // 3c. THE VAE SCOPE sc-17435 PINNED. Changing a decoder-only row to full-autoencoder without
+  //     changing its receipt must fail structurally, not merely because a prose marker disappeared.
+  {
+    const ledger = clone();
+    const row = ledger.exceptions.find(
+      (item) =>
+        item.model === "qwen_image" &&
+        item.component === "vae" &&
+        item.backends.join() === "candle",
+    );
+    row.evidence.vaeScope = VAE_SCOPES.FULL;
+    expect(
+      "receipt-bound VAE residency scope",
+      validate({ ...inputs, ledger }).errors,
+      "does not match the numeric receipt scope",
+    );
+  }
+
+  // 3d. Restoring the old whole-file Qwen count under a decoder-only scope must fail arithmetic.
+  {
+    const ledger = clone();
+    const row = ledger.exceptions.find(
+      (item) =>
+        item.model === "qwen_image" &&
+        item.component === "vae" &&
+        item.backends.join() === "candle",
+    );
+    row.evidence.costBytesByTier.q4 = 126892531 * 4;
+    expect(
+      "decoder-only VAE element count",
+      validate({ ...inputs, ledger }).errors,
+      "does not reproduce the independent safetensors-header receipt",
+    );
+  }
+
+  // 3e. Restoring Mage's old whole-file scalar as a decoder byte count must fail arithmetic.
+  {
+    const ledger = clone();
+    const row = ledger.exceptions.find(
+      (item) => item.model === "mage_flow" && item.component === "vae",
+    );
+    row.evidence.costBytesByTier.q4 = 172478148 * 2;
+    expect(
+      "Mage decoder-only VAE element count",
+      validate({ ...inputs, ledger }).errors,
+      "does not reproduce the independent safetensors-header receipt",
+    );
+  }
+
+  // 3f. FLUX.2 decode receipts include both live BN-stat vectors and exclude the unused counter.
+  {
+    const ledger = clone();
+    const row = ledger.exceptions.find(
+      (item) =>
+        item.model === "lens" &&
+        item.component === "vae" &&
+        item.backends.join() === "candle",
+    );
+    row.evidence.costBytesByTier.q4 = 49620259 * 4;
+    expect(
+      "FLUX.2 decoder BN-stat element count",
+      validate({ ...inputs, ledger }).errors,
+      "does not reproduce the independent safetensors-header receipt",
     );
   }
 

@@ -353,10 +353,17 @@ pub(crate) enum KreaTurboFit {
 }
 
 pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
-// sc-17097: the exact inference commit the shipped Krea phase curves were re-measured against, under
-// `gen_core::MEMORY_CALIBRATION_ABI` 3. It must stay equal to the manifest's `turboFit.inferenceRevision`
-// - `candidate_exclusion` compares the two and stales every optimized rung when they diverge.
-pub(crate) const KREA_TURBO_INFERENCE_REVISION: &str = "277f423822bf1899340ed3d867c3d6a773473d7b";
+// sc-17097: the inference revision the shipped Krea phase curves are declared COMPATIBLE with. It must
+// stay equal to the manifest's `turboFit.inferenceRevision` - `candidate_exclusion` compares the two and
+// stales every optimized rung when they diverge.
+//
+// The curves were captured against `277f4238`; each evidence record keeps
+// that exact commit in its own `inferenceCommit` receipt, which is never rewritten (sc-16482: a receipt
+// testifies to its own run). This constant moved to the sc-17393 closeout pin only after verifying the
+// range is a single commit whose diff against BOTH `candle-gen-krea` and `gen-core/src/memory_strategy.rs`
+// is empty - the measured path and the calibration identity (ABI 3, fingerprint, deferred load shape) are
+// byte-for-byte unchanged, so the captures remain valid rather than merely re-stamped.
+pub(crate) const KREA_TURBO_INFERENCE_REVISION: &str = "35251a8875d695144c3c1046d14cd35840fd5838";
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {

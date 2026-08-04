@@ -33,6 +33,15 @@
 //     row to every entry in the catalog and drown the rows that record a decision.
 //   ALSO OUT OF SCOPE: activation transients and workspace (this is a residency ledger, not a peak
 //     ledger), and BELOW-tier residency, which the invariant permits outright — it is one-directional.
+//   VAE RESIDENCY CONVENTION (normative, sc-17435): a `vae` row reports the worst-case weight set its
+//     backend actually constructs across the catalog entry's advertised modes. `vaeScope` is REQUIRED:
+//     "decoder-only" counts the decoder (plus its post-quant projection) and explicitly EXCLUDES encoder
+//     tensors that no advertised route constructs; "full-autoencoder" counts encoder + decoder when the
+//     loader constructs both or an advertised img2img/edit route loads the encoder. If two backends use
+//     different scopes, they MUST be separate rows. `evidence.isolation` names the selected half, while
+//     `scripts/tier-integrity-measurement-receipts.mjs` binds that structured scope to the exact selected
+//     element count and keeps it separate from each lane's runtime width. A whole-file count may never
+//     masquerade as decoder residency merely because both halves share one safetensors artifact.
 // A reader who finds an above-tier component on the DECLARE side with no row here has found an omission,
 // not an exercise of judgment. File it.
 //
@@ -46,6 +55,8 @@
 //   model            catalog entry id in config/manifests/builtin.models.jsonc
 //   component        which component is above tier (textEncoder / vae / visionTower / controlBranch /
 //                    identityAdapters / transformerHead)
+//   evidence.vaeScope required on VAE rows: "decoder-only" or "full-autoencoder", using the normative
+//                    worst-case-by-advertised-mode convention above and the receipt for this exact lane.
 //   residentTier     the precision it is actually resident at: "f32" | "bf16" | "q8". PER LANE — see
 //                    `backends`. Where a component's residency differs between the two ports, this is
 //                    the value for the lanes THIS row claims, not a compromise across both.
@@ -843,12 +854,13 @@
       "reason": "The UNet and both text encoders are packed in q4/q8; the SDXL VAE is never quantized because it runs f32 (fp16/int8-unstable) and its decode quality dominates the final image.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 334615452,
           "q8": 334615452
         },
         "source": "config/manifests/builtin.models.jsonc `sdxl` q8 footprint — residentMemoryBytes 4219172640 vs the on-disk sum, noted as \"the dense VAE + int8 weights up-cast slightly at load\"; isolated artifact: SceneWorks/sdxl-base-mlx@36699bb8a6353e61c920e3bf19f0e6f8e4151c55:q8/vae/diffusion_pytorch_model.fp16.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.fp16.safetensors at immutable revision 36699bb8a6353e61c920e3bf19f0e6f8e4151c55; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.fp16.safetensors at immutable revision 36699bb8a6353e61c920e3bf19f0e6f8e4151c55; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -870,12 +882,13 @@
       "reason": "The Candle SDXL route loads the shared fp16-fix VAE densely at F16 while the selected q4/q8 tier applies to the denoiser checkpoint.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167307726,
           "q8": 167307726
         },
         "source": "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs:507-515 at inference f522fd1 — the generator and VAE use DType::F16; isolated artifact: madebyollin/sdxl-vae-fp16-fix@207b116dae70ace3637169f1ddd2434b91b3a8cd:diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: Candle deliberately uses the fp16-fix VAE because lower-precision SDXL VAE decode is unstable and affects final-image quality."
@@ -896,12 +909,13 @@
       "reason": "Shares the SDXL packing policy: UNet + both text encoders packed, VAE dense in every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 334615452,
           "q8": 334615452
         },
         "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs — \"The VAE is never quantized (it runs f32)\"; isolated artifact: SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e40202d63baef826c7df95a639a811698c1178d2; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e40202d63baef826c7df95a639a811698c1178d2; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -922,12 +936,13 @@
       "reason": "The shared Candle SDXL adapter loads the caller-staged fp16-fix VAE densely at F16 for this SDXL-family route.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167307726,
           "q8": 167307726
         },
         "source": "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs:507-515 at inference f522fd1 — the generator and VAE use DType::F16; isolated artifact: madebyollin/sdxl-vae-fp16-fix@207b116dae70ace3637169f1ddd2434b91b3a8cd:diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: Candle deliberately uses the fp16-fix VAE because lower-precision SDXL VAE decode is unstable and affects final-image quality."
@@ -948,12 +963,13 @@
       "reason": "Shares the SDXL packing policy: encoders packed in q4/q8, VAE dense in every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 334615452,
           "q8": 334615452
         },
         "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs; isolated artifact: SceneWorks/realvisxl-lightning-mlx@c09fd586989bdc3c658d4acd03e8ae81677ade8e:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision c09fd586989bdc3c658d4acd03e8ae81677ade8e; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision c09fd586989bdc3c658d4acd03e8ae81677ade8e; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -974,12 +990,13 @@
       "reason": "The shared Candle SDXL adapter loads the caller-staged fp16-fix VAE densely at F16 for this SDXL-family route.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167307726,
           "q8": 167307726
         },
         "source": "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs:507-515 at inference f522fd1 — the generator and VAE use DType::F16; isolated artifact: madebyollin/sdxl-vae-fp16-fix@207b116dae70ace3637169f1ddd2434b91b3a8cd:diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: Candle deliberately uses the fp16-fix VAE because lower-precision SDXL VAE decode is unstable and affects final-image quality."
@@ -1000,12 +1017,13 @@
       "reason": "Routes through the shared SDXL adapter, whose packer never quantizes the VAE.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 334615452,
           "q8": 334615452
         },
         "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v1-mlx@c5a92a902dd4e6ee99c2a57981ecf66209905dd1:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision c5a92a902dd4e6ee99c2a57981ecf66209905dd1; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision c5a92a902dd4e6ee99c2a57981ecf66209905dd1; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1026,12 +1044,13 @@
       "reason": "The shared Candle SDXL adapter loads the caller-staged fp16-fix VAE densely at F16 for this SDXL-family route.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167307726,
           "q8": 167307726
         },
         "source": "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs:507-515 at inference f522fd1 — the generator and VAE use DType::F16; isolated artifact: madebyollin/sdxl-vae-fp16-fix@207b116dae70ace3637169f1ddd2434b91b3a8cd:diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: Candle deliberately uses the fp16-fix VAE because lower-precision SDXL VAE decode is unstable and affects final-image quality."
@@ -1052,12 +1071,13 @@
       "reason": "Routes through the shared SDXL adapter, whose packer never quantizes the VAE.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 334615452,
           "q8": 334615452
         },
         "source": "crates/media/mlx-gen/mlx-gen-sdxl/src/quant.rs (shared by the illustrious entries via the sdxl adapter); isolated artifact: SceneWorks/illustrious-xl-v2-mlx@7c5c8b2bb75a8f38a7365e70bdf84d38d6204473:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 7c5c8b2bb75a8f38a7365e70bdf84d38d6204473; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 7c5c8b2bb75a8f38a7365e70bdf84d38d6204473; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1078,12 +1098,13 @@
       "reason": "The shared Candle SDXL adapter loads the caller-staged fp16-fix VAE densely at F16 for this SDXL-family route.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167307726,
           "q8": 167307726
         },
         "source": "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs:507-515 at inference f522fd1 — the generator and VAE use DType::F16; isolated artifact: madebyollin/sdxl-vae-fp16-fix@207b116dae70ace3637169f1ddd2434b91b3a8cd:diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for diffusion_pytorch_model.safetensors at immutable revision 207b116dae70ace3637169f1ddd2434b91b3a8cd; floating tensors were counted at the F16 Candle runtime load dtype. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: Candle deliberately uses the fp16-fix VAE because lower-precision SDXL VAE decode is unstable and affects final-image quality."
@@ -1101,12 +1122,13 @@
       "reason": "The SDXL-style UNet and the ChatGLM3-6B encoder are packed; the SDXL VAE stays dense f32 in every tier (fp16/int8-unstable).",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 334615452,
           "q8": 334615452
         },
         "source": "crates/media/candle-gen/candle-gen-kolors/src/pipeline.rs — \"the VAE stays dense f32 in every tier (the MLX packer mirrors it, not packs it)\"; isolated artifact: SceneWorks/kolors-mlx@aadbd49f53b66a33ef1be09384eac409cbc44061:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision aadbd49f53b66a33ef1be09384eac409cbc44061; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision aadbd49f53b66a33ef1be09384eac409cbc44061; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1128,12 +1150,13 @@
       "reason": "SANA quantizes the Linear-DiT trunk and the Gemma-2 text encoder; the 32x DC-AE decoder stays dense f32 in EVERY tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 1249001100,
           "q8": 1249001100
         },
         "source": "crates/media/mlx-gen/mlx-gen-sana/src/quant.rs — \"SANA quantizes two components … The DC-AE decoder stays dense\"; isolated artifact: SceneWorks/Sana_1600M_1024px_mlx@ac421696dd6eb0b41f446f4c45a53ccc057d82a1:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision ac421696dd6eb0b41f446f4c45a53ccc057d82a1; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision ac421696dd6eb0b41f446f4c45a53ccc057d82a1; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1155,12 +1178,13 @@
       "reason": "Same SANA packing policy: Sprint Linear-DiT trunk packed, DC-AE decoder dense.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 1249001100,
           "q8": 1249001100
         },
         "source": "crates/media/mlx-gen/mlx-gen-sana/src/quant.rs; isolated artifact: SceneWorks/Sana_Sprint_1.6B_1024px_mlx@0b0d18484cac2fb515e76d25a09a5911ae4ab58e:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 0b0d18484cac2fb515e76d25a09a5911ae4ab58e; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 0b0d18484cac2fb515e76d25a09a5911ae4ab58e; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1182,12 +1206,13 @@
       "reason": "The convert pre-quantizes transformer + text encoder and symlinks the VAE verbatim: it is Conv/GroupNorm with no quantizable Linear leaves, so there is nothing to pack.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
-          "q4": 336185492,
-          "q8": 336185492
+          "q4": 336185484,
+          "q8": 336185484
         },
         "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs — \"the rest of the VAE is Conv/GroupNorm, never quantized\"; isolated artifact: SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 2868b1461b2b6e6e05d84e52534df3632b4c7d5d; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 2868b1461b2b6e6e05d84e52534df3632b4c7d5d, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency."
@@ -1209,12 +1234,13 @@
       "reason": "Shares the FLUX.2 VAE: Conv/GroupNorm with no quantizable Linear leaves.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
-          "q4": 336185492,
-          "q8": 336185492
+          "q4": 336185484,
+          "q8": 336185484
         },
         "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs; isolated artifact: SceneWorks/flux2-klein-9b-mlx@acf05e8d5103838baba6a5e32dc91d6997a56023:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision acf05e8d5103838baba6a5e32dc91d6997a56023; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision acf05e8d5103838baba6a5e32dc91d6997a56023, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency."
@@ -1236,12 +1262,13 @@
       "reason": "Shares the FLUX.2 VAE: Conv/GroupNorm with no quantizable Linear leaves.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
-          "q4": 336185492,
-          "q8": 336185492
+          "q4": 336185484,
+          "q8": 336185484
         },
         "source": "crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs; isolated artifact: SceneWorks/flux2-klein-9b-kv-mlx@406265beebe141024a06e24038c3713cf7af87d8:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 406265beebe141024a06e24038c3713cf7af87d8; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 406265beebe141024a06e24038c3713cf7af87d8, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency."
@@ -1264,12 +1291,13 @@
       "reason": "The Qwen-Image VAE is all-conv — no `to_quantized` leaves — so the MLX lane keeps the published bf16 tensors dense whatever the tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 253785062,
           "q8": 253785062
         },
         "source": "crates/media/mlx-gen/mlx-gen-qwen-image/src/model_edit.rs — \"its VAE is all-conv (no `to_quantized` leaves). So the VL encoder and VAE stay bf16\"; isolated artifact: SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 8080a4171f1c8b7fca6c30491eafbe6ffab754bf; floating tensors were counted at the BF16 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 8080a4171f1c8b7fca6c30491eafbe6ffab754bf; floating tensors were counted at the BF16 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency."
@@ -1285,12 +1313,13 @@
       "reason": "The Qwen-Image VAE is all-conv — no `to_quantized` leaves — and candle-gen loads the dense decoder at f32 whatever the selected tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "decoder-only",
         "costBytesByTier": {
-          "q4": 507570124,
-          "q8": 507570124
+          "q4": 293182412,
+          "q8": 293182412
         },
         "source": "crates/media/candle-gen/candle-gen-qwen-image/src/lib.rs `ENC_DTYPE = DType::F32`; isolated artifact: SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 8080a4171f1c8b7fca6c30491eafbe6ffab754bf; floating tensors were counted at the F32 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 8080a4171f1c8b7fca6c30491eafbe6ffab754bf; floating tensors were counted at the F32 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: the provider audit confirms there are no packer-targeted Linear leaves, so re-hosting cannot remove this residency."
@@ -1308,12 +1337,13 @@
       "reason": "Krea directly reuses the all-conv Qwen-Image QwenVae; it has no packer-targeted Linear leaves and the published f32 VAE remains resident on every packed tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 507570124,
           "q8": 507570124
         },
         "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-krea/src/vae.rs delegates to mlx_gen_qwen_image::load_vae; Qwen-Image audit: VAE is all-conv with no to_quantized leaves; crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs — \"the VAE stays dense (the published `vae/` is f32)\"; crates/media/mlx-gen/mlx-gen-krea/src/convert.rs `assemble_quantized_snapshot` copies `vae/` with no `bits` branch; isolated artifact: SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision d009674080cc1bccf2b629d834c34bf5eccdb723; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision d009674080cc1bccf2b629d834c34bf5eccdb723; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
@@ -1321,6 +1351,34 @@
       },
       "backends": [
         "mlx",
+        "candle"
+      ]
+    },
+    {
+      "model": "anima_base",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "cause": "structural",
+      "reason": "Candle constructs the Qwen decode-only VAE at f32; only decoder-resident weights stay dense in every packed tier.",
+      "evidence": {
+        "state": "measured",
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 293182412,
+          "q8": 293182412
+        },
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/candle-gen/candle-gen-anima/src/vae.rs constructs candle_gen_qwen_image::QwenVae::new; candle-gen-qwen-image/src/vae.rs documents that type as decode-only and loads decoder + post_quant_conv; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
+        "note": "CAUSE RE-CHECKED by sc-16015: the earlier packing-exception classification had only a packing-policy citation. The pinned provider now supplies the missing structural proof by directly reusing Qwen-Image QwenVae, whose audited all-conv stack has no packer-targeted Linear leaves. The row therefore returns to structural on stronger evidence, not on the former unsupported inference."
+      },
+      "backends": [
         "candle"
       ]
     },
@@ -1336,12 +1394,13 @@
       "reason": "Krea directly reuses the all-conv Qwen-Image QwenVae; it has no packer-targeted Linear leaves and the published f32 VAE remains resident on every packed tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 507570124,
           "q8": 507570124
         },
         "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-krea/src/vae.rs delegates to mlx_gen_qwen_image::load_vae; Qwen-Image audit: VAE is all-conv with no to_quantized leaves; crates/media/mlx-gen/mlx-gen-krea/src/model.rs — Raw \"shares `load_variant` + the whole KreaPipeline\"; crates/media/mlx-gen/mlx-gen-krea/src/pipeline.rs — \"the VAE stays dense (the published `vae/` is f32)\"; isolated artifact: SceneWorks/krea-2-raw-mlx@b88090c79762ba34b1de23a892da239eb76962e4:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision b88090c79762ba34b1de23a892da239eb76962e4; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision b88090c79762ba34b1de23a892da239eb76962e4; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
@@ -1349,6 +1408,34 @@
       },
       "backends": [
         "mlx",
+        "candle"
+      ]
+    },
+    {
+      "model": "anima_aesthetic",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "cause": "structural",
+      "reason": "Candle constructs the Qwen decode-only VAE at f32; only decoder-resident weights stay dense in every packed tier.",
+      "evidence": {
+        "state": "measured",
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 293182412,
+          "q8": 293182412
+        },
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/candle-gen/candle-gen-anima/src/vae.rs constructs candle_gen_qwen_image::QwenVae::new; candle-gen-qwen-image/src/vae.rs documents that type as decode-only and loads decoder + post_quant_conv; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
+        "note": "CAUSE RE-CHECKED by sc-16015: the earlier packing-exception classification had only a packing-policy citation. The pinned provider now supplies the missing structural proof by directly reusing Qwen-Image QwenVae, whose audited all-conv stack has no packer-targeted Linear leaves. The row therefore returns to structural on stronger evidence, not on the former unsupported inference."
+      },
+      "backends": [
         "candle"
       ]
     },
@@ -1364,12 +1451,13 @@
       "reason": "Both DiTs and the Qwen3-VL text encoder are packed; the VAE is copied dense verbatim into every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
-          "q4": 336185488,
-          "q8": 336185488
+          "q4": 336185484,
+          "q8": 336185484
         },
         "source": "crates/media/candle-gen/candle-gen-ideogram/src/quant.rs — \"both DiTs … and the Qwen3-VL text encoder are packed; the VAE stays dense\"; isolated artifact: SceneWorks/ideogram-4-mlx@a3095855b8819dc0d6b067cb1354aaa7da189ff8:q8/vae/model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/model.safetensors at immutable revision a3095855b8819dc0d6b067cb1354aaa7da189ff8; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/model.safetensors at immutable revision a3095855b8819dc0d6b067cb1354aaa7da189ff8, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
@@ -1392,12 +1480,13 @@
       "reason": "Shares the Ideogram-4 turnkey and its packing policy: DiTs + text encoder packed, VAE dense.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
-          "q4": 336185488,
-          "q8": 336185488
+          "q4": 336185484,
+          "q8": 336185484
         },
         "source": "crates/media/mlx-gen/mlx-gen-ideogram/src/convert.rs — copies the \"dense VAE\" verbatim; isolated artifact: SceneWorks/ideogram-4-mlx@a3095855b8819dc0d6b067cb1354aaa7da189ff8:q8/vae/model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/model.safetensors at immutable revision a3095855b8819dc0d6b067cb1354aaa7da189ff8; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/model.safetensors at immutable revision a3095855b8819dc0d6b067cb1354aaa7da189ff8, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1419,12 +1508,13 @@
       "reason": "The FLUX.1 VAE is decode-precision-sensitive and stays dense; the text encoder's token-embedding table is also kept bf16.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 335278732,
           "q8": 335278732
         },
         "source": "crates/media/mlx-gen/mlx-gen-boogu/src/pipeline.rs — \"FLUX.1 VAE (decode-precision-sensitive) stays dense\"; isolated artifact: SceneWorks/boogu-image-mlx@a459e614d408bfdf57089c32cc3da706f5a017de:base/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for base/vae/diffusion_pytorch_model.safetensors at immutable revision a459e614d408bfdf57089c32cc3da706f5a017de; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for base/vae/diffusion_pytorch_model.safetensors at immutable revision a459e614d408bfdf57089c32cc3da706f5a017de; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1446,12 +1536,13 @@
       "reason": "Shares the Boogu packing policy: FLUX.1 VAE dense in every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 335278732,
           "q8": 335278732
         },
         "source": "crates/media/mlx-gen/mlx-gen-boogu/src/pipeline.rs; isolated artifact: SceneWorks/boogu-image-mlx@a459e614d408bfdf57089c32cc3da706f5a017de:turbo/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for turbo/vae/diffusion_pytorch_model.safetensors at immutable revision a459e614d408bfdf57089c32cc3da706f5a017de; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for turbo/vae/diffusion_pytorch_model.safetensors at immutable revision a459e614d408bfdf57089c32cc3da706f5a017de; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1473,12 +1564,13 @@
       "reason": "Shares the Boogu packing policy: FLUX.1 VAE dense in every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 335278732,
           "q8": 335278732
         },
         "source": "crates/media/mlx-gen/mlx-gen-boogu/src/pipeline.rs; isolated artifact: SceneWorks/boogu-image-mlx@a459e614d408bfdf57089c32cc3da706f5a017de:edit/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for edit/vae/diffusion_pytorch_model.safetensors at immutable revision a459e614d408bfdf57089c32cc3da706f5a017de; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for edit/vae/diffusion_pytorch_model.safetensors at immutable revision a459e614d408bfdf57089c32cc3da706f5a017de; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1497,8 +1589,16 @@
       "reason": "The VAE is dense in every tier by design: its quantizable weights are the adaLN projections the one-step decoder folds away at load, so packing them on disk would corrupt the decode.",
       "evidence": {
         "state": "measured",
-        "costGb": 0.345,
-        "source": "config/manifests/builtin.models.jsonc `mage_flow_base` per-tier VAE footprint (0.345 GB in every tier)"
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 141260422,
+          "q8": 141260422
+        },
+        "source": "config/manifests/builtin.models.jsonc `mage_flow_base` per-tier VAE footprint (0.345 GB in every tier); isolated artifact: SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected 70,630,211 BF16 elements from the immutable VAE header under `pipeline.*` after excluding the 34,426,113-element discarded `pipeline.y_embedder.encoder.*` subtree; two-byte runtime width yields 141,260,422 bytes. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: the provider loads these dense convolutional codec weights at BF16; packing the load-time-folded adaLN sources would change the decoded output rather than remove equivalent residency."
       },
       "backends": [
         "mlx",
@@ -1514,8 +1614,16 @@
       "reason": "Same Mage-Flow VAE: the adaLN projections fold away at load, so packing them on disk would corrupt the decode.",
       "evidence": {
         "state": "measured",
-        "costGb": 0.345,
-        "source": "config/manifests/builtin.models.jsonc `mage_flow` per-tier VAE footprint"
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 141260422,
+          "q8": 141260422
+        },
+        "source": "config/manifests/builtin.models.jsonc `mage_flow` per-tier VAE footprint; isolated artifact: SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected 70,630,211 BF16 elements from the immutable VAE header under `pipeline.*` after excluding the 34,426,113-element discarded `pipeline.y_embedder.encoder.*` subtree; two-byte runtime width yields 141,260,422 bytes. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: the provider loads these dense convolutional codec weights at BF16; packing the load-time-folded adaLN sources would change the decoded output rather than remove equivalent residency."
       },
       "backends": [
         "mlx",
@@ -1531,8 +1639,16 @@
       "reason": "Same Mage-Flow VAE: the adaLN projections fold away at load.",
       "evidence": {
         "state": "measured",
-        "costGb": 0.345,
-        "source": "config/manifests/builtin.models.jsonc `mage_flow_turbo` per-tier VAE footprint"
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 141260422,
+          "q8": 141260422
+        },
+        "source": "config/manifests/builtin.models.jsonc `mage_flow_turbo` per-tier VAE footprint; isolated artifact: SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected 70,630,211 BF16 elements from the immutable VAE header under `pipeline.*` after excluding the 34,426,113-element discarded `pipeline.y_embedder.encoder.*` subtree; two-byte runtime width yields 141,260,422 bytes. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: the provider loads these dense convolutional codec weights at BF16; packing the load-time-folded adaLN sources would change the decoded output rather than remove equivalent residency."
       },
       "backends": [
         "mlx",
@@ -1548,8 +1664,16 @@
       "reason": "Same Mage-Flow VAE: the adaLN projections fold away at load.",
       "evidence": {
         "state": "measured",
-        "costGb": 0.345,
-        "source": "config/manifests/builtin.models.jsonc `mage_flow_edit_base` per-tier VAE footprint"
+        "vaeScope": "full-autoencoder",
+        "costBytesByTier": {
+          "q4": 276104070,
+          "q8": 276104070
+        },
+        "source": "config/manifests/builtin.models.jsonc `mage_flow_edit_base` per-tier VAE footprint; isolated artifact: SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected 70,630,211 decoder elements plus 67,421,824 `student.dconv_encoder.*` elements from the immutable BF16 VAE header, for 138,052,035 elements at two-byte runtime width and 276,104,070 bytes. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: the provider loads these dense convolutional codec weights at BF16; packing the load-time-folded adaLN sources would change the decoded output rather than remove equivalent residency."
       },
       "backends": [
         "mlx",
@@ -1565,8 +1689,16 @@
       "reason": "Same Mage-Flow VAE: the adaLN projections fold away at load.",
       "evidence": {
         "state": "measured",
-        "costGb": 0.345,
-        "source": "config/manifests/builtin.models.jsonc `mage_flow_edit` per-tier VAE footprint"
+        "vaeScope": "full-autoencoder",
+        "costBytesByTier": {
+          "q4": 276104070,
+          "q8": 276104070
+        },
+        "source": "config/manifests/builtin.models.jsonc `mage_flow_edit` per-tier VAE footprint; isolated artifact: SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected 70,630,211 decoder elements plus 67,421,824 `student.dconv_encoder.*` elements from the immutable BF16 VAE header, for 138,052,035 elements at two-byte runtime width and 276,104,070 bytes. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: the provider loads these dense convolutional codec weights at BF16; packing the load-time-folded adaLN sources would change the decoded output rather than remove equivalent residency."
       },
       "backends": [
         "mlx",
@@ -1582,8 +1714,16 @@
       "reason": "Same Mage-Flow VAE: the adaLN projections fold away at load.",
       "evidence": {
         "state": "measured",
-        "costGb": 0.345,
-        "source": "config/manifests/builtin.models.jsonc `mage_flow_edit_turbo` per-tier VAE footprint"
+        "vaeScope": "full-autoencoder",
+        "costBytesByTier": {
+          "q4": 276104070,
+          "q8": 276104070
+        },
+        "source": "config/manifests/builtin.models.jsonc `mage_flow_edit_turbo` per-tier VAE footprint; isolated artifact: SceneWorks/Mage-Flow-Components-mlx@c936de2a107ee8d0869137e73943f6414f23adaa:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected 70,630,211 decoder elements plus 67,421,824 `student.dconv_encoder.*` elements from the immutable BF16 VAE header, for 138,052,035 elements at two-byte runtime width and 276,104,070 bytes. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: the provider loads these dense convolutional codec weights at BF16; packing the load-time-folded adaLN sources would change the decoded output rather than remove equivalent residency."
       },
       "backends": [
         "mlx",
@@ -1602,12 +1742,13 @@
       "reason": "Only the MMDiT transformer is quantized; the 16-channel VAE is reused dense in every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 335278732,
           "q8": 335278732
         },
         "source": "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs — \"VAE stays dense (its decode quality dominates the final image …)\"; isolated artifact: SceneWorks/sd3.5-large-mlx@0cf819d00d30d296cee58e02c59b0daa5b8ede89:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 0cf819d00d30d296cee58e02c59b0daa5b8ede89; floating tensors were counted at the F32 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 0cf819d00d30d296cee58e02c59b0daa5b8ede89; floating tensors were counted at the F32 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1628,12 +1769,13 @@
       "reason": "Only the MMDiT transformer is quantized; the 16-channel VAE is reused dense in every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167639366,
           "q8": 167639366
         },
         "source": "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs — \"VAE stays dense (its decode quality dominates the final image …)\"; isolated artifact: SceneWorks/sd3.5-large-mlx@0cf819d00d30d296cee58e02c59b0daa5b8ede89:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 0cf819d00d30d296cee58e02c59b0daa5b8ede89; floating tensors were counted at the BF16 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 0cf819d00d30d296cee58e02c59b0daa5b8ede89; floating tensors were counted at the BF16 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1654,12 +1796,13 @@
       "reason": "Same SD3.5 packing policy: MMDiT packed, 16-channel VAE dense.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 335278732,
           "q8": 335278732
         },
         "source": "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs; isolated artifact: SceneWorks/sd3.5-large-turbo-mlx@e9166f4632ec64f74d560be3ac778d346f89a364:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e9166f4632ec64f74d560be3ac778d346f89a364; floating tensors were counted at the F32 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e9166f4632ec64f74d560be3ac778d346f89a364; floating tensors were counted at the F32 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1680,12 +1823,13 @@
       "reason": "Same SD3.5 packing policy: MMDiT packed, 16-channel VAE dense.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167639366,
           "q8": 167639366
         },
         "source": "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs; isolated artifact: SceneWorks/sd3.5-large-turbo-mlx@e9166f4632ec64f74d560be3ac778d346f89a364:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e9166f4632ec64f74d560be3ac778d346f89a364; floating tensors were counted at the BF16 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e9166f4632ec64f74d560be3ac778d346f89a364; floating tensors were counted at the BF16 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1706,12 +1850,13 @@
       "reason": "Same SD3.5 packing policy: MMDiT-X packed, VAE dense.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 335278732,
           "q8": 335278732
         },
         "source": "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs; isolated artifact: SceneWorks/sd3.5-medium-mlx@5413e962bb326db248be2026a93b147c323392b6:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 5413e962bb326db248be2026a93b147c323392b6; floating tensors were counted at the F32 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 5413e962bb326db248be2026a93b147c323392b6; floating tensors were counted at the F32 runtime load dtype for the mlx lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1732,12 +1877,13 @@
       "reason": "Same SD3.5 packing policy: MMDiT-X packed, VAE dense.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167639366,
           "q8": 167639366
         },
         "source": "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs; isolated artifact: SceneWorks/sd3.5-medium-mlx@5413e962bb326db248be2026a93b147c323392b6:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 5413e962bb326db248be2026a93b147c323392b6; floating tensors were counted at the BF16 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 5413e962bb326db248be2026a93b147c323392b6; floating tensors were counted at the BF16 runtime load dtype for the candle lane, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
@@ -1758,12 +1904,13 @@
       "reason": "Chroma packs only the transformer; the FLUX.1 AutoencoderKL stays dense at its native bf16 in every tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167639366,
           "q8": 167639366
         },
         "source": "config/manifests/builtin.models.jsonc — chroma1_base tier subdirs bundle a dense VAE; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
@@ -1785,12 +1932,13 @@
       "reason": "Chroma packs only the transformer, and candle-gen-chroma builds the FLUX.1 AutoencoderKL through its f32 VarBuilder, so the dense decoder is resident at f32 rather than its native bf16.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "decoder-only",
         "costBytesByTier": {
-          "q4": 335278732,
-          "q8": 335278732
+          "q4": 198181900,
+          "q8": 198181900
         },
         "source": "crates/media/candle-gen/candle-gen-chroma/src/pipeline.rs — `Vae::new(self.f32_vb(&self.root.join(\"vae\"))?)`; isolated artifact: SceneWorks/chroma1-base-mlx@e7330dda29d00ffdeeb719b28e92ee74cff0884c:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c; all 244 tensors are BF16 on disk, but the candle lane builds the AutoencoderKL through `f32_vb`, so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected the decoder and post-quant projection tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision e7330dda29d00ffdeeb719b28e92ee74cff0884c, totaling 49,545,475 elements. The tensors are BF16 on disk, but Candle constructs them through `f32_vb`, so the receipt applies a four-byte runtime width; encoder-prefixed tensors are excluded before that multiplication. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the extra width over the bf16 artifact is a candle load-dtype decision (`f32_vb`), not an unpacked artifact, so removing it is a CUDA-lane compute change (tracked as sc-17439) rather than the repack sc-16462 owns for the mlx sibling.",
@@ -1812,12 +1960,13 @@
       "reason": "Same chroma packing policy: transformer packed, VAE dense at its native bf16.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167639366,
           "q8": 167639366
         },
         "source": "config/manifests/builtin.models.jsonc — chroma1_hd tier subdirs bundle a dense VAE; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
@@ -1839,12 +1988,13 @@
       "reason": "Chroma packs only the transformer, and candle-gen-chroma builds the FLUX.1 AutoencoderKL through its f32 VarBuilder, so the dense decoder is resident at f32 rather than its native bf16.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "decoder-only",
         "costBytesByTier": {
-          "q4": 335278732,
-          "q8": 335278732
+          "q4": 198181900,
+          "q8": 198181900
         },
         "source": "crates/media/candle-gen/candle-gen-chroma/src/pipeline.rs — `Vae::new(self.f32_vb(&self.root.join(\"vae\"))?)`; isolated artifact: SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5; all 244 tensors are BF16 on disk, but the candle lane builds the AutoencoderKL through `f32_vb`, so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected the decoder and post-quant projection tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 9d99afe1ebca67032476756bc70d4a7152bc1bd5, totaling 49,545,475 elements. The tensors are BF16 on disk, but Candle constructs them through `f32_vb`, so the receipt applies a four-byte runtime width; encoder-prefixed tensors are excluded before that multiplication. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the extra width over the bf16 artifact is a candle load-dtype decision (`f32_vb`), not an unpacked artifact, so removing it is a CUDA-lane compute change (tracked as sc-17439) rather than the repack sc-16462 owns for the mlx sibling.",
@@ -1866,12 +2016,13 @@
       "reason": "Same chroma packing policy: transformer packed, VAE dense at its native bf16.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 167639366,
           "q8": 167639366
         },
         "source": "config/manifests/builtin.models.jsonc — chroma1_flash tier subdirs bundle a dense VAE; only the transformer is quantized per tier; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; all 244 tensors are BF16 and mlx-gen loads the AutoencoderKL at that native width, so floating tensors are counted at 2 bytes, not 4. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "eliminate",
         "eliminationStory": "sc-16462",
         "reviewedCause": "packing-exception",
@@ -1893,12 +2044,13 @@
       "reason": "Chroma packs only the transformer, and candle-gen-chroma builds the FLUX.1 AutoencoderKL through its f32 VarBuilder, so the dense decoder is resident at f32 rather than its native bf16.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "decoder-only",
         "costBytesByTier": {
-          "q4": 335278732,
-          "q8": 335278732
+          "q4": 198181900,
+          "q8": 198181900
         },
         "source": "crates/media/candle-gen/candle-gen-chroma/src/pipeline.rs — `Vae::new(self.f32_vb(&self.root.join(\"vae\"))?)`; isolated artifact: SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor byte spans for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00; all 244 tensors are BF16 on disk, but the candle lane builds the AutoencoderKL through `f32_vb`, so floating tensors are counted at 4 bytes for THIS lane while the mlx sibling counts 2. The element counts are the same artifact's and are shared with that row. This is isolated weight residency, excluding activations and allocator overhead.",
+        "isolation": "Selected the decoder and post-quant projection tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 6a9cb6178709559461506bf247f708d0d1008d00, totaling 49,545,475 elements. The tensors are BF16 on disk, but Candle constructs them through `f32_vb`, so the receipt applies a four-byte runtime width; encoder-prefixed tensors are excluded before that multiplication. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the extra width over the bf16 artifact is a candle load-dtype decision (`f32_vb`), not an unpacked artifact, so removing it is a CUDA-lane compute change (tracked as sc-17439) rather than the repack sc-16462 owns for the mlx sibling.",
@@ -1917,21 +2069,48 @@
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "The VAE is the shared FLUX.2 decoder and is never quantized (runs f32) — every tier ships it dense.",
+      "reason": "MLX constructs the complete FLUX.2 autoencoder at f32; its convolutional weights stay dense in every packed tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
-          "q4": 336185492,
-          "q8": 336185492
+          "q4": 336185484,
+          "q8": 336185484
         },
-        "source": "crates/media/mlx-gen/mlx-gen-lens/src/quant.rs — \"The VAE is the shared Flux.2 decoder and is never quantized (runs f32)\"; isolated artifact: SceneWorks/lens-mlx@4e1349c1962950eee328c69537904631ebc64283:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 4e1349c1962950eee328c69537904631ebc64283; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs Flux2Vae::from_weights constructs encoder, decoder, quant_conv, post_quant_conv, and batch normalization; isolated artifact: SceneWorks/lens-mlx@4e1349c1962950eee328c69537904631ebc64283:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 4e1349c1962950eee328c69537904631ebc64283, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
       },
       "backends": [
-        "mlx",
+        "mlx"
+      ]
+    },
+    {
+      "model": "lens",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "cause": "packing-exception",
+      "reason": "Candle constructs the FLUX.2 decode-only VAE at f32; only decoder-resident weights stay dense in every packed tier.",
+      "evidence": {
+        "state": "measured",
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 198482060,
+          "q8": 198482060
+        },
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/candle-gen/candle-gen-lens/src/lib.rs constructs the VAE with Flux2Vae::new; candle-gen-flux2/src/vae.rs defines that constructor as decode-only; isolated artifact: SceneWorks/lens-mlx@4e1349c1962950eee328c69537904631ebc64283:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected decoder, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision 4e1349c1962950eee328c69537904631ebc64283, totaling 49,620,515 elements. The unused `bn.num_batches_tracked` scalar plus all encoder and quant_conv tensors are excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "packing-exception",
+        "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
+      },
+      "backends": [
         "candle"
       ]
     },
@@ -1944,21 +2123,48 @@
         "q8"
       ],
       "cause": "packing-exception",
-      "reason": "Same Lens packing policy: the shared FLUX.2 VAE stays f32 in every tier.",
+      "reason": "MLX constructs the complete FLUX.2 autoencoder at f32; its convolutional weights stay dense in every packed tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
-          "q4": 336185492,
-          "q8": 336185492
+          "q4": 336185484,
+          "q8": 336185484
         },
-        "source": "crates/media/candle-gen/candle-gen-lens/src/quant.rs — \"the Flux.2 VAE stays f32\"; isolated artifact: SceneWorks/lens-turbo-mlx@d3f485c320039595cff16d4f686a5f9378714f25:q8/vae/diffusion_pytorch_model.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision d3f485c320039595cff16d4f686a5f9378714f25; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-flux2/src/vae.rs Flux2Vae::from_weights constructs encoder, decoder, quant_conv, post_quant_conv, and batch normalization; isolated artifact: SceneWorks/lens-turbo-mlx@d3f485c320039595cff16d4f686a5f9378714f25:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected encoder, decoder, quant_conv, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision d3f485c320039595cff16d4f686a5f9378714f25, totaling 84,046,371 elements. The unused `bn.num_batches_tracked` metadata scalar is excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "packing-exception",
         "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
       },
       "backends": [
-        "mlx",
+        "mlx"
+      ]
+    },
+    {
+      "model": "lens_turbo",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "cause": "packing-exception",
+      "reason": "Candle constructs the FLUX.2 decode-only VAE at f32; only decoder-resident weights stay dense in every packed tier.",
+      "evidence": {
+        "state": "measured",
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 198482060,
+          "q8": 198482060
+        },
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/candle-gen/candle-gen-lens/src/lib.rs constructs the VAE with Flux2Vae::new; candle-gen-flux2/src/vae.rs defines that constructor as decode-only; isolated artifact: SceneWorks/lens-turbo-mlx@d3f485c320039595cff16d4f686a5f9378714f25:q8/vae/diffusion_pytorch_model.safetensors",
+        "isolation": "Selected decoder, post_quant_conv, bn.running_mean, and bn.running_var tensor shapes from q8/vae/diffusion_pytorch_model.safetensors at immutable revision d3f485c320039595cff16d4f686a5f9378714f25, totaling 49,620,515 elements. The unused `bn.num_batches_tracked` scalar plus all encoder and quant_conv tensors are excluded before applying the four-byte F32 runtime width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "packing-exception",
+        "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration."
+      },
+      "backends": [
         "candle"
       ]
     },
@@ -1971,22 +2177,50 @@
         "q8"
       ],
       "cause": "structural",
-      "reason": "Anima directly reuses the all-conv Qwen-Image QwenVae; it has no packer-targeted Linear leaves and is loaded f32, so every packed tier retains this structural residency.",
+      "reason": "MLX constructs the complete QwenVae at f32; its convolutional weights stay dense in every packed tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 507570124,
           "q8": 507570124
         },
-        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-anima/src/vae.rs re-exports mlx_gen_qwen_image::QwenVae; Qwen-Image audit: VAE is all-conv with no to_quantized leaves; crates/media/candle-gen/candle-gen-anima/src/transformer.rs — \"Anima's tiers pack ONLY the DiT\"; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-anima/src/vae.rs re-exports mlx_gen_qwen_image::QwenVae; mlx-gen-qwen-image/src/vae.rs QwenVae::from_weights constructs encoder, decoder, quant_conv, and post_quant_conv; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
         "note": "CAUSE RE-CHECKED by sc-16015: the earlier packing-exception classification had only a packing-policy citation. The pinned provider now supplies the missing structural proof by directly reusing Qwen-Image QwenVae, whose audited all-conv stack has no packer-targeted Linear leaves. The row therefore returns to structural on stronger evidence, not on the former unsupported inference."
       },
       "backends": [
-        "mlx",
+        "mlx"
+      ]
+    },
+    {
+      "model": "anima_turbo",
+      "component": "vae",
+      "residentTier": "f32",
+      "appliesToTiers": [
+        "q4",
+        "q8"
+      ],
+      "cause": "structural",
+      "reason": "Candle constructs the Qwen decode-only VAE at f32; only decoder-resident weights stay dense in every packed tier.",
+      "evidence": {
+        "state": "measured",
+        "vaeScope": "decoder-only",
+        "costBytesByTier": {
+          "q4": 293182412,
+          "q8": 293182412
+        },
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/candle-gen/candle-gen-anima/src/vae.rs constructs candle_gen_qwen_image::QwenVae::new; candle-gen-qwen-image/src/vae.rs documents that type as decode-only and loads decoder + post_quant_conv; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: decoder only; encoder tensors are excluded because no advertised route on this backend constructs them.",
+        "triageDecision": "measure",
+        "reviewedCause": "structural",
+        "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
+        "note": "CAUSE RE-CHECKED by sc-16015: the earlier packing-exception classification had only a packing-policy citation. The pinned provider now supplies the missing structural proof by directly reusing Qwen-Image QwenVae, whose audited all-conv stack has no packer-targeted Linear leaves. The row therefore returns to structural on stronger evidence, not on the former unsupported inference."
+      },
+      "backends": [
         "candle"
       ]
     },
@@ -1999,23 +2233,23 @@
         "q8"
       ],
       "cause": "structural",
-      "reason": "Anima directly reuses the all-conv Qwen-Image QwenVae; it has no packer-targeted Linear leaves and is loaded f32, so every packed tier retains this structural residency.",
+      "reason": "MLX constructs the complete QwenVae at f32; its convolutional weights stay dense in every packed tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 507570124,
           "q8": 507570124
         },
-        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-anima/src/vae.rs re-exports mlx_gen_qwen_image::QwenVae; Qwen-Image audit: VAE is all-conv with no to_quantized leaves; crates/media/candle-gen/candle-gen-anima/src/transformer.rs — \"Anima's tiers pack ONLY the DiT\"; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-anima/src/vae.rs re-exports mlx_gen_qwen_image::QwenVae; mlx-gen-qwen-image/src/vae.rs QwenVae::from_weights constructs encoder, decoder, quant_conv, and post_quant_conv; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
         "note": "CAUSE RE-CHECKED by sc-16015: the earlier packing-exception classification had only a packing-policy citation. The pinned provider now supplies the missing structural proof by directly reusing Qwen-Image QwenVae, whose audited all-conv stack has no packer-targeted Linear leaves. The row therefore returns to structural on stronger evidence, not on the former unsupported inference."
       },
       "backends": [
-        "mlx",
-        "candle"
+        "mlx"
       ]
     },
     {
@@ -2027,23 +2261,23 @@
         "q8"
       ],
       "cause": "structural",
-      "reason": "Anima directly reuses the all-conv Qwen-Image QwenVae; it has no packer-targeted Linear leaves and is loaded f32, so every packed tier retains this structural residency.",
+      "reason": "MLX constructs the complete QwenVae at f32; its convolutional weights stay dense in every packed tier.",
       "evidence": {
         "state": "measured",
+        "vaeScope": "full-autoencoder",
         "costBytesByTier": {
           "q4": 507570124,
           "q8": 507570124
         },
-        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-anima/src/vae.rs re-exports mlx_gen_qwen_image::QwenVae; Qwen-Image audit: VAE is all-conv with no to_quantized leaves; crates/media/candle-gen/candle-gen-anima/src/transformer.rs — \"Anima's tiers pack ONLY the DiT\"; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
-        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead.",
+        "source": "inference@f522fd1f646d147e513054cbb3abe8410a91c836:crates/media/mlx-gen/mlx-gen-anima/src/vae.rs re-exports mlx_gen_qwen_image::QwenVae; mlx-gen-qwen-image/src/vae.rs QwenVae::from_weights constructs encoder, decoder, quant_conv, and post_quant_conv; isolated artifact: circlestone-labs/Anima@f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b:split_files/vae/qwen_image_vae.safetensors",
+        "isolation": "Summed the exact safetensors-header tensor shapes for split_files/vae/qwen_image_vae.safetensors at immutable revision f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
         "triageDecision": "measure",
         "reviewedCause": "structural",
         "triageNote": "Measure, not eliminate: this provider directly reuses Qwen-Image QwenVae, whose all-conv stack has no packer-targeted Linear leaves, so re-hosting cannot remove the residency.",
         "note": "CAUSE RE-CHECKED by sc-16015: the earlier packing-exception classification had only a packing-policy citation. The pinned provider now supplies the missing structural proof by directly reusing Qwen-Image QwenVae, whose audited all-conv stack has no packer-targeted Linear leaves. The row therefore returns to structural on stronger evidence, not on the former unsupported inference."
       },
       "backends": [
-        "mlx",
-        "candle"
+        "mlx"
       ]
     },
 

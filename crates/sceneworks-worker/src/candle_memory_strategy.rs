@@ -1107,8 +1107,38 @@ mod tests {
             0,
             MemoryCacheState::Cold,
         )
-        .expect("FLUX.2-dev safe-device-peak evaluation")
-        .expect("bounded decode must fit");
+        .expect("FLUX.2-dev safe-device-peak evaluation");
+
+        // Everything above is pin-independent: the packaged evidence is RETAINED whatever the live
+        // pin is, which is why `verified_candidates` still returns all five rungs. ADMISSION is the
+        // step that carries the pin — `evaluate_shared_image` threads
+        // `catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION` in as `expected_inference_revision`.
+        //
+        // The bindings are audited through an exact compatibility WINDOW: captured at
+        // `FLUX2_CAPTURED_INFERENCE_REVISION` (5ffd), audited against
+        // `FLUX2_COMPATIBLE_INFERENCE_REVISION` (277f). While the live pin is still that audited
+        // revision, bounded decode is admitted. Once the pin moves past it the evidence no longer
+        // authorizes the newer runtime and admission correctly yields `None` — evidence is
+        // superseded by revision, not rejected. sc-17393's bump to 35251a88 is the first to arrive
+        // after this test landed, and without this branch a routine pin bump reads as a selector
+        // regression rather than as the fail-closed rule doing its job.
+        //
+        // Deliberately NOT "fixed" by widening `FLUX2_COMPATIBLE_INFERENCE_REVISION`: re-certifying
+        // needs a new `inference-compatibility-<rev>.json` proof, and that proof's audited-object
+        // set includes `crates/media/candle-gen/candle-gen`, which 277f..35251a88 actually changes.
+        // The window has to be re-audited by measurement, not by editing a constant.
+        if crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+            != FLUX2_COMPATIBLE_INFERENCE_REVISION
+        {
+            assert!(
+                evaluation.is_none(),
+                "outside the audited compatibility window the packaged FLUX.2-dev evidence must \
+                 not admit a strategy against the newer runtime pin"
+            );
+            return;
+        }
+
+        let evaluation = evaluation.expect("bounded decode must fit");
         assert_eq!(
             evaluation.context.selection.strategy,
             MemoryStrategy::BoundedDecode
