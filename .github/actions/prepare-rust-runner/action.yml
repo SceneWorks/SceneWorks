@@ -51,6 +51,14 @@ description: >
 # clippy-driver.exe/rustdoc.exe are thin launchers that load rustc_driver-*.dll /
 # std-*.dll from their OWN directory, so a copy without those DLLs would break — and
 # re-symlinking is the very thing that fails in the service context.)
+#
+# CARGO_HOME IS NOT RUSTUP'S HOME HERE. Every path this action needs from rustup —
+# rustup.exe itself, and the .cargo\bin an interactive shell resolves — hangs off the
+# profile that installed rustup, NOT off $env:CARGO_HOME. The runner services pin
+# CARGO_HOME to a per-runner dependency cache (D:\cargo-home-N) and windows-candle.yml
+# repoints it again at $RUNNER_TEMP\cargo-home; neither has a bin\. Deriving rustup
+# from CARGO_HOME silently skipped the authoritative resolution and emitted a
+# permanent bogus "rustup was deleted" warning. Keep the two notions separate.
 runs:
   using: composite
   steps:
@@ -61,8 +69,36 @@ runs:
 
         # rustup's homes are overridable by env; honor them, else the rustup defaults.
         $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
-        $cargoHome  = if ($env:CARGO_HOME)  { $env:CARGO_HOME }  else { Join-Path $env:USERPROFILE '.cargo' }
         $toolchainsDir = Join-Path $rustupHome 'toolchains'
+
+        # WHERE rustup.exe ACTUALLY LIVES — do NOT derive it from $env:CARGO_HOME.
+        # rustup drops itself and its 13 proxies into whatever CARGO_HOME was in effect
+        # AT INSTALL TIME, i.e. the developer profile. The JOB's CARGO_HOME is a wholly
+        # different thing on these runners: each runner service pins it to a per-runner
+        # dependency cache (D:\cargo-home-N — registry\, git\, config.toml, and no bin\
+        # at all) so four concurrent jobs stop racing one shared checkout (os error 267),
+        # and windows-candle.yml repoints it again at $RUNNER_TEMP\cargo-home a few steps
+        # later. Resolving rustup under CARGO_HOME therefore probed a directory that has
+        # never existed on this box: it silently disabled the authoritative resolution in
+        # (1) below — every job has been falling through to the directory scan in (2) —
+        # and made the closing .cargo\bin check report "rustup was deleted" on every
+        # single run of a box whose rustup is present and healthy.
+        $userCargoBin = Join-Path (Join-Path $env:USERPROFILE '.cargo') 'bin'
+        $rustupProbe = New-Object System.Collections.Generic.List[string]
+        if ($env:CARGO_HOME) { $rustupProbe.Add((Join-Path $env:CARGO_HOME 'bin\rustup.exe')) }
+        $rustupProbe.Add((Join-Path $userCargoBin 'rustup.exe'))
+        $onPath = Get-Command rustup.exe -CommandType Application -ErrorAction SilentlyContinue
+        if ($onPath) { $rustupProbe.Add($onPath.Source) }
+        # rustup.exe is a real ~12.8 MB binary. A reparse point or 0-byte file under that
+        # name would be a proxy dispatching to nothing, not a usable rustup.
+        $rustupExe = $rustupProbe |
+          Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+          Where-Object {
+            $ri = Get-Item -LiteralPath $_ -Force
+            -not ($ri.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $ri.Length -gt 0
+          } |
+          Select-Object -First 1
+        Write-Host "rustup.exe: $(if ($rustupExe) { $rustupExe } else { '<none found>' })"
 
         # The channel this repo PINS (rust-toolchain.toml at the workspace root). CI must
         # build exactly this toolchain, not whatever the box default happens to be: this box
@@ -80,20 +116,19 @@ runs:
 
         $binDir = $null
 
-        # 1) Authoritative: ask the real rustup.exe. It is a real ~12.8 MB binary (NOT one of
-        #    the fragile proxy symlinks), so it launches under the runner service token and
-        #    resolves this repo's rust-toolchain.toml exactly the way an in-repo cargo would.
-        $rustupExe = Join-Path $cargoHome 'bin\rustup.exe'
-        if (Test-Path $rustupExe) {
-          $ri = Get-Item $rustupExe -Force
-          if (-not ($ri.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $ri.Length -gt 0) {
-            try {
-              $cargoPath = (& $rustupExe which cargo | Out-String).Trim()
-              if ($LASTEXITCODE -eq 0 -and $cargoPath -and (Test-Path $cargoPath)) {
-                $binDir = Split-Path -Parent $cargoPath
-              }
-            } catch { }
-          }
+        # 1) Authoritative: ask the real rustup.exe (resolved above). It is a real binary
+        #    (NOT one of the fragile proxy symlinks), so it launches under the runner
+        #    service token and resolves this repo's rust-toolchain.toml exactly the way an
+        #    in-repo cargo would — including a pinned channel the scan in (2) cannot see,
+        #    because rustup installs a toolchain-file channel on demand where the scan can
+        #    only pick from what is already on disk.
+        if ($rustupExe) {
+          try {
+            $cargoPath = (& $rustupExe which cargo | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and $cargoPath -and (Test-Path $cargoPath)) {
+              $binDir = Split-Path -Parent $cargoPath
+            }
+          } catch { }
         }
 
         # 2) Fallback for the dangling-shim state (rustup.exe itself deleted): resolve by
@@ -174,17 +209,35 @@ runs:
         # the entry survives the `call vcvars64.bat` cmd steps (vcvars only appends).
         Add-Content -Path $env:GITHUB_PATH -Value $binDir
 
-        # Informational only (never fatal): surface a broken .cargo\bin so the box's
-        # INTERACTIVE cargo (used by dev + sibling sessions) gets repaired too. CI itself
-        # is already immune via the PATH prepend above.
+        # Informational only (never fatal): surface a GENUINELY broken .cargo\bin so the
+        # box's INTERACTIVE cargo (used by dev + sibling sessions) gets repaired too. CI
+        # itself is already immune via the PATH prepend above.
+        #
+        # "Is a 0-byte reparse point" is NOT evidence of breakage: that is rustup's NORMAL
+        # Windows proxy layout wherever symlinks are available, and those proxies dispatch
+        # fine interactively (`.cargo\bin\cargo.exe --version` prints cargo 1.97.1 on this
+        # box, while the old check was calling it broken). Flagging that healthy shape —
+        # and flagging a bin-less job CARGO_HOME as "rustup was deleted" — fired this
+        # warning on 100% of runs and trained everyone to scroll past it. The one state
+        # worth reporting is failure mode 1 from the header: the DANGLING shim, where the
+        # rustup.exe all 13 proxies reach by argv[0] is gone and every one of them dies
+        # with ERROR_NO_ASSOCIATION. Keyed off the profile .cargo\bin, which is what an
+        # interactive shell resolves — never off the job's CARGO_HOME.
         $ErrorActionPreference = 'Continue'
-        $proxyCargo = Join-Path $cargoHome 'bin\cargo.exe'
-        if (Test-Path $proxyCargo) {
-          $i = Get-Item $proxyCargo -Force
-          if (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $i.Length -eq 0) {
-            Write-Host "::warning title=Fragile .cargo\bin on candle runner::'$proxyCargo' is a $([int]$i.Length)-byte reparse point (rustup proxy). This CI lane is unaffected (it uses '$binDir'), but interactive 'cargo' on the box is broken until rustup is reinstalled + Defender excludes .cargo/.rustup (sc-13166)."
+        if (Test-Path -LiteralPath $userCargoBin -PathType Container) {
+          $profileRustup = Join-Path $userCargoBin 'rustup.exe'
+          $rustupIntact = $false
+          if (Test-Path -LiteralPath $profileRustup -PathType Leaf) {
+            $ru = Get-Item -LiteralPath $profileRustup -Force
+            $rustupIntact = -not ($ru.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $ru.Length -gt 0
           }
-        } else {
-          Write-Host "::warning title=Fragile .cargo\bin on candle runner::'$proxyCargo' is missing (rustup was deleted). This CI lane is unaffected (it uses '$binDir'), but interactive 'cargo' on the box is broken until rustup is reinstalled (sc-13166)."
+          if (-not $rustupIntact) {
+            # ASCII ONLY in this string, as in every other message this action emits.
+            # An em dash is UTF-8 E2 80 94; if the script is ever decoded as CP1252 the
+            # trailing 0x94 becomes U+201D, which PowerShell accepts as a STRING
+            # DELIMITER and the whole step dies on a parse error. Comments survive that
+            # mangling (rest of line ignored); quoted message strings do not.
+            Write-Host "::warning title=Dangling .cargo\bin proxies on candle runner::'$profileRustup' is missing or empty, so every rustup proxy in '$userCargoBin' dispatches to nothing and dies with ERROR_NO_ASSOCIATION. This CI lane is unaffected (it uses '$binDir'), but interactive 'cargo' on the box is broken until rustup is reinstalled (https://win.rustup.rs). First confirm no workflow runs Swatinem/rust-cache with cache-bin enabled: its post step is what deletes rustup here (scripts/lib/rust-cache-bin.mjs, sc-13166)."
+          }
         }
         exit 0
