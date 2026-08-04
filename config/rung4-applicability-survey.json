@@ -14,11 +14,12 @@
       "provider-local": "Real block streaming that does NOT go through the shared primitive.",
       "none": "No block-window code path exists for this family on this backend."
     },
-    "implementedEntries": "The exact catalog entries whose provider exposes the rung-4 code path. Implementation is per ENTRY, not per family — Krea's Candle contract is gated on the turbo descriptor id, so krea_2_raw does not get it — and a family-level claim would over-report. Must be empty exactly when `implementation` is \"none\".",
+    "implementedEntries": "Legacy Cartesian implementation selector: the exact catalog entries whose provider exposes one parameter-identical rung-4 code path. Implementation is per ENTRY, not per family — Krea's Candle contract is gated on the turbo descriptor id, so krea_2_raw does not get it — and a family-level claim would over-report. Mutually exclusive with `implementationScopes`; must be empty exactly when `implementation` is \"none\".",
+    "implementationScopes": "Exact implementation selectors for a family whose entries or tiers publish different rung-4 parameter shapes. Every scope names entries and its own strategyParameters; optional tiers, modes, and overlays narrow the scope. Scopes must not overlap and are mutually exclusive with the legacy implementedEntries/implementedTiers/implementedModes/implementedOverlays fields.",
     "implementedModes": "Optional narrowing of `implementedEntries` to the catalog modes the implementing provider descriptor actually serves. Needed because the matrix collapses a catalog entry's modes onto one provider id while inference may route them to DIFFERENT descriptors: Candle Krea's edit modes are served by the krea_2_edit descriptor and the krea_2_turbo_edit surface tag, neither of which returns the memory contract, so a mode-blind claim would report rung 4 as implemented on a route that does not expose it. Absent means every mode.",
-    "implementedTiers": "Optional narrowing of `implementedEntries` to measured numeric tiers. Absent means every tier. Lens uses this because dense BF16 moves the request peak while Q4 does not; treating a family-level implementation as tier-neutral would turn a measured non-win into a production claim.",
+    "implementedTiers": "Optional narrowing of legacy `implementedEntries` to measured numeric tiers. Absent means every tier.",
     "implementedOverlays": "Optional narrowing of `implementedEntries` to the overlay cells admitted by the provider contract. Absent means every overlay. Use this for evidence-gated exclusions such as a contract measured only with no adapter; use `overlayIncompatible` instead when the provider mechanism makes an overlay structurally impossible.",
-    "strategyParameters": "The rung's OWN published parameters for an implemented family. Deliberately not the cumulative composition: rung 4 engages rungs 2 and 3 by cost-order default, but this survey has no measured tile/chunk values for the families it marks implemented, and inventing them would put unmeasured numbers in a cell that reads as evidence.",
+    "strategyParameters": "The rung's OWN published parameters for a legacy Cartesian implementation claim. Exact implementationScopes carry this field per scope. Deliberately not the cumulative composition: rung 4 engages lower rungs by cost-order default, but inventing unmeasured values would put unsupported numbers in a cell that reads as evidence.",
     "overlayIncompatible": "Present when the provider's adapter mechanism makes a windowed block unable to carry an overlay. It makes the overlay cells of the IMPLEMENTED entries/modes Structurally N/A with the cited evidence, and nothing else: on an entry that has no streaming path at all the rung is Missing for the ordinary reason, and calling it structurally exempt would presuppose a path that does not exist. It is reported on the cell as its own `overlayIncompatible` flag rather than by overwriting `structuralApplicability`, whose meaning is about the ARCHITECTURE — Krea's 28-block trunk is windowable whatever its adapters do.",
     "blockStacks[].entries": "Optional. Present when a stack exists on only some of the family's catalog entries, so a per-entry difference stays machine-readable instead of being rounded into the family verdict.",
     "requestPeak": {
@@ -424,21 +425,39 @@
         "mlx": {
           "structuralApplicability": "full",
           "implementation": "shared-primitive",
-          "implementedEntries": [
-            "lens",
-            "lens_turbo"
+          "implementationScopes": [
+            {
+              "entries": [
+                "lens"
+              ],
+              "tiers": [
+                "q4"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Both"
+              }
+            },
+            {
+              "entries": [
+                "lens_turbo"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "TextEncoder"
+              }
+            }
           ],
-          "implementedTiers": [
-            "bf16"
-          ],
-          "implementedOverlays": [
-            "none"
-          ],
-          "strategyParameters": {
-            "transformerWindowSize": 1,
-            "transformerWindowComponent": "TextEncoder"
-          },
-          "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+          "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
           "blockStacks": [
             {
               "name": "blocks",
@@ -461,22 +480,63 @@
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
-              "reason": "The provider declares BoundedTransformerResidency Implemented only for BF16 + Sequential + DeferredMaterialization + directory weights with no quantization, adapter, or PiD overlay, publishing TextEncoder/window=1."
+              "reason": "The provider selects two exact calibration routes: `lens` with prepacked Q4 publishes the full shared ladder and Both/window=1, while `lens_turbo` with dense BF16 publishes the legacy TextEncoder/window=1 rung. Other entry/tier combinations, adapters, PiD, and non-deferred loads remain unmeasured."
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/registry.rs",
-              "reason": "Both lens and lens_turbo descriptors expose the measured contract and select the streamable text loader only when the exact production predicate holds; Resident keeps the fully resident encoder."
+              "reason": "The registry materializes the text and DiT block streams only when the selected contract admits them, preserving the provider-id, numeric-tier, load-shape, and overlay boundaries established by memory_strategy."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/shared_memory_ladder_real_weights.rs",
+              "reason": "The serial real-Metal harness records that the exact cached Q4 `lens` artifact passed every ladder arm and terminal recovery at 1024²/one step, reducing the full-request peak from 30.497 to 4.696 GiB at rung 4."
             }
           ],
           "requestPeak": {
-            "finding": "moves",
-            "byTier": {
-              "bf16": "moves",
-              "q4": "does-not-move",
-              "q8": "unmeasured"
-            },
-            "reason": "Real Lens-Turbo BF16 weights on Apple/Metal measured 80.084 GiB unscoped versus 10.037 GiB with TextEncoder/window=1 for the full request, an 87.5% reduction with identical pixels. Q4 is an explicit counterexample: conditioning fell 3.972 -> 1.861 GiB, but the request peak changed 6.367 -> 6.547 GiB, so Q4 remains Missing rather than inheriting the BF16 result.",
+            "finding": "unmeasured",
+            "scopes": [
+              {
+                "entries": [
+                  "lens"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              },
+              {
+                "entries": [
+                  "lens_turbo"
+                ],
+                "tiers": [
+                  "bf16"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              },
+              {
+                "entries": [
+                  "lens_turbo"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "does-not-move"
+              }
+            ],
+            "reason": "The current full-ladder run moved base Lens Q4 from 30.497 to 4.696 GiB at rung 4. The legacy Lens-Turbo BF16 request A/B moved 80.084 to 10.037 GiB with TextEncoder/window=1 and identical pixels. Lens-Turbo Q4 remains an explicit counterexample: conditioning fell 3.972 -> 1.861 GiB, but the request peak changed 6.367 -> 6.547 GiB.",
             "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/shared_memory_ladder_real_weights.rs",
+                "reason": "Serial real-weight request comparison for base Lens Q4 records the full-ladder rung-4 request-peak reduction and byte-identical output."
+              },
               {
                 "source": "inference:crates/media/mlx-gen/mlx-gen-lens/tests/text_encoder_request_peak_real_weights.rs",
                 "reason": "Fresh-process, real-weight request comparison pins the BF16 win and the reproducible Q4 non-win while requiring exact generated-pixel identity."
@@ -491,9 +551,9 @@
             "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
             "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
             "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-            "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+            "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
             "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-            "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+            "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
             "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
           ]
         },

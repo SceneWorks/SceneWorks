@@ -3412,27 +3412,29 @@ mod candle_image_load_shape_tests {
 
 /// Select deferred materialization for MLX routes with a measured load-exact contract. The fit gate
 /// still owns the independent Resident/Sequential decision; a constrained request adds Sequential
-/// and can then select the provider's bounded transformer rung. Qwen base/edit also cover Q4/Q8 and
+/// and can then select the provider's bounded transformer rung. Lens has two deliberately separate
+/// measured identities at the current provider pin: base Lens Q4 exposes the full ladder, while
+/// Lens-Turbo BF16 retains its legacy text-encoder-only rung. Qwen base/edit also cover Q4/Q8 and
 /// forward-time adapters because the block stream replays packed quantization and captured residuals.
 #[cfg(target_os = "macos")]
 fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
-    let directory_bf16 = matches!(&spec.weights, WeightsSource::Dir(_))
+    let directory_native = matches!(&spec.weights, WeightsSource::Dir(_))
         && spec.precision == gen_core::Precision::Bf16;
-    let lens_dense_native = matches!(engine_id, "lens" | "lens_turbo")
-        && directory_bf16
-        && spec.quantize.is_none()
+    let lens_native = directory_native
+        && ((engine_id == "lens" && spec.quantize == Some(gen_core::Quant::Q4))
+            || (engine_id == "lens_turbo" && spec.quantize.is_none()))
         && spec.control.is_none()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.adapters.is_empty()
         && spec.pid.is_none();
-    let qwen_native = directory_bf16
+    let qwen_native = directory_native
         && matches!(engine_id, "qwen_image" | "qwen_image_edit")
         && spec.control.is_none()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.pid.is_none();
-    if lens_dense_native || qwen_native {
+    if lens_native || qwen_native {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3447,7 +3449,7 @@ mod measured_mlx_load_shape_tests {
         TransformerComponent,
     };
 
-    fn fixture_spec(root: &std::path::Path) -> LoadSpec {
+    fn fixture_spec(root: &std::path::Path, quant_bits: Option<u8>) -> LoadSpec {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
@@ -3462,12 +3464,18 @@ mod measured_mlx_load_shape_tests {
         }
         std::fs::write(
             root.join("text_encoder/config.json"),
-            r#"{"dtype":"bfloat16"}"#,
+            quant_bits.map_or_else(
+                || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+            ),
         )
         .unwrap();
         std::fs::write(
             root.join("transformer/config.json"),
-            r#"{"dtype":"bfloat16"}"#,
+            quant_bits.map_or_else(
+                || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+            ),
         )
         .unwrap();
         LoadSpec::new(WeightsSource::Dir(root.to_owned()))
@@ -3485,74 +3493,89 @@ mod measured_mlx_load_shape_tests {
     }
 
     #[test]
-    fn worker_lens_spec_reaches_only_the_measured_bf16_native_contract() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = fixture_spec(dir.path());
+    fn worker_lens_specs_reach_only_their_exact_measured_contracts() {
+        let bf16_dir = tempfile::tempdir().unwrap();
+        let bf16 = fixture_spec(bf16_dir.path(), None);
+        let q4_dir = tempfile::tempdir().unwrap();
+        let q4 = fixture_spec(q4_dir.path(), Some(4)).with_quant(Quant::Q4);
 
-        for engine_id in ["lens", "lens_turbo"] {
-            let shaped = apply_measured_mlx_load_shape(engine_id, base.clone());
+        let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
+        assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        assert_eq!(
+            rung_four_support("lens_turbo", &turbo),
+            MemoryStrategySupport::Missing,
+            "the legacy dense Lens-Turbo rung still requires Sequential"
+        );
+        let turbo = turbo.with_offload_policy(OffloadPolicy::Sequential);
+        let turbo_contract = crate::inference_runtime::media()
+            .memory_strategy_contract("lens_turbo", &turbo)
+            .unwrap()
+            .expect("Lens-Turbo contract");
+        let turbo_rung = turbo_contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .expect("Lens-Turbo rung 4");
+        assert_eq!(turbo_rung.support, MemoryStrategySupport::Implemented);
+        assert_eq!(turbo_rung.parameters.transformer_window_sizes, vec![1]);
+        assert_eq!(
+            turbo_rung.parameters.transformer_window_components,
+            vec![TransformerComponent::TextEncoder]
+        );
+
+        let lens = apply_measured_mlx_load_shape("lens", q4.clone());
+        assert_eq!(lens.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        let lens_contract = crate::inference_runtime::media()
+            .memory_strategy_contract("lens", &lens)
+            .unwrap()
+            .expect("Lens contract");
+        let lens_rung = lens_contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .expect("Lens rung 4");
+        assert_eq!(lens_rung.support, MemoryStrategySupport::Implemented);
+        assert_eq!(lens_rung.parameters.transformer_window_sizes, vec![1]);
+        assert_eq!(
+            lens_rung.parameters.transformer_window_components,
+            vec![TransformerComponent::Both]
+        );
+
+        let adapter = AdapterSpec::new(
+            q4_dir.path().join("adapter.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        let unsupported = [
+            ("lens", bf16.clone()),
+            ("lens_turbo", q4),
+            ("lens", bf16.clone().with_quant(Quant::Q8)),
+            ("lens", bf16.clone().with_adapters(vec![adapter])),
+            (
+                "lens",
+                bf16.with_pid(
+                    WeightsSource::File(q4_dir.path().join("pid.safetensors")),
+                    WeightsSource::Dir(q4_dir.path().join("gemma")),
+                ),
+            ),
+        ];
+        for (engine_id, spec) in unsupported {
+            let shaped = apply_measured_mlx_load_shape(engine_id, spec)
+                .with_offload_policy(OffloadPolicy::Sequential);
             assert_eq!(
                 shaped.load_shape,
-                gen_core::LoadShape::DeferredMaterialization,
-                "the production worker must request the load shape measured by the provider"
+                gen_core::LoadShape::EagerMaterialization,
+                "unmeasured Lens entry/tier/overlay combinations must remain eager"
             );
             assert_eq!(
                 rung_four_support(engine_id, &shaped),
-                MemoryStrategySupport::Missing,
-                "deferred materialization alone must not bypass the Sequential prerequisite"
+                MemoryStrategySupport::Missing
             );
-
-            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
-            let contract = crate::inference_runtime::media()
-                .memory_strategy_contract(engine_id, &sequential)
-                .unwrap()
-                .expect("Lens contract");
-            let rung = contract
-                .capability(MemoryStrategy::BoundedTransformerResidency)
-                .expect("rung 4");
-            assert_eq!(rung.support, MemoryStrategySupport::Implemented);
-            assert_eq!(rung.parameters.transformer_window_sizes, vec![1]);
-            assert_eq!(
-                rung.parameters.transformer_window_components,
-                vec![TransformerComponent::TextEncoder]
-            );
-
-            let adapter = AdapterSpec::new(
-                dir.path().join("adapter.safetensors"),
-                1.0,
-                AdapterKind::Lora,
-            );
-            let unsupported = [
-                base.clone().with_quant(Quant::Q4),
-                base.clone().with_quant(Quant::Q8),
-                base.clone().with_adapters(vec![adapter]),
-                base.clone().with_pid(
-                    WeightsSource::File(dir.path().join("pid.safetensors")),
-                    WeightsSource::Dir(dir.path().join("gemma")),
-                ),
-            ];
-            for spec in unsupported {
-                let shaped = apply_measured_mlx_load_shape(engine_id, spec)
-                    .with_offload_policy(OffloadPolicy::Sequential);
-                assert_eq!(
-                    shaped.load_shape,
-                    gen_core::LoadShape::EagerMaterialization,
-                    "unmeasured tiers and overlays must not opt into the deferred Lens load"
-                );
-                assert_eq!(
-                    rung_four_support(engine_id, &shaped),
-                    MemoryStrategySupport::Missing
-                );
-            }
         }
     }
 
     #[test]
     fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path());
+        let bf16 = fixture_spec(bf16_dir.path(), None);
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path());
+        let q4 = fixture_spec(q4_dir.path(), None);
         std::fs::write(
             q4_dir.path().join("transformer/config.json"),
             r#"{"quantization":{"bits":4}}"#,

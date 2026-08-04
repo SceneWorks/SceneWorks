@@ -1,7 +1,7 @@
 {
   "schemaVersion": 6,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:991ee6ecfc37e0fdfa8544d413a113e52e959f9463922a7cc8efebdcc50730f0",
+    "sceneWorksRevision": "source-tree:730aebfac01735fe16ce3316f6b09999e4f557a79300dc49cc217e22bd28f5ea",
     "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
     "sources": {
       "manifest": {
@@ -14,7 +14,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "adaf75d5aaa3cae06b164508e57952ac487286158337030e5abdfdbe1eace2b2"
+        "sha256": "fa07a95c8e9590387db7298611f15cc5641d74a63c0c6af618cebf37d51bee17"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -42,7 +42,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "a0ed848e2271967bb367a479a5c7a2e840837547ae077ba77d35a92e2a03ce4a"
+        "sha256": "ba01bc5266ecc1d4ec8b4e2e534502cf3fab2540982916e092893494334d6d17"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -244784,10 +244784,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "moves",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -244799,9 +244799,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -245135,7 +245135,7 @@
         "requestPeak": "moves",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -245147,9 +245147,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -245481,10 +245481,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "moves",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -245496,9 +245496,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -245832,7 +245832,7 @@
         "requestPeak": "moves",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -245844,9 +245844,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -246178,10 +246178,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "does-not-move",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -246193,9 +246193,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -246526,7 +246526,7 @@
         "requestPeak": "does-not-move",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -246538,9 +246538,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -246868,10 +246868,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "does-not-move",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -246883,9 +246883,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -247216,7 +247216,7 @@
         "requestPeak": "does-not-move",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -247228,9 +247228,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -247561,7 +247561,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -247573,9 +247573,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -247906,7 +247906,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -247918,9 +247918,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -248251,7 +248251,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -248263,9 +248263,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -248596,7 +248596,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -248608,9 +248608,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -248938,10 +248938,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "moves",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -248953,9 +248953,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -249269,27 +249269,24 @@
           "768x1376"
         ]
       },
-      "strategyParameters": {
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "TextEncoder"
-      },
+      "strategyParameters": {},
       "engagedRungs": null,
-      "state": "Implemented/unverified",
+      "state": "Missing",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "792302777e3f37fdebafd999a1ab3dff8dd353e1cfcef5a1f58aaad04a5e9103",
+      "calibrationFingerprint": null,
       "owningFamilyStory": 15512,
       "owningModelStory": 15462,
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "moves",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -249301,18 +249298,14 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
       "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/dit/transformer.rs"
-          }
-        ],
+        "staticImplementation": [],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/lens/mlx/minMemoryGb",
@@ -249635,10 +249628,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "moves",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -249650,9 +249643,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -249966,27 +249959,24 @@
           "768x1376"
         ]
       },
-      "strategyParameters": {
-        "transformerWindowSize": 1,
-        "transformerWindowComponent": "TextEncoder"
-      },
+      "strategyParameters": {},
       "engagedRungs": null,
-      "state": "Implemented/unverified",
+      "state": "Missing",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f2baf88e6821e64367dd34b27642da82daefa601247f161e3f627b49608c9732",
+      "calibrationFingerprint": null,
       "owningFamilyStory": 15512,
       "owningModelStory": 15462,
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "moves",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -249998,18 +249988,14 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
       "evidence": {
-        "staticImplementation": [
-          {
-            "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/dit/transformer.rs"
-          }
-        ],
+        "staticImplementation": [],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/lens/mlx/minMemoryGb",
@@ -250332,10 +250318,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "does-not-move",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -250347,9 +250333,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -250663,24 +250649,27 @@
           "768x1376"
         ]
       },
-      "strategyParameters": {},
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Both"
+      },
       "engagedRungs": null,
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "9b032890dd5d3ab25a6c8ed8acd3557d667d722e80aced6e89b807bd9a5acf83",
       "owningFamilyStory": 15512,
       "owningModelStory": 15462,
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "does-not-move",
+        "requestPeak": "moves",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -250692,14 +250681,18 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/dit/transformer.rs"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/lens/mlx/minMemoryGb",
@@ -251022,10 +251015,10 @@
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "does-not-move",
+        "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -251037,9 +251030,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -251353,24 +251346,27 @@
           "768x1376"
         ]
       },
-      "strategyParameters": {},
+      "strategyParameters": {
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Both"
+      },
       "engagedRungs": null,
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "6163678d8baf2d5c60354e4c75b493543a87f8d1ebe503d9999cccea7194b206",
       "owningFamilyStory": 15512,
       "owningModelStory": 15462,
       "rung4Survey": {
         "story": 15969,
         "structuralApplicability": "full",
-        "requestPeak": "does-not-move",
+        "requestPeak": "moves",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -251382,14 +251378,18 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-lens/src/dit/transformer.rs"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/lens/mlx/minMemoryGb",
@@ -251715,7 +251715,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -251727,9 +251727,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -252060,7 +252060,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -252072,9 +252072,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -252405,7 +252405,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -252417,9 +252417,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },
@@ -252750,7 +252750,7 @@
         "requestPeak": "unmeasured",
         "implementation": "shared-primitive",
         "overlayIncompatible": false,
-        "summary": "The 48-block DiT remains resident, while the TE-dominant 24-layer gpt-oss encoder is rebuilt one layer at a time through the shared block-window driver. The production contract is deliberately narrower than the structural family verdict: dense BF16, Sequential, deferred directory loads, no adapter, and TextEncoder/window=1 only.",
+        "summary": "The pinned provider now exposes two distinct measured Lens identities. Base `lens` Q4 uses the full shared ladder and rebuilds both the 24-layer gpt-oss encoder and 48-block DiT with window 1. `lens_turbo` BF16 retains the earlier text-encoder-only window-1 contract. The entry/tier cross-products, adapters, PiD, eager loads, and other numeric tiers remain outside both contracts.",
         "blockStacks": [
           {
             "name": "blocks",
@@ -252762,9 +252762,9 @@
           "The gpt-oss encoder is MoE. A window over its layers materializes ALL experts of each layer in the window, not the top-k a token routes to, so the per-block cost of a TE-scoped window is the full expert set — a parameter-sizing consequence, not a blocker.",
           "Dense BF16 conditioning scales with the resident window: 80.098 GiB at 24 layers, 33.136 at 8, 21.271 at 4, 15.340 at 2, and 8.767 at 1. Exact identity held at windows 1, 4, and 24; replacing the 24-layer stack with zero layers changed the output by 1.2079592e4, proving the bound is load-bearing.",
           "Lens does not pad every prompt to one fixed token length. Its harmony preamble is fixed, but the measured prompts produced 121, 141, and 181 tokens; window=1 conditioning peaks were 8.748, 8.767, and 8.807 GiB respectively.",
-          "The Q4 tier is not a production rung-4 win: its isolated conditioning peak improved, but its full-request peak reproducibly increased. The tier-specific implementation claim is therefore BF16 only.",
+          "The Q4 result is entry-specific: base `lens` Q4 now has a measured full-ladder request win, while `lens_turbo` Q4's text-encoder-only experiment reproducibly increased the full-request peak and remains Missing.",
           "Adapter cells remain Missing, not Structurally N/A. The provider also rejects PiD for this measured contract, although PiD is a request option rather than an overlay axis in this matrix. The TextEncoder primitive is not inherently incapable of coexisting with either; separate dynamic evidence would be required before broadening the production predicate.",
-          "The declaration is per load and the matrix has no load-source or materialization axis. Catalog Lens routes use deferred directory loads, which are re-openable; a single-file, eager, or Resident load does not receive this contract.",
+          "The declaration is per load and the matrix has no load-source or materialization axis. The worker opts only base Lens Q4 and Lens-Turbo BF16 directory routes into deferred materialization; a single-file, eager, or Resident load does not receive either contract.",
           "A second, independent gpt-oss stack exists: `LensReasonerModel.layers` (24) sits OUTSIDE the Sequential seam, which only knows the text and heavy bundles, so nothing on this ladder sheds it. It is LATENT rather than live: `attach_reasoner` has no production callers and the registry path leaves it off, so no catalog route reaches it today. It matters only if a route ever turns it on."
         ]
       },

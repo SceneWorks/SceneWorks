@@ -853,8 +853,8 @@ export const RUNG4_REQUEST_PEAKS = Object.freeze(["moves", "does-not-move", "unm
  *   evidence is rejected — the epic allows a static verdict *because* the evidence is present, and
  *   an empty array would turn that allowance into a bare assertion.
  * - **Implementation claims are per entry and mutually consistent.** `implementation: "none"` with
- *   a non-empty `implementedEntries` (or the reverse) is a contradiction, and every named entry has
- *   to belong to the family that claims it.
+ *   a non-empty legacy `implementedEntries` or exact `implementationScopes` claim (or the reverse)
+ *   is a contradiction, and every named entry has to belong to the family that claims it.
  */
 export function parseRung4Survey(body, { familyGroups } = {}) {
   const parsed = JSON.parse(body);
@@ -912,9 +912,23 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
         );
       }
       const implemented = verdict.implementedEntries ?? [];
-      if ((verdict.implementation === "none") !== (implemented.length === 0)) {
+      const implementationScopes = verdict.implementationScopes ?? [];
+      const carriesLegacyImplementationFields = [
+        "implementedEntries",
+        "implementedModes",
+        "implementedTiers",
+        "implementedOverlays",
+        "strategyParameters",
+      ].some((field) => Object.hasOwn(verdict, field));
+      if (carriesLegacyImplementationFields && implementationScopes.length) {
         throw new Error(
-          `${at}: implementation is ${verdict.implementation} but names ${implemented.length} catalog entries — the two must agree`,
+          `${at}: use either legacy implementedEntries fields or exact implementationScopes, not both`,
+        );
+      }
+      const hasImplementationClaim = implemented.length > 0 || implementationScopes.length > 0;
+      if ((verdict.implementation === "none") !== !hasImplementationClaim) {
+        throw new Error(
+          `${at}: implementation is ${verdict.implementation} but carries ${hasImplementationClaim ? "an" : "no"} implementation claim — the two must agree`,
         );
       }
       if (implemented.length && !Object.keys(verdict.strategyParameters ?? {}).length) {
@@ -947,12 +961,53 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
       ) {
         throw new Error(`${at}: implementedOverlays contains an overlay outside the matrix vocabulary`);
       }
+      const selectorOverlaps = (left, right) =>
+        left === undefined || right === undefined || left.some((value) => right.includes(value));
+      for (const [index, scope] of implementationScopes.entries()) {
+        const scopeAt = `${at}: implementationScopes[${index}]`;
+        if (!scope.entries?.length) {
+          throw new Error(`${scopeAt}.entries must name at least one catalog entry`);
+        }
+        if (!Object.keys(scope.strategyParameters ?? {}).length) {
+          throw new Error(`${scopeAt} must publish the rung's own strategy parameters`);
+        }
+        for (const [field, values, vocabulary] of [
+          ["tiers", scope.tiers, ["bf16", "q4", "q8"]],
+          ["overlays", scope.overlays, ["none", "lora", "control", "identity"]],
+        ]) {
+          if (values?.length === 0) {
+            throw new Error(`${scopeAt}.${field} is empty — omit it to mean every cell value`);
+          }
+          if (values?.some((value) => !vocabulary.includes(value))) {
+            throw new Error(`${scopeAt}.${field} contains a value outside the matrix vocabulary`);
+          }
+        }
+        if (scope.modes?.length === 0) {
+          throw new Error(`${scopeAt}.modes is empty — omit it to mean every mode`);
+        }
+        for (let previous = 0; previous < index; previous += 1) {
+          const other = implementationScopes[previous];
+          if (
+            selectorOverlaps(scope.entries, other.entries) &&
+            selectorOverlaps(scope.tiers, other.tiers) &&
+            selectorOverlaps(scope.modes, other.modes) &&
+            selectorOverlaps(scope.overlays, other.overlays)
+          ) {
+            throw new Error(
+              `${scopeAt} overlaps implementationScopes[${previous}], making strategy parameters ambiguous`,
+            );
+          }
+        }
+      }
       if (familyGroups) {
         // Both fields name catalog entries, and both are published onto cells, so both are checked.
         // Only `implementedEntries` was at first, and a typo'd or foreign id in `blockStacks[].entries`
         // then rode onto every rung-4 cell of the family as though it were a real per-entry fact.
         const named = [
           ...implemented.map((id) => [id, "implementedEntries"]),
+          ...implementationScopes.flatMap((scope, index) =>
+            scope.entries.map((id) => [id, `implementationScopes[${index}].entries`]),
+          ),
           ...(verdict.requestPeak?.scopes ?? []).flatMap((scope, index) =>
             (scope.entries ?? []).map((id) => [id, `requestPeak.scopes[${index}].entries`]),
           ),
@@ -982,7 +1037,7 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
       // it may not be recorded silently either: without the finding the value degrades to a bare
       // `Missing` cell indistinguishable from "nobody has written it yet".
       if (verdict.structuralApplicability === "requires-different-primitive") {
-        if (implemented.length) {
+        if (hasImplementationClaim) {
           throw new Error(
             `${at}: names implemented entries while declaring the primitive's shape insufficient — one of the two is wrong`,
           );
@@ -1038,6 +1093,31 @@ function rung4SurveyCell(survey, modelId, backend, tier, mode, overlay, overlayI
     blockStacks: verdict.blockStacks ?? [],
     findings: verdict.findings ?? [],
   };
+}
+
+/**
+ * Resolve the exact rung-4 implementation claim for one matrix cell.
+ *
+ * Most providers publish one parameter shape over a Cartesian entry/tier/mode/overlay selector and
+ * continue using the legacy fields. Providers whose catalog entries expose different measured
+ * parameter shapes use `implementationScopes`; keeping the parameters on each scope prevents a
+ * family-wide claim from inventing unsupported cross-products.
+ */
+function rung4Implementation(verdict, modelId, tier, mode, overlay) {
+  const exact = (verdict?.implementationScopes ?? []).find(
+    (scope) =>
+      scope.entries.includes(modelId) &&
+      (scope.tiers ?? [tier]).includes(tier) &&
+      (scope.modes ?? [mode]).includes(mode) &&
+      (scope.overlays ?? [overlay]).includes(overlay),
+  );
+  if (exact) return exact.strategyParameters;
+  const legacyImplemented =
+    (verdict?.implementedEntries ?? []).includes(modelId) &&
+    (verdict?.implementedModes ?? [mode]).includes(mode) &&
+    (verdict?.implementedTiers ?? [tier]).includes(tier) &&
+    (verdict?.implementedOverlays ?? [overlay]).includes(overlay);
+  return legacyImplemented ? verdict.strategyParameters : null;
 }
 
 /**
@@ -1148,14 +1228,14 @@ function strategyStatus({
   const staticRung4Verdict = rung === "bounded_transformer_residency"
     ? rung4Survey.get(`${familyGroup(model.id)}:${backend}`)
     : null;
-  const staticRung4Allowed = rung !== "bounded_transformer_residency" || (
-    ["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
-    (staticRung4Verdict?.implementedEntries ?? []).includes(model.id) &&
-    (staticRung4Verdict?.implementedModes ?? [mode]).includes(mode) &&
-    (staticRung4Verdict?.implementedTiers ?? [tier]).includes(tier) &&
-    (staticRung4Verdict?.implementedOverlays ?? [overlay]).includes(overlay) &&
-    stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById })
-  );
+  const staticRung4Implementation = rung === "bounded_transformer_residency"
+    ? rung4Implementation(staticRung4Verdict, model.id, tier, mode, overlay)
+    : null;
+  const staticRung4Allowed =
+    rung !== "bounded_transformer_residency" ||
+    (["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
+      staticRung4Implementation !== null &&
+      stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById }));
   const staticImplementation = staticContractCoversProvider(staticMemoryContract, provider)
     ? staticMemoryContract.implementations.find(
         (implementation) =>
@@ -1349,11 +1429,15 @@ function strategyStatus({
     // Implementation is per ENTRY and per MODE — inference may route a catalog entry's modes to
     // different descriptors than the one carrying the contract — and the rung is unreachable without
     // its declared rung-1 prerequisite however good the architecture is.
+    const implementationParameters = rung4Implementation(
+      verdict,
+      model.id,
+      tier,
+      mode,
+      overlay,
+    );
     const implementedHere =
-      (verdict.implementedEntries ?? []).includes(model.id) &&
-      (verdict.implementedModes ?? [mode]).includes(mode) &&
-      (verdict.implementedTiers ?? [tier]).includes(tier) &&
-      (verdict.implementedOverlays ?? [overlay]).includes(overlay) &&
+      implementationParameters !== null &&
       stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, manifestById });
     if (verdict.structuralApplicability === "none") {
       return {
@@ -1380,7 +1464,7 @@ function strategyStatus({
       return {
         state: "Implemented/unverified",
         source: verdict.evidence[0].source,
-        parameters: verdict.strategyParameters,
+        parameters: implementationParameters,
       };
     }
     return { state: "Missing", source: null, parameters: {} };
