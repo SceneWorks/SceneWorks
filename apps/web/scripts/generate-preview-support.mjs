@@ -30,14 +30,21 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  assertBackendCoverage,
   catalogToWebPreviewSupport,
   derivePreviewSupport,
   parseEngineModelTable,
+  parseSceneworksBackends,
 } from "../src/data/previewSupportDerivation.js";
 
 const factsDir = fileURLToPath(new URL("../../../config/engine-capabilities", import.meta.url));
 const enginesPath = fileURLToPath(
   new URL("../../../crates/sceneworks-worker/src/engines.rs", import.meta.url),
+);
+// The declared backend list (sc-17119). Read from the Rust const rather than the directory listing,
+// because the directory listing cannot see a file that was never written.
+const factsDeclarationPath = fileURLToPath(
+  new URL("../../../crates/sceneworks-worker/src/engine_capability_facts.rs", import.meta.url),
 );
 const manifestPath = fileURLToPath(
   new URL("../../../config/manifests/builtin.preview-support.jsonc", import.meta.url),
@@ -59,9 +66,19 @@ export function readFactsFiles(dir = factsDir) {
   return names.map((name) => JSON.parse(readFileSync(`${dir}/${name}`, "utf8")));
 }
 
+const factsFiles = readFactsFiles();
+// Refuse to write a catalog that is blind to a backend SceneWorks can run (sc-17119). Everything
+// else here is scoped to what is on disk, so without this the artifacts regenerate perfectly
+// happily with a whole engine's answers missing — reported downstream as "unknown", which renders
+// exactly as it did before the feature shipped.
+assertBackendCoverage(
+  parseSceneworksBackends(readFileSync(factsDeclarationPath, "utf8")),
+  factsFiles.map((facts) => facts.backend),
+);
+
 const catalog = derivePreviewSupport(
   parseEngineModelTable(readFileSync(enginesPath, "utf8")),
-  readFactsFiles(),
+  factsFiles,
 );
 
 writeFileSync(manifestPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");

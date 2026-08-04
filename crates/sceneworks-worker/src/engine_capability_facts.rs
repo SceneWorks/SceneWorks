@@ -58,6 +58,32 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Every backend SceneWorks can link a **media** registry for, and therefore every backend stage 2
+/// requires a checked-in facts file for (sc-17119).
+///
+/// Scoped to [`crate::inference_runtime::media`] because that is the only registry this module
+/// dumps. [`crate::inference_runtime::audio`] is a separate registry whose descriptors are dumped
+/// **nowhere** — its `supports_preview` is unknown to the catalog on every platform. That gap is not
+/// closed here and is not visible to this list: audio is candle-native everywhere, so backend-level
+/// coverage is satisfied coincidentally rather than because anything checked. See sc-17593.
+///
+/// Without this list, "which backends are covered?" could only be answered by *the files on disk* —
+/// so a backend that was **never dumped** passed every guard forever, silently. That is not
+/// hypothetical: `capabilities.mlx.json` was absent for four consecutive pins beginning with the one
+/// sc-16965 itself shipped on (`d4802320`, `bf06bb56`, `5b6d6aa0`, `5f973a73`), and the vitest drift
+/// guard and the generator — which both glob this directory — were green throughout, as
+/// `verifyEngineCapabilityFacts` would have been had anything invoked it. Absence rendered as
+/// "unknown", which renders exactly as before — i.e. it looked fine.
+///
+/// This is the **union across both lanes**, so no single build can verify it whole: a macOS build
+/// links only `mlx`, a `backend-candle` build only `candle` (see [`crate::inference_runtime::media`],
+/// whose two cfg arms are the definition this list mirrors). What each lane *can* enforce is that
+/// the backend it actually links is declared here — see `the_linked_backend_is_declared`. Between
+/// the two lanes every entry is covered by a real registry.
+///
+/// Sorted and unique; stage 2 compares it against the sorted set of dumped files.
+pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "mlx"];
+
 /// One engine's weights-free preview facts, as written to a per-backend facts file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -333,6 +359,52 @@ mod tests {
         )
         .expect_err("a duplicate engine id must be refused");
         assert!(error.contains("krea_2_turbo"), "got: {error}");
+    }
+
+    // Stage 2 compares SCENEWORKS_BACKENDS against the sorted list of dumped files, so an unsorted
+    // or duplicated entry would fail the coverage check for a reason that has nothing to do with a
+    // missing dump.
+    #[test]
+    fn sceneworks_backends_is_sorted_and_unique() {
+        let mut sorted = SCENEWORKS_BACKENDS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted, SCENEWORKS_BACKENDS,
+            "SCENEWORKS_BACKENDS must be sorted and duplicate-free"
+        );
+        assert!(
+            !SCENEWORKS_BACKENDS.is_empty(),
+            "an empty backend list would make the stage-2 coverage assertion vacuous — the exact \
+             class of hole it exists to close"
+        );
+    }
+
+    // The half of SCENEWORKS_BACKENDS this lane can actually measure. The list is a union across
+    // two mutually exclusive lanes, so neither build sees it whole; what each build proves is that
+    // the backend IT links is declared. An undeclared backend would ship with no stage-2 coverage
+    // assertion at all — a third engine could be added, never dumped, and stay invisible exactly
+    // the way `mlx` did.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn the_linked_backend_is_declared() {
+        let facts = collect_engine_capability_facts()
+            .expect("this lane links a media registry, so collecting facts must succeed");
+        assert!(
+            !facts.is_empty(),
+            "a lane that links a registry must produce at least one backend's facts"
+        );
+        for entry in &facts {
+            assert!(
+                SCENEWORKS_BACKENDS.contains(&entry.backend.as_str()),
+                "this build links backend {:?}, which SCENEWORKS_BACKENDS ({:?}) does not declare. \
+                 Stage 2 requires one dumped facts file per DECLARED backend, so an undeclared one \
+                 is covered by nothing. Add it to the list and dump {} on this lane.",
+                entry.backend,
+                SCENEWORKS_BACKENDS,
+                entry.file_name(),
+            );
+        }
     }
 
     #[test]
