@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6270b7e8b8f7f8a9a7417e2238c95ba618ff3b59517da9a7a97820a11c32f213",
-    "matrixRevision": "source-tree:acce9caa7a1e637bb8386ef359ada1224017d49a9c865b2f483969d4200dea82",
-    "inferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
+    "sceneWorksRevision": "source-tree:7aa2db8c76f4f557334416f99ad44f406f4d625cdd2d7d76cd784cfb5a7822d1",
+    "matrixRevision": "source-tree:0106a1ab1d0072f59fd0af7360eae6414383c7c3a55e89b99af22348feeba69d",
+    "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "c3c4355088992e2309803b9b3962ec8cdbe3e11120c4d3859ee8d4eb0a2842c7"
+        "sha256": "14688e3aff8b13e2077bb7bb38dd35324b21005c60792dbb0bf6745a9737bfe6"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "344a3b4562ef6337b365e059a11f9d840903b4269ea4f5e98d2026c4bfa59cd6"
+        "sha256": "f4ad988cdfcc73348b43e137ea3deecb58c6627b29e16aaf575f442993baa485"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "2453acf4d26b302440cbc6a02d5cca6ce2756b2ba50f51251dd5bec4f741d9c5"
+        "sha256": "20f54c77e2a2a7b849e29d3505acf37e31e8ff4f7eb360e3ef9ee2748becdd6e"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
@@ -391,8 +391,8 @@
   "cells": {
     "total": 9140,
     "byState": {
-      "Implemented/unverified": 3002,
-      "Missing": 6132,
+      "Implemented/unverified": 3026,
+      "Missing": 6108,
       "Structurally N/A": 6
     },
     "byBackend": {
@@ -400,9 +400,9 @@
       "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 1053,
+      "Implemented/unverified @ candle": 1077,
       "Implemented/unverified @ mlx": 1949,
-      "Missing @ candle": 3461,
+      "Missing @ candle": 3437,
       "Missing @ mlx": 2671,
       "Structurally N/A @ candle": 6
     },
