@@ -35,7 +35,7 @@ const RUNGS = [
 
 // sc-17497: the audit is layered. `auditedObjects` pins the CAPTURED side of FLUX.2's Candle/CUDA
 // compile closure — the code the measurements were taken against, immutable forever. A live pin
-// whose objects are all byte-identical is authorized by that alone, for free (the v1 shape).
+// whose objects are all byte-identical is authorized by that alone, for free.
 //
 // When a path moves, object identity can no longer decide: the 42-line `//!` doc comment in
 // inference `35251a88` moved `candle-gen`'s tree while provably changing nothing that compiles.
@@ -48,9 +48,16 @@ const RUNGS = [
 // digest is frozen HERE, in source, so the checked-in record cannot authorize itself.
 //
 // `adjudicates` is the other half, and it is not optional. A digest speaks only for the paths the
-// audited binary LINKS: `runtime-cuda` depends on `candle-gen-flux2`, not the reverse, so a commit
-// into the CUDA bundle leaves the measurement binary byte-identical. Pinning the adjudicable set
-// here keeps an unchanged digest from being read as proof over a path it never compiled.
+// audited binary can answer for: `runtime-cuda` depends on `candle-gen-flux2`, not the reverse, so
+// a commit into the CUDA bundle leaves the measurement binary byte-identical. Pinning the
+// adjudicable set here keeps an unchanged digest from being read as proof over a path it never
+// compiled.
+//
+// sc-17524: the set also carries the three workspace build inputs (`Cargo.toml`, `Cargo.lock`,
+// `rust-toolchain.toml`), which earn their place differently — not "compiled into the binary" but
+// "an input to the build that produced it", which is the only route they have to the measured code.
+// They are in the closure because `Cargo.lock` had already moved inside the authorized window while
+// every crate tree stayed identical, i.e. a changed build input taking the free path unexamined.
 // Exported so the tests can assert against what is FROZEN IN SOURCE rather than re-deriving their
 // expectations from the record under test — which would grade the record against itself.
 export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
