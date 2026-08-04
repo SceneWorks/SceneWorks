@@ -12,7 +12,7 @@ import {
 } from "./sc-15833-flux2-evidence.mjs";
 
 const SCENEWORKS_REVISION = "1".repeat(40);
-const INFERENCE_REVISION = "2".repeat(40);
+const INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
 const MODEL_REVISION = "3".repeat(40);
 const MODEL_INVENTORY = "4".repeat(64);
 const CONTROL_REVISION = "5".repeat(40);
@@ -86,6 +86,37 @@ const STRATEGY_DEBUG = {
   bounded_attention: "BoundedAttention",
   bounded_transformer_residency: "BoundedTransformerResidency",
 };
+const RUNG_ENV = {
+  resident: "resident",
+  staged_residency: "staged",
+  bounded_decode: "decode",
+  bounded_attention: "attention",
+  bounded_transformer_residency: "blocks",
+};
+
+function parametersFor(rung) {
+  const [decodeTileEdge, decodeOverlap, attentionChunkSize, transformerWindowSize, transformerWindowComponent] = PARAMS[rung];
+  return Object.fromEntries(Object.entries({
+    decodeTileEdge, decodeOverlap, attentionChunkSize, transformerWindowSize, transformerWindowComponent,
+  }).filter(([, value]) => value !== null));
+}
+
+function baseCommand(rung, outputPath) {
+  const parity = rung === "resident"
+    ? ""
+    : " FLUX2_PARITY_REFERENCE=docs/calibration/sc-15833/base-q4-resident.rgb";
+  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${BASE_INPUT.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[rung]} FLUX2_OUT=${outputPath}${parity} MEMORY_INFERENCE_REVISION=${INFERENCE_REVISION} MEMORY_SCENEWORKS_REVISION=${SCENEWORKS_REVISION} MEMORY_MODEL_REVISION=${MODEL_REVISION} MEMORY_MODEL_INVENTORY_SHA256=${MODEL_INVENTORY} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
+}
+
+function routeCommand(route) {
+  const control = route === "control" ? ` FLUX2_CONTROL=${CONTROL_INPUT.path}` : "";
+  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${BASE_INPUT.path}${control} FLUX2_DEV_OUT_DIR=docs/calibration/sc-15833 FLUX2_DEV_W=512 FLUX2_DEV_H=512 cargo test -p sceneworks-worker --release --no-default-features --features backend-candle flux2_dev_gpu_smoke::flux2_dev_${route}_candle_gpu_smoke -- --ignored --nocapture --test-threads=1`;
+}
+
+function supportCommand(kind, rung) {
+  const mode = kind === "negative_mutation" ? "negative" : "lifecycle";
+  return `node scripts/sc-15833-flux2-evidence.mjs --support-${mode} docs/calibration/sc-15833/capture.json ${rung}`;
+}
 
 function outputForRung(rung) {
   const output = Buffer.from(OUTPUT);
@@ -203,10 +234,13 @@ function routeLog(route, capturedAt) {
   );
 }
 
-function supportLog(kind, capturedAt) {
+function supportLog(kind, rung, capturedAt) {
+  const output = outputForRung(rung);
+  const mutated = Buffer.from(Uint8Array.from(output, (value) => value < 128 ? 255 : 0));
+  const negative = parityMetrics(output, mutated);
   const marker = kind === "lifecycle"
     ? {
-      kind,
+      kind, rung, parameters: parametersFor(rung),
       result: "passed",
       warm_repeat: true,
       cancel_cleanup: true,
@@ -214,10 +248,16 @@ function supportLog(kind, capturedAt) {
       error_cleanup: true,
       error_warm_follow_up: true,
     }
-    : { kind, result: "passed", measured: true, maximum_error: 255, mean_error: 13.25 };
+    : {
+      kind, rung, parameters: parametersFor(rung), result: "passed", measured: true,
+      maximum_error: negative.maximum, mean_error: negative.mean,
+    };
+  const identity = kind === "lifecycle"
+    ? `flux2_dev_gpu_smoke::sc15833_lifecycle_${rung}`
+    : `sc15833_negative_mutation_${rung}`;
   return Buffer.from(
     `${sourceHeader(capturedAt, [BASE_INPUT])}SC15833_VALIDATION_V1 ${wrappedJson(marker)}\n` +
-    `test sc15833_${kind} ... ok\ntest result: ok. 1 passed; 0 failed\n`,
+    `test ${identity} ... ok\ntest result: ok. 1 passed; 0 failed\n`,
   );
 }
 
@@ -234,7 +274,7 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
     files.set(outputPath, output);
     return {
       rung,
-      command: `CUDA_VISIBLE_DEVICES=0 FLUX2_MEMORY_RUNG=${rung} cargo test --release --ignored`,
+      command: baseCommand(rung, outputPath),
       sourcePath,
       capturedAt,
       outputPath,
@@ -242,29 +282,34 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
   });
   const routeSessions = ["edit", "control"].map((route, index) => {
     const sourcePath = `docs/calibration/sc-15833/${route}-q4-resident.log`;
-    const outputPath = `docs/calibration/sc-15833/${route}-q4-resident.png`;
+    const outputPath = `docs/calibration/sc-15833/flux2_dev_${route}_candle.png`;
     const capturedAt = `2026-08-04T04:1${index}:00Z`;
     files.set(sourcePath, routeLog(route, capturedAt));
     files.set(outputPath, Buffer.from(`${route}-png`));
     return {
       route,
-      command: `CUDA_VISIBLE_DEVICES=0 cargo test --release ${route}_gpu_smoke -- --ignored`,
+      command: routeCommand(route),
       sourcePath,
       capturedAt,
       outputPath,
     };
   });
-  const supportSessions = support ? ["lifecycle", "negative_mutation"].map((kind, index) => {
-    const sourcePath = `docs/calibration/sc-15833/${kind}.log`;
-    const capturedAt = `2026-08-04T04:2${index}:00Z`;
-    files.set(sourcePath, supportLog(kind, capturedAt));
-    return {
-      kind,
-      command: `cargo test sc15833_${kind} -- --nocapture`,
-      sourcePath,
-      capturedAt,
-    };
-  }) : [];
+  const supportSessions = support ? RUNGS.flatMap((rung, rungIndex) =>
+    ["lifecycle", "negative_mutation"].map((kind, kindIndex) => {
+      const sourcePath = `docs/calibration/sc-15833/support-${kind.replace("_", "-")}-${rung.replaceAll("_", "-")}.log`;
+      const capturedAt = `2026-08-04T04:${20 + rungIndex * 2 + kindIndex}:00Z`;
+      const outputPath = `docs/calibration/sc-15833/base-q4-${rung}.rgb`;
+      files.set(sourcePath, supportLog(kind, rung, capturedAt));
+      return {
+        kind,
+        rung,
+        parameters: parametersFor(rung),
+        command: supportCommand(kind, rung),
+        sourcePath,
+        capturedAt,
+        outputPath,
+      };
+    })) : [];
   const excludedPath = "target/sc15833-evidence/dirty_experimental_decode_1024_1.log";
   files.set(excludedPath, Buffer.from("diagnostic only; repositories intentionally dirty"));
   const capture = {
@@ -299,8 +344,8 @@ test("SC-15833 ingests five strict base rungs plus edit/control and support sess
   assert.equal(ingestion.report.promotionEligible, true);
   assert.deepEqual(ingestion.report.blockers, []);
   assert.equal(ingestion.records.length, 5);
-  assert.equal(ingestion.sourceSessions.length, 9);
-  assert.equal(ingestion.report.acceptedSessions.length, 9);
+  assert.equal(ingestion.sourceSessions.length, 17);
+  assert.equal(ingestion.report.acceptedSessions.length, 17);
   assert.equal(ingestion.report.excludedAttempts.length, 1);
   assert.match(ingestion.report.excludedAttempts[0].reason, /dirty experimental/);
   for (const record of ingestion.records) {
@@ -427,6 +472,42 @@ test("SC-15833 rejects dirty naming, dirty repositories, malformed provenance, a
   zero.capture.repositories.inference.revision = "0".repeat(40);
   await assert.rejects(ingestFlux2Capture(zero.capture, { reader: zero.reader }), /nonzero lowercase Git SHA/);
 
+  const stalePin = fixture();
+  stalePin.capture.repositories.inference.revision = "a".repeat(40);
+  await assert.rejects(ingestFlux2Capture(stalePin.capture, { reader: stalePin.reader }), /reviewed merge/);
+
+  const arbitraryCommand = fixture();
+  arbitraryCommand.capture.baseSessions[0].command += " --arbitrary-passing-test";
+  await assert.rejects(
+    ingestFlux2Capture(arbitraryCommand.capture, { reader: arbitraryCommand.reader }),
+    /exact approved command/,
+  );
+
+  const copiedLifecycle = fixture();
+  const residentLifecycle = copiedLifecycle.capture.supportSessions.find(
+    (item) => item.kind === "lifecycle" && item.rung === "resident",
+  );
+  const stagedLifecycle = copiedLifecycle.capture.supportSessions.find(
+    (item) => item.kind === "lifecycle" && item.rung === "staged_residency",
+  );
+  copiedLifecycle.files.set(
+    stagedLifecycle.sourcePath,
+    copiedLifecycle.files.get(residentLifecycle.sourcePath),
+  );
+  await assert.rejects(
+    ingestFlux2Capture(copiedLifecycle.capture, { reader: copiedLifecycle.reader }),
+    /exact approved test|source marker has the wrong schema or capture time|kind\/rung mismatch/,
+  );
+
+  const copiedOutputScope = fixture();
+  const boundedNegative = copiedOutputScope.capture.supportSessions.find(
+    (item) => item.kind === "negative_mutation" && item.rung === "bounded_decode",
+  );
+  boundedNegative.outputPath = "docs/calibration/sc-15833/base-q4-resident.rgb";
+  const scoped = await ingestFlux2Capture(copiedOutputScope.capture, { reader: copiedOutputScope.reader });
+  assert.equal(scoped.report.promotionEligible, false);
+  assert.match(scoped.report.blockers.join("\n"), /not bound to the exact rung output/);
+
   const mutableModel = fixture();
   mutableModel.capture.baseInput.resolvedRevision = "main";
   await assert.rejects(
@@ -497,7 +578,7 @@ test("SC-15833 bundle and plan updates preserve all unrelated evidence structura
   assert.equal(updated.records.filter((record) => record.target.provider === "flux2_dev").length, 5);
   assert.equal(
     updated.sourceSessions.filter((session) => session.sourcePath.startsWith("docs/calibration/sc-15833/")).length,
-    9,
+    17,
   );
 
   const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));

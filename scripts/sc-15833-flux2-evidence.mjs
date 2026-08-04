@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +28,8 @@ const BOUNDED_MAX_ABS = 2;
 const EXPECTED_CALIBRATION_ABI = 3;
 const EXPECTED_CALIBRATION_FINGERPRINT =
   "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
+const EXPECTED_INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
+const CAPTURE_PATH = "docs/calibration/sc-15833/capture.json";
 const SHA256 = /^[0-9a-f]{64}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
@@ -69,6 +72,14 @@ const PARAMETERS = {
     transformerWindowSize: 1,
     transformerWindowComponent: "dit",
   },
+};
+
+const RUNG_ENV = {
+  resident: "resident",
+  staged_residency: "staged",
+  bounded_decode: "decode",
+  bounded_attention: "attention",
+  bounded_transformer_residency: "blocks",
 };
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -179,6 +190,33 @@ function assertPassingTestLog(text, filename) {
   }
 }
 
+function assertExactTest(text, identity, filename) {
+  const line = `test ${identity} ... ok`;
+  if (text.split(/\r?\n/).filter((item) => item.trim() === line).length !== 1) {
+    fail(`${filename} did not pass the exact approved test ${identity}`);
+  }
+}
+
+function baseCommand(capture, descriptor) {
+  const parity = descriptor.rung === "resident"
+    ? ""
+    : ` FLUX2_PARITY_REFERENCE=${SESSION_PREFIX}base-q4-resident.rgb`;
+  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${capture.baseInput.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[descriptor.rung]} FLUX2_OUT=${descriptor.outputPath}${parity} MEMORY_INFERENCE_REVISION=${EXPECTED_INFERENCE_REVISION} MEMORY_SCENEWORKS_REVISION=${capture.repositories.sceneWorks.revision} MEMORY_MODEL_REVISION=${capture.baseInput.resolvedRevision} MEMORY_MODEL_INVENTORY_SHA256=${capture.baseInput.sha256} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
+}
+
+function routeCommand(capture, descriptor) {
+  const control = descriptor.route === "control" ? ` FLUX2_CONTROL=${capture.controlInput.path}` : "";
+  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${capture.baseInput.path}${control} FLUX2_DEV_OUT_DIR=${SESSION_PREFIX.slice(0, -1)} FLUX2_DEV_W=512 FLUX2_DEV_H=512 cargo test -p sceneworks-worker --release --no-default-features --features backend-candle flux2_dev_gpu_smoke::flux2_dev_${descriptor.route}_candle_gpu_smoke -- --ignored --nocapture --test-threads=1`;
+}
+
+function supportCommand(descriptor) {
+  return `node scripts/sc-15833-flux2-evidence.mjs --support-${descriptor.kind.replace("_mutation", "")} ${CAPTURE_PATH} ${descriptor.rung}`;
+}
+
+function assertExactCommand(actual, expected, label) {
+  if (actual !== expected) fail(`${label} must equal the exact approved command`);
+}
+
 function validateSourceMarker(text, capture, descriptor, inputs, filename) {
   const marker = extractWrappedJson(text, "SC15833_SOURCE_V1", filename);
   exactObject(marker, `${filename} source marker`, [
@@ -275,6 +313,14 @@ function validateMeasuredParity(resident, candidate) {
     fail(`${filename} recomputed bounded parity exceeds maxAbs ${BOUNDED_MAX_ABS}`);
   }
   return measured;
+}
+
+function measuredNegativeMutation(output, filename) {
+  const mutated = Buffer.from(output);
+  for (let index = 0; index < mutated.length; index += 1) {
+    mutated[index] = output[index] < 128 ? 255 : 0;
+  }
+  return rgb8Parity(output, mutated, filename);
 }
 
 function expectedSnakeParameters(rung) {
@@ -377,6 +423,59 @@ function sourceSession(spec) {
   return session;
 }
 
+function printMarker(name, value) {
+  process.stdout.write(`${name} ${JSON.stringify(value)}\n`);
+}
+
+async function runSupportCapture(mode, capturePath, rung) {
+  if (!RUNGS.includes(rung)) fail(`support capture has invalid rung ${rung}`);
+  if (capturePath.replaceAll("\\", "/") !== CAPTURE_PATH) {
+    fail(`support capture path must equal ${CAPTURE_PATH}`);
+  }
+  await validateLiveInferencePins();
+  const capture = JSON.parse(await readFile(path.join(ROOT, CAPTURE_PATH), "utf8"));
+  validateCaptureEnvelope(capture);
+  const kind = mode === "--support-lifecycle" ? "lifecycle" : "negative_mutation";
+  const descriptor = capture.supportSessions.find((item) => item.kind === kind && item.rung === rung);
+  if (!descriptor) fail(`capture is missing ${kind}:${rung}`);
+  assertExactCommand(descriptor.command, supportCommand(descriptor), `${kind}.${rung}.command`);
+  printMarker("SC15833_SOURCE_V1", {
+    schema_version: 1,
+    captured_at: descriptor.capturedAt,
+    repositories: capture.repositories,
+    hardware: capture.hardware,
+    inputs: [capture.baseInput],
+  });
+
+  if (kind === "lifecycle") {
+    const identity = `flux2_dev_gpu_smoke::sc15833_lifecycle_${rung}`;
+    const result = spawnSync("cargo", [
+      "test", "-p", "sceneworks-worker", "--no-default-features", "--features", "backend-candle",
+      identity, "--", "--exact", "--nocapture", "--test-threads=1",
+    ], { cwd: ROOT, encoding: "utf8" });
+    process.stdout.write(result.stdout ?? "");
+    process.stderr.write(result.stderr ?? "");
+    if (result.status !== 0) fail(`${identity} failed with exit ${result.status}`);
+    printMarker("SC15833_VALIDATION_V1", {
+      kind, rung, parameters: PARAMETERS[rung], result: "passed", warm_repeat: true,
+      cancel_cleanup: true, cancel_warm_follow_up: true,
+      error_cleanup: true, error_warm_follow_up: true,
+    });
+    return;
+  }
+
+  const outputPath = repoRelative(descriptor.outputPath, `${kind}.${rung}.outputPath`);
+  const output = await readFile(path.join(ROOT, outputPath));
+  if (output.length !== 1024 * 1024 * 3) fail(`${outputPath} is not a 1024x1024 RGB8 output`);
+  const measured = measuredNegativeMutation(output, outputPath);
+  printMarker("SC15833_VALIDATION_V1", {
+    kind, rung, parameters: PARAMETERS[rung], result: "passed", measured: true,
+    maximum_error: measured.maximumError, mean_error: measured.meanError,
+  });
+  process.stdout.write(`test sc15833_negative_mutation_${rung} ... ok\n`);
+  process.stdout.write("test result: ok. 1 passed; 0 failed\n");
+}
+
 function validateCaptureEnvelope(capture) {
   exactObject(capture, "capture", [
     "schemaVersion", "story", "promotionIntent", "repositories", "hardware", "calibrationAbi",
@@ -390,6 +489,9 @@ function validateCaptureEnvelope(capture) {
   exactObject(capture.repositories.inference, "repositories.inference", ["revision", "dirty"]);
   requireRevision(capture.repositories.sceneWorks.revision, "SceneWorks revision");
   requireRevision(capture.repositories.inference.revision, "inference revision");
+  if (capture.repositories.inference.revision !== EXPECTED_INFERENCE_REVISION) {
+    fail(`inference revision must equal the reviewed merge ${EXPECTED_INFERENCE_REVISION}`);
+  }
   requireDigest(capture.repositories.sceneWorks.matrixSourceRevision.replace(/^source-tree:/, ""), "matrix source revision");
   if (capture.repositories.sceneWorks.dirty || capture.repositories.inference.dirty) fail("authoritative capture repositories must be clean");
   exactObject(capture.hardware, "hardware", [
@@ -410,6 +512,26 @@ function validateCaptureEnvelope(capture) {
   for (const name of ["baseSessions", "routeSessions", "supportSessions", "excludedAttempts"]) {
     if (!Array.isArray(capture[name])) fail(`${name} must be an array`);
   }
+}
+
+async function validateLiveInferencePins() {
+  const manifests = [
+    "Cargo.toml",
+    "crates/sceneworks-memory-adapter/Cargo.toml",
+    "crates/sceneworks-worker/Cargo.toml",
+  ];
+  let count = 0;
+  for (const manifest of manifests) {
+    const text = await readFile(path.join(ROOT, manifest), "utf8");
+    const revisions = [...text.matchAll(
+      /git\s*=\s*"https:\/\/github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/g,
+    )].map((match) => match[1]);
+    count += revisions.length;
+    if (revisions.some((revision) => revision !== EXPECTED_INFERENCE_REVISION)) {
+      fail(`${manifest} contains a SceneWorks/inference pin other than ${EXPECTED_INFERENCE_REVISION}`);
+    }
+  }
+  if (count === 0) fail("live Cargo manifests contain no immutable SceneWorks/inference pins");
 }
 
 function validateInput(input, label, role, variant) {
@@ -434,6 +556,7 @@ async function ingestBaseSession(descriptor, capture, reader) {
   requireText(descriptor.command, `${descriptor.rung}.command`);
   const sourcePath = repoRelative(descriptor.sourcePath, `${descriptor.rung}.sourcePath`, SESSION_PREFIX);
   const outputPath = repoRelative(descriptor.outputPath, `${descriptor.rung}.outputPath`);
+  assertExactCommand(descriptor.command, baseCommand(capture, descriptor), `${descriptor.rung}.command`);
   if (!RFC3339.test(descriptor.capturedAt ?? "")) fail(`${descriptor.rung}.capturedAt must be stable RFC3339 UTC`);
   if (/dirty|experimental|failed|sweep/i.test(sourcePath) || /dirty|experimental|failed|sweep/i.test(outputPath)) {
     fail(`${sourcePath} or its output is excluded from authoritative ingestion`);
@@ -444,6 +567,7 @@ async function ingestBaseSession(descriptor, capture, reader) {
   ]);
   const text = decodeLog(logBytes);
   assertPassingTestLog(text, sourcePath);
+  assertExactTest(text, "tests::flux2_dev_probed_generate_for_offload_ab", sourcePath);
   validateSourceMarker(text, capture, descriptor, [capture.baseInput], sourcePath);
   const hasDiagnostic = markerOffsets(text, "MEMORY_PARITY_DIAGNOSTIC").length > 0;
   const diagnostic = hasDiagnostic ? parityDiagnostic(text, sourcePath) : null;
@@ -471,7 +595,7 @@ async function ingestBaseSession(descriptor, capture, reader) {
     stdoutSha256: sha256(logBytes),
     inputs: [capture.baseInput],
     outputs: [{ path: outputPath, sha256: outputSha256 }],
-    claims: ["memory", "quality", "loadability"],
+    claims: ["memory", "quality", "loadability", "overlay"],
   });
   return { descriptor, record, diagnostic, outputBytes, session };
 }
@@ -482,6 +606,9 @@ async function ingestRouteSession(descriptor, capture, reader) {
   requireText(descriptor.command, `${descriptor.route}.command`);
   const sourcePath = repoRelative(descriptor.sourcePath, `${descriptor.route}.sourcePath`, SESSION_PREFIX);
   const outputPath = repoRelative(descriptor.outputPath, `${descriptor.route}.outputPath`);
+  const expectedOutput = `${SESSION_PREFIX}flux2_dev_${descriptor.route}_candle.png`;
+  if (outputPath !== expectedOutput) fail(`${descriptor.route}.outputPath must equal ${expectedOutput}`);
+  assertExactCommand(descriptor.command, routeCommand(capture, descriptor), `${descriptor.route}.command`);
   if (!RFC3339.test(descriptor.capturedAt ?? "")) fail(`${descriptor.route}.capturedAt must be stable RFC3339 UTC`);
   if (/dirty|experimental|failed|sweep/i.test(sourcePath) || /dirty|experimental|failed|sweep/i.test(outputPath)) {
     fail(`${sourcePath} or its output is excluded from authoritative ingestion`);
@@ -502,7 +629,8 @@ async function ingestRouteSession(descriptor, capture, reader) {
   const done = descriptor.route === "edit"
     ? "[smoke] DONE: flux2_dev edit (candle) coherent"
     : "[smoke] DONE: flux2_dev control (candle) coherent";
-  if (!text.includes(`test flux2_dev_gpu_smoke::${test} ... ok`) || !text.includes(done)) {
+  assertExactTest(text, `flux2_dev_gpu_smoke::${test}`, sourcePath);
+  if (!text.includes(done)) {
     fail(`${sourcePath} did not pass the exact ${descriptor.route} smoke`);
   }
   const stdMatch = text.match(new RegExp(`\\[smoke\\] dev ${descriptor.route} 512x512 std ([0-9.]+)`));
@@ -532,10 +660,16 @@ async function ingestRouteSession(descriptor, capture, reader) {
   return { descriptor, outputSha256, outputStdDev: Number(stdMatch[1]), session };
 }
 
-function validateSupportMarker(marker, filename) {
+function validateSupportMarker(marker, descriptor, filename) {
   exactObject(marker, `${filename} validation marker`, marker.kind === "lifecycle"
-    ? ["kind", "result", "warm_repeat", "cancel_cleanup", "cancel_warm_follow_up", "error_cleanup", "error_warm_follow_up"]
-    : ["kind", "result", "measured", "maximum_error", "mean_error"]);
+    ? ["kind", "rung", "parameters", "result", "warm_repeat", "cancel_cleanup", "cancel_warm_follow_up", "error_cleanup", "error_warm_follow_up"]
+    : ["kind", "rung", "parameters", "result", "measured", "maximum_error", "mean_error"]);
+  if (marker.kind !== descriptor.kind || marker.rung !== descriptor.rung) {
+    fail(`${filename} validation marker kind/rung mismatch`);
+  }
+  if (canonicalJson(marker.parameters) !== canonicalJson(PARAMETERS[descriptor.rung])) {
+    fail(`${filename} validation marker parameters mismatch`);
+  }
   if (marker.result !== "passed") fail(`${filename} validation marker did not pass`);
   if (marker.kind === "lifecycle") {
     for (const key of ["warm_repeat", "cancel_cleanup", "cancel_warm_follow_up", "error_cleanup", "error_warm_follow_up"]) {
@@ -553,19 +687,32 @@ function validateSupportMarker(marker, filename) {
 }
 
 async function ingestSupportSession(descriptor, capture, reader) {
-  exactObject(descriptor, `support session ${descriptor?.kind ?? "?"}`, ["kind", "command", "sourcePath", "capturedAt"]);
+  exactObject(descriptor, `support session ${descriptor?.kind ?? "?"}`, [
+    "kind", "rung", "parameters", "command", "sourcePath", "capturedAt", "outputPath",
+  ]);
   if (!['lifecycle', 'negative_mutation'].includes(descriptor.kind)) fail(`invalid support kind ${descriptor.kind}`);
+  if (!RUNGS.includes(descriptor.rung)) fail(`invalid support rung ${descriptor.rung}`);
+  if (canonicalJson(descriptor.parameters) !== canonicalJson(PARAMETERS[descriptor.rung])) {
+    fail(`${descriptor.kind}.${descriptor.rung}.parameters do not match the exact provider selection`);
+  }
   requireText(descriptor.command, `${descriptor.kind}.command`);
   const sourcePath = repoRelative(descriptor.sourcePath, `${descriptor.kind}.sourcePath`, SESSION_PREFIX);
+  const expectedSource = `${SESSION_PREFIX}support-${descriptor.kind.replace("_", "-")}-${descriptor.rung.replaceAll("_", "-")}.log`;
+  if (sourcePath !== expectedSource) fail(`${descriptor.kind}.${descriptor.rung}.sourcePath must equal ${expectedSource}`);
+  const outputPath = repoRelative(descriptor.outputPath, `${descriptor.kind}.outputPath`);
+  assertExactCommand(descriptor.command, supportCommand(descriptor), `${descriptor.kind}.${descriptor.rung}.command`);
   if (!RFC3339.test(descriptor.capturedAt ?? "")) fail(`${descriptor.kind}.capturedAt must be stable RFC3339 UTC`);
   if (/dirty|experimental|failed|sweep/i.test(sourcePath)) fail(`${sourcePath} is excluded from authoritative ingestion`);
   const logBytes = await readRepoFile(sourcePath, reader);
   const text = decodeLog(logBytes);
   assertPassingTestLog(text, sourcePath);
+  const identity = descriptor.kind === "lifecycle"
+    ? `flux2_dev_gpu_smoke::sc15833_lifecycle_${descriptor.rung}`
+    : `sc15833_negative_mutation_${descriptor.rung}`;
+  assertExactTest(text, identity, sourcePath);
   validateSourceMarker(text, capture, descriptor, [capture.baseInput], sourcePath);
   const marker = extractWrappedJson(text, "SC15833_VALIDATION_V1", sourcePath);
-  if (marker.kind !== descriptor.kind) fail(`${sourcePath} validation marker kind mismatch`);
-  validateSupportMarker(marker, sourcePath);
+  validateSupportMarker(marker, descriptor, sourcePath);
   const session = sourceSession({
     kind: "unit_test",
     command: descriptor.command,
@@ -576,12 +723,16 @@ async function ingestSupportSession(descriptor, capture, reader) {
       inference: { revision: capture.repositories.inference.revision, dirty: false },
     },
     hardware: capture.hardware,
+    target: {
+      tier: "q4", mode: "text_to_image", overlay: "none",
+      rung: descriptor.rung,
+    },
     stdoutSha256: sha256(logBytes),
     inputs: [capture.baseInput],
     outputs: [],
     claims: [descriptor.kind === "lifecycle" ? "lifecycle" : "negative_mutation"],
   });
-  return { descriptor, marker, session };
+  return { descriptor, marker, outputPath, session };
 }
 
 async function ingestExcludedAttempt(descriptor, reader, acceptedPaths) {
@@ -617,11 +768,13 @@ function qualityFor(base) {
   };
 }
 
-function makeCompleteRecord(base, capture, supportByKind) {
+function makeCompleteRecord(base, capture, supportByKey) {
   const rung = base.descriptor.rung;
   const peak = base.record.observed_peak_bytes;
   const quality = qualityFor(base);
-  const negative = supportByKind.get("negative_mutation").marker;
+  const lifecycleSupport = supportByKey.get(`lifecycle:${rung}`);
+  const negativeSupport = supportByKey.get(`negative_mutation:${rung}`);
+  const negative = negativeSupport.marker;
   const parameters = PARAMETERS[rung];
   const record = {
     id: "",
@@ -689,6 +842,15 @@ function makeCompleteRecord(base, capture, supportByKind) {
         { name: "rgb8MaximumError", unit: "RGB8 levels", value: quality.maximumError },
       ],
     },
+    derivation: {
+      memory: { kind: "direct", sourceSessionIds: [base.session.id] },
+      quality: { kind: "direct", sourceSessionIds: [base.session.id] },
+      loadability: { kind: "direct", sourceSessionIds: [base.session.id] },
+      lifecycle: { kind: "direct", sourceSessionIds: [lifecycleSupport.session.id] },
+      negativeMutation: { kind: "direct", sourceSessionIds: [negativeSupport.session.id] },
+      overlay: { kind: "direct", sourceSessionIds: [base.session.id] },
+      justification: "Every complete claim is bound to this exact rung, provider parameters, immutable artifacts, and reviewed runtime revisions.",
+    },
     calibrationFingerprint: capture.calibrationFingerprint,
     capturedAt: base.descriptor.capturedAt,
     harnessVersion: HARNESS_VERSION,
@@ -700,6 +862,7 @@ function makeCompleteRecord(base, capture, supportByKind) {
 }
 
 export async function ingestFlux2Capture(capture, { reader = (relative) => readFile(path.join(ROOT, relative)) } = {}) {
+  await validateLiveInferencePins();
   validateCaptureEnvelope(capture);
   const base = await Promise.all(capture.baseSessions.map((item) => ingestBaseSession(item, capture, reader)));
   const route = await Promise.all(capture.routeSessions.map((item) => ingestRouteSession(item, capture, reader)));
@@ -738,12 +901,32 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
   if (route.length !== 2 || !routeByName.has("edit") || !routeByName.has("control")) {
     blockers.push("the exact edit and control source sessions are both required");
   }
-  const supportByKind = new Map(support.map((item) => [item.descriptor.kind, item]));
-  if (support.length !== 2 || !supportByKind.has("lifecycle")) {
-    blockers.push("promotion requires one complete lifecycle source session");
+  const supportByKey = new Map(
+    support.map((item) => [`${item.descriptor.kind}:${item.descriptor.rung}`, item]),
+  );
+  if (support.length !== RUNGS.length * 2 || supportByKey.size !== support.length) {
+    blockers.push("promotion requires one lifecycle and one negative-mutation session per rung");
   }
-  if (support.length !== 2 || !supportByKind.has("negative_mutation")) {
-    blockers.push("promotion requires one measured negative-mutation source session");
+  for (const rung of RUNGS) {
+    const baseItem = baseByRung.get(rung);
+    const lifecycle = supportByKey.get(`lifecycle:${rung}`);
+    const negative = supportByKey.get(`negative_mutation:${rung}`);
+    if (!lifecycle || !negative || !baseItem) {
+      blockers.push(`${rung} is missing its exact lifecycle or negative-mutation support session`);
+      continue;
+    }
+    for (const item of [lifecycle, negative]) {
+      if (item.outputPath !== baseItem.descriptor.outputPath.replaceAll("\\", "/")) {
+        blockers.push(`${item.descriptor.kind}.${rung} is not bound to the exact rung output`);
+      }
+    }
+    const measured = measuredNegativeMutation(baseItem.outputBytes, negative.descriptor.sourcePath);
+    if (
+      !sameSerializedMetric(measured.maximumError, negative.marker.maximum_error) ||
+      !sameSerializedMetric(measured.meanError, negative.marker.mean_error)
+    ) {
+      blockers.push(`${rung} negative-mutation metrics do not match the bound rung output`);
+    }
   }
   if (capture.promotionIntent !== "complete") {
     blockers.push("capture promotionIntent is report_only; no calibration record may be emitted");
@@ -752,7 +935,7 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
 
   const promotionEligible = blockers.length === 0;
   const records = promotionEligible
-    ? RUNGS.map((rung) => makeCompleteRecord(baseByRung.get(rung), capture, supportByKind))
+    ? RUNGS.map((rung) => makeCompleteRecord(baseByRung.get(rung), capture, supportByKey))
     : [];
   const sourceSessions = [...base, ...route, ...support].map((item) => item.session);
   const report = {
@@ -789,6 +972,8 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
     })),
     support: support.map((item) => ({
       kind: item.descriptor.kind,
+      rung: item.descriptor.rung,
+      parameters: item.descriptor.parameters,
       marker: item.marker,
       sourceSessionId: item.session.id,
     })),
@@ -851,6 +1036,11 @@ export function updatePlan(existing, ingestion) {
 
 async function main() {
   const [capturePath, ...flags] = process.argv.slice(2);
+  if (["--support-lifecycle", "--support-negative"].includes(capturePath)) {
+    if (flags.length !== 2) fail(`usage: ${capturePath} ${CAPTURE_PATH} <rung>`);
+    await runSupportCapture(capturePath, flags[0], flags[1]);
+    return;
+  }
   if (!capturePath) fail("usage: node scripts/sc-15833-flux2-evidence.mjs <capture.json> [--write-report <path>] [--write]");
   const absoluteCapture = path.resolve(ROOT, capturePath);
   const capture = JSON.parse(await readFile(absoluteCapture, "utf8"));

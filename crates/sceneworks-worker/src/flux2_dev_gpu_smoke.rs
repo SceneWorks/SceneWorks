@@ -94,6 +94,113 @@ mod quant_tests {
     }
 }
 
+#[cfg(test)]
+fn sc15833_lifecycle(strategy: gen_core::MemoryStrategy) {
+    use gen_core::{
+        MemoryBehaviorRoute, MemoryRunOutcome, MemorySafetyDecision, MemoryStrategyParameters,
+        Precision, TransformerComponent,
+    };
+
+    let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/missing-flux2-dev")))
+        .with_quant(Quant::Q4);
+    spec.load_shape = gen_core::LoadShape::DeferredMaterialization;
+    let generator = crate::inference_runtime::load("flux2_dev", &spec)
+        .expect("the pinned FLUX.2 dev provider loads lazily");
+    let contract = generator
+        .memory_strategy_contract()
+        .expect("FLUX.2 dev memory contract");
+    let context = gen_core::standard_memory_behavior_context(
+        contract,
+        strategy,
+        gen_core::MemoryNumericTier {
+            precision: Precision::Bf16,
+            quant: Some(Quant::Q4),
+            component_precision_floors: &[],
+        },
+        MemoryBehaviorRoute {
+            mode: gen_core::MemoryMode::TextToImage,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+            overlay: None,
+        },
+    )
+    .expect("exact SC-15833 provider context");
+    let expected = match strategy {
+        gen_core::MemoryStrategy::Resident | gen_core::MemoryStrategy::StagedResidency => {
+            MemoryStrategyParameters::default()
+        }
+        gen_core::MemoryStrategy::BoundedDecode => MemoryStrategyParameters {
+            decode_tile_edge: Some(1024),
+            decode_overlap: Some(1),
+            ..Default::default()
+        },
+        gen_core::MemoryStrategy::BoundedAttention => MemoryStrategyParameters {
+            decode_tile_edge: Some(1024),
+            decode_overlap: Some(1),
+            attention_chunk_size: Some(67_108_864),
+            ..Default::default()
+        },
+        gen_core::MemoryStrategy::BoundedTransformerResidency => MemoryStrategyParameters {
+            decode_tile_edge: Some(1024),
+            decode_overlap: Some(1),
+            attention_chunk_size: Some(67_108_864),
+            transformer_window_size: Some(1),
+            transformer_window_component: Some(TransformerComponent::Dit),
+        },
+    };
+    assert_eq!(context.selection.parameters, expected);
+
+    let run = |outcome| {
+        assert!(matches!(
+            generator.memory_strategy_safety_check(&context),
+            MemorySafetyDecision::Accept
+        ));
+        let mut scope = generator
+            .begin_memory_strategy_request(&context)
+            .expect("begin exact lifecycle request")
+            .expect("FLUX.2 dev returns a request scope");
+        let mut request = GenerationRequest {
+            prompt: "SC-15833 lifecycle conformance".to_owned(),
+            width: 1024,
+            height: 1024,
+            count: 1,
+            ..Default::default()
+        };
+        scope
+            .configure_request(&mut request)
+            .expect("configure exact lifecycle request");
+        scope.finish(outcome).expect("finish lifecycle request");
+    };
+
+    run(MemoryRunOutcome::Complete);
+    run(MemoryRunOutcome::Complete);
+    run(MemoryRunOutcome::Canceled);
+    run(MemoryRunOutcome::Complete);
+    run(MemoryRunOutcome::Error {
+        message: "SC-15833 injected lifecycle error".to_owned(),
+    });
+    run(MemoryRunOutcome::Complete);
+}
+
+macro_rules! sc15833_lifecycle_test {
+    ($name:ident, $strategy:ident) => {
+        #[test]
+        fn $name() {
+            sc15833_lifecycle(gen_core::MemoryStrategy::$strategy);
+        }
+    };
+}
+
+sc15833_lifecycle_test!(sc15833_lifecycle_resident, Resident);
+sc15833_lifecycle_test!(sc15833_lifecycle_staged_residency, StagedResidency);
+sc15833_lifecycle_test!(sc15833_lifecycle_bounded_decode, BoundedDecode);
+sc15833_lifecycle_test!(sc15833_lifecycle_bounded_attention, BoundedAttention);
+sc15833_lifecycle_test!(
+    sc15833_lifecycle_bounded_transformer_residency,
+    BoundedTransformerResidency
+);
+
 #[test]
 #[ignore = "real-weight GPU smoke; needs the dense FLUX.2-dev diffusers snapshot + a CUDA device (cap=120)"]
 fn flux2_dev_candle_gpu_smoke() {
