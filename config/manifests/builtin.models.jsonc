@@ -6631,6 +6631,24 @@
       // TE alone overflows them); even q4 needs ~24 GB sequential, so off-Mac klein is a big-card/offload
       // family. minMemoryGb 25 ≈ the q4 sequential floor; the dynamic fit-gate drives the per-card decision.
       "candle": {
+        // SC-15831: the provider-owned implementation is shared by the base, KV, and True V2
+        // catalog entries because all three resolve to the same Candle engine. Evidence remains
+        // entry-specific: only an exact artifact/tier/mode calibration may activate a candidate.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 25,
         "vramGbByTier": { "q4": 46.2, "q8": 50.6, "bf16": 75.5 },
         "vramMeasuredPixels": 1048576,
@@ -6774,6 +6792,25 @@
         // see the base 9B entry above and `config/tier-integrity.jsonc` for the exception row.
         "denseTextEncoderTier": true
       },
+      "candle": {
+        // SC-15831 shared provider implementation. SC-17485 owns KV-specific artifact and
+        // calibration proof; without those exact records the selector fails closed.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        }
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-kv-mlx/blob/main/LICENSE.md",
       "ui": {
@@ -6884,6 +6921,25 @@
         "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors",
         "convertBaseRepo": "SceneWorks/flux2-klein-9b-mlx",
         "convertBaseSubdir": "bf16"
+      },
+      "candle": {
+        // SC-15831 shared provider implementation. SC-17486 owns True V2-specific artifact and
+        // calibration proof; without those exact records the selector fails closed.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        }
       },
       "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md",
       "ui": {

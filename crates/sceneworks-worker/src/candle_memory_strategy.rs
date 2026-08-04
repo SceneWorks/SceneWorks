@@ -28,6 +28,7 @@ const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request
 const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
 const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
 const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
+const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -51,19 +52,42 @@ fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
     })
 }
 
-fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
-    match mode {
-        "image_generation" | "text_to_image" => (MemoryMode::TextToImage, "text_to_image"),
-        "style_variations" => (MemoryMode::ImageToImage, "style_variations"),
-        // `ImageToImage` serializes as `image_to_image`; retain the catalog's narrower character
-        // axis in `Other` so the typed evidence key and exact calibration lookup share one spelling.
+struct RequestModeBinding {
+    mode: MemoryMode,
+    /// Catalog/matrix axis used to find the entry-specific calibration binding.
+    calibration_key: String,
+    /// Typed gen-core key used by the exact request scope (`MemoryMode::as_key`).
+    scope_key: String,
+}
+
+fn request_mode(engine_id: &str, mode: &str) -> RequestModeBinding {
+    let (mode, calibration_key) = match mode {
+        "image_generation" | "text_to_image" => {
+            (MemoryMode::TextToImage, "text_to_image".to_owned())
+        }
+        "style_variations" => (
+            MemoryMode::Other("style_variations".to_owned()),
+            "style_variations".to_owned(),
+        ),
         "character_image" => (
             MemoryMode::Other("character_image".to_owned()),
-            "character_image",
+            "character_image".to_owned(),
         ),
-        "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
-        "edit_image" => (MemoryMode::Edit, "edit"),
-        _ => (MemoryMode::Other(mode.to_owned()), "other"),
+        // FLUX.2 Klein's reference alias is the same typed Edit coordinate as edit_image. Keep the
+        // catalog axis at edit_image so an exact matrix calibration can promote that cell, while
+        // the gen-core selector and provider receive MemoryMode::Edit / "edit".
+        "reference" | "image_to_image" if engine_id == "flux2_klein_9b" => {
+            (MemoryMode::Edit, "edit_image".to_owned())
+        }
+        "image_to_image" => (MemoryMode::ImageToImage, "image_to_image".to_owned()),
+        "edit" | "edit_image" => (MemoryMode::Edit, "edit_image".to_owned()),
+        _ => (MemoryMode::Other(mode.to_owned()), mode.to_owned()),
+    };
+    let scope_key = mode.as_key().to_owned();
+    RequestModeBinding {
+        mode,
+        calibration_key,
+        scope_key,
     }
 }
 
@@ -259,7 +283,7 @@ fn verified_candidates(
     model_id: &str,
     runtime_provider: &str,
     tier: &str,
-    mode: &str,
+    mode: &RequestModeBinding,
     overlay: &str,
     geometry: MemoryGeometry,
 ) -> WorkerResult<Vec<MemoryEvidence>> {
@@ -290,7 +314,14 @@ fn verified_candidates(
         let Some(item) = value.as_object() else {
             continue;
         };
-        if !binding_matches_request(item, evidence_provider, tier, mode, overlay, geometry) {
+        if !binding_matches_request(
+            item,
+            evidence_provider,
+            tier,
+            &mode.calibration_key,
+            overlay,
+            geometry,
+        ) {
             continue;
         }
         let Some(rung) = text(item, "rung").and_then(rung) else {
@@ -328,7 +359,7 @@ fn verified_candidates(
             model_id: model_id.to_owned(),
             provider: evidence_provider.to_owned(),
             tier: tier.to_owned(),
-            mode: mode.to_owned(),
+            mode: mode.calibration_key.clone(),
             overlay: overlay.to_owned(),
             geometry: calibration_geometry,
             rung,
@@ -354,7 +385,7 @@ fn verified_candidates(
                 resolved_route: runtime_provider.to_owned(),
                 backend: MemoryBackend::Candle,
                 tier: numeric_tier(tier).expect("validated numeric tier"),
-                mode: request_mode(mode).0,
+                mode: mode.mode.clone(),
                 load_shape,
                 overlay: (overlay != "none").then(|| overlay.to_owned()),
                 geometry,
@@ -546,6 +577,7 @@ fn evaluate_shared_image_inner(
             | "flux1_schnell"
             | "flux1_dev"
             | "flux2_dev"
+            | "flux2_klein_9b"
     ) && contract_override.is_none()
     {
         return Ok(None);
@@ -554,6 +586,7 @@ fn evaluate_shared_image_inner(
         "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
         "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
         "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
+        "flux2_klein_9b" => FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION,
         _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -562,7 +595,7 @@ fn evaluate_shared_image_inner(
     if has_phases {
         return Ok(None);
     }
-    let (mode, mode_key) = request_mode(request_mode_value);
+    let mode = request_mode(engine_id, request_mode_value);
     let Some(tier) = numeric_tier(tier_key) else {
         return Ok(None);
     };
@@ -597,7 +630,7 @@ fn evaluate_shared_image_inner(
             resolved_route: engine_id.to_owned(),
             backend: MemoryBackend::Candle,
             tier,
-            mode: mode.clone(),
+            mode: mode.mode.clone(),
             load_shape: contract.load_shape,
             overlay: overlay.map(str::to_owned),
             geometry,
@@ -636,7 +669,7 @@ fn evaluate_shared_image_inner(
             model_id,
             engine_id,
             tier_key,
-            mode_key,
+            &mode,
             exact_overlay,
             geometry,
         )?
@@ -678,7 +711,7 @@ fn evaluate_shared_image_inner(
             resolved_route: engine_id,
             backend: "candle",
             tier,
-            mode: mode_key,
+            mode: &mode.scope_key,
             overlay,
             geometry,
             expected_inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
@@ -719,7 +752,7 @@ fn evaluate_shared_image_inner(
             selection,
             calibration_abi: selected_evidence.calibration_abi,
             calibration_fingerprint: selected_evidence.calibration_fingerprint.clone(),
-            mode,
+            mode: mode.mode,
             load_shape: contract.load_shape,
             has_reference,
             use_pid,
@@ -758,20 +791,43 @@ mod tests {
     }
 
     #[test]
-    fn style_variations_preserves_its_exact_evidence_key() {
-        let (mode, key) = request_mode("style_variations");
-        assert_eq!(mode, MemoryMode::ImageToImage);
-        assert_eq!(key, "style_variations");
-    }
+    fn flux2_klein_reference_modes_preserve_catalog_and_typed_keys() {
+        let cases = [
+            ("edit_image", MemoryMode::Edit, "edit_image", "edit"),
+            ("reference", MemoryMode::Edit, "edit_image", "edit"),
+            ("image_to_image", MemoryMode::Edit, "edit_image", "edit"),
+            (
+                "character_image",
+                MemoryMode::Other("character_image".to_owned()),
+                "character_image",
+                "character_image",
+            ),
+            (
+                "style_variations",
+                MemoryMode::Other("style_variations".to_owned()),
+                "style_variations",
+                "style_variations",
+            ),
+        ];
+        for (request, expected_mode, calibration_key, scope_key) in cases {
+            let binding = request_mode("flux2_klein_9b", request);
+            assert_eq!(binding.mode, expected_mode, "request={request}");
+            assert_eq!(
+                binding.calibration_key, calibration_key,
+                "request={request}"
+            );
+            assert_eq!(binding.scope_key, scope_key, "request={request}");
+            assert_eq!(
+                binding.mode.as_key(),
+                binding.scope_key,
+                "request={request}"
+            );
+        }
 
-    #[test]
-    fn character_image_preserves_its_exact_evidence_key() {
-        let (mode, key) = request_mode("character_image");
-        assert_eq!(mode, MemoryMode::Other("character_image".to_owned()));
-        assert_eq!(key, "character_image");
-
-        let (_, generic_key) = request_mode("image_to_image");
-        assert_eq!(generic_key, "image_to_image");
+        let generic = request_mode("z_image", "image_to_image");
+        assert_eq!(generic.mode, MemoryMode::ImageToImage);
+        assert_eq!(generic.calibration_key, "image_to_image");
+        assert_eq!(generic.scope_key, "image_to_image");
     }
 
     #[test]
@@ -862,7 +918,7 @@ mod tests {
                 model_id,
                 provider,
                 "q4",
-                "text_to_image",
+                &request_mode(provider, "text_to_image"),
                 "none",
                 geometry,
             )
@@ -894,7 +950,7 @@ mod tests {
                     model_id,
                     provider,
                     "q4",
-                    "character_image",
+                    &request_mode(provider, "character_image"),
                     overlay,
                     MemoryGeometry {
                         reference_count: 1,
@@ -949,7 +1005,7 @@ mod tests {
             "flux2_dev",
             "flux2_dev",
             "q4",
-            "text_to_image",
+            &request_mode("flux2_dev", "text_to_image"),
             "none",
             geometry,
         )
@@ -999,7 +1055,7 @@ mod tests {
             "flux2_dev",
             "flux2_dev",
             "q4",
-            "text_to_image",
+            &request_mode("flux2_dev", "text_to_image"),
             "none",
             geometry,
         )
@@ -1023,7 +1079,7 @@ mod tests {
             "flux2_dev",
             "flux2_dev",
             "q4",
-            "text_to_image",
+            &request_mode("flux2_dev", "text_to_image"),
             "control",
             geometry,
         )

@@ -1155,8 +1155,26 @@
         },
         "candle": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "Same 8-double + 24-single split; no Candle block-window path.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2"
+          ],
+          "implementedModes": [
+            "text_to_image",
+            "edit_image",
+            "character_image",
+            "style_variations"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "SC-15831 wires the shared 8-double + 24-single Candle Klein provider through the common block-window primitive while keeping catalog-entry evidence independent.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -1171,15 +1189,25 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
-              "reason": "The Candle FLUX.2 provider advertises sequential offload but declares no memory_strategy_contract and carries no streamed-block loader."
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs",
+              "reason": "At pinned inference revision 41464d57, the Klein-specific contract publishes bounded decode, bounded attention, and a one-block DiT window over the exact 8 + 24 block domain with its own calibration fingerprint."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/block_stream.rs",
+              "reason": "The shared streamed loader reconstructs exact double- and single-stream block windows from the re-openable snapshot and delegates scheduling and cleanup to candle_gen::block_window."
+            },
+            {
+              "source": "crates/sceneworks-worker/src/image_jobs/base.rs",
+              "reason": "The registered path binds the shared selector to the exact base artifact while KV and True V2 remain fail-closed until their downstream artifact and calibration stories provide entry-specific proof."
             }
           ],
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "No rung-4 run exists for FLUX.2."
+            "reason": "The shared implementation is present, but no final revision-bound SC-15831 rung-4 observation has yet been promoted into this survey."
           },
-          "findings": []
+          "findings": [
+            "Sharing provider code does not verify a catalog sibling: the base, KV, and True V2 entries retain separate artifact and calibration ownership (SC-15919, SC-17485, and SC-17486)."
+          ]
         }
       }
     },
