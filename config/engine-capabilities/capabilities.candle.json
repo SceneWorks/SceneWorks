@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+    "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -48,27 +48,27 @@
     {
       "id": "chroma1_base",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "chroma1_flash",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "chroma1_hd",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "flux1_dev",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "flux1_schnell",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "flux2_dev",
@@ -253,12 +253,12 @@
     {
       "id": "z_image",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "z_image_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     }
   ]
 }
