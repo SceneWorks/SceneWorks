@@ -7058,9 +7058,12 @@
         // SC-15833: exact Q4 base-only CUDA memory-ladder evidence. Edit and strict ControlNet
         // loadability are captured separately, but only the text-to-image/none coordinates below
         // are admitted as runtime-complete memory evidence. The captures remain truthfully pinned
-        // to 5ffd; `docs/calibration/sc-15833/inference-compatibility-277f.json` proves the exact
-        // Candle FLUX.2 dependency closure is tree-identical at 277f, so only that later pin is
-        // admitted as compatible. The MLX FLUX.2 changes in between are outside this CUDA closure.
+        // to 5ffd; `docs/calibration/sc-15833/inference-compatibility-a4f4.json` proves the Candle
+        // FLUX.2 closure still describes the same compiled code at a4f409ae, so only that later pin
+        // is admitted as compatible. sc-17524: two closure paths DID move across that window
+        // (`Cargo.lock` and `candle-gen`) and the audited `candle-gen-flux2` lib test binary is
+        // byte-identical at both ends, so the proof is a measured digest rather than tree identity.
+        // The MLX FLUX.2 changes in between are outside this CUDA closure.
         "calibrations": [
           {
             "abi": 3, "loadShape": "deferred_materialization",
@@ -7068,7 +7071,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7082,7 +7085,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7096,7 +7099,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7110,7 +7113,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7125,7 +7128,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",

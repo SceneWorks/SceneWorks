@@ -511,19 +511,18 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.equal(model.completedBaseline.runtimeCompleteRecords, 15);
   assert.equal(model.completedBaseline.activationEligibleRecords, 48);
   // "Runtime-current" is measured against the shipped inference pin. SC-15833's checked-in
-  // dependency-closure audit proves the Candle FLUX.2 provider trees byte-identical at 5ffd and
-  // 277f, so those five records are current through that exact compatibility binding — but ONLY
-  // while 277f is still the live pin. The audit is a window, not a permanent grant: once the pin
-  // moves past it the five join every other retained record as historical, which is the fail-closed
-  // rule `sc-15833-flux2-evidence.test.mjs` asserts directly.
+  // compatibility audit certifies the Candle FLUX.2 closure across an exact window — captured at
+  // 5ffd, compatible through `AUDITED_LIVE_REVISION` — so those five records are current through
+  // that binding and ONLY while that revision is still the live pin. The audit is a window, not a
+  // permanent grant: once the pin moves past it the five join every other retained record as
+  // historical, which is the fail-closed rule `sc-15833-flux2-evidence.test.mjs` asserts directly.
   //
-  // Derived from the live pin rather than hardcoded, so a bump does not make this test wrong. It
-  // asserted a flat `5`, which was only ever true at 277f; sc-17393's bump to 35251a88 is the first
-  // bump to arrive after SC-15833 landed. Re-certifying FLUX.2 needs a new
-  // `inference-compatibility-<rev>.json` proof — and that proof's audited-object set includes
-  // `crates/media/candle-gen/candle-gen`, which 277f→35251a88 changes — so the count must fall to
-  // zero here until the window is re-audited by measurement.
-  const AUDITED_LIVE_REVISION = "277f423822bf1899340ed3d867c3d6a773473d7b";
+  // Derived from the live pin rather than hardcoded, so a bump does not make this test wrong; it
+  // falls to zero on its own and comes back when the window is re-audited. sc-17524 did exactly
+  // that for a4f409ae — `Cargo.lock` and `candle-gen` both moved, and the compiled
+  // measurement binary was byte-identical at both ends — which is why the count is 5 again. Only a
+  // measurement re-opens this window; editing the constant below does not.
+  const AUDITED_LIVE_REVISION = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
   const workerCargo = readFileSync(
     new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url),
     "utf8",
