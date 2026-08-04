@@ -113,10 +113,11 @@ builds are **not** in it:
   unrealized, but nothing on the free path looks at it.
 
 This gap predates sc-17497 and is not introduced by it — the free path behaves exactly as the v1
-audit always did. It is **not** fixed here because closing it revokes the current authorization: the
-lockfile already moved, so adding it to the closure immediately demands a CUDA build that this
-machine cannot produce, dropping the five `flux2_dev` cells to `historical` and blocking sc-17396
-harder than today.
+audit always did. It is **not** fixed here because it cannot be closed without a CUDA build: the
+lockfile has moved across every window in play (`5ffd7612` → `277f4238` → the live `35251a88` pin all
+share `e5014b40…` only from `277f4238` onward), so adding it to the closure would immediately demand
+an artifact proof this machine cannot produce. Widening the closure without the hardware to satisfy
+it converts a silent gap into a hard block, which helps nobody; sc-17524 does both together.
 
 Related: the artifact layer cannot adjudicate non-crate closure entries at all. Cargo's
 `compiler-artifact` stream only ever names *package* manifests, and inference's root `Cargo.toml` is

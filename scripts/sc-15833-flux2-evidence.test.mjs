@@ -513,24 +513,53 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
   }
 
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
-  assert.equal(matrix.generatedFrom.inferenceRevision, LIVE_INFERENCE_REVISION);
+  // The audited compatibility is a WINDOW — captured at `INFERENCE_REVISION` (5ffd), audited
+  // against the live pin `LIVE_INFERENCE_REVISION` (277f) by
+  // docs/calibration/sc-15833/inference-compatibility-277f.json. Inside that window the five cells
+  // ride CURRENT evidence and are Runtime verified. Once the pin moves past it the records are
+  // retained but no longer authorize the new pin, which is the same fail-closed rule the sibling
+  // test "refuses to authorize capture promotion against a newer live inference pin" asserts
+  // directly, and which already applies to every other family's shipped bundle.
+  //
+  // Reading the live pin instead of hardcoding it is what makes this test survive a bump. It used
+  // to assert `generatedFrom.inferenceRevision === LIVE_INFERENCE_REVISION`, so the NEXT pin bump
+  // was always going to fail it — sc-17393's bump to 35251a88 is simply the one that arrived. The
+  // precedent is `generate-memory-matrix.test.mjs`, which hit exactly this when sc-16962's bump
+  // de-currented sc-16353's Qwen rung-4 records and answered it by asserting promotion against a
+  // re-stamped fixture rather than against whichever pin happened to be live.
+  //
+  // Re-certifying FLUX.2 on a newer pin is deliberately NOT something this test can do by relaxing:
+  // it needs a new `inference-compatibility-<rev>.json` proof, and that proof's audited-object set
+  // includes `crates/media/candle-gen/candle-gen`, which 277f→35251a88 changes. So the window must
+  // be re-audited by measurement, not extended by assertion.
+  const workerCargo = await readFile(new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url), "utf8");
+  const livePin = workerCargo.match(
+    /github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/,
+  )?.[1];
+  assert.ok(livePin, "could not read the pinned inference revision from the worker manifest");
+  assert.equal(matrix.generatedFrom.inferenceRevision, livePin);
   assert.notEqual(matrix.generatedFrom.inferenceRevision, INFERENCE_REVISION);
+  const withinAuditedWindow = livePin === LIVE_INFERENCE_REVISION;
   const runs = matrix.calibrationRuns.filter(({ record }) => record.target.provider === "flux2_dev");
   assert.equal(runs.length, 5);
   assert.ok(runs.every(({ binding, semantics, record }) =>
-    binding.eligible && binding.reasons.length === 0 && semantics === "current" &&
+    binding.eligible && binding.reasons.length === 0 &&
+    semantics === (withinAuditedWindow ? "current" : "historical") &&
     record.status === "runtime_complete"));
   const cells = matrix.cells.filter((cell) =>
     cell.modelId === "flux2_dev" && cell.backend === "candle" && cell.tier === "q4" &&
     cell.mode === "text_to_image" && cell.overlay === "none",
   );
   assert.equal(cells.length, 5);
-  assert.ok(cells.every((cell) => cell.state === "Runtime verified"));
   assert.ok(cells.every((cell) =>
-    cell.evidence.currentEnvironmentVerification.length === 1 &&
-    cell.evidence.currentEnvironmentVerification[0].recordStatus === "runtime_complete" &&
-    cell.evidence.historicalVerification.length === 0,
-  ));
+    cell.state === (withinAuditedWindow ? "Runtime verified" : "Implemented/unverified")));
+  assert.ok(cells.every((cell) => (withinAuditedWindow
+    ? cell.evidence.currentEnvironmentVerification.length === 1 &&
+      cell.evidence.currentEnvironmentVerification[0].recordStatus === "runtime_complete" &&
+      cell.evidence.historicalVerification.length === 0
+    : cell.evidence.currentEnvironmentVerification.length === 0 &&
+      cell.evidence.historicalVerification.length === 1 &&
+      cell.evidence.historicalVerification[0].recordStatus === "runtime_complete")));
 
   const proof = JSON.parse(await readFile(
     new URL("../docs/calibration/sc-15833/inference-compatibility-277f.json", import.meta.url),
