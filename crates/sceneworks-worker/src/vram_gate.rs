@@ -359,11 +359,11 @@ pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
 //
 // The curves were captured against `277f4238`; each evidence record keeps
 // that exact commit in its own `inferenceCommit` receipt, which is never rewritten (sc-16482: a receipt
-// testifies to its own run). This constant moved to the sc-17393 closeout pin only after verifying the
+// testifies to its own run). This constant moved to the sc-17439 closeout pin only after verifying the
 // range is a single commit whose diff against BOTH `candle-gen-krea` and `gen-core/src/memory_strategy.rs`
 // is empty - the measured path and the calibration identity (ABI 3, fingerprint, deferred load shape) are
 // byte-for-byte unchanged, so the captures remain valid rather than merely re-stamped.
-pub(crate) const KREA_TURBO_INFERENCE_REVISION: &str = "35251a8875d695144c3c1046d14cd35840fd5838";
+pub(crate) const KREA_TURBO_INFERENCE_REVISION: &str = "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {

@@ -5256,12 +5256,12 @@
           "sceneWorksRevision": "sc-15449-contract-v1",
           // Inference revision these curves are declared COMPATIBLE with. The campaign measured against
           // 277f4238 (kept verbatim in every record's own `inferenceCommit` receipt, which is never
-          // rewritten); this declaration moved to the sc-17393 closeout pin only after verifying that the
+          // rewritten); this declaration moved to the sc-17439 closeout pin only after verifying that the
           // one-commit range has an EMPTY diff against both `candle-gen-krea` and
           // `gen-core/src/memory_strategy.rs`. The fingerprint is unchanged because the provider's tensor
           // layout, quantization floors and execution structure did not move - only the shared contract
           // ABI did, which is precisely the split the two identity fields exist to express.
-          "inferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+          "inferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
@@ -5294,7 +5294,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+              "compatibleInferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5404,7 +5404,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+              "compatibleInferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5514,7 +5514,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+              "compatibleInferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5617,7 +5617,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+              "compatibleInferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5727,7 +5727,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+              "compatibleInferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5830,7 +5830,7 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+              "compatibleInferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
