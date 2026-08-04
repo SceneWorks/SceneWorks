@@ -22,7 +22,7 @@
     "exception": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model", "component", "residentTier", "appliesToTiers", "cause", "reason", "evidence"],
+      "required": ["model", "component", "residentTier", "appliesToTiers", "backends", "cause", "reason", "evidence"],
       "properties": {
         "model": {
           "type": "string",
@@ -48,7 +48,7 @@
           "type": "array",
           "minItems": 1,
           "items": { "type": "string", "enum": ["mlx", "candle"] },
-          "description": "Which lanes carry this residency. OMIT for both. Declare it when the lanes genuinely differ — the mage transformerHead floor, for example, exists only in mlx-gen-mage; candle-gen-mage has no floor symbol at all, so a q4 render there really is uniformly q4. THE SAME DECLARED TIER CAN YIELD DIFFERENT RESIDENCY PER BACKEND, so residentTier is a per-lane fact: sensenova_u1_8b's vision conv kernels and fm_head are bf16 under mlx-gen-sensenova but f32 under candle-gen-sensenova, which widens every dense leaf it multiplies against an f32 activation (candle-gen-sensenova/src/quant.rs::get_f32, sc-14249). Such a component is declared as one row per lane. Enforced, not advisory: the checker validates the lane names, requires each declared lane to be one the catalog entry actually has a block for, keys row uniqueness on it, and publishes it as a column in docs/generated/tier-integrity.md."
+          "description": "Which lanes carry this residency — REQUIRED (sc-17395), never defaulted. THE SAME DECLARED TIER CAN YIELD DIFFERENT RESIDENCY PER BACKEND, so residentTier is a per-lane fact: sensenova_u1_8b's vision conv kernels and fm_head are bf16 under mlx-gen-sensenova but f32 under candle-gen-sensenova, which widens every dense leaf it multiplies against an f32 activation (candle-gen-sensenova/src/quant.rs::get_f32, sc-14249); chroma's T5-XXL is bf16 under mlx-gen but f32 under candle-gen-chroma, whose load_t5 reads the bf16 checkpoint into F32 containers. Such a component is declared as ONE ROW PER LANE. This key was optional until sc-17395, with omission meaning 'both' — and the lane cross-check ran only when it was present, so the default claim went unvalidated and 42 rows asserted cross-lane equality nobody had checked. Enforced, not advisory: the checker validates the lane names, requires each declared lane to be one the ROUTER serves the model on (routing/catalog.rs ModelCaps + VideoModelCaps + the bespoke CANDLE_IMAGE_ROUTES — NOT the manifest's optional per-backend tuning block, which is not a lane declaration), keys row uniqueness on it, and publishes it as a column in docs/generated/tier-integrity.md."
         },
         "cause": {
           "type": "string",
