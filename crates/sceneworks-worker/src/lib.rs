@@ -369,6 +369,13 @@ mod zimage_pid_gpu_smoke;
 // the worker-lane validation (the crate links + drives the engine), not just the mlx-gen-krea crate.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_turbo_mlx_smoke;
+// Real-weight MLX smoke for the SenseNova-U1 `_fast` worker lane (sc-17396). Test-only + macOS-only;
+// drives `crate::inference_runtime::load("sensenova_u1_8b_fast")` with a packed-tier Q8 `LoadSpec`
+// against the HF CACHE. Distinct from the `sensenova_jobs` packed-tier smokes, which build the model
+// via `load_sensenova_model` (`load_raw` + `from_weights`, the dense VQA/interleave shape) and so
+// never reach the engine's own `load_fast` — the gap that let the pinned-artifact regression ship.
+#[cfg(all(test, target_os = "macos"))]
+mod sensenova_fast_q8_mlx_smoke;
 // Real-weight MLX smoke for the Krea 2 Turbo pose-ControlNet worker lane on a PACKED Q8 base (sc-11796).
 // Test-only + macOS-only; drives `gen_core::load("krea_2_turbo_control")` with the exact packed-q8
 // `LoadSpec` `krea_control_spec` builds and asserts the pose steers the render vs a base passthrough —
