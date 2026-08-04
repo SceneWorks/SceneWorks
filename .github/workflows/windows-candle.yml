@@ -135,6 +135,17 @@ jobs:
       # admin-override merges). The action fails loudly with an actionable message if no
       # usable toolchain is installed. See .github/actions/prepare-rust-runner.
       - uses: ./.github/actions/prepare-rust-runner
+      # The shared runner exports RUSTC_WRAPPER=sccache. The prep action correctly clears a
+      # missing wrapper, but an installed daemon can still reset its local connection mid-build
+      # (Windows os error 10054), observed independently in both the backend-candle test and the
+      # sidecar check. This is the repository's heaviest Rust/CUDA lane, so make rustc direct and
+      # deterministic for this job only. Cargo registry/git/target caches remain intact; sibling
+      # workflows may continue using sccache.
+      - name: Disable unstable sccache wrapper for the heavy Candle lane
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
       # Multiple runner services share %USERPROFILE%\.cargo. A sibling job can replace
       # that global git checkout while rustc is still reading vendored inference sources,
       # which surfaces as an unrelated missing-path/os-error-267 failure. Keep dependency

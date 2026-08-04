@@ -506,6 +506,7 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
     """
     audited_lanes = {
         "image_jobs/base.rs": "model.default_repo()",
+        "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
         "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
         "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
         "image_jobs/kolors_ipadapter.rs": "default_repo_for(&request.model)",
@@ -571,6 +572,7 @@ def test_manifest_model_path_is_only_an_optional_override():
         # absent. It does not affect generation's normal repo resolution.
         "image_jobs.rs",
         "image_jobs/base.rs",
+        "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
         "image_jobs/kolors_ipadapter.rs",
@@ -650,6 +652,26 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
         f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
         for error in errors
     )
+
+
+def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
+    """Static capabilities and exact provider contracts share one overlay vocabulary.
+
+    The matrix generator and Candle selector both recognize identity-conditioned cells. Keeping
+    the two authoring-schema locations exact prevents an identity-capable manifest from validating
+    in one memory-strategy declaration while being rejected in the other.
+    """
+    schema = _load_schema(SCHEMA_PATH)
+    expected = {"none", "lora", "identity", "control"}
+    static_overlays = schema["$defs"]["staticMemoryStrategyCapability"]["properties"][
+        "overlays"
+    ]["items"]["enum"]
+    contract_overlays = schema["properties"]["models"]["items"]["properties"]["mlx"][
+        "properties"
+    ]["memoryStrategyContract"]["properties"]["implementations"]["items"]["properties"][
+        "overlays"
+    ]["items"]["enum"]
+    assert set(static_overlays) == set(contract_overlays) == expected
 
 
 def test_measured_memory_rows_declare_their_1024_square_geometry():

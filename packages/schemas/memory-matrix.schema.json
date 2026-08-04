@@ -132,6 +132,14 @@
           "type": "string",
           "minLength": 1
         },
+        "recordStatus": {
+          "enum": [
+            "complete",
+            "runtime_complete",
+            "gated",
+            "negative_complete"
+          ]
+        },
         "engagedRungs": {
           "$ref": "#/$defs/engagedRungs"
         },
@@ -396,15 +404,15 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): `models[].owningFamilyStory`/`owningModelStory` were renamed to the plural `owningFamilyStories`/`owningModelStories` and retyped from an integer to a backend->id object. A reader written against version 1 reads `undefined` for both, so the shapes cannot share a version. 3 (sc-16268): `cells[].evidenceRevision` was removed \u2014 it fanned the same two constants across every row, so a fingerprint rotation rewrote ~14,700 lines and guaranteed merge conflicts. The values remain in `generatedFrom.sceneWorksRevision`/`inferenceRevision`; `additionalProperties: false` on a cell now makes re-adding the per-row copy a schema failure. 4 (SC-15969): `rung4SurveyRows` and `cells[].rung4Survey` were added, and both are REQUIRED \u2014 the first at the document root, the second on exactly the rung-4 cells. The fields are additive, so a version-3 READER is unaffected; but a version-3 DOCUMENT has neither and therefore no longer validates against this schema, which is what the version number identifies. Bumping is the honest call: leaving it at 3 would mean a schema that rejects documents legitimately stamped 3. 5 (SC-16060): `claims`, `memoryCharacterizationStates`, and `cells[].memoryCharacterization` were added and are REQUIRED, and `conformanceStates` changed SHAPE from bare strings to `{state, definition}` objects. That last one is not additive \u2014 a version-4 reader indexing `conformanceStates` for a string now gets an object \u2014 and it is the point of the change: the states carried no definitions, which is how the pipeline came to hold two contradictory answers to whether one measured geometry certifies a whole envelope.",
-      "const": 5
+      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts.",
+      "const": 6
     },
     "generatedFrom": {
       "type": "object"
     },
     "conformanceStates": {
       "type": "array",
-      "minItems": 5,
+      "minItems": 6,
       "items": {
         "type": "object",
         "required": [
@@ -416,6 +424,7 @@
           "state": {
             "enum": [
               "Verified",
+              "Runtime verified",
               "Implemented/unverified",
               "Structurally N/A",
               "Missing",
@@ -443,9 +452,19 @@
         "mlxStagedStaticCoverage",
         "mlxStagedStaticCoverageDenominator",
         "fullModels",
+        "calibrationRunsByStatus",
         "rung4Survey"
       ],
       "properties": {
+        "calibrationRunsByStatus": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["complete", "runtimeComplete"],
+          "properties": {
+            "complete": { "type": "integer", "minimum": 0 },
+            "runtimeComplete": { "type": "integer", "minimum": 0 }
+          }
+        },
         "rung4Survey": {
           "type": "object",
           "required": [
@@ -638,6 +657,7 @@
           "state": {
             "enum": [
               "Verified",
+              "Runtime verified",
               "Implemented/unverified",
               "Structurally N/A",
               "Missing",

@@ -143,11 +143,14 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_wired_candle_routes_as_supporting() {
-        // The truth at inference pin d4802320: sc-16951 (Krea) + sc-16952 (Qwen-Image).
+    fn reads_the_current_wired_candle_routes_as_supporting() {
+        // Representative truth at inference pin 5b6d6aa: Krea, Qwen-Image, and SDXL all advertise
+        // live preview. Keep SDXL here because its provider gained preview after this contract's
+        // original pre-5b6 fixture was written.
         assert_eq!(supports_preview("krea_2_turbo", "candle"), Some(true));
         assert_eq!(supports_preview("krea_2_raw", "candle"), Some(true));
         assert_eq!(supports_preview("qwen_image", "candle"), Some(true));
+        assert_eq!(supports_preview("sdxl", "candle"), Some(true));
     }
 
     // The distinction the whole story exists for: a wired route that does NOT preview answers
@@ -155,12 +158,14 @@ mod tests {
     // reintroduces the bug.
     #[test]
     fn distinguishes_wired_false_from_unknown() {
-        assert_eq!(supports_preview("sdxl", "candle"), Some(false));
+        // SD3.5 Medium is registered in the current Candle facts but does not advertise preview.
+        // This is a declared false route, not an inference from a provider being absent.
+        assert_eq!(supports_preview("sd3_5_medium", "candle"), Some(false));
         // A backend with no facts file is UNKNOWN, not false. Asserted against a name that can
         // never be dumped rather than against `mlx`: `mlx` is exactly the backend the macOS lane is
         // expected to add, and pinning "mlx is absent" here would turn that follow-up into a red
         // test with a comment claiming the absence was intentional.
-        assert_eq!(supports_preview("sdxl", "no_such_backend"), None);
+        assert_eq!(supports_preview("sd3_5_medium", "no_such_backend"), None);
         assert_eq!(supports_preview("not_a_model", "candle"), None);
     }
 

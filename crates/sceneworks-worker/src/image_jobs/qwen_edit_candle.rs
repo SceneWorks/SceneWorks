@@ -771,10 +771,10 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         cancel: cancel.clone(),
                         // The job's LIVE per-image preview sink (epic 16948, sc-16962), built by
                         // `preview_sink_for` and handed in by `drive_gen_items`. Qwen-Image-Edit emits
-                        // per-step latent previews as of inference `d4802320` (sc-16952); the frames
-                        // are of the TARGET only — the reference latents are concatenated onto the DiT
-                        // sequence inside the predict closure and narrowed straight back off, so the
-                        // sampler's running latent never carries a reference token.
+                        // per-step latent previews at inference `5b6d6aa` (introduced by sc-16952);
+                        // the frames are of the TARGET only — the reference latents are concatenated
+                        // onto the DiT sequence inside the predict closure and narrowed straight back
+                        // off, so the sampler's running latent never carries a reference token.
                         //
                         // This closure used to bind `_preview` and drop it. `Default::default()` — or
                         // `..Default::default()`, which reads more innocent and does the same thing —

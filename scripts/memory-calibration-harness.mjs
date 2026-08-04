@@ -363,11 +363,72 @@ function validateNegative(record) {
   ) fail(`${record.id}: negative case did not breach a threshold`);
 }
 
+function validateRuntimeComplete(record) {
+  if (record.target.overlay !== "none") {
+    fail(`${record.id}: runtime-complete evidence must target the base-only none overlay`);
+  }
+  if (record.repositories.sceneWorks.dirty || record.repositories.inference.dirty) {
+    fail(`${record.id}: runtime-complete evidence cannot come from a dirty repository`);
+  }
+  validatePredicted(record.predictedPeakBytes, `${record.id}.predictedPeakBytes`);
+  validatePhaseMetrics(record.observedMemory, `${record.id}.observedMemory`);
+  const [soleCase] = record.sweep.cases;
+  if (
+    record.sweep.rangeVerified !== true ||
+    record.sweep.cases.length !== 1 ||
+    soleCase?.result !== "passed" ||
+    !equal(soleCase.parameters, record.strategy.parameters)
+  ) fail(`${record.id}: runtime-complete evidence needs exactly one passed case matching its strategy parameters`);
+  const scenarios = new Map(record.scenarios.map((item) => [item.name, item]));
+  if (record.scenarios.length !== REQUIRED_SCENARIOS.length || scenarios.size !== REQUIRED_SCENARIOS.length) {
+    fail(`${record.id}: runtime-complete scenarios must be unique and exhaustive`);
+  }
+  for (const name of ["exact_fit", "unknown_budget", "stale_evidence", "loadability"]) {
+    if (scenarios.get(name)?.result !== "passed") fail(`${record.id}: ${name} must pass for runtime activation`);
+  }
+  for (const name of ["warm_repeat", "cancel", "error"]) {
+    const scenario = scenarios.get(name);
+    if (scenario?.result !== "not_run") fail(`${record.id}: ${name} must remain explicitly not_run`);
+    text(scenario.reason, `${record.id}.${name}.reason`);
+  }
+  const exact = scenarios.get("exact_fit");
+  number(exact.predictedBytes, `${record.id}.exact_fit.predictedBytes`);
+  number(exact.effectiveBudgetBytes, `${record.id}.exact_fit.effectiveBudgetBytes`);
+  if (exact.predictedBytes !== exact.effectiveBudgetBytes) fail(`${record.id}: exact_fit must exercise equality`);
+  const overlay = scenarios.get("overlay");
+  if (overlay?.result !== "not_applicable") fail(`${record.id}: runtime-complete evidence must be base-only`);
+  text(overlay.reason, `${record.id}.overlay.reason`);
+  if (record.negativeMutation !== null) fail(`${record.id}: unexecuted negative mutation must remain null`);
+  if (
+    record.quality.result !== "passed" ||
+    record.quality.identicalInputs !== true
+  ) fail(`${record.id}: runtime-complete quality evidence must pass with identical inputs`);
+  text(record.quality.contract, `${record.id}.quality.contract`);
+  for (const metric of [
+    "maximumError", "meanError", "rootMeanSquareError",
+    "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
+  ]) {
+    number(record.quality[metric], `${record.id}.quality.${metric}`);
+  }
+  if (
+    record.quality.maximumError > record.quality.maximumErrorThreshold ||
+    record.quality.meanError > record.quality.meanErrorThreshold ||
+    record.quality.rootMeanSquareError > record.quality.rootMeanSquareErrorThreshold
+  ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
+  if (record.loadability.result !== "passed") fail(`${record.id}: runtime-complete loadability did not pass`);
+  text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
+  if (record.observedMemory.overall.deviceBytes > record.hardware.memoryBytes) {
+    fail(`${record.id}: overall device bytes exceed probed hardware memory`);
+  }
+}
+
 export function validateRecord(record) {
   object(record, "record");
   text(record.id, "record.id");
   text(record.logicalCaseId, `${record.id}.logicalCaseId`);
-  if (!["complete", "gated", "negative_complete"].includes(record.status)) fail(`${record.id}: invalid status`);
+  if (!["complete", "runtime_complete", "gated", "negative_complete"].includes(record.status)) {
+    fail(`${record.id}: invalid status`);
+  }
   if (!["authoritative", "candidate", "fixture"].includes(record.evidenceScope)) {
     fail(`${record.id}: invalid evidenceScope`);
   }
@@ -379,6 +440,9 @@ export function validateRecord(record) {
   validateHardware(record);
   object(record.artifact, `${record.id}.artifact`);
   for (const key of ["repository", "resolvedRevision", "variant"]) text(record.artifact[key], `${record.id}.artifact.${key}`);
+  if (record.artifact.inventorySha256 !== undefined && !/^[0-9a-f]{64}$/.test(record.artifact.inventorySha256)) {
+    fail(`${record.id}.artifact.inventorySha256 must be a lowercase SHA-256 digest`);
+  }
   object(record.target, `${record.id}.target`);
   for (const key of ["modelId", "provider", "tier", "mode", "overlay"]) text(record.target[key], `${record.id}.target.${key}`);
   for (const key of ["width", "height", "batch", "frames"]) number(record.target.geometry[key], `${record.id}.target.geometry.${key}`, true);
@@ -397,6 +461,7 @@ export function validateRecord(record) {
   object(record.quality, `${record.id}.quality`);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
   if (record.status === "complete") validateComplete(record);
+  if (record.status === "runtime_complete") validateRuntimeComplete(record);
   if (record.status === "negative_complete") validateNegative(record);
   return record;
 }
@@ -522,7 +587,7 @@ export function evidenceSemantics(record, revisions) {
   if (record.evidenceScope === "fixture") return "fixture";
   if (record.evidenceScope === "candidate") return "candidate";
   if (record.status === "negative_complete") return "negative";
-  if (record.status !== "complete") return "gated";
+  if (!["complete", "runtime_complete"].includes(record.status)) return "gated";
   // SceneWorks invalidation is owned by calibrationBinding's provider ABI fingerprint. The exact
   // matrixSourceRevision remains captured provenance, but treating it as a second invalidation gate
   // would stale every measurement on comments, formatting, or unrelated source edits.
@@ -613,7 +678,7 @@ export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE
 
 function completedLogicalIds(record) {
   if (record.status === "negative_complete") return [record.logicalCaseId];
-  if (record.status !== "complete") return [];
+  if (!["complete", "runtime_complete"].includes(record.status)) return [];
   return record.sweep.cases.filter((item) => item.result === "passed").map((item) =>
     logicalCaseId({
       evidenceScope: record.evidenceScope,

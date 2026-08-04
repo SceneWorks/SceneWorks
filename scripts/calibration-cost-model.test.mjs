@@ -508,21 +508,24 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
 test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
   assert.equal(model.completedBaseline.completeRecords, 33);
+  assert.equal(model.completedBaseline.runtimeCompleteRecords, 10);
+  assert.equal(model.completedBaseline.activationEligibleRecords, 43);
   // "Runtime-current" is measured against the SHIPPED inference pin. sc-16353's four exact Qwen
   // Q4/Q8 rung records were current at `8ffa211a`; sc-16962 moved the pin to `d4802320`, so they are
   // historical. SC-15510's five exact Z-Image records were captured at `d4802320`; SC-15815 then
   // moved the shared pin to `bf06bb56` for the Candle repair. The Mac recapture runner was absent,
-  // so all 33 records remain retained history but fail closed as runtime-current evidence.
+  // so all 33 Full records remain retained history. SC-15823's ten exact base-only FLUX records
+  // are current runtime evidence and must be counted separately rather than masquerading as Full.
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
-    0,
-    "no historical calibration run may survive the exact inference-pin advance",
+    10,
+    "only the ten current runtime-complete FLUX records should survive",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
-  assert.match(model.completedBaseline.note, /33 complete record\(s\) exist/);
-  assert.match(model.completedBaseline.note, /0 current calibration run\(s\)/);
+  assert.match(model.completedBaseline.note, /33 Full complete and 10 base-only runtime-complete/);
+  assert.match(model.completedBaseline.note, /10 current calibration run\(s\)/);
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
-  assert.match(model.biggestUncertainties[0].why, /Only 6 of 53 catalog entries/);
+  assert.match(model.biggestUncertainties[0].why, /Only 8 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
   assert.doesNotMatch(
     allProse,
@@ -677,7 +680,7 @@ test("the perRunSeconds remediation derives current completion counts and asks f
   assert.ok(perRun, "perRunSeconds must still be reported as an uncertainty");
 
   assert.doesNotMatch(perRun.howToResolve, /One run\s+collapses this uncertainty entirely/);
-  assert.match(perRun.why, /2 complete record/);
+  assert.match(perRun.why, /2 activation-eligible record/);
   assert.match(perRun.why, new RegExp(`${prod.producibleToday} producible cell`));
   assert.match(perRun.howToResolve, /per-scenario timing instrumentation/);
   assert.match(perRun.howToResolve, /now-complete Krea MLX adapter path/);

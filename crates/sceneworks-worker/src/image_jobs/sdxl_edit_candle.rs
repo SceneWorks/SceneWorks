@@ -383,7 +383,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -399,6 +399,7 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above — the engine errors
                         // if set without a loaded student, so `use_pid` is `pid_weights.is_some()`.
                         use_pid,
+                        preview,
                         cancel: cancel.clone(),
                     };
                     let result = match &mask {

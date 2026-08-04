@@ -355,7 +355,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             drive_gen_items(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -369,6 +369,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         seed: seed as u64,
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
+                        preview: preview.clone(),
                         cancel: cancel.clone(),
                     };
                     let result = model.generate(&req, &references, &mut *on_progress);

@@ -210,7 +210,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix();
-  assert.equal(matrix.schemaVersion, 5);
+  assert.equal(matrix.schemaVersion, 6);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -1233,9 +1233,9 @@ test("an implemented family is Implemented/unverified only where the provider ac
     );
   }
 
-  // Lens' measured win is deliberately tier- and overlay-specific. BF16/no-overlay exposes the
-  // TextEncoder scope for both family entries; the Q4 request non-win and the unmeasured Q8/adapter
-  // cells must not inherit a family-level implementation claim.
+  // Lens publishes two exact provider identities rather than a Cartesian family claim: base Q4
+  // exposes the full ladder with Both/window=1, while Turbo BF16 retains TextEncoder/window=1.
+  // Crossing either entry with the other tier must remain Missing.
   const lens = implemented.filter(
     (cell) => cell.backend === "mlx" && cell.owningFamilyStory === 15512,
   );
@@ -1244,14 +1244,29 @@ test("an implemented family is Implemented/unverified only where the provider ac
     ["lens", "lens_turbo"],
   );
   assert.ok(lens.length > 0);
-  assert.ok(lens.every((cell) => cell.tier === "bf16" && cell.overlay === "none"));
   assert.ok(
-    lens.every(
+    lens
+      .filter((cell) => cell.modelId === "lens")
+      .every(
+        (cell) =>
+          cell.tier === "q4" &&
+          cell.overlay === "none" &&
+          cell.strategyParameters.transformerWindowSize === 1 &&
+          cell.strategyParameters.transformerWindowComponent === "Both" &&
+          cell.rung4Survey.requestPeak === "moves",
+      ),
+  );
+  assert.ok(
+    lens
+      .filter((cell) => cell.modelId === "lens_turbo")
+      .every(
       (cell) =>
+        cell.tier === "bf16" &&
+        cell.overlay === "none" &&
         cell.strategyParameters.transformerWindowSize === 1 &&
         cell.strategyParameters.transformerWindowComponent === "TextEncoder" &&
         cell.rung4Survey.requestPeak === "moves",
-    ),
+      ),
   );
   assert.equal(
     matrix.cells.filter(
@@ -1259,10 +1274,15 @@ test("an implemented family is Implemented/unverified only where the provider ac
         cell.owningFamilyStory === 15512 &&
         cell.rung === "bounded_transformer_residency" &&
         cell.state === "Implemented/unverified" &&
-        (cell.tier !== "bf16" || cell.overlay !== "none"),
+        !(
+          (cell.modelId === "lens" && cell.tier === "q4" && cell.overlay === "none") ||
+          (cell.modelId === "lens_turbo" &&
+            cell.tier === "bf16" &&
+            cell.overlay === "none")
+        ),
     ).length,
     0,
-    "Lens Q4/Q8 and adapter cells remain Missing",
+    "Lens implementation scopes must not create unsupported entry/tier cross-products",
   );
   const lensCells = matrix.cells.filter(
     (cell) =>
@@ -1272,26 +1292,48 @@ test("an implemented family is Implemented/unverified only where the provider ac
   );
   assert.ok(
     lensCells
-      .filter((cell) => cell.tier === "q4")
+      .filter(
+        (cell) =>
+          cell.modelId === "lens_turbo" && cell.tier === "q4" && cell.overlay === "none",
+      )
       .every(
         (cell) =>
           cell.state === "Missing" && cell.rung4Survey.requestPeak === "does-not-move",
       ),
-    "Lens Q4 cells carry the measured request non-win and remain Missing",
+    "Lens-Turbo Q4 carries the measured request non-win and remains Missing",
   );
   assert.ok(
     lensCells
-      .filter((cell) => cell.tier === "q8")
+      .filter(
+        (cell) =>
+          (cell.modelId === "lens" && cell.tier === "bf16") || cell.tier === "q8",
+      )
       .every(
         (cell) => cell.state === "Missing" && cell.rung4Survey.requestPeak === "unmeasured",
       ),
-    "Lens Q8 cells carry no measurement claim and remain Missing",
+    "Lens BF16 and Q8 cells carry no base-provider measurement claim and remain Missing",
   );
   assert.ok(
     lensCells
       .filter((cell) => cell.overlay !== "none")
       .every((cell) => cell.state === "Missing"),
     "Lens adapter overlays remain exactly Missing",
+  );
+  const candleLens = matrix.cells.filter(
+    (cell) =>
+      cell.backend === "candle" &&
+      ["lens", "lens_turbo"].includes(cell.modelId) &&
+      cell.rung === "bounded_transformer_residency",
+  );
+  assert.ok(candleLens.length > 0);
+  assert.ok(
+    candleLens.every(
+      (cell) =>
+        cell.owningFamilyStory === 15819 &&
+        cell.state === "Missing" &&
+        cell.rung4Survey.implementation === "none",
+    ),
+    "the MLX reconciliation must preserve SC-15819's independent Candle ownership and verdict",
   );
 
   // MLX Krea registers the contract on all four base descriptors, so both catalog entries and both
@@ -1578,17 +1620,49 @@ test("a survey that contradicts itself or misses a family fails generation", asy
   );
 
   const emptyTiers = await surveyFixture();
-  emptyTiers.families["15512"].backends.mlx.implementedTiers = [];
+  emptyTiers.families["15517"].backends.mlx.implementedTiers = [];
   await assert.rejects(
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(emptyTiers) } }),
     /implementedTiers is empty/,
   );
 
   const unknownOverlay = await surveyFixture();
-  unknownOverlay.families["15512"].backends.mlx.implementedOverlays = ["mystery"];
+  unknownOverlay.families["15517"].backends.mlx.implementedOverlays = ["mystery"];
   await assert.rejects(
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(unknownOverlay) } }),
     /implementedOverlays contains an overlay outside the matrix vocabulary/,
+  );
+
+  const emptyScope = await surveyFixture();
+  emptyScope.families["15512"].backends.mlx.implementationScopes[0].entries = [];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(emptyScope) } }),
+    /entries must name at least one catalog entry/,
+  );
+
+  const overlappingScopes = await surveyFixture();
+  overlappingScopes.families["15512"].backends.mlx.implementationScopes.push({
+    entries: ["lens"],
+    tiers: ["q4"],
+    strategyParameters: { transformerWindowSize: 2 },
+  });
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(overlappingScopes) } }),
+    /overlaps implementationScopes\[0\]/,
+  );
+
+  const foreignScope = await surveyFixture();
+  foreignScope.families["15512"].backends.mlx.implementationScopes[0].entries = ["qwen_image"];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(foreignScope) } }),
+    /belongs to another family/,
+  );
+
+  const mixedSelectors = await surveyFixture();
+  mixedSelectors.families["15512"].backends.mlx.implementedEntries = ["lens"];
+  await assert.rejects(
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(mixedSelectors) } }),
+    /either legacy implementedEntries fields or exact implementationScopes/,
   );
 
   // Positive control: the shipped survey builds.
@@ -1853,14 +1927,14 @@ test("request-peak measurements can be scoped to the exact entry, mode, and over
 
 test("request-peak tier overrides fail closed", async () => {
   const badTier = await surveyFixture();
-  badTier.families["15512"].backends.mlx.requestPeak.byTier.fp8 = "moves";
+  badTier.families["15512"].backends.mlx.requestPeak.byTier = { fp8: "moves" };
   await assert.rejects(
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(badTier) } }),
     /requestPeak\.byTier contains a tier outside the matrix vocabulary/,
   );
 
   const badFinding = await surveyFixture();
-  badFinding.families["15512"].backends.mlx.requestPeak.byTier.q4 = "phase-only";
+  badFinding.families["15512"].backends.mlx.requestPeak.byTier = { q4: "phase-only" };
   await assert.rejects(
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(badFinding) } }),
     /requestPeak\.byTier\.q4 has unknown finding/,

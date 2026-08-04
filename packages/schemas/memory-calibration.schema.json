@@ -161,7 +161,7 @@
       "properties": {
         "id": { "type": "string", "pattern": "^imc-[0-9a-f]{20}$" },
         "logicalCaseId": { "type": "string", "pattern": "^implan-[0-9a-f]{20}$" },
-        "status": { "enum": ["complete", "gated", "negative_complete"] },
+        "status": { "enum": ["complete", "runtime_complete", "gated", "negative_complete"] },
         "evidenceScope": { "enum": ["authoritative", "candidate", "fixture"] },
         "backend": { "enum": ["mlx", "candle"] },
         "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
@@ -216,7 +216,8 @@
           "type": "object", "additionalProperties": false, "required": ["repository", "resolvedRevision", "variant"],
           "properties": {
             "repository": { "type": "string", "minLength": 1 }, "resolvedRevision": { "type": "string", "minLength": 1 },
-            "variant": { "type": "string", "minLength": 1 }
+            "variant": { "type": "string", "minLength": 1 },
+            "inventorySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
           }
         },
         "target": {
@@ -303,8 +304,10 @@
             "result": { "enum": ["passed", "failed", "not_run"] },
             "maximumError": { "type": "number", "minimum": 0 },
             "meanError": { "type": "number", "minimum": 0 },
+            "rootMeanSquareError": { "type": "number", "minimum": 0 },
             "maximumErrorThreshold": { "type": "number", "minimum": 0 },
-            "meanErrorThreshold": { "type": "number", "minimum": 0 }
+            "meanErrorThreshold": { "type": "number", "minimum": 0 },
+            "rootMeanSquareErrorThreshold": { "type": "number", "minimum": 0 }
           }
         },
         "negativeMutation": {
@@ -444,6 +447,73 @@
                   "meanError": { "type": "number", "minimum": 0 }
                 }
               },
+              "loadability": {
+                "properties": {
+                  "result": { "const": "passed" },
+                  "resolvedPathFingerprint": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "runtime_complete" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "repositories": {
+                "required": ["sceneWorks", "inference"],
+                "properties": {
+                  "sceneWorks": {
+                    "required": ["revision", "dirty", "matrixSourceRevision"],
+                    "properties": { "dirty": { "const": false } }
+                  },
+                  "inference": { "properties": { "dirty": { "const": false } } }
+                }
+              },
+              "predictedPeakBytes": { "$ref": "#/$defs/predicted" },
+              "observedMemory": { "$ref": "#/$defs/phaseMetrics" },
+              "target": {
+                "properties": { "overlay": { "const": "none" } }
+              },
+              "sweep": {
+                "properties": {
+                  "rangeVerified": { "const": true },
+                  "cases": {
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": {
+                      "properties": { "result": { "const": "passed" } },
+                      "required": ["result"]
+                    }
+                  }
+                }
+              },
+              "scenarios": {
+                "minItems": 8,
+                "maxItems": 8,
+                "allOf": [
+                  { "contains": { "properties": { "name": { "const": "exact_fit" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "unknown_budget" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "stale_evidence" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                  { "contains": { "properties": { "name": { "const": "cancel" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                  { "contains": { "properties": { "name": { "const": "error" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                  { "contains": { "properties": { "name": { "const": "loadability" }, "result": { "const": "passed" } }, "required": ["name", "result"] } },
+                  { "contains": { "properties": { "name": { "const": "overlay" }, "result": { "const": "not_applicable" } }, "required": ["name", "result", "reason"] } }
+                ]
+              },
+              "quality": {
+                "required": [
+                  "contract", "result", "maximumError", "meanError",
+                  "rootMeanSquareError", "maximumErrorThreshold", "meanErrorThreshold",
+                  "rootMeanSquareErrorThreshold", "identicalInputs"
+                ],
+                "properties": {
+                  "identicalInputs": { "const": true },
+                  "result": { "const": "passed" }
+                }
+              },
+              "negativeMutation": { "type": "null" },
               "loadability": {
                 "properties": {
                   "result": { "const": "passed" },

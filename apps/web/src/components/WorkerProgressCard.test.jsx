@@ -1044,7 +1044,12 @@ describe("live preview support states", () => {
   // Same model id, two answers — the reason the flag can never be a single shipped boolean.
   const models = [
     { id: "krea_2_turbo", type: "image", preview: { byBackend: { candle: true, mlx: true } } },
-    { id: "sdxl", type: "image", preview: { byBackend: { candle: false, mlx: true } } },
+    { id: "sd3_5_medium", type: "image", preview: { byBackend: { candle: false } } },
+    {
+      id: "split_preview_fixture",
+      type: "image",
+      preview: { byBackend: { candle: false, mlx: true } },
+    },
     { id: "some_external_model", type: "image" },
   ];
 
@@ -1067,7 +1072,7 @@ describe("live preview support states", () => {
   it("state 1 — a model that does NOT support preview renders exactly as before", () => {
     api = render(
       <WorkerProgressCard
-        job={job({ payload: { model: "sdxl" } })}
+        job={job({ payload: { model: "sd3_5_medium" } })}
         thumbnailsVariant="image-grid"
       />,
       contextWith([candleWorker]),
@@ -1117,11 +1122,12 @@ describe("live preview support states", () => {
   });
 
   it("the answer is ENGINE-KEYED: the same model resolves per worker backend", () => {
-    // sdxl previews on MLX but not on candle. Reading a single boolean would be wrong on one of
-    // these two cards.
+    // This synthetic split route answers differently per backend. Reading a single boolean would
+    // be wrong on one of these two cards; shipped provider truth is covered by the catalog drift
+    // test instead of being frozen into this UI-state unit test.
     api = render(
       <WorkerProgressCard
-        job={job({ payload: { model: "sdxl" } })}
+        job={job({ payload: { model: "split_preview_fixture" } })}
         thumbnailsVariant="image-grid"
       />,
       contextWith([candleWorker]),
@@ -1133,7 +1139,7 @@ describe("live preview support states", () => {
 
     api = render(
       <WorkerProgressCard
-        job={job({ payload: { model: "sdxl" }, workerId: "worker-mlx-1" })}
+        job={job({ payload: { model: "split_preview_fixture" }, workerId: "worker-mlx-1" })}
         thumbnailsVariant="image-grid"
       />,
       contextWith([mlxWorker]),

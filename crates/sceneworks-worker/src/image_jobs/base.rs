@@ -921,6 +921,12 @@ pub(super) const ZIMAGE_MLX_TURNKEY_REPO: &str = "SceneWorks/z-image-mlx";
 ))]
 pub(super) const ZIMAGE_MLX_TURNKEY_REVISION: &str =
     "c74f74c2ad193294fc9ff3f8a5be71daa00d22ab";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const FLUX1_SCHNELL_MLX_TURNKEY_REVISION: &str =
+    "bba3ae01dfd94089f173c05edd4e1a4c551f2599";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const FLUX1_DEV_MLX_TURNKEY_REVISION: &str =
+    "323fd12d79f78ad444e882e8d8e871914584f2b9";
 
 #[cfg(any(
     target_os = "macos",
@@ -2479,22 +2485,69 @@ fn resolve_tier_dir(request: &ImageRequest, settings: &Settings, tier: &str) -> 
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn zimage_certified_artifact_path(settings: &Settings, weights_dir: &Path, tier: &str) -> bool {
-    let Some(root) = crate::model_jobs::huggingface_pinned_snapshot_dir(
-        &settings.data_dir,
-        ZIMAGE_MLX_TURNKEY_REPO,
-        ZIMAGE_MLX_TURNKEY_REVISION,
-    ) else {
-        return false;
+fn candle_certified_artifact_path(
+    engine_id: &str,
+    settings: &Settings,
+    weights_dir: &Path,
+    tier: &str,
+) -> bool {
+    let (repo, revision) = match engine_id {
+        "z_image" | "z_image_turbo" =>
+            (ZIMAGE_MLX_TURNKEY_REPO, ZIMAGE_MLX_TURNKEY_REVISION),
+        "flux1_schnell" =>
+            ("SceneWorks/flux1-schnell-mlx", FLUX1_SCHNELL_MLX_TURNKEY_REVISION),
+        "flux1_dev" => ("SceneWorks/flux1-dev-mlx", FLUX1_DEV_MLX_TURNKEY_REVISION),
+        _ => return false,
     };
-    let expected = root.join(tier);
+    candle_certified_hf_artifact_path(settings, repo, revision, Path::new(tier), weights_dir)
+}
+
+/// Exact path identity for an artifact inside one immutable Hugging Face snapshot. Optimized memory
+/// evidence is artifact-specific: resolving the same filename from `refs/main`, an environment
+/// override, or another registered overlay must not inherit the canonical fixture's measurements.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_certified_hf_artifact_path(
+    settings: &Settings,
+    repo: &str,
+    revision: &str,
+    relative: &Path,
+    actual: &Path,
+) -> bool {
+    candle_pinned_hf_artifact_path(settings, repo, revision, relative)
+        .is_some_and(|expected| candle_artifact_path_matches(actual, &expected))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_pinned_hf_artifact_path(
+    settings: &Settings,
+    repo: &str,
+    revision: &str,
+    relative: &Path,
+) -> Option<PathBuf> {
+    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        repo,
+        revision,
+    )?;
+    Some(root.join(relative))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_artifact_path_matches(actual: &Path, expected: &Path) -> bool {
     match (
-        std::fs::canonicalize(weights_dir),
-        std::fs::canonicalize(&expected),
+        std::fs::canonicalize(actual),
+        std::fs::canonicalize(expected),
     ) {
         (Ok(actual), Ok(expected)) => actual == expected,
-        _ => weights_dir == expected,
+        _ => actual == expected,
     }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn optimized_shared_memory_context(
+    context: gen_core::MemoryRunContext,
+) -> Option<gen_core::MemoryRunContext> {
+    context.selection.strategy.is_optimized().then_some(context)
 }
 
 /// The generation tiers (`bf16`/`q8`/`q4`) currently INSTALLED for `request`'s model, in DESCENDING
@@ -3099,24 +3152,38 @@ fn load_spec(
 /// function's test module is itself macOS-excluded, so admitting bare `test` would leave it unused
 /// in a macOS test build and dead-code-error again under `-D warnings`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn apply_candle_qwen_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    let directory = matches!(&spec.weights, WeightsSource::Dir(_));
     let qwen_native = matches!(engine_id, "qwen_image" | "qwen_image_edit")
-        && matches!(&spec.weights, WeightsSource::Dir(_))
+        && directory
         && spec.control.is_none()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.adapters.is_empty()
         && spec.pid.is_none();
-    if qwen_native {
+    let flux_supported = matches!(engine_id, "flux1_schnell" | "flux1_dev")
+        && directory
+        && spec.adapters.is_empty()
+        && spec.extra_controls.is_empty()
+        && spec.pid.is_none()
+        && spec.identity.is_none()
+        && !(spec.control.is_some() && spec.ip_adapter.is_some());
+    if qwen_native || flux_supported {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
     }
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn apply_candle_qwen_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    apply_candle_image_load_shape(engine_id, spec)
+}
+
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
-mod candle_qwen_load_shape_tests {
+mod candle_image_load_shape_tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn fixture_spec() -> LoadSpec {
         LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
@@ -3125,17 +3192,22 @@ mod candle_qwen_load_shape_tests {
     }
 
     #[test]
-    fn native_base_and_edit_use_deferred_materialization() {
-        for engine_id in ["qwen_image", "qwen_image_edit"] {
+    fn native_qwen_and_flux_routes_use_deferred_materialization() {
+        for engine_id in [
+            "qwen_image",
+            "qwen_image_edit",
+            "flux1_schnell",
+            "flux1_dev",
+        ] {
             assert_eq!(
-                apply_candle_qwen_load_shape(engine_id, fixture_spec()).load_shape,
+                apply_candle_image_load_shape(engine_id, fixture_spec()).load_shape,
                 gen_core::LoadShape::DeferredMaterialization
             );
         }
     }
 
     #[test]
-    fn overlays_and_non_qwen_routes_remain_eager() {
+    fn unsupported_overlays_and_non_streamable_routes_remain_eager() {
         let adapter = gen_core::AdapterSpec::new(
             std::path::PathBuf::from("adapter.safetensors"),
             1.0,
@@ -3154,36 +3226,215 @@ mod candle_qwen_load_shape_tests {
         ];
         for (engine_id, spec) in cases {
             assert_eq!(
-                apply_candle_qwen_load_shape(engine_id, spec).load_shape,
+                apply_candle_image_load_shape(engine_id, spec).load_shape,
                 gen_core::LoadShape::EagerMaterialization
             );
         }
+    }
+
+    #[test]
+    fn flux_single_control_or_ip_overlay_keeps_deferred_materialization() {
+        for spec in [
+            fixture_spec().with_control(WeightsSource::File(std::path::PathBuf::from(
+                "control.safetensors",
+            ))),
+            fixture_spec().with_ip_adapter(WeightsSource::Dir(std::path::PathBuf::from("ip"))),
+        ] {
+            assert_eq!(
+                apply_candle_image_load_shape("flux1_dev", spec).load_shape,
+                gen_core::LoadShape::DeferredMaterialization
+            );
+        }
+        let combined = fixture_spec()
+            .with_control(WeightsSource::File(std::path::PathBuf::from(
+                "control.safetensors",
+            )))
+            .with_ip_adapter(WeightsSource::Dir(std::path::PathBuf::from("ip")));
+        assert_eq!(
+            apply_candle_image_load_shape("flux1_dev", combined).load_shape,
+            gen_core::LoadShape::EagerMaterialization
+        );
+    }
+
+    struct ResidentOverwriteScope;
+
+    impl gen_core::MemoryRequestScope for ResidentOverwriteScope {
+        fn configure_request(
+            &mut self,
+            request: &mut gen_core::GenerationRequest,
+        ) -> gen_core::Result<()> {
+            request.memory = Some(gen_core::GenerationMemory::default());
+            Ok(())
+        }
+
+        fn enter_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn leave_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn configure_decode(
+            &mut self,
+            _tile_edge: u32,
+            _overlap: u32,
+            _geometry: gen_core::MemoryGeometry,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn configure_attention(&mut self, _chunk_size: u32) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn materialize_transformer_window(
+            &mut self,
+            _first_block: u32,
+            _block_count: u32,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn finish(&mut self, _outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct LegacyFallbackGenerator {
+        observed_stage_residency: Arc<Mutex<Option<bool>>>,
+        descriptor: gen_core::ModelDescriptor,
+    }
+
+    impl LegacyFallbackGenerator {
+        fn new(observed_stage_residency: Arc<Mutex<Option<bool>>>) -> Self {
+            Self {
+                observed_stage_residency,
+                descriptor: gen_core::ModelDescriptor {
+                    id: "legacy_fallback_fixture",
+                    family: "test",
+                    backend: "candle",
+                    modality: gen_core::Modality::Image,
+                    capabilities: Default::default(),
+                    required_components: &[],
+                    control_kinds: None,
+                },
+            }
+        }
+    }
+
+    impl gen_core::Generator for LegacyFallbackGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn begin_memory_strategy_request(
+            &self,
+            _context: &gen_core::MemoryRunContext,
+        ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+            Ok(Some(Box::new(ResidentOverwriteScope)))
+        }
+
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            *self.observed_stage_residency.lock().unwrap() =
+                Some(request.memory.unwrap_or_default().stage_residency);
+            Ok(gen_core::GenerationOutput::Images(Vec::new()))
+        }
+    }
+
+    fn resident_context() -> gen_core::MemoryRunContext {
+        gen_core::MemoryRunContext {
+            selection: gen_core::MemorySelection {
+                strategy: gen_core::MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: gen_core::MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: None,
+                    component_precision_floors: &[],
+                },
+            },
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: String::new(),
+            load_shape: gen_core::LoadShape::DeferredMaterialization,
+            mode: gen_core::MemoryMode::TextToImage,
+            has_reference: false,
+            use_pid: false,
+            has_phases: false,
+            geometry: gen_core::MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            overlay: None,
+            budget: gen_core::MemoryBudget {
+                total_bytes: 24,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            },
+            predicted_peak_bytes: 20,
+            cache_state: gen_core::MemoryCacheState::Cold,
+            evidence_revision: "resident-sentinel".to_owned(),
+        }
+    }
+
+    #[test]
+    fn resident_shared_context_cannot_overwrite_legacy_sequential_request() {
+        let observed = Arc::new(Mutex::new(None));
+        let generator = LegacyFallbackGenerator::new(Arc::clone(&observed));
+        let mut request = gen_core::GenerationRequest {
+            memory: Some(gen_core::GenerationMemory {
+                stage_residency: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let context = optimized_shared_memory_context(resident_context());
+        assert!(context.is_none(), "Resident is a fallback sentinel, not an execution scope");
+
+        crate::memory_strategy::generate_with_scope(
+            &generator,
+            &mut request,
+            context.as_ref(),
+            &mut |_| {},
+        )
+        .expect("legacy fallback generation");
+
+        assert_eq!(*observed.lock().unwrap(), Some(true));
+        assert!(request.memory.unwrap().stage_residency);
     }
 }
 
 /// Select deferred materialization for MLX routes with a measured load-exact contract. The fit gate
 /// still owns the independent Resident/Sequential decision; a constrained request adds Sequential
-/// and can then select the provider's bounded transformer rung. Qwen base/edit also cover Q4/Q8 and
+/// and can then select the provider's bounded transformer rung. Lens has two deliberately separate
+/// measured identities at the current provider pin: base Lens Q4 exposes the full ladder, while
+/// Lens-Turbo BF16 retains its legacy text-encoder-only rung. Qwen base/edit also cover Q4/Q8 and
 /// forward-time adapters because the block stream replays packed quantization and captured residuals.
 #[cfg(target_os = "macos")]
 fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
-    let directory_bf16 = matches!(&spec.weights, WeightsSource::Dir(_))
+    let directory_native = matches!(&spec.weights, WeightsSource::Dir(_))
         && spec.precision == gen_core::Precision::Bf16;
-    let lens_dense_native = matches!(engine_id, "lens" | "lens_turbo")
-        && directory_bf16
-        && spec.quantize.is_none()
+    let lens_native = directory_native
+        && ((engine_id == "lens" && spec.quantize == Some(gen_core::Quant::Q4))
+            || (engine_id == "lens_turbo" && spec.quantize.is_none()))
         && spec.control.is_none()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.adapters.is_empty()
         && spec.pid.is_none();
-    let qwen_native = directory_bf16
+    let qwen_native = directory_native
         && matches!(engine_id, "qwen_image" | "qwen_image_edit")
         && spec.control.is_none()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.pid.is_none();
-    if lens_dense_native || qwen_native {
+    if lens_native || qwen_native {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3198,7 +3449,7 @@ mod measured_mlx_load_shape_tests {
         TransformerComponent,
     };
 
-    fn fixture_spec(root: &std::path::Path) -> LoadSpec {
+    fn fixture_spec(root: &std::path::Path, quant_bits: Option<u8>) -> LoadSpec {
         for component in ["text_encoder", "transformer", "vae"] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).unwrap();
@@ -3213,12 +3464,18 @@ mod measured_mlx_load_shape_tests {
         }
         std::fs::write(
             root.join("text_encoder/config.json"),
-            r#"{"dtype":"bfloat16"}"#,
+            quant_bits.map_or_else(
+                || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+            ),
         )
         .unwrap();
         std::fs::write(
             root.join("transformer/config.json"),
-            r#"{"dtype":"bfloat16"}"#,
+            quant_bits.map_or_else(
+                || r#"{"dtype":"bfloat16"}"#.to_owned(),
+                |bits| format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+            ),
         )
         .unwrap();
         LoadSpec::new(WeightsSource::Dir(root.to_owned()))
@@ -3236,74 +3493,89 @@ mod measured_mlx_load_shape_tests {
     }
 
     #[test]
-    fn worker_lens_spec_reaches_only_the_measured_bf16_native_contract() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = fixture_spec(dir.path());
+    fn worker_lens_specs_reach_only_their_exact_measured_contracts() {
+        let bf16_dir = tempfile::tempdir().unwrap();
+        let bf16 = fixture_spec(bf16_dir.path(), None);
+        let q4_dir = tempfile::tempdir().unwrap();
+        let q4 = fixture_spec(q4_dir.path(), Some(4)).with_quant(Quant::Q4);
 
-        for engine_id in ["lens", "lens_turbo"] {
-            let shaped = apply_measured_mlx_load_shape(engine_id, base.clone());
+        let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
+        assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        assert_eq!(
+            rung_four_support("lens_turbo", &turbo),
+            MemoryStrategySupport::Missing,
+            "the legacy dense Lens-Turbo rung still requires Sequential"
+        );
+        let turbo = turbo.with_offload_policy(OffloadPolicy::Sequential);
+        let turbo_contract = crate::inference_runtime::media()
+            .memory_strategy_contract("lens_turbo", &turbo)
+            .unwrap()
+            .expect("Lens-Turbo contract");
+        let turbo_rung = turbo_contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .expect("Lens-Turbo rung 4");
+        assert_eq!(turbo_rung.support, MemoryStrategySupport::Implemented);
+        assert_eq!(turbo_rung.parameters.transformer_window_sizes, vec![1]);
+        assert_eq!(
+            turbo_rung.parameters.transformer_window_components,
+            vec![TransformerComponent::TextEncoder]
+        );
+
+        let lens = apply_measured_mlx_load_shape("lens", q4.clone());
+        assert_eq!(lens.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        let lens_contract = crate::inference_runtime::media()
+            .memory_strategy_contract("lens", &lens)
+            .unwrap()
+            .expect("Lens contract");
+        let lens_rung = lens_contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .expect("Lens rung 4");
+        assert_eq!(lens_rung.support, MemoryStrategySupport::Implemented);
+        assert_eq!(lens_rung.parameters.transformer_window_sizes, vec![1]);
+        assert_eq!(
+            lens_rung.parameters.transformer_window_components,
+            vec![TransformerComponent::Both]
+        );
+
+        let adapter = AdapterSpec::new(
+            q4_dir.path().join("adapter.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        let unsupported = [
+            ("lens", bf16.clone()),
+            ("lens_turbo", q4),
+            ("lens", bf16.clone().with_quant(Quant::Q8)),
+            ("lens", bf16.clone().with_adapters(vec![adapter])),
+            (
+                "lens",
+                bf16.with_pid(
+                    WeightsSource::File(q4_dir.path().join("pid.safetensors")),
+                    WeightsSource::Dir(q4_dir.path().join("gemma")),
+                ),
+            ),
+        ];
+        for (engine_id, spec) in unsupported {
+            let shaped = apply_measured_mlx_load_shape(engine_id, spec)
+                .with_offload_policy(OffloadPolicy::Sequential);
             assert_eq!(
                 shaped.load_shape,
-                gen_core::LoadShape::DeferredMaterialization,
-                "the production worker must request the load shape measured by the provider"
+                gen_core::LoadShape::EagerMaterialization,
+                "unmeasured Lens entry/tier/overlay combinations must remain eager"
             );
             assert_eq!(
                 rung_four_support(engine_id, &shaped),
-                MemoryStrategySupport::Missing,
-                "deferred materialization alone must not bypass the Sequential prerequisite"
+                MemoryStrategySupport::Missing
             );
-
-            let sequential = shaped.with_offload_policy(OffloadPolicy::Sequential);
-            let contract = crate::inference_runtime::media()
-                .memory_strategy_contract(engine_id, &sequential)
-                .unwrap()
-                .expect("Lens contract");
-            let rung = contract
-                .capability(MemoryStrategy::BoundedTransformerResidency)
-                .expect("rung 4");
-            assert_eq!(rung.support, MemoryStrategySupport::Implemented);
-            assert_eq!(rung.parameters.transformer_window_sizes, vec![1]);
-            assert_eq!(
-                rung.parameters.transformer_window_components,
-                vec![TransformerComponent::TextEncoder]
-            );
-
-            let adapter = AdapterSpec::new(
-                dir.path().join("adapter.safetensors"),
-                1.0,
-                AdapterKind::Lora,
-            );
-            let unsupported = [
-                base.clone().with_quant(Quant::Q4),
-                base.clone().with_quant(Quant::Q8),
-                base.clone().with_adapters(vec![adapter]),
-                base.clone().with_pid(
-                    WeightsSource::File(dir.path().join("pid.safetensors")),
-                    WeightsSource::Dir(dir.path().join("gemma")),
-                ),
-            ];
-            for spec in unsupported {
-                let shaped = apply_measured_mlx_load_shape(engine_id, spec)
-                    .with_offload_policy(OffloadPolicy::Sequential);
-                assert_eq!(
-                    shaped.load_shape,
-                    gen_core::LoadShape::EagerMaterialization,
-                    "unmeasured tiers and overlays must not opt into the deferred Lens load"
-                );
-                assert_eq!(
-                    rung_four_support(engine_id, &shaped),
-                    MemoryStrategySupport::Missing
-                );
-            }
         }
     }
 
     #[test]
     fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
         let bf16_dir = tempfile::tempdir().unwrap();
-        let bf16 = fixture_spec(bf16_dir.path());
+        let bf16 = fixture_spec(bf16_dir.path(), None);
         let q4_dir = tempfile::tempdir().unwrap();
-        let q4 = fixture_spec(q4_dir.path());
+        let q4 = fixture_spec(q4_dir.path(), None);
         std::fs::write(
             q4_dir.path().join("transformer/config.json"),
             r#"{"quantization":{"bits":4}}"#,
@@ -5955,10 +6227,18 @@ fn apply_request_scoped_candle_residency(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn rejects_unverified_zimage_optimized_fallback(
-    zimage_memory_contract_route: bool,
+    engine_id: &str,
     optimized_strategy_selected: bool,
 ) -> bool {
-    zimage_memory_contract_route && !optimized_strategy_selected
+    matches!(engine_id, "z_image" | "z_image_turbo") && !optimized_strategy_selected
+}
+
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn verified_only_memory_family_label(engine_id: &str) -> Option<&'static str> {
+    matches!(engine_id, "z_image" | "z_image_turbo").then_some("Z-Image")
 }
 
 /// Caller-visible explanation for the one Krea memory decision whose latency would otherwise look
@@ -6126,9 +6406,25 @@ mod candle_request_residency_tests {
 
     #[test]
     fn zimage_never_falls_back_to_an_unverified_optimized_strategy() {
-        assert!(rejects_unverified_zimage_optimized_fallback(true, false));
-        assert!(!rejects_unverified_zimage_optimized_fallback(true, true));
-        assert!(!rejects_unverified_zimage_optimized_fallback(false, false));
+        assert!(rejects_unverified_zimage_optimized_fallback(
+            "z_image", false
+        ));
+        assert!(!rejects_unverified_zimage_optimized_fallback(
+            "z_image", true
+        ));
+        assert!(!rejects_unverified_zimage_optimized_fallback(
+            "qwen_image",
+            false
+        ));
+    }
+
+    #[test]
+    fn flux_without_exact_evidence_preserves_sequential_fallback_and_never_names_zimage() {
+        for engine in ["flux1_schnell", "flux1_dev"] {
+            assert!(!rejects_unverified_zimage_optimized_fallback(engine, false));
+            assert_eq!(verified_only_memory_family_label(engine), None);
+        }
+        assert_eq!(verified_only_memory_family_label("z_image"), Some("Z-Image"));
     }
 
     #[test]
@@ -7328,10 +7624,6 @@ async fn generate_candle_stream(
     let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
     let mut selected_memory_strategy_context: Option<gen_core::MemoryRunContext> = None;
     let mut adapted_peak_gb: Option<f64> = None;
-    let shared_candle_memory_contract_route = matches!(
-        engine_id,
-        "z_image" | "z_image_turbo" | "qwen_image" | "qwen_image_edit"
-    );
     // Z-Image and Qwen-Image use the same worker-owned selector as every adopting provider. Static
     // Implemented/unverified declarations do not authorize optimized execution: this bridge always
     // submits the conservative resident estimate and adds deeper candidates only when an exact
@@ -7340,12 +7632,12 @@ async fn generate_candle_stream(
     if let Some(pid) = pid_weights.as_ref() {
         zimage_contract_spec = zimage_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
-    zimage_contract_spec = apply_candle_qwen_load_shape(engine_id, zimage_contract_spec);
+    zimage_contract_spec = apply_candle_image_load_shape(engine_id, zimage_contract_spec);
     let zimage_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
         &zimage_contract_spec,
-        zimage_certified_artifact_path(settings, &weights_dir, tier),
+        candle_certified_artifact_path(engine_id, settings, &weights_dir, tier),
         &request.model_manifest_entry,
         tier,
         &request.mode,
@@ -7375,7 +7667,10 @@ async fn generate_candle_stream(
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
-        selected_memory_strategy_context = Some(evaluation.context);
+        // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
+        // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
+        // Resident scope would then overwrite that request memory back to resident in configure_request.
+        selected_memory_strategy_context = optimized_shared_memory_context(evaluation.context);
     }
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
@@ -7620,18 +7915,21 @@ async fn generate_candle_stream(
                 let zimage_selected = memory_strategy_selection
                     .is_some_and(|selection| selection.strategy.is_optimized());
                 if rejects_unverified_zimage_optimized_fallback(
-                    shared_candle_memory_contract_route,
+                    engine_id,
                     zimage_selected,
                 ) {
+                    let family = verified_only_memory_family_label(engine_id)
+                        .expect("verified-only rejection is restricted to a named family");
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} at the {tier} tier needs ~{needed} GB of resident VRAM, but GPU \
-                         {gpu} has ~{available} GB available and no exact verified Z-Image memory \
+                         {gpu} has ~{available} GB available and no exact verified {family} memory \
                          strategy fits this request. Install or verify matching calibration evidence, \
                          select a smaller tier or resolution, or use a GPU with more VRAM.",
                         model = request.model,
                         needed = needed_gb.round() as i64,
                         available = available_gb.round() as i64,
                         gpu = settings.gpu_id,
+                        family = family,
                     )));
                 }
                 if !krea_selected && !zimage_selected {
@@ -7815,7 +8113,7 @@ async fn generate_candle_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
-    spec = apply_candle_qwen_load_shape(engine_id, spec);
+    spec = apply_candle_image_load_shape(engine_id, spec);
     // Named model components (epic 13657, sc-13682): the candle twin of the mlx attach above — stages
     // SDXL's three caller-provided components on the Windows/CUDA candle `sdxl` engine. Keyed on the
     // resolved `engine_id` (the DESCRIPTOR id), NOT `request.model`, so the finetune siblings that share

@@ -84,18 +84,42 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
-    assert len(evidence_ids) == len(calibration["records"]) == 33
+    records_by_status = Counter(record["status"] for record in calibration["records"])
+    assert records_by_status == {"complete": 33, "runtime_complete": 10}
+    assert len(evidence_ids) == len(calibration["records"]) == sum(
+        records_by_status.values()
+    )
     assert {run["record"]["id"] for run in matrix["calibrationRuns"]} == evidence_ids
-    # `current` vs `historical` is decided against the shipped inference pin. Qwen's records predate
-    # `d4802320`, and SC-15815 advanced the shared pin again to `bf06bb56` after SC-15510 captured
-    # Z-Image. All 33 records therefore remain retained history and none is runtime-current.
-    assert {run["semantics"] for run in matrix["calibrationRuns"]} == {"historical"}
+    runs_by_status = Counter(run["record"]["status"] for run in matrix["calibrationRuns"])
+    assert runs_by_status == records_by_status
+    assert matrix["summary"]["calibrationRuns"] == sum(runs_by_status.values())
+    assert matrix["summary"]["calibrationRunsByStatus"] == {
+        "complete": records_by_status["complete"],
+        "runtimeComplete": records_by_status["runtime_complete"],
+    }
+
+    # `current` vs `historical` is decided against the shipped inference pin. The 33 Full records
+    # predate it and remain retained history. SC-15823's ten base-only FLUX records target the exact
+    # shipped pin, so they are runtime-current without being promoted to Full verification.
+    full_runs = [
+        run for run in matrix["calibrationRuns"] if run["record"]["status"] == "complete"
+    ]
+    runtime_complete_runs = [
+        run
+        for run in matrix["calibrationRuns"]
+        if run["record"]["status"] == "runtime_complete"
+    ]
+    assert {run["semantics"] for run in full_runs} == {"historical"}
+    assert {run["semantics"] for run in runtime_complete_runs} == {"current"}
+    assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert current_eligible == []
+    assert {run["record"]["id"] for run in current_eligible} == {
+        run["record"]["id"] for run in runtime_complete_runs
+    }
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.

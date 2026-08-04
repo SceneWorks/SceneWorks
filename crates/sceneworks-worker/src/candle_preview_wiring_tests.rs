@@ -43,7 +43,8 @@ use crate::architecture_tests::code_without_comments_or_literals;
 /// The bespoke candle request literals whose upstream struct carries a `preview` field at the pinned
 /// inference revision, and the worker file that builds each.
 ///
-/// Krea = inference `f94c0b1c` (sc-16950); both Qwen entries = inference `d4802320` (sc-16952).
+/// All three request types remain present at inference `5b6d6aa`; sc-16950/sc-16952 originally
+/// introduced their preview fields.
 const WIRED_LANES: &[(&str, &str)] = &[
     ("Krea2ControlRequest", "krea_control_candle.rs"),
     ("QwenFunControlRequest", "qwen_control.rs"),

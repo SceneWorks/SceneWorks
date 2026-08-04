@@ -1,10 +1,11 @@
 use super::{
-    admit_conditioning_paths, consume_gen_events, drive_gen_items_scored, load_reference_image,
-    non_empty, resolve_advanced_or_manifest_f32_with, resolve_advanced_or_manifest_u32_with,
-    resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
-    ApiClient, Image, ImagePlan, ImageRequest, IpAdapterFlux, IpAdapterFluxPaths,
-    IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
-    WorkerResult,
+    admit_conditioning_paths, apply_candle_image_load_shape, candle_artifact_path_matches,
+    candle_certified_artifact_path, candle_pinned_hf_artifact_path, consume_gen_events,
+    drive_gen_items_scored, load_reference_image, non_empty, resolve_advanced_or_manifest_f32_with,
+    resolve_advanced_or_manifest_u32_with, resolve_character_image_likeness_source, resolve_seed,
+    stage_likeness, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, IpAdapterFlux,
+    IpAdapterFluxPaths, IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
+    Value, WorkerError, WorkerResult,
 };
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
@@ -43,9 +44,24 @@ pub(super) const FLUX_IPADAPTER_ENCODER_REVISION: &str = "32bd64288804d66eefd0cc
 /// IP-Adapter scale default — the XLabs resemblance tier 0.7 (matches `base.rs` `FLUX_IP_SCALE`, the MLX
 /// path, and the candle `IpAdapterFlux::DEFAULT_IP_SCALE`).
 const FLUX_IPADAPTER_IP_SCALE: f32 = 0.7;
+const FLUX_IPADAPTER_MEMORY_OVERLAY: &str = "identity";
 /// The adapter/engine id recorded on candle FLUX IP-Adapter assets + telemetry (distinct from the
 /// txt2img `candle_flux` lane).
 pub(super) const FLUX_IPADAPTER_ENGINE: &str = "candle_flux_ipadapter";
+
+fn flux_ipadapter_overlay_paths_are_certified(
+    adapter_file: &Path,
+    encoder_dir: &Path,
+    expected_adapter: Option<PathBuf>,
+    expected_encoder: Option<PathBuf>,
+) -> bool {
+    let (Some(expected_adapter), Some(expected_encoder)) = (expected_adapter, expected_encoder)
+    else {
+        return false;
+    };
+    candle_artifact_path_matches(adapter_file, &expected_adapter)
+        && candle_artifact_path_matches(encoder_dir, &expected_encoder)
+}
 
 /// Model ids the candle FLUX IP-Adapter route accepts (both variants — the forked DiT injects the same
 /// XLabs adapter for each; dev embeds the guidance scalar, schnell ignores it).
@@ -306,7 +322,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| flux_ipadapter_default_repo(&request.model))
         .to_owned();
-    let raw_settings = flux_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
+    let mut raw_settings = flux_ipadapter_raw_settings(request, &repo, steps, guidance, ip_scale);
 
     // Per-image work items: (seed, prompt) — `request.count` images at the reference identity.
     let (width, height) = (request.width, request.height);
@@ -315,19 +331,107 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         .collect();
     let total = work.len();
 
+    let engine_id = if request.model == "flux_schnell" {
+        "flux1_schnell"
+    } else {
+        "flux1_dev"
+    };
+    let tier = match flux_base.file_name().and_then(|name| name.to_str()) {
+        Some("q4") => "q4",
+        Some("q8") => "q8",
+        _ => "bf16",
+    };
+    let runtime_overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&adapter_file)
+        .saturating_add(gen_core::weightsmeta::safetensors_path_bytes(&encoder_dir));
+    let strategy_spec = apply_candle_image_load_shape(
+        engine_id,
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux_base.clone()))
+            .with_ip_adapter(gen_core::WeightsSource::File(adapter_file.clone()))
+            .with_component(
+                "flux_ip_image_encoder",
+                gen_core::WeightsSource::Dir(encoder_dir.clone()),
+            )
+            .with_offload_policy(gen_core::OffloadPolicy::Sequential),
+    );
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        runtime_overlay_bytes,
+    );
+    let expected_adapter = candle_pinned_hf_artifact_path(
+        settings,
+        FLUX_IPADAPTER_ADAPTER_REPO,
+        FLUX_IPADAPTER_ADAPTER_REVISION,
+        Path::new(FLUX_IPADAPTER_ADAPTER_FILE),
+    );
+    let expected_encoder = candle_pinned_hf_artifact_path(
+        settings,
+        FLUX_IPADAPTER_ENCODER_REPO,
+        FLUX_IPADAPTER_ENCODER_REVISION,
+        Path::new(""),
+    );
+    let artifact_is_certified =
+        candle_certified_artifact_path(engine_id, settings, &flux_base, tier)
+            && flux_ipadapter_overlay_paths_are_certified(
+                &adapter_file,
+                &encoder_dir,
+                expected_adapter,
+                expected_encoder,
+            );
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+        engine_id,
+        &request.model,
+        &strategy_spec,
+        artifact_is_certified,
+        &request.model_manifest_entry,
+        tier,
+        &request.mode,
+        Some(FLUX_IPADAPTER_MEMORY_OVERLAY),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        true,
+        false,
+        false,
+        raw_budget,
+        predicted_peak,
+        runtime_overlay_bytes,
+        gen_core::MemoryCacheState::Cold,
+    )?;
+    let generation_memory = memory_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.memory)
+        .unwrap_or_default();
+    if let Some(evaluation) = &memory_evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+    }
+
     // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FLUX.1 base held co-resident with
     // the XLabs IP-Adapter and its CLIP image encoder. This lane loads through the UNcached
     // `start_gen_stream` with a bespoke `IpAdapterFluxPaths`, so it reaches neither the
     // `generate_candle_stream` `vram_gate` nor the `generator_cache` `apply_residency_policy`; before this
     // it allocated unchecked.
-    admit_conditioning_paths(
-        settings,
-        "FLUX.1",
-        "IP-Adapter",
-        &flux_base,
-        &[adapter_file.as_path(), encoder_dir.as_path()],
-    )
-    .await?;
+    if generation_memory == gen_core::GenerationMemory::default() {
+        admit_conditioning_paths(
+            settings,
+            "FLUX.1",
+            "IP-Adapter",
+            &flux_base,
+            &[adapter_file.as_path(), encoder_dir.as_path()],
+        )
+        .await?;
+    }
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -339,9 +443,10 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 ip_adapter: adapter_file,
                 image_encoder: encoder_dir,
             };
-            let model = IpAdapterFlux::load(&paths).map_err(|error| {
-                WorkerError::Engine(format!("FLUX IP-Adapter load failed: {error}"))
-            })?;
+            let model =
+                IpAdapterFlux::load_with_memory(&paths, generation_memory).map_err(|error| {
+                    WorkerError::Engine(format!("FLUX IP-Adapter load failed: {error}"))
+                })?;
             // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
             // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
             // staging / construction failure ⇒ scores omitted.
@@ -371,6 +476,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                         guidance,
                         ip_adapter_scale: ip_scale,
                         seed: seed as u64,
+                        memory: generation_memory,
                         cancel: cancel.clone(),
                     };
                     let out = match model.generate(&req, &reference, &mut *on_progress) {
@@ -423,4 +529,48 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod memory_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn optimized_ip_evidence_requires_both_exact_overlay_artifacts() {
+        let root = tempfile::tempdir().expect("overlay fixture");
+        let expected_adapter = root.path().join("pinned-adapter.safetensors");
+        let expected_encoder = root.path().join("pinned-encoder");
+        std::fs::write(&expected_adapter, b"adapter").expect("adapter fixture");
+        std::fs::create_dir_all(&expected_encoder).expect("encoder fixture");
+        let alternate_adapter = root.path().join("alternate-adapter.safetensors");
+        let alternate_encoder = root.path().join("alternate-encoder");
+        std::fs::write(&alternate_adapter, b"adapter").expect("alternate adapter");
+        std::fs::create_dir_all(&alternate_encoder).expect("alternate encoder");
+
+        assert!(flux_ipadapter_overlay_paths_are_certified(
+            &expected_adapter,
+            &expected_encoder,
+            Some(expected_adapter.clone()),
+            Some(expected_encoder.clone()),
+        ));
+        assert_eq!(FLUX_IPADAPTER_MEMORY_OVERLAY, "identity");
+        assert!(!flux_ipadapter_overlay_paths_are_certified(
+            &alternate_adapter,
+            &expected_encoder,
+            Some(expected_adapter.clone()),
+            Some(expected_encoder.clone()),
+        ));
+        assert!(!flux_ipadapter_overlay_paths_are_certified(
+            &expected_adapter,
+            &alternate_encoder,
+            Some(expected_adapter.clone()),
+            Some(expected_encoder.clone()),
+        ));
+        assert!(!flux_ipadapter_overlay_paths_are_certified(
+            &alternate_adapter,
+            &alternate_encoder,
+            None,
+            None,
+        ));
+    }
 }

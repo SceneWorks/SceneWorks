@@ -1,24 +1,24 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "bf06bb569697391a620e171f983fbb4d11a2ff14",
+    "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
     {
       "id": "anima_aesthetic",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "anima_base",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "anima_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "bernini",
@@ -73,27 +73,27 @@
     {
       "id": "flux2_dev",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "flux2_klein_9b",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "ideogram_4",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "ideogram_4_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "kolors",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "krea_2_edit",
@@ -113,12 +113,12 @@
     {
       "id": "lens",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "lens_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "ltx_2_3_distilled",
@@ -198,7 +198,7 @@
     {
       "id": "sdxl",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": true
     },
     {
       "id": "seedvr2",

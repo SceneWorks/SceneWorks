@@ -3886,6 +3886,92 @@
       // hardcodes load_dev and can't load schnell weights). Same reject-when-even-sequential-won't-fit gate
       // (sc-10856). bf16 omitted for the same diffusers-dense candle load gap as dev (sc-10888).
       "candle": {
+        // SC-15823: exact q4 base-only CUDA evidence. Identity/control/LoRA and sibling tiers or
+        // modes deliberately have no binding and therefore remain on the unverified fallback.
+        "calibrations": [
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
+            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
+            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+            "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
+            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
+            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+            "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+            "rung": "staged_residency", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
+            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
+            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+            "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+            "rung": "bounded_decode", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
+            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
+            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+            "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+            "rung": "bounded_attention",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb",
+            "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2",
+            "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-schnell-mlx",
+            "artifactResolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q4",
+            "rung": "bounded_transformer_residency",
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "dit" }
+          }
+        ],
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
@@ -4005,6 +4091,70 @@
       // block) which the candle FLUX loader does NOT read — it wants the black-forest-labs single-file
       // `flux1-dev.safetensors` — so bf16 off-Mac candle is a separate load gap (sc-10888), not gated here.
       "candle": {
+        // SC-15823: exact q4 base-only CUDA evidence. The model's identity/control capabilities remain
+        // declared above, but neither they nor PuLID are promoted without their own physical captures.
+        "calibrations": [
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4", "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4", "rung": "staged_residency", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4", "rung": "bounded_decode", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 }
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4", "rung": "bounded_attention", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
+            "sceneWorksRevision": "002e19717c322ba0520ebff28c96c71d0dea21eb", "matrixSourceRevision": "source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2", "inferenceRevision": "5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b",
+            "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q4", "rung": "bounded_transformer_residency", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "dit" }
+          }
+        ],
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "overlays": ["none", "control", "identity"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none", "control", "identity"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none", "control", "identity"]
+          }
+        },
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,

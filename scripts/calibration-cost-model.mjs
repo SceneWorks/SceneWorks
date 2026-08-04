@@ -478,11 +478,12 @@ export const PRODUCIBILITY_GATES = [
   },
   {
     id: "adapter-gated",
-    label: "An adapter exists, but it has never emitted a `complete` record",
+    label: "An adapter exists, but it has never emitted an activation-eligible record",
     blockedBy: "provider-adapter code (phase telemetry and lifecycle injection)",
     citation:
-      "docs/generated/memory-calibration-evidence.json (records with status `complete`, per " +
-      "(entry, backend)); a pair remains gated only while that set has no complete record",
+      "docs/generated/memory-calibration-evidence.json (records with status `complete` or " +
+      "base-only `runtime_complete`, per (entry, backend)); a pair remains gated only while that " +
+      "set has no activation-eligible record",
   },
   {
     id: "producible-today",
@@ -1376,12 +1377,12 @@ export function rankUncertainties(
     },
     {
       gate: "adapter-gated",
-      input: "what a `complete` record actually requires from an existing adapter",
+      input: "what an activation-eligible record actually requires from an existing adapter",
       why:
         `${blocking["adapter-gated"]?.soleBlockerCells ?? 0} cells are blocked ONLY by this, and ` +
         `${blocking["adapter-gated"]?.cellsTouched ?? 0} in total. The Krea MLX control adapter has ` +
         "now emitted complete exact records, proving the pipeline can close; this bucket applies " +
-        "only to adapter-covered pairs that still have no complete record.",
+        "only to adapter-covered pairs that still have no activation-eligible record.",
       howToResolve:
         "Close the harness contract for each remaining adapter-covered pair: real phase telemetry, " +
         "bounded-output parity, exact-fit/stale/unknown selection, lifecycle recovery, loadability, " +
@@ -1429,7 +1430,7 @@ export function rankUncertainties(
     input: "perRunSeconds",
     why:
       "It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The " +
-      `current artifact has ${completeRecords} complete record(s) and ${prod.producibleToday} ` +
+      `current artifact has ${completeRecords} activation-eligible record(s) and ${prod.producibleToday} ` +
       "producible cell(s), but the records do not carry per-scenario duration telemetry, so they " +
       "do not narrow that multiplier yet.",
     howToResolve:
@@ -1527,11 +1528,15 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     evidenceBundleRecords: evidence.records.length,
     recordsByStatus,
     completeRecords: recordsByStatus.complete ?? 0,
+    runtimeCompleteRecords: recordsByStatus.runtime_complete ?? 0,
+    activationEligibleRecords:
+      (recordsByStatus.complete ?? 0) + (recordsByStatus.runtime_complete ?? 0),
     matrixSummaryCalibrationRuns: matrix.summary.calibrationRuns,
     matrixSummaryCurrentCalibrationRuns: matrix.summary.currentCalibrationRuns,
     verifiedCells: census.byState.Verified ?? 0,
     note:
-      `${recordsByStatus.complete ?? 0} complete record(s) exist in the evidence bundle; the matrix ` +
+      `${recordsByStatus.complete ?? 0} Full complete and ${recordsByStatus.runtime_complete ?? 0} ` +
+      `base-only runtime-complete record(s) exist in the evidence bundle; the matrix ` +
       `reports ${matrix.summary.currentCalibrationRuns} current calibration run(s) and ` +
       `${census.byState.Verified ?? 0} aggregate Verified cell(s). Exact records remain narrower ` +
       "than aggregate matrix cells, so a current exact run does not by itself promote a whole cell.",
@@ -1543,7 +1548,7 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     (provider) => `${provider.target.modelId}|${provider.backend}`,
   );
   const pairsWithCompleteRecords = evidence.records
-    .filter((record) => record.status === "complete")
+    .filter((record) => ["complete", "runtime_complete"].includes(record.status))
     .map((record) => `${record.target.modelId}|${record.backend}`);
   const matrixOverlay = (overlay) => (/^control:\d+$/.test(overlay) ? "control" : overlay);
   const overlayKeysWithCompleteRecords = evidence.records
@@ -1678,7 +1683,7 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     },
     parameters: DEFAULT_PARAMETERS,
     biggestUncertainties: rankUncertainties(producible, {
-      completeRecords: completedBaseline.completeRecords,
+      completeRecords: completedBaseline.activationEligibleRecords,
       adapterModelCount: new Set(plan.providers.map((provider) => provider.target.modelId)).size,
       catalogEntryCount: new Set(cells.map((cell) => cell.modelId)).size,
     }),

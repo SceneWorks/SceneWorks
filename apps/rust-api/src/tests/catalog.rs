@@ -337,11 +337,16 @@ async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
         Value::Bool(true),
         "qwen_image must advertise live preview on candle in the /models response"
     );
-    // A wired candle route that does NOT preview — `false`, which is a different claim from absent.
     assert_eq!(
         entry("sdxl")["preview"]["byBackend"]["candle"],
+        Value::Bool(true),
+        "sdxl must advertise its current candle live-preview support in the /models response"
+    );
+    // A wired candle route that does NOT preview — `false`, which is a different claim from absent.
+    assert_eq!(
+        entry("sd3_5_medium")["preview"]["byBackend"]["candle"],
         Value::Bool(false),
-        "sdxl is wired on candle and does not preview — served as false, not omitted"
+        "sd3_5_medium is wired on candle without preview — served as false, not omitted"
     );
     // A backend with no facts file is UNKNOWN. It must be ABSENT rather than false: inventing
     // `false` would make the UI claim a route cannot preview when the catalog has no measurement
@@ -349,7 +354,7 @@ async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
     // backend the macOS lane is expected to add, and pinning its absence here would make that
     // follow-up land on a red test asserting the opposite of the intended end state.
     assert!(
-        entry("sdxl")["preview"]["byBackend"]
+        entry("sd3_5_medium")["preview"]["byBackend"]
             .get("no_such_backend")
             .is_none(),
         "an un-dumped backend must be absent (unknown), never served as false"

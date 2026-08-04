@@ -427,7 +427,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -444,6 +444,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                         scheduler: scheduler.clone(),
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
+                        preview,
                         cancel: cancel.clone(),
                     };
                     let out = match model.generate(&req, &reference, &mut *on_progress) {

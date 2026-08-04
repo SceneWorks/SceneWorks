@@ -247,6 +247,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         seed: 42,
         // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
         use_pid: false,
+        preview: gen_core::PreviewSink::default(),
         cancel: gen_core::runtime::CancelFlag::new(),
     };
     println!("[smoke] dev edit {w}x{h} @ {steps} steps (single ref) ...");
@@ -332,6 +333,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
         seed: 42,
         // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
         use_pid: false,
+        preview: gen_core::PreviewSink::default(),
         cancel: gen_core::runtime::CancelFlag::new(),
     };
     println!("[smoke] dev control {w}x{h} @ {steps} steps (scale 0.75) ...");

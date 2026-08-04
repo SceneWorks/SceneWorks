@@ -202,6 +202,7 @@ pub enum LoadShapeKey {
 #[serde(rename_all = "snake_case")]
 pub enum RecordStatus {
     Complete,
+    RuntimeComplete,
     Gated,
     NegativeComplete,
 }
@@ -283,6 +284,7 @@ pub struct Artifact {
     pub repository: String,
     pub resolved_revision: String,
     pub variant: String,
+    pub inventory_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -434,8 +436,10 @@ pub struct Quality {
     pub result: Option<QualityResult>,
     pub maximum_error: Option<f64>,
     pub mean_error: Option<f64>,
+    pub root_mean_square_error: Option<f64>,
     pub maximum_error_threshold: Option<f64>,
     pub mean_error_threshold: Option<f64>,
+    pub root_mean_square_error_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -665,8 +669,10 @@ impl EvidenceBundle {
             .records
             .iter()
             .filter(|record| {
-                record.status == RecordStatus::Complete
-                    && record.evidence_scope == EvidenceScope::Authoritative
+                matches!(
+                    record.status,
+                    RecordStatus::Complete | RecordStatus::RuntimeComplete
+                ) && record.evidence_scope == EvidenceScope::Authoritative
                     && record.backend == query.backend
                     && record.target.model_id == query.model_id
                     && record.target.provider == query.provider
@@ -1169,14 +1175,24 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
         || [
             record.quality.maximum_error,
             record.quality.mean_error,
+            record.quality.root_mean_square_error,
             record.quality.maximum_error_threshold,
             record.quality.mean_error_threshold,
+            record.quality.root_mean_square_error_threshold,
         ]
         .into_iter()
         .flatten()
         .any(|value| value < 0.0)
     {
         return Err(format!("{} quality fields violate the schema", record.id));
+    }
+    if record
+        .artifact
+        .inventory_sha256
+        .as_deref()
+        .is_some_and(|value| value.len() != 64 || !is_lower_hex(value))
+    {
+        return Err(format!("{} artifact inventorySha256 is invalid", record.id));
     }
     if let RequiredNullable::Value(mutation) = &record.negative_mutation {
         if [mutation.maximum_error, mutation.mean_error]
@@ -1243,9 +1259,167 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
 
     match record.status {
         RecordStatus::Complete => validate_complete(record),
+        RecordStatus::RuntimeComplete => validate_runtime_complete(record),
         RecordStatus::NegativeComplete => validate_negative_complete(record),
         RecordStatus::Gated => Ok(()),
     }
+}
+
+fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
+    if record.target.overlay != "none" {
+        return Err(format!(
+            "{} runtime-complete evidence must target the base-only none overlay",
+            record.id
+        ));
+    }
+    if record.repositories.scene_works.dirty || record.repositories.inference.dirty {
+        return Err(format!(
+            "{} runtime-complete evidence has a dirty repository",
+            record.id
+        ));
+    }
+    let sole_case = record.sweep.cases.first();
+    if !record.sweep.range_verified
+        || record.sweep.cases.len() != 1
+        || sole_case.map_or(true, |case| {
+            case.result != SweepResult::Passed || case.parameters != record.strategy.parameters
+        })
+    {
+        return Err(format!(
+            "{} runtime-complete evidence needs exactly one passed case matching its strategy parameters",
+            record.id
+        ));
+    }
+    let predicted = required_value(
+        &record.predicted_peak_bytes,
+        &record.id,
+        "predictedPeakBytes",
+    )?;
+    if predicted.overall
+        < predicted
+            .conditioning
+            .max(predicted.denoise)
+            .max(predicted.decode)
+    {
+        return Err(format!(
+            "{} predicted overall does not cover phase peaks",
+            record.id
+        ));
+    }
+    let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
+    validate_phase_metrics(observed, &record.id)?;
+    if observed.overall.device_bytes > record.hardware.memory_bytes() {
+        return Err(format!(
+            "{} observed device memory exceeds hardware",
+            record.id
+        ));
+    }
+    let scenarios: BTreeMap<_, _> = record
+        .scenarios
+        .iter()
+        .map(|scenario| (scenario.name, scenario))
+        .collect();
+    let required = [
+        ScenarioName::ExactFit,
+        ScenarioName::UnknownBudget,
+        ScenarioName::StaleEvidence,
+        ScenarioName::WarmRepeat,
+        ScenarioName::Cancel,
+        ScenarioName::Error,
+        ScenarioName::Loadability,
+        ScenarioName::Overlay,
+    ];
+    if record.scenarios.len() != required.len() || scenarios.len() != required.len() {
+        return Err(format!(
+            "{} runtime-complete scenarios must be unique and exhaustive",
+            record.id
+        ));
+    }
+    for name in [
+        ScenarioName::ExactFit,
+        ScenarioName::UnknownBudget,
+        ScenarioName::StaleEvidence,
+        ScenarioName::Loadability,
+    ] {
+        if scenarios.get(&name).map(|scenario| scenario.result) != Some(ScenarioResult::Passed) {
+            return Err(format!("{} scenario {name:?} must pass", record.id));
+        }
+    }
+    for name in [
+        ScenarioName::WarmRepeat,
+        ScenarioName::Cancel,
+        ScenarioName::Error,
+    ] {
+        let scenario = scenarios
+            .get(&name)
+            .ok_or_else(|| format!("{} is missing scenario {name:?}", record.id))?;
+        if scenario.result != ScenarioResult::NotRun
+            || scenario.reason.as_deref().map_or(true, str::is_empty)
+        {
+            return Err(format!(
+                "{} scenario {name:?} must remain explicitly not_run",
+                record.id
+            ));
+        }
+    }
+    let exact = scenarios[&ScenarioName::ExactFit];
+    if exact.predicted_bytes.is_none() || exact.predicted_bytes != exact.effective_budget_bytes {
+        return Err(format!(
+            "{} exact_fit must exercise predicted == effective budget",
+            record.id
+        ));
+    }
+    let overlay = scenarios[&ScenarioName::Overlay];
+    if overlay.result != ScenarioResult::NotApplicable
+        || overlay.reason.as_deref().map_or(true, str::is_empty)
+    {
+        return Err(format!(
+            "{} runtime-complete evidence must be base-only",
+            record.id
+        ));
+    }
+    if !matches!(record.negative_mutation, RequiredNullable::Null) {
+        return Err(format!(
+            "{} unexecuted negative mutation must remain null",
+            record.id
+        ));
+    }
+    let quality = &record.quality;
+    if quality.identical_inputs != Some(true) || quality.result != Some(QualityResult::Passed) {
+        return Err(format!(
+            "{} runtime-complete quality evidence did not pass",
+            record.id
+        ));
+    }
+    let (maximum_error, mean_error, maximum_threshold, mean_threshold) =
+        require_complete_quality_fields(quality, &record.id)?;
+    if maximum_error > maximum_threshold || mean_error > mean_threshold {
+        return Err(format!("{} quality thresholds were exceeded", record.id));
+    }
+    let rmse = quality
+        .root_mean_square_error
+        .ok_or_else(|| format!("{} is missing quality.rootMeanSquareError", record.id))?;
+    let rmse_threshold = quality.root_mean_square_error_threshold.ok_or_else(|| {
+        format!(
+            "{} is missing quality.rootMeanSquareErrorThreshold",
+            record.id
+        )
+    })?;
+    if rmse > rmse_threshold {
+        return Err(format!("{} RMSE threshold was exceeded", record.id));
+    }
+    if record.loadability.result != LoadabilityResult::Passed
+        || !matches!(
+            &record.loadability.resolved_path_fingerprint,
+            RequiredNullable::Value(value) if !value.is_empty()
+        )
+    {
+        return Err(format!(
+            "{} runtime-complete loadability did not pass",
+            record.id
+        ));
+    }
+    Ok(())
 }
 
 fn validate_git_state(state: &GitState, require_matrix: bool, id: &str) -> Result<(), String> {
@@ -1783,7 +1957,8 @@ mod tests {
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        StaleBundleReason, StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
+        RecordStatus, StaleBundleReason, StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
+        PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
     fn phase(value: u64) -> Value {
@@ -2033,18 +2208,36 @@ mod tests {
         // Existing MLX measurements remain available as history under their truthful load shapes;
         // their old inference revisions cannot become a current fit. SC-15510 adds four eager and
         // one deferred current-pin Z-Image records without rewriting that historical provenance.
+        // SC-15823 then adds ten base-only runtime-complete FLUX records (eight eager, two deferred)
+        // without promoting them to Full completion.
         let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
         };
-        assert_eq!(bundle.records.len(), 33);
+        assert_eq!(bundle.records.len(), 43);
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .filter(|record| record.status == RecordStatus::Complete)
+                .count(),
+            33
+        );
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .filter(|record| record.status == RecordStatus::RuntimeComplete)
+                .count(),
+            10
+        );
         assert_eq!(
             bundle
                 .records
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
                 .count(),
-            28
+            36
         );
         assert_eq!(
             bundle
@@ -2052,8 +2245,42 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            5
+            7
         );
+    }
+
+    #[test]
+    fn runtime_complete_requires_one_exact_passed_sweep_case() {
+        fn runtime_record(raw: &mut Value) -> &mut Value {
+            raw["records"]
+                .as_array_mut()
+                .expect("records array")
+                .iter_mut()
+                .find(|record| record["status"] == "runtime_complete")
+                .expect("packaged runtime-complete record")
+        }
+
+        let mut extra: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        runtime_record(&mut extra)["sweep"]["cases"]
+            .as_array_mut()
+            .expect("sweep cases")
+            .push(json!({ "parameters": { "unexpected": 1 }, "result": "passed" }));
+        assert!(matches!(
+            load_bundle(&extra.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("exactly one passed case matching its strategy parameters")
+        ));
+
+        let mut mismatch: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE)
+            .expect("packaged evidence JSON");
+        runtime_record(&mut mismatch)["sweep"]["cases"][0]["parameters"] =
+            json!({ "unexpected": 1 });
+        assert!(matches!(
+            load_bundle(&mismatch.to_string()),
+            Err(BundleLoadError::Invalid(message))
+                if message.contains("exactly one passed case matching its strategy parameters")
+        ));
     }
 
     #[test]
