@@ -1317,6 +1317,45 @@
           "findings": [
             "Pruned adaLN makes this family MORE window-friendly than stock FLUX, not less: the blocks carry no `.norm*.linear` weights and take their modulation as a slice of one approximator output computed once per step. That output is a small resident tensor, and the per-block weight bytes a window must materialize are correspondingly smaller."
           ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The Candle provider has the same 19-double/38-single split plus the resident modulation approximator, but exposes neither sequential offload nor a block-window loader.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "19 (double)",
+              "windowable": true
+            },
+            {
+              "name": "single_transformer_blocks",
+              "blocks": "38 (single)",
+              "windowable": true
+            },
+            {
+              "name": "ChromaApproximator",
+              "blocks": "5 residual (linear, linear) pairs + 5 norms",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/transformer.rs",
+              "reason": "ChromaTransformer stores distinct `double_blocks` and `single_blocks` vectors, preserving the same partial two-stack shape as the MLX provider."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-chroma/src/config.rs",
+              "reason": "The Candle descriptor declares `supports_sequential_offload: false`; no memory-strategy or block-window implementation is published."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17410 and the Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until the family loader and authoritative CUDA evidence land."
+          ]
         }
       }
     },
@@ -1555,6 +1594,35 @@
             "SANA's blocks carry a depthwise-conv Mix-FFN rather than a plain MLP. That changes per-block byte counts but not the sequential-stack shape the primitive needs.",
             "The gemma-2-2b-it caption encoder is a uniform decoder stack shared with PiD, so a TextEncoder-scoped window is structurally available for this family too."
           ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "The Candle port retains SANA's uniform 20-block transformer stack, but publishes no sequential-offload or block-window path.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks",
+              "blocks": "20",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sana/src/transformer.rs",
+              "reason": "SanaTransformer stores one `blocks: Vec<SanaBlock>` built from the single transformer configuration."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sana/src/model.rs",
+              "reason": "The Candle descriptors declare `supports_sequential_offload: false` and expose no rung-4 contract."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17411 and the Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until the family loader and authoritative CUDA evidence land."
+          ]
         }
       }
     },
@@ -1588,6 +1656,35 @@
           },
           "findings": [
             "Anima's Qwen3-0.6B encoder reuses Z-Image's decoder block, which is the same module Z-Image's shipped TE streaming windows. A TextEncoder-scoped rung 4 here is therefore the smallest port in the catalog — the block constructor already exists in a streamed form."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "The Candle provider has the same uniform 28-block DiT stack, but exposes neither sequential offload nor a block-window implementation.",
+          "blockStacks": [
+            {
+              "name": "blocks",
+              "blocks": "28",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-anima/src/transformer.rs",
+              "reason": "The Candle Anima transformer stores one `blocks: Vec<Block>` and evaluates it as a sequential trunk."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-anima/src/lib.rs",
+              "reason": "The Candle descriptor declares `supports_sequential_offload: false` and publishes no memory-strategy contract."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17412 and the Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until the family loader and authoritative CUDA evidence land."
           ]
         }
       }
@@ -1638,6 +1735,45 @@
             "The story's first trap is confirmed against the code and the classification is `partial`, not N/A. Its `[0, 2, 10]` shorthand is right about the SHAPE: the config array is [1, 2, 10], but level 0 is a DownBlock2D/UpBlock2D with no attention, so its entry is never read and the effective depths are 2 and 10.",
             "The skip connections bound the SIZE of the win, not its validity. They keep down-path ACTIVATIONS alive across the forward, and rung 4 bounds WEIGHT residency — so the weight bound over each 10-deep sub-stack still holds; what does not shrink is the activation term it is competing against. That is why this family needs a measurement before selection, not a structural exemption.",
             "The rung would need a plan PER Transformer2D, not one per model: there are six 10-deep sub-stacks (two on the down path, one in the mid block, three on the up path) and the residency floor is one block of the widest level. `BlockPlan` expresses each of them unchanged; what is missing is a family loader that can re-read a single `down_blocks.N.attentions.M.transformer_blocks.K` from the snapshot."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The Candle SDXL U-Net has the same windowable Transformer2D sub-stacks inside a non-windowable conv/resnet and skip-connection trunk, with no sequential-offload or block-window path.",
+          "blockStacks": [
+            {
+              "name": "down/up level 1 attentions[*].transformer_blocks",
+              "blocks": "2 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "down/up level 2 + mid attentions[*].transformer_blocks",
+              "blocks": "10 per Transformer2D",
+              "windowable": true
+            },
+            {
+              "name": "conv stem / resnets / down-up skip path",
+              "blocks": "n/a",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/unet/attention.rs",
+              "reason": "Each Candle SpatialTransformer owns a `transformer_blocks: Vec<BasicTransformerBlock>`, preserving the per-Transformer2D windowable sub-stack shape."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
+              "reason": "The Candle SDXL descriptor declares `supports_sequential_offload: false` and publishes no rung-4 implementation."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17413 and the five Candle model twins own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until per-Transformer2D loading and authoritative CUDA evidence land."
           ]
         }
       }
@@ -1924,6 +2060,40 @@
             "Dual residency makes this the largest structural rung-4 opportunity in the catalog after Qwen-Image, and for a different reason: 80 blocks are resident while at most one expert's window is in use at any instant. A per-expert plan bounds each, and the idle expert is a whole model that a window schedule could hold at zero.",
             "The guided-velocity modes run SEVERAL full forward passes per step over different conditioning combos. A window plan is re-walked once per forward, so the re-materialization cost of rung 4 is multiplied by the mode's pass count — a latency consequence to price into the window size, not a correctness problem.",
             "Bernini already loads and quantizes one expert before the next so only one bf16 dequant transient is resident. That is a LOAD-TIME transient bound; both experts are resident afterwards, so it does not overlap with what rung 4 would do."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The Candle renderer also switches between two uniform Wan expert stacks during denoise. It publishes no sequential-offload or block-window contract, so the two-stack opportunity is in scope but unimplemented.",
+          "blockStacks": [
+            {
+              "name": "low_noise_model blocks",
+              "blocks": "40",
+              "windowable": true
+            },
+            {
+              "name": "high_noise_model blocks",
+              "blocks": "40",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/pipeline.rs",
+              "reason": "The Candle renderer loads the dual-expert Wan snapshot, selects the high- or low-noise expert per timestep, and declares `supports_sequential_offload: false`."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-wan/src/wan14b.rs",
+              "reason": "The shared Candle Wan expert provides the uniform transformer stack used by each Bernini expert but no Bernini block-window loader is wired."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-17414 and SC-17480 own the missing implementation and CUDA measurement work."
+          },
+          "findings": [
+            "In scope for epic 15448. The newly visible Candle cells stay Missing until per-expert streaming and authoritative CUDA evidence land."
           ]
         }
       }
