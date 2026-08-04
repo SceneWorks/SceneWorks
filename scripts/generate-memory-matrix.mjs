@@ -1173,6 +1173,10 @@ function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, 
 }
 
 function staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }) {
+  // Legacy Candle capability maps were not exhaustive for the base overlay. PuLID is different:
+  // its bespoke entry was added with a deliberately closed identity-only contract, so its `none`
+  // coordinate must also consult the declaration instead of inheriting the generic base fallback.
+  if (model.id !== "pulid_flux_dev" && overlay === "none") return true;
   const declaredModel =
     model.id === "z_image_edit" && route.engine === "z_image_turbo"
       ? manifestById.get("z_image_turbo")
@@ -1324,7 +1328,7 @@ function strategyStatus({
   if (
     rung === "resident" &&
     !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image") &&
-    (backend !== "candle" ||
+    (backend !== "candle" || model.id !== "pulid_flux_dev" ||
       staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }))
   ) {
     return {

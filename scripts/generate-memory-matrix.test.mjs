@@ -1411,6 +1411,31 @@ test("Candle PuLID exposes every rung only for its exact identity route", async 
   );
 });
 
+test("PuLID's closed overlay contract does not redefine legacy Candle resident coverage", async () => {
+  const matrix = await buildMatrix();
+  const expectedResident = [
+    "flux_dev:flux1_dev:candle:q4:text_to_image:lora:resident",
+    "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
+    "z_image_turbo:z_image_turbo:candle:q4:text_to_image:control:resident",
+  ];
+  for (const id of expectedResident) {
+    assert.equal(
+      matrix.cells.find((cell) => cell.id === id)?.state,
+      "Implemented/unverified",
+      `${id} keeps its pre-PuLID generic resident fallback`,
+    );
+  }
+
+  assert.equal(
+    matrix.cells.find(
+      (cell) =>
+        cell.id === "flux_dev:flux1_dev:candle:q4:text_to_image:lora:staged_residency",
+    )?.state,
+    "Missing",
+    "the scope fix must not broaden legacy staged-overlay support",
+  );
+});
+
 test("Candle Krea's Implemented cells report the shared backend that makes them reachable", async () => {
   const matrix = await buildMatrix();
   const source = await surveyFixture();

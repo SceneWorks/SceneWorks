@@ -26166,17 +26166,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "10da55c4f2fc96138b9e1054774912de262610d07117a1b114591ecd4795f14b",
       "owningFamilyStory": 15823,
       "owningModelStory": 15898,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/minMemoryGb",
@@ -27812,17 +27816,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "3beec96ef03d08890e5975d72c51f9e01154ff6fcf296f3ae403ecd3bb91b8c5",
       "owningFamilyStory": 15823,
       "owningModelStory": 15898,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/minMemoryGb",
@@ -29458,17 +29466,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "8d759a98f4b7d8aa93d705b7314cbd551fa6b56e78a6acf886350d95afe6cbb2",
       "owningFamilyStory": 15823,
       "owningModelStory": 15898,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/minMemoryGb",
@@ -31246,17 +31258,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "956196040fd7e13bc1507d0fd1ad8c76ec5cd32bc142c2013b58bb527b6ca873",
       "owningFamilyStory": 15823,
       "owningModelStory": 15898,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/minMemoryGb",
@@ -32892,17 +32908,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "b1f1f25b870a34600a914163f19a16e074651474ce8196d2cdc9dab586b8c935",
       "owningFamilyStory": 15823,
       "owningModelStory": 15898,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/minMemoryGb",
@@ -34538,17 +34558,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "10750d790a3d7fa5cf1df58f99d474747217431657778d2433601262bf60fe03",
       "owningFamilyStory": 15823,
       "owningModelStory": 15898,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_dev/candle/minMemoryGb",
@@ -46936,17 +46960,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "30c7663df891eec3703adb082b57be42b4b4a9c752f06e3632f57190717dbb3b",
       "owningFamilyStory": 15823,
       "owningModelStory": 15895,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/minMemoryGb",
@@ -47742,17 +47770,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "fc97dc071f5d08ae00a6442b9f199786e3f3ec667c63b440eb4f84b6cb66f178",
       "owningFamilyStory": 15823,
       "owningModelStory": 15895,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/minMemoryGb",
@@ -48690,17 +48722,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "9f2403c1272a76a9abdccab19a662b5e507b8463797cff15eda790cc2e5947c2",
       "owningFamilyStory": 15823,
       "owningModelStory": 15895,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/minMemoryGb",
@@ -49496,17 +49532,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "58f4b935c965d156c52ea0872158563d8186433ecc0726f55bc31ceec643c7f9",
       "owningFamilyStory": 15823,
       "owningModelStory": 15895,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/flux_schnell/candle/minMemoryGb",
@@ -279163,17 +279203,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "84985b758dab92f0bcb2af15e880c0a437292cf0b0836ef93c812a15e8852b44",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/minMemoryGb",
@@ -280372,17 +280416,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "1e767f01e693bba658aad75867751aafdedf44e52d14eb4645e678bee03d4552",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/minMemoryGb",
@@ -281581,17 +281629,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "a57c1ac46856fc773fa71d49d4502efdc6f38336dd5187e1acfc64636c096495",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/minMemoryGb",
@@ -282790,17 +282842,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "af24a2572f6a2ea27b170ffcb5ddd342f787a48ecaa78fa63048d871cdcff57a",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/minMemoryGb",
@@ -283999,17 +284055,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "1d99154e1560543b52c4930a795dff438d87d19527bcda4565c65ba067fe2319",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/minMemoryGb",
@@ -285208,17 +285268,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "3351f884c4806404bd3034df714987c2a98a404c897d4d776f8aeb7db1d2e94e",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511_lightning/candle/minMemoryGb",
@@ -293455,17 +293519,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "605de141d92935631d459f21eccf2e0a63d22cec9ba18eef3321e6551a544408",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/minMemoryGb",
@@ -294671,17 +294739,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "ce418e8f6f26b8a5bcddf883f47d1c1777027e2adfdaff24b130cb07a2bdf204",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/minMemoryGb",
@@ -295887,17 +295959,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "0772fe84d1852d367b30d9f2e12d31936e02e4eca654fb00fd1988de72e369d5",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/minMemoryGb",
@@ -297103,17 +297179,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "6046f903a9d62bd8c10f3fe9fddc02f12bec05ed7705bb4e1c4adfcc8054735c",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/minMemoryGb",
@@ -298319,17 +298399,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "285bb89e677729592c2ad4410fcf0f0cbbb783dc366242e8116067172b8819fe",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/minMemoryGb",
@@ -299535,17 +299619,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "355f3c63bc733f847c4917b4985c5b02809e260d7cb59cd15f1f2c8ca6788772",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image_edit_2511/candle/minMemoryGb",
@@ -307804,17 +307892,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "5a506075ce28d4fa17935ee660f94b6603efd70335a97f11f476ed70898d963b",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -308214,17 +308306,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "7f1afdec936c42d075ac6d52177a046c381a134975aa3707033b18ce4d072b35",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -309068,17 +309164,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "c3778c1106dec6a2ae6ec3243014199a4d3bdd248c0063c80541e95369754ffd",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -309478,17 +309578,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "9d5d88d861513ac6df525d48b1d556d3e4053b389b6165c63d1dec9f0ec1d21c",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -310332,17 +310436,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "30b23eae269c05d0524137d6afa622f10aaf16387891b340815bfbc01cc66c3a",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -310742,17 +310850,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "d119a81b71557fb524efa03086b4390030fc8ff67f60c21dd428c0df912b9bff",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -311596,17 +311708,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "a45c93b2a0784c95b744b4aba36a70f13b3dff20297e9229fee7721afc8d3945",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -312006,17 +312122,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "f34bcccaf8ee03f94bda27b49c8de44856b489b7b0f068ad92a39dae733fa093",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -312878,17 +312998,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "bb14284b4dc57f92b13e063abea38eaa9ce15d7864849a2b10cd53abf1fa259d",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -313288,17 +313412,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "2cbad5e1cbb390dd968924eb7c1fabf29db603fe483a2066819a9859c3b41421",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -314142,17 +314270,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "3bea3392f67ecf285fa475f94aeaebaeb9802c9072f133474d07005dbbb08593",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -314552,17 +314684,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "82c16261ec51e6da9c36b546fa3dcacf843fb56b8398e7a58894efe7bcfabba1",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/qwen_image/candle/minMemoryGb",
@@ -503593,17 +503729,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "09e4c6633054b29db96784841efb97eee9270b2f18146b556dd4974ce2612b04",
       "owningFamilyStory": 15815,
       "owningModelStory": 15859,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle/minMemoryGb",
@@ -504871,17 +505011,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "15539546145e17fe4bdff3bfdbb6286329438c295710f8981bceb25f9f3960c8",
       "owningFamilyStory": 15815,
       "owningModelStory": 15859,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle/minMemoryGb",
@@ -506149,17 +506293,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "265220898a626f1a9f30e59ae133fca507b7f53c2d59a47ab2b6386bd333a9df",
       "owningFamilyStory": 15815,
       "owningModelStory": 15859,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle/minMemoryGb",
@@ -507427,17 +507575,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "57a6fda575b3f813a0877b155ee2165c0386ebe66d8cd32a46be8770eb8944fe",
       "owningFamilyStory": 15815,
       "owningModelStory": 15859,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle/minMemoryGb",
@@ -508705,17 +508857,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "6a26d2b78db982211e36cc3738a15eb2f1594947fb9b747d3ff4b6664fe8e1ab",
       "owningFamilyStory": 15815,
       "owningModelStory": 15859,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle/minMemoryGb",
@@ -509983,17 +510139,21 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Missing",
+      "state": "Implemented/unverified",
       "memoryCharacterization": {
         "status": "unmeasured",
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": null,
+      "calibrationFingerprint": "38f3036b90e6ce593a111c667f993a456d3c0826b125e013cc01fa108421a37b",
       "owningFamilyStory": 15815,
       "owningModelStory": 15859,
       "evidence": {
-        "staticImplementation": [],
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
         "declaredCalibration": [
           {
             "source": "config/manifests/builtin.models.jsonc#models/z_image_turbo/candle/minMemoryGb",
