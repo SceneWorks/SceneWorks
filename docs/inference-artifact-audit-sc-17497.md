@@ -2,14 +2,16 @@
 
 A packaged calibration is a set of measurements taken against a specific build of the inference
 engine. Extending it to a newer pin means proving the code it describes has not changed. sc-15833
-proved that with **git object identity** over FLUX.2's seven-object Candle/CUDA compile closure;
-sc-17497 keeps that as the cheap layer and adds a **compiled-artifact** layer underneath it, so a
-commit that cannot change the compiled code no longer costs a re-capture.
+proved that with **git object identity** over FLUX.2's Candle/CUDA compile closure; sc-17497 keeps
+that as the cheap layer and adds a **compiled-artifact** layer underneath it, so a commit that
+cannot change the compiled code no longer costs a re-capture. sc-17524 widened the closure to the
+workspace build inputs it had been missing and made the Windows build reproducible enough for the
+compiled-artifact layer to mean anything.
 
 ## Why the source tree was the wrong unit
 
-The v1 audit's unit is a crate tree, so any commit into one of the seven invalidates the proof.
-inference `35251a88` added 42 lines of `//!` doc comment to `candle-gen/src/preview.rs`. Six objects
+The v1 audit's unit is a crate tree, so any commit into one of them invalidates the proof. inference
+`35251a88` added 42 lines of `//!` doc comment to `candle-gen/src/preview.rs`. Every other object
 stayed byte-identical, that one moved, the five `flux2_dev` q4 cells dropped to `historical`, and the
 only remedy on offer was a ~47.6 GB-peak capture on an RTX PRO 6000 — for a change that could not
 possibly have altered a single instruction.
@@ -36,8 +38,11 @@ Confirmed on the real closure at the real revisions, **on the Metal lane**: `277
 across a `277f → d2216 → 277f` round trip in one worktree.
 
 That is evidence the mechanism works and that this particular delta is codegen-inert; it is **not**
-the proof, and no validator will accept it — a Metal record is refused on `lane`. The CUDA-lane
-digests are still owed and can only be produced on a box with a real toolkit.
+the proof, and no validator will accept it — a Metal record is refused on `lane`.
+
+sc-17524 produced the CUDA-lane digests on the RTX PRO 6000 box, and doing so exposed that the
+Windows link step was not reproducible at all until `/Brepro /DEBUG:NONE` — see **Determinism**
+below. A Metal round trip being stable is not evidence that a Windows one is.
 
 ## The two layers
 
@@ -53,6 +58,42 @@ The proof is frozen in source — `FLUX2_COMPATIBILITY_AUDIT.artifactProof` in
 `crates/sceneworks-worker/src/inference_compatibility_audit.rs` — so the checked-in record cannot authorize
 itself.
 
+## The closure: six crate trees and four build inputs
+
+sc-15833 declared it as seven paths, all crate trees bar the root manifest. sc-17524 added three
+more build inputs that feed every one of those builds, bringing that kind to four:
+
+| Entry | Kind |
+| --- | --- |
+| `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml` | workspace build inputs |
+| `crates/contracts/gen-core` | crate tree |
+| `crates/bundles/runtime-cuda` | crate tree |
+| `crates/media/candle-gen/candle-gen`, `-pid`, `-flux2` | crate trees |
+| `crates/media/candle-gen/vendor/candle-kernels` | crate tree |
+
+`Cargo.lock` was a realized gap, not a theoretical one: it moved between `5ffd7612` and `277f4238`
+while all seven audited trees stayed byte-identical, so the free path printed *"no build needed"*
+over a changed build input. That particular diff (`sha2` reaching `candle-gen-sensenova` and some
+mlx crates) is inert for FLUX.2, but that was luck. A `cargo update` bumping a semver-compatible
+transitive dependency the measurement binary links moves **only** the lockfile.
+
+`.cargo/config.toml` is the same class and the easiest to miss, being neither at the repo root nor a
+manifest — cargo reads it for every build in the worktree, and a `[build] rustflags`, a `[target.*]`
+linker override or an `[env]` entry a build script consumes changes the compiled code while moving
+no crate tree. It is object `61d7be37…` at every revision in play — `5ffd7612`, `277f4238`,
+`06e0c5e9`, `a4f409ae`. One part of it the tool cannot honestly adjudicate:
+`CARGO_ENCODED_RUSTFLAGS`, which this script must set for the path
+remaps, **replaces** config-declared rustflags rather than merging them. So the audit refuses to run
+against a config that declares any (`assertNoConfigRustflags`) rather than certify a build it had
+itself stripped the flags out of. inference declares none today.
+
+**Scope note.** These are inputs to the *measurement* build, inside the inference workspace. They
+are not the worker's: SceneWorks consumes `runtime-cuda` as a git dependency, so cargo ignores
+inference's `Cargo.lock` entirely and resolves against SceneWorks' own, and SceneWorks pins
+`channel = "stable"` against inference's `1.96.0`. That is the correct scope for the claim being
+made — "the code the measurements ran has not changed" — but it is not a statement about the
+toolchain or lockfile the shipped worker is built with.
+
 ## A digest only speaks for what the binary links
 
 `runtime-cuda` depends on `candle-gen-flux2`, **not** the other way round. A commit into
@@ -60,13 +101,63 @@ itself.
 that unchanged digest as proof over the whole closure would be a false green — strictly worse than
 the false positive this story set out to remove.
 
-So the proof carries an `adjudicates` set alongside its digest: the closure paths the audited binary
-actually compiled. The tool derives it from cargo's own `compiler-artifact` stream rather than a
-hand-maintained list, so it cannot drift from the dependency graph, and both validators refuse a
-moved path that falls outside it. For the `candle-gen-flux2` lib test binary that set is gen-core,
-candle-gen, candle-gen-pid, candle-gen-flux2 and (on the CUDA lane) candle-kernels. The workspace
-`Cargo.toml` and `runtime-cuda` are **not** adjudicable by it and must stay object-identical, or a
-different artifact has to be audited.
+So the proof carries an `adjudicates` set alongside its digest, and both validators refuse a moved
+path that falls outside it. The two kinds of entry earn their place in it differently:
+
+- **Crate trees** are covered when cargo reports having *compiled* a package under them. Derived
+  from the `compiler-artifact` stream rather than a hand-maintained list, so it cannot drift from
+  the dependency graph. For the `candle-gen-flux2` lib test binary that is gen-core, candle-gen,
+  candle-gen-pid, candle-gen-flux2 and (on the CUDA lane) candle-kernels. `runtime-cuda` is **not**
+  among them and must stay object-identical.
+- **Build inputs** can never appear there — cargo's stream only ever names *package* manifests, and
+  the root `Cargo.toml` is a virtual manifest. They are adjudicated anyway, and soundly: they are
+  inputs to *this* build. A lockfile bump that moves a dependency the binary links, a
+  `[workspace.dependencies]` edit, a `[target.*]` linker override — each recompiles the binary, so
+  each shows up in its digest. One that leaves the digest byte-identical provably did not reach the
+  measured code. The inference is anchored to the audited package's own tree being covered, so a
+  cargo report that compiled nothing cannot hand back four adjudicable paths.
+
+  Two carve-outs, because "the digest saw it" is not true of either. A `rust-toolchain.toml`
+  **channel** bump never reaches a digest comparison — `assertComparableToolchains` hard-stops
+  first, which is strictly stronger. And rustflags declared in `.cargo/config.toml` are replaced by
+  this script's own, so `assertNoConfigRustflags` refuses the run instead. Both are refusals, not
+  adjudications; the free path can no longer reach either case because both files are in the
+  closure.
+
+### Why not audit `runtime-cuda`'s test binary instead
+
+sc-17524 considered switching the audited artifact to one that links the *whole* closure, which
+would make `runtime-cuda` adjudicable by compile coverage alone. Measured and rejected. That binary
+links the entire CUDA bundle — `candle-gen-catalog` plus every provider and the audio lane — so its
+digest moves on a commit to any of ~50 crates that have nothing to do with FLUX.2. Across the very
+window this first had to adjudicate, `5ffd7612` → `06e0c5e9`, four of them moved
+(`candle-gen-catalog`, `candle-gen-chroma`, `candle-gen-sdxl`, `candle-gen-sensenova`). It would
+have demanded a 47.6 GB re-capture for FLUX.2 code that did not change: the exact false positive
+this epic exists to remove, with a far wider trigger.
+
+**What that trade gives up.** Two things, and the second is the one to remember:
+
+1. `crates/bundles/runtime-cuda` stays non-adjudicable and must remain object-identical. Cheap — it
+   has not moved since the capture, and a change there is a *composition* change (which provider is
+   registered), which a codegen digest could not answer anyway. `candle-gen-catalog` sits in the
+   same position and is in no closure list at all; that asymmetry is
+   [sc-17607](https://app.shortcut.com/trefry/story/17607).
+2. **Feature unification is narrower than the shipped bundle's.** `cargo test -p candle-gen-flux2
+   --features cuda` resolves a smaller feature set than `-p runtime-cuda` does. A feature enabled by
+   some crate outside the closure — `candle-llm`, the audio lane, another provider — changes how a
+   *shared* dependency (`candle-core`, `candle-nn`, `candle-transformers`) is compiled into the
+   shipped runtime, and therefore what FLUX.2 executes there. Feature flags are not recorded in
+   `Cargo.lock`, so the lockfile does not see it either: every closure object stays byte-identical,
+   the digest stays byte-identical, and the free path certifies. This is realized precedent in this
+   codebase — `core-llm` unifying `serde_json/preserve_order` flipped map ordering under CI.
+
+   Note that (2) is a gap between *the measured code* and *the shipped code*, not a regression in
+   what this audit claims: sc-15833's capture command is itself `cargo test -p candle-gen-flux2
+   --release --features cuda`, so the measurements were always taken under the provider-only
+   resolution. The audit's claim — "the code the measurements ran has not changed" — holds exactly.
+   Closing the wider gap wants a resolved-feature-set witness (`cargo tree -e features
+   -p runtime-cuda`, no compile), tracked as
+   [sc-17606](https://app.shortcut.com/trefry/story/17606).
 
 ## Known, accepted false positive
 
@@ -99,32 +190,62 @@ of the artifact, `CARGO_INCREMENTAL=0`, and `--locked`. The toolchain is re-read
 checkout — a checkout swaps `rust-toolchain.toml` too — and two builds under different compilers are
 a hard stop, because their digests are not comparable at all.
 
-## Known gap: the closure omits two build inputs (sc-17524)
+On Windows that was not sufficient, and sc-17524 found it by running the audit for real. `link.exe`
+stamps the link time into the PE image, so the *same* revision built twice hashed differently —
+`5ffd7612` gave `sha256:2164e988…` then `sha256:57f15abb…`, `06e0c5e9` gave `sha256:feb9ea68…` then
+`sha256:b5fbcd64…`. The cuda lane could only ever report ARTIFACTS DIFFER: an unfalsifiable
+"re-capture on an RTX PRO 6000" for code that had not changed. Byte-diffing two builds located it
+exactly — **21 bytes out of 181 MB, none of them in `.text`**: the COFF `TimeDateStamp` at `0x138`,
+its copy in each of the three debug-directory entries, and the 17-byte CodeView PDB GUID+age.
+Codegen was already deterministic.
 
-sc-15833 defined the closure as seven paths. Two root-level siblings that feed every one of those
-builds are **not** in it:
+The fix is `-Clink-arg=/Brepro -Clink-arg=/DEBUG:NONE`, on `win32` only. Both are needed, which a
+two-link experiment on a hello-world binary settled directly:
 
-- **`Cargo.lock`** — verified moved *inside the currently authorized window*:
-  `5ffd7612:Cargo.lock` is `8ab01e00…` and `277f4238:Cargo.lock` is `e5014b40…`, while all seven
-  audited objects stayed byte-identical. That particular diff is inert for FLUX.2, but that is luck,
-  not the audit. A `cargo update` bumping a semver-compatible transitive dependency the binary links
-  moves only the lockfile, and the free path reports "no build needed".
-- **`rust-toolchain.toml`** — same shape. It has not moved across this window, so the gap is
-  unrealized, but nothing on the free path looks at it.
+| flags | result |
+| --- | --- |
+| *(baseline)* | DIFFERS |
+| `/Brepro` | DIFFERS — it hashes the image, which still contains the varying PDB signature |
+| `/Brepro -Cstrip=symbols` | DIFFERS |
+| `/Brepro -Cdebuginfo=0` | DIFFERS — rustc passes `/DEBUG` on MSVC regardless |
+| `/DEBUG:NONE` | IDENTICAL |
+| `/Brepro /DEBUG:NONE` | **IDENTICAL** |
 
-This gap predates sc-17497 and is not introduced by it — the free path behaves exactly as the v1
-audit always did. It is **not** fixed here because it cannot be closed without a CUDA build: the
-lockfile has moved across every window in play (`5ffd7612` → `277f4238` → the live `35251a88` pin all
-share `e5014b40…` only from `277f4238` onward), so adding it to the closure would immediately demand
-an artifact proof this machine cannot produce. Widening the closure without the hardware to satisfy
-it converts a silent gap into a hard block, which helps nobody; sc-17524 does both together.
+`/DEBUG:NONE` is the one that decides it: no PDB is emitted, so there is no signature left to vary.
+Dropping it does not weaken the claim — the audited binary is built `--no-run` and never executes,
+debug info is not code, and `.text` is byte-identical with and without it. Verified at real scale:
+two builds of `5ffd7612` differ in **0 of 181,235,712 bytes**, and the shipped record's digest
+`d80844f2…` came back from **eleven builds across three separate runs**: the two-build
+same-revision probe, both revisions of `5ffd7612 → 06e0c5e9` in both build orders (4), the
+unmutated build of the sensitivity check (1), both revisions again when the record was re-emitted
+for the widened closure (2), and both revisions of the shipped `5ffd7612 → a4f409ae` window (2).
 
-Related: the artifact layer cannot adjudicate non-crate closure entries at all. Cargo's
-`compiler-artifact` stream only ever names *package* manifests, and inference's root `Cargo.toml` is
-a virtual manifest, so it can never appear in `adjudicates`. Any `[workspace.dependencies]` or
-`[patch]` edit therefore falls back to demanding object identity. Closing that properly means
-auditing an artifact that links the whole closure — `runtime-cuda`'s own test binary rather than the
-provider's — which needs a CUDA box to validate. Both are tracked in [sc-17524](https://app.shortcut.com/trefry/story/17524).
+**Stable is not the same as blind**, and the flag that bought stability is the one most likely to
+over-normalize — so the other direction was measured too. Mutating a production constant in the
+closure (`RMS_EPS: f64` in `candle-gen-flux2/src/transformer.rs`, `1e-5` → `2e-5`) under the same
+`/Brepro /DEBUG:NONE` moves the digest from `d80844f2…` to `43fcc369…`. The audit still sees code
+changes; it no longer sees the clock.
+
+Mach-O and ELF carry no such stamp, which is exactly why sc-17497's macOS round trip was stable and
+this went unseen.
+
+**Re-running is warm.** `--workdir PATH` builds at a fixed path and keeps the derived
+`<PATH>-target` afterwards. The remapped paths make every rustc fingerprint path-specific, so this
+is the only way a second run reuses the first one's dependency build; without it a re-run is a cold
+multi-hour compile. Only the workspace crates rebuild, because `git worktree add` gives every source
+file a fresh mtime.
+
+## Schema versions
+
+`schemaVersion: 3` is the ten-path closure. v1 (object identity only) and v2 (sc-17497's
+seven-path artifact layer) are **refused**, not re-graded: a record produced before `Cargo.lock`,
+`rust-toolchain.toml` and `.cargo/config.toml` were audited cannot be read as evidence about them. The closure-identity check
+would reject them on size regardless; the version check is the legible version of the same refusal.
+
+Superseded record files stay on disk — `inference-compatibility-277f.json` is the v1 one, and the
+current window `5ffd7612 → a4f409ae` strictly contains the window it proved. They are history, not
+fallbacks: pointing `SOURCE_PATHS.inferenceCompatibility` back at one is a hard failure, because
+`validatedInferenceCompatibility` throws rather than degrading.
 
 ## After a build was needed
 
@@ -146,10 +267,8 @@ Moving the live pin at all — with or without a build — also means:
   `config/manifests/builtin.models.jsonc`;
 - `SOURCE_PATHS.inferenceCompatibility` (`scripts/generate-memory-matrix.mjs`) and the same filename
   hardcoded in `scripts/sc-15833-flux2-evidence.test.mjs`;
-- `LIVE_INFERENCE_REVISION` in `scripts/sc-15833-flux2-evidence.test.mjs`, plus two assertions in
-  that file's v1-shaped test: `capturedObject === compatibleObject` for every audited object, and
-  the `changedPathDisposition` assertions — **a v2 record does not emit that field at all**, so they
-  must move to `changedClosurePaths`;
+- `LIVE_INFERENCE_REVISION` in `scripts/sc-15833-flux2-evidence.test.mjs`, and its assertion that
+  every audited object is `capturedObject === compatibleObject` — true only on the free path;
 - `crates/sceneworks-worker/src/candle_memory_strategy.rs`'s binding test, which asserts the literal
   revision pair;
 - the evidence-classification test in `scripts/calibration-cost-model.test.mjs` and
