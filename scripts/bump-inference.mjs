@@ -25,6 +25,14 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// The stage-2 derivation owns both halves of the facts-file contract, so the bump's fail-closed
+// check reuses them rather than re-implementing a second, drifting copy (the same cross-import
+// shape as scripts/check-scaffold.mjs).
+import {
+  assertBackendCoverage,
+  parseSceneworksBackends,
+} from "../apps/web/src/data/previewSupportDerivation.js";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
 const MEMORY_MANIFEST = join(repoRoot, "crates/sceneworks-memory-adapter/Cargo.toml");
@@ -283,6 +291,30 @@ function verifyEngineCapabilityFacts(sha) {
         "`npm run gen:preview-support` from apps/web.",
     );
   }
+  // Coverage BEFORE staleness (sc-17119). The loop below can only judge files that exist, so a
+  // backend that was never dumped is not "stale" — it is absent, and absence passed this check
+  // forever. `capabilities.mlx.json` was absent for four consecutive pins beginning with the one
+  // sc-16965 itself shipped on, and nothing in this function could have objected -- it validates
+  // only the files that are there.
+  const dumpedBackends = names.map((name) => {
+    const backend = JSON.parse(readFileSync(join(dir, name), "utf8"))?.backend;
+    if (typeof backend !== "string" || backend.length === 0) {
+      // Named here rather than left to `assertBackendCoverage`, which sees only the values: a
+      // nameless backend reads there as an unidentifiable entry, and the operator needs the file.
+      throw new Error(
+        `${name} carries no \`backend\` field, so it cannot be matched against SCENEWORKS_BACKENDS. ` +
+          "Re-dump it on the lane that owns it rather than hand-editing it.",
+      );
+    }
+    return backend;
+  });
+  assertBackendCoverage(
+    parseSceneworksBackends(
+      readFileSync(join(repoRoot, "crates/sceneworks-worker/src/engine_capability_facts.rs"), "utf8"),
+    ),
+    dumpedBackends,
+  );
+
   const stale = [];
   for (const name of names) {
     const facts = JSON.parse(readFileSync(join(dir, name), "utf8"));
