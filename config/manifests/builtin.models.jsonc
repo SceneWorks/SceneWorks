@@ -5177,7 +5177,18 @@
         // the first sufficient rung in declaration order. Curves are conservative upper fits (+~0.1 GiB
         // calibration allowance) to rendered-device samples at 768² and 1024², seed 42, on an exclusive
         // RTX PRO 6000 Blackwell with the public q4 turnkey. Step count does not change the working set.
-        // Raw sample peaks (GiB):
+        //
+        // ==> SUPERSEDED BY sc-17097. The sc-15117/15205/15206/16514 sample tables below describe the
+        // calibration-ABI-1 captures and are retained as provenance for how this block was originally
+        // derived. They are NOT the shipped curves: `turboFit.phaseCurvesByTier` is now fitted from the
+        // ABI-3 re-measurement, whose raw samples are tabulated in Shortcut sc-17097 activity 17466 and
+        // reproduced per cell in each `evidenceRecords` entry's `observedPhasesGb` / `observedPeaksGb`.
+        // The methodology is unchanged (exclusive rendered-device phase peaks at 768² and 1024²); the
+        // instrument is now the versioned harness (`sceneworks-memory-v5`, 30 cells, --fresh-per-case)
+        // rather than an ad-hoc capture, and every fitted curve is pinned at or above BOTH measured
+        // geometries so no measured point can be under-predicted.
+        //
+        // Superseded ABI-1 raw sample peaks (GiB):
         //   threeStage       768² text/denoise/decode 3.895/11.747/10.843;
         //                    1024²                         3.895/15.405/15.440
         //   tiledVae        768²                           3.895/11.747/9.702;
@@ -5225,20 +5236,36 @@
           // measured-composition identity per rung. SC-16402 corrects the provider contract to attest
           // the physical staged-residency path already present in the tiled-VAE, chunked-attention,
           // and streamed-block captures, so every measured row binds to its exact executed composition.
-          "calibrationAbi": 1,
+          //
+          // sc-17097 re-collects every cell below under `gen_core::MEMORY_CALIBRATION_ABI` 3. The ABI
+          // moved 1 -> 2 (typed load shape, inference sc-16583) -> 3 (typed reference-count geometry,
+          // inference 5083b0ec), and each bump declares earlier records intentionally stale. Stamping 3
+          // onto the ABI-1 curves would have silenced the handshake while leaving a fit measured under
+          // different semantics, which is exactly what the handshake exists to stop - and the numbers
+          // moved, so it would also have shipped wrong ones. Every tier's three-stage peak is now
+          // materially HIGHER than the ABI-1 curve it replaces (q4 1024^2 15.44 -> 21.285 GiB, q8
+          // 22.015 -> 25.911, bf16 32.014 -> 36.724): the superseded manifest UNDER-predicted the rung
+          // a constrained card falls to first, while the deeper bounded rungs got cheaper.
+          //
+          // `loadShape` is the ABI-2 axis made load-bearing on this route. The worker used to take the
+          // shape from the provider alone, so the axis did no work here; it now compares this declared
+          // shape against the provider identity and refuses a fit measured under the other one.
+          "calibrationAbi": 3,
+          "loadShape": "deferred_materialization",
           "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
           "sceneWorksRevision": "sc-15449-contract-v1",
-          // The pinned 1c4354 merge changes Mage/request contracts only; Krea's measured CUDA
-          // implementation and calibration fingerprint are byte-for-byte unchanged, so the
-          // historical captures below are explicitly compatible with this additive revision.
-          "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+          // Exact inference commit the sc-17097 campaign measured against, probed by the harness before
+          // and after every provider case. The fingerprint is unchanged because the provider's tensor
+          // layout, quantization floors and execution structure did not move - only the shared contract
+          // ABI did, which is precisely the split the two identity fields exist to express.
+          "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
-            "stories": ["sc-15117", "sc-15205", "sc-15206"],
+            "stories": ["sc-15117", "sc-15205", "sc-15206", "sc-17097"],
             "method": "exclusive rendered-device phase peaks at 768x768 and 1024x1024",
-            "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB",
-            "outputParity": "ordinary CUDA text-to-image retains tier and output bytes"
+            "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB; every fitted curve pinned at or above BOTH measured geometries after rounding, so no measured point can be under-predicted",
+            "outputParity": "ordinary CUDA text-to-image retains tier and output bytes; sc-17097 additionally compares a resident render against the deepest bounded rung from one loaded generator per tier, after proving the resident A-B-A repeat is bit-identical"
           },
           // Machine-readable evidence cells. `exact_request` rows carry geometry-specific output
           // parity and may admit that exact request after runtime fingerprint/loadability checks.
@@ -5247,18 +5274,18 @@
           // values come from the cited Shortcut activities; artifact revisions name the merged path.
           "evidenceRecords": [
             {
-              "evidenceScope": "exact_request",
+              "evidenceScope": "phase_fit_only",
               "tier": "q4",
               "width": 768,
               "height": 768,
-              "capturedAt": "2026-07-26T21:22:50Z",
-              "harnessVersion": "sc-15117-activity-15189",
-              "sourceStory": "sc-15117",
-              "sourceActivity": 15189,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:43:06Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5266,38 +5293,87 @@
                 "tierRoot": "q4",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 11.85679552,
-                "tiledVae": 11.85679552,
-                "chunkedAttention": 11.18799616,
-                "streamedBlocks": 4.8491392
+                "threeStage": 16.28908,
+                "tiledVae": 10.40948,
+                "chunkedAttention": 9.7627,
+                "streamedBlocks": 4.32
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 4.0, "denoise": 11.85679552, "decode": 10.95593472 },
-                "tiledVae": { "text": 4.0, "denoise": 11.85679552, "decode": 9.80718592 },
-                "chunkedAttention": { "text": 4.0, "denoise": 11.18799616, "decode": 9.81 },
-                "streamedBlocks": { "text": 4.0, "denoise": 3.86928384, "decode": 4.8491392 }
+                "threeStage": {
+                  "text": 3.57,
+                  "denoise": 10.60069,
+                  "decode": 16.28908
+                },
+                "tiledVae": {
+                  "text": 3.57,
+                  "denoise": 10.40948,
+                  "decode": 8.6
+                },
+                "chunkedAttention": {
+                  "text": 3.44925,
+                  "denoise": 9.7627,
+                  "decode": 8.6
+                },
+                "streamedBlocks": {
+                  "text": 3.57,
+                  "denoise": 3.4485,
+                  "decode": 4.32
+                }
+              },
+              "observedPhasesGb": {
+                "threeStage": {
+                  "text": 3.565,
+                  "denoise": 10.597,
+                  "decode": 16.286
+                },
+                "tiledVae": {
+                  "text": 3.565,
+                  "denoise": 10.409,
+                  "decode": 8.599
+                },
+                "chunkedAttention": {
+                  "text": 3.44,
+                  "denoise": 9.753,
+                  "decode": 8.599
+                },
+                "streamedBlocks": {
+                  "text": 3.565,
+                  "denoise": 3.44,
+                  "decode": 4.317
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 11.747,
-                "tiledVae": 11.747,
-                "chunkedAttention": 11.076,
-                "streamedBlocks": 4.736
+                "threeStage": 16.286,
+                "tiledVae": 10.409,
+                "chunkedAttention": 9.753,
+                "streamedBlocks": 4.317
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
-              },
-              "parity": {
-                "contract": "golden",
-                "result": "passed",
-                "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.213,
-                "fixture": "sc-15117-q4-768-seed42"
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               }
             },
             {
@@ -5305,14 +5381,14 @@
               "tier": "q4",
               "width": 1024,
               "height": 1024,
-              "capturedAt": "2026-07-26T21:22:50Z",
-              "harnessVersion": "sc-15117-activity-15189",
-              "sourceStory": "sc-15117",
-              "sourceActivity": 15189,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:41:33Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5320,38 +5396,72 @@
                 "tierRoot": "q4",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 15.55721728,
-                "tiledVae": 15.51763648,
-                "chunkedAttention": 11.45865984,
-                "streamedBlocks": 5.7895808
+                "threeStage": 21.28948,
+                "tiledVae": 13.31797,
+                "chunkedAttention": 10.54258,
+                "streamedBlocks": 4.32
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 4.0, "denoise": 15.51763648, "decode": 15.55721728 },
-                "tiledVae": { "text": 4.0, "denoise": 15.51763648, "decode": 9.84388608 },
-                "chunkedAttention": { "text": 4.0, "denoise": 11.45865984, "decode": 9.81 },
-                "streamedBlocks": { "text": 4.0, "denoise": 4.17206016, "decode": 5.7895808 }
+                "threeStage": {
+                  "text": 3.57,
+                  "denoise": 14.53678,
+                  "decode": 21.28948
+                },
+                "tiledVae": {
+                  "text": 3.57,
+                  "denoise": 13.31797,
+                  "decode": 8.6
+                },
+                "chunkedAttention": {
+                  "text": 3.57312,
+                  "denoise": 10.54258,
+                  "decode": 8.6
+                },
+                "streamedBlocks": {
+                  "text": 3.57,
+                  "denoise": 3.69623,
+                  "decode": 4.32
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 15.440,
-                "tiledVae": 15.405,
-                "chunkedAttention": 11.345,
-                "streamedBlocks": 5.676
+                "threeStage": 21.285,
+                "tiledVae": 13.316,
+                "chunkedAttention": 10.534,
+                "streamedBlocks": 3.69
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
                 "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.0528,
-                "fixture": "sc-15117-q4-1024-seed42"
+                "maximumError": 0.01681,
+                "fixture": "krea-q4-1024-seed42"
               }
             },
             {
@@ -5359,14 +5469,14 @@
               "tier": "q8",
               "width": 768,
               "height": 768,
-              "capturedAt": "2026-07-27T03:22:43Z",
-              "harnessVersion": "sc-15205-activity-15272",
-              "sourceStory": "sc-15205",
-              "sourceActivity": 15272,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:50:32Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5374,37 +5484,87 @@
                 "tierRoot": "q8",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 18.46679552,
-                "tiledVae": 18.46679552,
-                "chunkedAttention": 17.72599232,
-                "streamedBlocks": 6.4488064
+                "threeStage": 21.41617,
+                "tiledVae": 15.51164,
+                "chunkedAttention": 14.88366,
+                "streamedBlocks": 5.01
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 6.45, "denoise": 18.46679552, "decode": 16.62 },
-                "tiledVae": { "text": 6.45, "denoise": 18.46679552, "decode": 16.65 },
-                "chunkedAttention": { "text": 6.45, "denoise": 17.72599232, "decode": 16.62 },
-                "streamedBlocks": { "text": 6.4488064, "denoise": 6.3177888, "decode": 4.94 }
+                "threeStage": {
+                  "text": 5.01,
+                  "denoise": 15.69907,
+                  "decode": 21.41617
+                },
+                "tiledVae": {
+                  "text": 5.01,
+                  "denoise": 15.51164,
+                  "decode": 13.70129
+                },
+                "chunkedAttention": {
+                  "text": 5.01,
+                  "denoise": 14.88366,
+                  "decode": 13.66258
+                },
+                "streamedBlocks": {
+                  "text": 5.01,
+                  "denoise": 4.88,
+                  "decode": 4.42
+                }
               },
               "observedPhasesGb": {
-                "threeStage": { "text": 6.345, "denoise": 18.357, "decode": 16.514 },
-                "tiledVae": { "text": 6.345, "denoise": 18.357, "decode": 16.548 },
-                "chunkedAttention": { "text": 6.345, "denoise": 17.619, "decode": 16.514 },
-                "streamedBlocks": { "text": 6.345, "denoise": 6.211, "decode": 4.837 }
+                "threeStage": {
+                  "text": 5.003,
+                  "denoise": 15.69,
+                  "decode": 21.411
+                },
+                "tiledVae": {
+                  "text": 5.003,
+                  "denoise": 15.503,
+                  "decode": 13.692
+                },
+                "chunkedAttention": {
+                  "text": 5.003,
+                  "denoise": 14.878,
+                  "decode": 13.661
+                },
+                "streamedBlocks": {
+                  "text": 5.003,
+                  "denoise": 4.878,
+                  "decode": 4.411
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 18.357,
-                "tiledVae": 18.357,
-                "chunkedAttention": 17.619,
-                "streamedBlocks": 6.345
+                "threeStage": 21.411,
+                "tiledVae": 15.503,
+                "chunkedAttention": 14.878,
+                "streamedBlocks": 5.003
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               }
             },
             {
@@ -5412,14 +5572,14 @@
               "tier": "q8",
               "width": 1024,
               "height": 1024,
-              "capturedAt": "2026-07-27T03:22:43Z",
-              "harnessVersion": "sc-15205-activity-15272",
-              "sourceStory": "sc-15205",
-              "sourceActivity": 15272,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:49:46Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5427,44 +5587,72 @@
                 "tierRoot": "q8",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 22.12763648,
-                "tiledVae": 22.12763648,
-                "chunkedAttention": 18.26731968,
-                "streamedBlocks": 6.9534336
+                "threeStage": 25.91653,
+                "tiledVae": 19.04404,
+                "chunkedAttention": 15.25983,
+                "streamedBlocks": 5.01
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 6.45, "denoise": 22.12763648, "decode": 16.62 },
-                "tiledVae": { "text": 6.45, "denoise": 22.12763648, "decode": 16.65 },
-                "chunkedAttention": { "text": 6.45, "denoise": 18.26731968, "decode": 16.62 },
-                "streamedBlocks": { "text": 6.9534336, "denoise": 6.8682912, "decode": 4.94 }
-              },
-              "observedPhasesGb": {
-                "threeStage": { "text": 6.345, "denoise": 22.015, "decode": 16.514 },
-                "tiledVae": { "text": 6.345, "denoise": 22.015, "decode": 16.514 },
-                "chunkedAttention": { "text": 6.345, "denoise": 18.156, "decode": 16.512 },
-                "streamedBlocks": { "text": 6.847, "denoise": 6.757, "decode": 4.132 }
+                "threeStage": {
+                  "text": 5.01,
+                  "denoise": 19.16723,
+                  "decode": 25.91653
+                },
+                "tiledVae": {
+                  "text": 5.01,
+                  "denoise": 19.04404,
+                  "decode": 13.7334
+                },
+                "chunkedAttention": {
+                  "text": 5.01,
+                  "denoise": 15.25983,
+                  "decode": 13.7268
+                },
+                "streamedBlocks": {
+                  "text": 5.01,
+                  "denoise": 4.88,
+                  "decode": 4.42
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 22.015,
-                "tiledVae": 22.015,
-                "chunkedAttention": 18.156,
-                "streamedBlocks": 6.847
+                "threeStage": 25.911,
+                "tiledVae": 19.034,
+                "chunkedAttention": 15.253,
+                "streamedBlocks": 5.003
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
                 "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.045161,
-                "fixture": "sc-15205-q8-1024-seed42"
+                "maximumError": 0.016112,
+                "fixture": "krea-q8-1024-seed42"
               }
             },
             {
@@ -5472,14 +5660,14 @@
               "tier": "bf16",
               "width": 768,
               "height": 768,
-              "capturedAt": "2026-07-27T11:24:32Z",
-              "harnessVersion": "sc-15206-activity-15314-waiver-15323",
-              "sourceStory": "sc-15206",
-              "sourceActivity": 15314,
-              "sceneWorksCommit": "1ad286f66d8c3c6c68f81923f992bddc65b9ea7b",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:56:48Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5487,37 +5675,87 @@
                 "tierRoot": "bf16",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 28.4896096,
-                "tiledVae": 28.4896096,
-                "chunkedAttention": 27.65976128,
-                "streamedBlocks": 8.64
+                "threeStage": 32.26489,
+                "tiledVae": 26.4811,
+                "chunkedAttention": 25.66796,
+                "streamedBlocks": 8.1
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 8.8, "denoise": 28.4896096, "decode": 26.51718592 },
-                "tiledVae": { "text": 8.8, "denoise": 28.4896096, "decode": 26.55 },
-                "chunkedAttention": { "text": 8.63, "denoise": 27.65976128, "decode": 26.52 },
-                "streamedBlocks": { "text": 8.64, "denoise": 8.64, "decode": 2.22872448 }
+                "threeStage": {
+                  "text": 7.94129,
+                  "denoise": 26.57239,
+                  "decode": 32.26489
+                },
+                "tiledVae": {
+                  "text": 8.1,
+                  "denoise": 26.4811,
+                  "decode": 24.60129
+                },
+                "chunkedAttention": {
+                  "text": 8.1,
+                  "denoise": 25.66796,
+                  "decode": 24.6
+                },
+                "streamedBlocks": {
+                  "text": 8.1,
+                  "denoise": 7.94162,
+                  "decode": 4.48
+                }
               },
               "observedPhasesGb": {
-                "threeStage": { "text": 8.694, "denoise": 28.390, "decode": 26.413 },
-                "tiledVae": { "text": 8.694, "denoise": 28.390, "decode": 26.446 },
-                "chunkedAttention": { "text": 8.527, "denoise": 27.552, "decode": 26.414 },
-                "streamedBlocks": { "text": 8.535, "denoise": 8.533, "decode": 2.130 }
+                "threeStage": {
+                  "text": 7.94,
+                  "denoise": 26.565,
+                  "decode": 32.255
+                },
+                "tiledVae": {
+                  "text": 8.097,
+                  "denoise": 26.472,
+                  "decode": 24.599
+                },
+                "chunkedAttention": {
+                  "text": 8.097,
+                  "denoise": 25.659,
+                  "decode": 24.599
+                },
+                "streamedBlocks": {
+                  "text": 8.097,
+                  "denoise": 7.94,
+                  "decode": 4.474
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 28.390,
-                "tiledVae": 28.390,
-                "chunkedAttention": 27.552,
-                "streamedBlocks": 8.535
+                "threeStage": 32.255,
+                "tiledVae": 26.472,
+                "chunkedAttention": 25.659,
+                "streamedBlocks": 8.097
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               }
             },
             {
@@ -5525,14 +5763,14 @@
               "tier": "bf16",
               "width": 1024,
               "height": 1024,
-              "capturedAt": "2026-07-27T11:24:32Z",
-              "harnessVersion": "sc-15206-activity-15314-waiver-15323",
-              "sourceStory": "sc-15206",
-              "sourceActivity": 15314,
-              "sceneWorksCommit": "1ad286f66d8c3c6c68f81923f992bddc65b9ea7b",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:55:42Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5540,44 +5778,72 @@
                 "tierRoot": "bf16",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 32.1137504,
-                "tiledVae": 32.1137504,
-                "chunkedAttention": 27.76068672,
-                "streamedBlocks": 8.64
+                "threeStage": 36.73313,
+                "tiledVae": 29.85752,
+                "chunkedAttention": 25.75972,
+                "streamedBlocks": 8.40955
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55388608 },
-                "tiledVae": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55 },
-                "chunkedAttention": { "text": 8.63, "denoise": 27.76068672, "decode": 26.52 },
-                "streamedBlocks": { "text": 8.64, "denoise": 8.64, "decode": 3.72884352 }
-              },
-              "observedPhasesGb": {
-                "threeStage": { "text": 8.694, "denoise": 32.014, "decode": 26.446 },
-                "tiledVae": { "text": 8.560, "denoise": 32.014, "decode": 26.446 },
-                "chunkedAttention": { "text": 8.526, "denoise": 27.652, "decode": 26.413 },
-                "streamedBlocks": { "text": 8.526, "denoise": 8.526, "decode": 3.629 }
+                "threeStage": {
+                  "text": 7.9734,
+                  "denoise": 29.98092,
+                  "decode": 36.73313
+                },
+                "tiledVae": {
+                  "text": 8.1,
+                  "denoise": 29.85752,
+                  "decode": 24.6334
+                },
+                "chunkedAttention": {
+                  "text": 8.1,
+                  "denoise": 25.75972,
+                  "decode": 24.6
+                },
+                "streamedBlocks": {
+                  "text": 8.1,
+                  "denoise": 8.40955,
+                  "decode": 4.48
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 32.014,
-                "tiledVae": 32.014,
-                "chunkedAttention": 27.652,
-                "streamedBlocks": 8.526
+                "threeStage": 36.724,
+                "tiledVae": 29.847,
+                "chunkedAttention": 25.753,
+                "streamedBlocks": 8.408
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
                 "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.046175,
-                "fixture": "sc-15206-bf16-1024-seed42"
+                "maximumError": 0.016239,
+                "fixture": "krea-bf16-1024-seed42"
               }
             }
           ],
@@ -5619,68 +5885,176 @@
           "phaseCurvesByTier": {
             "q4": {
               "threeStage": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 7.15, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 5.04, "perMpxGb": 10.03 }
+                "text": {
+                  "fixedGb": 3.57,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 5.54,
+                  "perMpxGb": 8.58
+                },
+                "decode": {
+                  "fixedGb": 9.86,
+                  "perMpxGb": 10.9
+                }
               },
               "tiledVae": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 7.15, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 9.76, "perMpxGb": 0.08 }
+                "text": {
+                  "fixedGb": 3.57,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 6.67,
+                  "perMpxGb": 6.34
+                },
+                "decode": {
+                  "fixedGb": 8.6,
+                  "perMpxGb": 0
+                }
               },
               "chunkedAttention": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 10.84, "perMpxGb": 0.59 },
-                "decode": { "fixedGb": 9.81, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 3.29,
+                  "perMpxGb": 0.27
+                },
+                "denoise": {
+                  "fixedGb": 8.76,
+                  "perMpxGb": 1.7
+                },
+                "decode": {
+                  "fixedGb": 8.6,
+                  "perMpxGb": 0
+                }
               },
               "streamedBlocks": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 3.48, "perMpxGb": 0.66 },
-                "decode": { "fixedGb": 3.64, "perMpxGb": 2.05 }
+                "text": {
+                  "fixedGb": 3.57,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 3.13,
+                  "perMpxGb": 0.54
+                },
+                "decode": {
+                  "fixedGb": 4.32,
+                  "perMpxGb": 0
+                }
               }
             },
             "q8": {
               "threeStage": {
-                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 13.76, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 16.62, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 11.24,
+                  "perMpxGb": 7.56
+                },
+                "decode": {
+                  "fixedGb": 15.63,
+                  "perMpxGb": 9.81
+                }
               },
               "tiledVae": {
-                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 13.76, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 16.65, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 10.97,
+                  "perMpxGb": 7.7
+                },
+                "decode": {
+                  "fixedGb": 13.66,
+                  "perMpxGb": 0.07
+                }
               },
               "chunkedAttention": {
-                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 17.03, "perMpxGb": 1.18 },
-                "decode": { "fixedGb": 16.62, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 14.4,
+                  "perMpxGb": 0.82
+                },
+                "decode": {
+                  "fixedGb": 13.58,
+                  "perMpxGb": 0.14
+                }
               },
               "streamedBlocks": {
-                "text": { "fixedGb": 5.80, "perMpxGb": 1.10 },
-                "denoise": { "fixedGb": 5.61, "perMpxGb": 1.20 },
-                "decode": { "fixedGb": 4.94, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 4.88,
+                  "perMpxGb": 0
+                },
+                "decode": {
+                  "fixedGb": 4.42,
+                  "perMpxGb": 0
+                }
               }
             },
             "bf16": {
               "threeStage": {
-                "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 23.83, "perMpxGb": 7.90 },
-                "decode": { "fixedGb": 26.47, "perMpxGb": 0.08 }
+                "text": {
+                  "fixedGb": 7.9,
+                  "perMpxGb": 0.07
+                },
+                "denoise": {
+                  "fixedGb": 22.19,
+                  "perMpxGb": 7.43
+                },
+                "decode": {
+                  "fixedGb": 26.52,
+                  "perMpxGb": 9.74
+                }
               },
               "tiledVae": {
-                "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 23.83, "perMpxGb": 7.90 },
-                "decode": { "fixedGb": 26.55, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 8.1,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 22.14,
+                  "perMpxGb": 7.36
+                },
+                "decode": {
+                  "fixedGb": 24.56,
+                  "perMpxGb": 0.07
+                }
               },
               "chunkedAttention": {
-                "text": { "fixedGb": 8.63, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 27.53, "perMpxGb": 0.22 },
-                "decode": { "fixedGb": 26.52, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 8.1,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 25.55,
+                  "perMpxGb": 0.2
+                },
+                "decode": {
+                  "fixedGb": 24.6,
+                  "perMpxGb": 0
+                }
               },
               "streamedBlocks": {
-                "text": { "fixedGb": 8.64, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 8.64, "perMpxGb": 0.00 },
-                "decode": { "fixedGb": 0.30, "perMpxGb": 3.27 }
+                "text": {
+                  "fixedGb": 8.1,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 7.34,
+                  "perMpxGb": 1.02
+                },
+                "decode": {
+                  "fixedGb": 4.48,
+                  "perMpxGb": 0
+                }
               }
             }
           }

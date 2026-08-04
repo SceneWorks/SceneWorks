@@ -352,10 +352,11 @@ pub(crate) enum KreaTurboFit {
     },
 }
 
-const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
-// The 1c4354 inference merge is additive to Mage/request contracts and leaves the Krea CUDA
-// implementation plus its calibration fingerprint unchanged.
-const KREA_TURBO_INFERENCE_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
+pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
+// sc-17097: the exact inference commit the shipped Krea phase curves were re-measured against, under
+// `gen_core::MEMORY_CALIBRATION_ABI` 3. It must stay equal to the manifest's `turboFit.inferenceRevision`
+// - `candidate_exclusion` compares the two and stales every optimized rung when they diverge.
+pub(crate) const KREA_TURBO_INFERENCE_REVISION: &str = "277f423822bf1899340ed3d867c3d6a773473d7b";
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {
@@ -489,6 +490,18 @@ impl KreaRuntimeEvidenceContext {
 /// decrease; the manifest names each such pair. `maxMeasuredPixels` remains 1024² because larger
 /// attention shapes have not been validated, so the curve is fitted within that bound rather than
 /// extrapolated beyond it.
+/// The typed materialization shape the shipped Krea Turbo curves were measured under (sc-17097).
+///
+/// `None` for a missing or unrecognized value, which fails the fit closed rather than defaulting: a
+/// silently assumed shape is what let calibration ABI 2's load-shape axis do no work on this route.
+pub(crate) fn krea_turbo_load_shape(turbo_fit: &Value) -> Option<gen_core::LoadShape> {
+    match turbo_fit.get("loadShape")?.as_str()? {
+        "eager_materialization" => Some(gen_core::LoadShape::EagerMaterialization),
+        "deferred_materialization" => Some(gen_core::LoadShape::DeferredMaterialization),
+        _ => None,
+    }
+}
+
 fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
     let fixed = phase.get("fixedGb").and_then(json_f64)?;
     let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
@@ -593,6 +606,11 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
     let calibration_fingerprint = turbo_fit.get("calibrationFingerprint")?.as_str()?;
     let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
+    // sc-17097: calibration ABI 2 added the typed load shape, but this route never read it - the
+    // worker took the shape from the provider alone, so the axis could not detect drift here. The
+    // manifest now states the shape its curves were MEASURED under and the handshake below compares
+    // the two; eager and deferred measurements are not interchangeable.
+    let declared_load_shape = krea_turbo_load_shape(turbo_fit)?;
     let scene_works_revision = turbo_fit.get("sceneWorksRevision")?.as_str()?;
     let inference_revision = turbo_fit.get("inferenceRevision")?.as_str()?;
     let max_pixels = turbo_fit.get("maxMeasuredPixels")?.as_u64()?;
@@ -729,7 +747,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             .calibration
             .as_ref()
             .is_some_and(|identity| {
-                identity.abi == calibration_abi && identity.fingerprint == calibration_fingerprint
+                identity.abi == calibration_abi
+                    && identity.fingerprint == calibration_fingerprint
+                    && identity.load_shape == declared_load_shape
             });
         let valid_commit = |field: &str| {
             evidence_record
@@ -1634,13 +1654,16 @@ mod tests {
             "candle": {
                 "vramGbByTier": { "q4": 30.0 },
                 "turboFit": {
-                    // The fixture opts in at the CURRENT calibration ABI: these tests pin the
-                    // verified selector ladder, not receipt provenance (production manifests stay
-                    // at their measured ABI and correctly degrade until sc-16915 re-collects).
+                    // This is a SYNTHETIC ladder fixture (30 GiB flat q4 curves), not the shipped
+                    // manifest, so tracking the current constants is authoring rather than surgery -
+                    // `builtin_krea_turbo_calibration_abi_tracks_the_pinned_provider` and
+                    // `builtin_krea_turbo_resident_admission_passes_the_provider_handshake` are the
+                    // tests that read the SHIPPED values, and neither patches anything.
                     "calibrationAbi": gen_core::MEMORY_CALIBRATION_ABI,
+                    "loadShape": "deferred_materialization",
                     "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
                     "sceneWorksRevision": "sc-15449-contract-v1",
-                    "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+                    "inferenceRevision": KREA_TURBO_INFERENCE_REVISION,
                     "measured": true,
                     "maxMeasuredPixels": 1048576,
                     "evidenceRecords": [{
@@ -1652,7 +1675,7 @@ mod tests {
                         "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
                         "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
                         "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-                        "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+                        "compatibleInferenceRevision": KREA_TURBO_INFERENCE_REVISION,
                         "measuredCompositions": {
                             "threeStage": ["resident", "staged_residency"],
                             "tiledVae": ["resident", "staged_residency", "bounded_decode"],
@@ -1789,6 +1812,66 @@ mod tests {
         manifest["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
         manifest
+    }
+
+    /// sc-17097: NO shipped route may carry a `calibrationAbi` stamp the pinned gen-core has moved
+    /// past, whatever its manifest shape.
+    ///
+    /// The per-route tests below cover `krea_2_turbo` in depth because it is the one stamp that reaches
+    /// a provider run context. This sweep is the cheap net for the next ABI bump: it walks the whole
+    /// builtin manifest for any key named `calibrationAbi` and fails on the first stale one, so a route
+    /// added later cannot ship a stale stamp just because nobody wrote it a bespoke test.
+    ///
+    /// Deliberately NOT swept: `mlx.calibrations[].abi` and `memoryStrategyContract.abi`. The former is
+    /// a historical receipt binding whose ABI-1 rows are correct provenance and demote fail-closed to
+    /// the legacy estimator (sc-16482 forbids backfilling them); the latter is an unrelated
+    /// static-contract version that the schema independently pins.
+    #[test]
+    fn no_builtin_route_ships_a_stale_calibration_abi_stamp() {
+        let jsonc = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let parsed: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
+                .expect("builtin model manifest parses");
+
+        fn walk(value: &Value, path: &str, found: &mut Vec<(String, u64)>) {
+            match value {
+                Value::Object(map) => {
+                    for (key, child) in map {
+                        if key == "calibrationAbi" {
+                            found.push((
+                                format!("{path}.{key}"),
+                                child.as_u64().expect("calibrationAbi is an integer"),
+                            ));
+                        }
+                        walk(child, &format!("{path}.{key}"), found);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        walk(child, &format!("{path}[{index}]"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&parsed, "manifest", &mut found);
+        assert!(
+            !found.is_empty(),
+            "the sweep found no calibrationAbi stamps at all — it has stopped inspecting what it \
+             claims to guard"
+        );
+        let stale = found
+            .iter()
+            .filter(|(_, abi)| *abi != u64::from(gen_core::MEMORY_CALIBRATION_ABI))
+            .collect::<Vec<_>>();
+        assert!(
+            stale.is_empty(),
+            "{stale:?} are stamped at a calibration ABI the pinned gen-core ({}) has moved past; \
+             re-measure those fits, do not re-stamp them",
+            gen_core::MEMORY_CALIBRATION_ABI
+        );
     }
 
     /// sc-17097: the shipped `krea_2_turbo` opt-in must be stamped at the calibration ABI the pinned
@@ -2629,34 +2712,34 @@ mod tests {
             (
                 MemoryStrategy::StagedResidency,
                 768,
-                [6.345, 18.357, 16.514],
+                [5.003, 15.690, 21.411],
             ),
             (
                 MemoryStrategy::StagedResidency,
                 1024,
-                [6.345, 22.015, 16.514],
+                [5.003, 19.159, 25.911],
             ),
-            (MemoryStrategy::BoundedDecode, 768, [6.345, 18.357, 16.548]),
-            (MemoryStrategy::BoundedDecode, 1024, [6.345, 22.015, 16.514]),
+            (MemoryStrategy::BoundedDecode, 768, [5.003, 15.503, 13.692]),
+            (MemoryStrategy::BoundedDecode, 1024, [5.003, 19.034, 13.724]),
             (
                 MemoryStrategy::BoundedAttention,
                 768,
-                [6.345, 17.619, 16.514],
+                [5.003, 14.878, 13.661],
             ),
             (
                 MemoryStrategy::BoundedAttention,
                 1024,
-                [6.345, 18.156, 16.512],
+                [5.003, 15.253, 13.724],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 768,
-                [6.345, 6.211, 4.837],
+                [5.003, 4.878, 4.411],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 1024,
-                [6.847, 6.757, 4.132],
+                [5.003, 4.878, 3.661],
             ),
         ];
         for (rung, edge, measured) in samples {
@@ -2876,34 +2959,34 @@ mod tests {
             (
                 MemoryStrategy::StagedResidency,
                 768,
-                [8.694, 28.390, 26.413],
+                [7.940, 26.565, 32.255],
             ),
             (
                 MemoryStrategy::StagedResidency,
                 1024,
-                [8.694, 32.014, 26.446],
+                [7.972, 29.972, 36.724],
             ),
-            (MemoryStrategy::BoundedDecode, 768, [8.694, 28.390, 26.446]),
-            (MemoryStrategy::BoundedDecode, 1024, [8.560, 32.014, 26.446]),
+            (MemoryStrategy::BoundedDecode, 768, [8.097, 26.472, 24.599]),
+            (MemoryStrategy::BoundedDecode, 1024, [8.097, 29.847, 24.630]),
             (
                 MemoryStrategy::BoundedAttention,
                 768,
-                [8.527, 27.552, 26.414],
+                [8.097, 25.659, 24.599],
             ),
             (
                 MemoryStrategy::BoundedAttention,
                 1024,
-                [8.526, 27.652, 26.413],
+                [8.097, 25.753, 24.599],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 768,
-                [8.535, 8.533, 2.130],
+                [8.097, 7.940, 4.474],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 1024,
-                [8.526, 8.526, 3.629],
+                [7.940, 8.408, 3.848],
             ),
         ];
         for (rung, edge, measured) in samples {

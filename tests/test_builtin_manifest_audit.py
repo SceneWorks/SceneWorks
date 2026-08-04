@@ -1461,16 +1461,20 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         key: turbo_fit[key]
         for key in (
             "calibrationAbi",
+            "loadShape",
             "calibrationFingerprint",
             "sceneWorksRevision",
             "inferenceRevision",
             "measured",
         )
     } == {
-        "calibrationAbi": 1,
+        # sc-17097 re-measured every curve under gen_core::MEMORY_CALIBRATION_ABI 3 on the CUDA box.
+        # The stamp is only allowed to move as the RESULT of that measurement, never on its own.
+        "calibrationAbi": 3,
+        "loadShape": "deferred_materialization",
         "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
         "sceneWorksRevision": "sc-15449-contract-v1",
-        "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+        "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
         "measured": True,
     }
     assert turbo_fit["strategyParameters"] == {
@@ -1500,6 +1504,7 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
         "sc-15117",
         "sc-15205",
         "sc-15206",
+        "sc-17097",
     ]
     assert {
         (record["tier"], record["width"], record["height"])
@@ -1617,6 +1622,15 @@ def test_krea_turbo_fit_schema_rejects_stale_or_incomplete_contract_evidence():
         assert list(validator.iter_errors(candidate)), label
 
     assert_rejected("unknown calibration ABI", lambda fit: fit.__setitem__("calibrationAbi", 2))
+    assert_rejected(
+        "superseded calibration ABI",
+        lambda fit: fit.__setitem__("calibrationAbi", 1),
+    )
+    assert_rejected("missing load shape", lambda fit: fit.pop("loadShape"))
+    assert_rejected(
+        "unknown load shape",
+        lambda fit: fit.__setitem__("loadShape", "lazy_materialization"),
+    )
     assert_rejected(
         "malformed calibration fingerprint",
         lambda fit: fit.__setitem__("calibrationFingerprint", "Krea Turbo"),
