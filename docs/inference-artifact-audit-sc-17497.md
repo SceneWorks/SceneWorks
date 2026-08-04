@@ -41,8 +41,8 @@ That is evidence the mechanism works and that this particular delta is codegen-i
 the proof, and no validator will accept it — a Metal record is refused on `lane`.
 
 sc-17524 produced the CUDA-lane digests on the RTX PRO 6000 box, and doing so exposed that the
-Windows link step was not reproducible at all until `/Brepro` — see **Determinism** below. A Metal
-round trip being stable is not evidence that a Windows one is.
+Windows link step was not reproducible at all until `/Brepro /DEBUG:NONE` — see **Determinism**
+below. A Metal round trip being stable is not evidence that a Windows one is.
 
 ## The two layers
 
@@ -60,8 +60,8 @@ itself.
 
 ## The closure: six crate trees and four build inputs
 
-sc-15833 declared it as seven paths, all crate trees bar the root manifest. sc-17524 added the three
-build inputs that feed every one of those builds:
+sc-15833 declared it as seven paths, all crate trees bar the root manifest. sc-17524 added three
+more build inputs that feed every one of those builds, bringing that kind to four:
 
 | Entry | Kind |
 | --- | --- |
@@ -81,8 +81,8 @@ transitive dependency the measurement binary links moves **only** the lockfile.
 manifest — cargo reads it for every build in the worktree, and a `[build] rustflags`, a `[target.*]`
 linker override or an `[env]` entry a build script consumes changes the compiled code while moving
 no crate tree. It is object `61d7be37…` at every revision in play — `5ffd7612`, `277f4238`,
-`06e0c5e9`, `a4f409ae`. One part of it the tool
-cannot honestly adjudicate: `CARGO_ENCODED_RUSTFLAGS`, which this script must set for the path
+`06e0c5e9`, `a4f409ae`. One part of it the tool cannot honestly adjudicate:
+`CARGO_ENCODED_RUSTFLAGS`, which this script must set for the path
 remaps, **replaces** config-declared rustflags rather than merging them. So the audit refuses to run
 against a config that declares any (`assertNoConfigRustflags`) rather than certify a build it had
 itself stripped the flags out of. inference declares none today.
@@ -139,7 +139,9 @@ this epic exists to remove, with a far wider trigger.
 
 1. `crates/bundles/runtime-cuda` stays non-adjudicable and must remain object-identical. Cheap — it
    has not moved since the capture, and a change there is a *composition* change (which provider is
-   registered), which a codegen digest could not answer anyway.
+   registered), which a codegen digest could not answer anyway. `candle-gen-catalog` sits in the
+   same position and is in no closure list at all; that asymmetry is
+   [sc-17607](https://app.shortcut.com/trefry/story/17607).
 2. **Feature unification is narrower than the shipped bundle's.** `cargo test -p candle-gen-flux2
    --features cuda` resolves a smaller feature set than `-p runtime-cuda` does. A feature enabled by
    some crate outside the closure — `candle-llm`, the audio lane, another provider — changes how a
@@ -154,7 +156,8 @@ this epic exists to remove, with a far wider trigger.
    --release --features cuda`, so the measurements were always taken under the provider-only
    resolution. The audit's claim — "the code the measurements ran has not changed" — holds exactly.
    Closing the wider gap wants a resolved-feature-set witness (`cargo tree -e features
-   -p runtime-cuda`, no compile), tracked separately.
+   -p runtime-cuda`, no compile), tracked as
+   [sc-17606](https://app.shortcut.com/trefry/story/17606).
 
 ## Known, accepted false positive
 
@@ -212,9 +215,10 @@ two-link experiment on a hello-world binary settled directly:
 Dropping it does not weaken the claim — the audited binary is built `--no-run` and never executes,
 debug info is not code, and `.text` is byte-identical with and without it. Verified at real scale:
 two builds of `5ffd7612` differ in **0 of 181,235,712 bytes**, and the shipped record's digest
-`d80844f2…` came back from **eleven builds across three separate runs** — both revisions of the
-`5ffd7612 → 06e0c5e9` window in both build orders, a same-revision round trip, and both revisions of
-the shipped `5ffd7612 → a4f409ae` window.
+`d80844f2…` came back from **eleven builds across three separate runs**: the two-build
+same-revision probe, both revisions of `5ffd7612 → 06e0c5e9` in both build orders (4), the
+unmutated build of the sensitivity check (1), both revisions again when the record was re-emitted
+for the widened closure (2), and both revisions of the shipped `5ffd7612 → a4f409ae` window (2).
 
 **Stable is not the same as blind**, and the flag that bought stability is the one most likely to
 over-normalize — so the other direction was measured too. Mutating a production constant in the
@@ -234,8 +238,8 @@ file a fresh mtime.
 ## Schema versions
 
 `schemaVersion: 3` is the ten-path closure. v1 (object identity only) and v2 (sc-17497's
-seven-path artifact layer) are **refused**, not re-graded: a record produced before `Cargo.lock` and
-`rust-toolchain.toml` were audited cannot be read as evidence about them. The closure-identity check
+seven-path artifact layer) are **refused**, not re-graded: a record produced before `Cargo.lock`,
+`rust-toolchain.toml` and `.cargo/config.toml` were audited cannot be read as evidence about them. The closure-identity check
 would reject them on size regardless; the version check is the legible version of the same refusal.
 
 Superseded record files stay on disk — `inference-compatibility-277f.json` is the v1 one, and the

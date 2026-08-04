@@ -53,8 +53,8 @@ const RUNGS = [
 // adjudicable set here keeps an unchanged digest from being read as proof over a path it never
 // compiled.
 //
-// sc-17524: the set also carries the three workspace build inputs (`Cargo.toml`, `Cargo.lock`,
-// `rust-toolchain.toml`), which earn their place differently — not "compiled into the binary" but
+// sc-17524: the set also carries the four workspace build inputs (`Cargo.toml`, `Cargo.lock`,
+// `rust-toolchain.toml`, `.cargo/config.toml`), which earn their place differently — not "compiled into the binary" but
 // "an input to the build that produced it", which is the only route they have to the measured code.
 // They are in the closure because `Cargo.lock` had already moved inside the authorized window while
 // every crate tree stayed identical, i.e. a changed build input taking the free path unexamined.
@@ -67,7 +67,7 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
   capturedInferenceRevision: "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
   compatibleInferenceRevision: "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
   // sc-17524: measured on the RTX PRO 6000 box (rustc 1.96.0, nvcc 12.9, `--features cuda`). Three
-  // closure paths moved across this window — `Cargo.lock`, gen-core and candle-gen — and the
+  // closure paths moved across this window — `Cargo.lock` and `candle-gen` — and the
   // `candle-gen-flux2` lib test binary is byte-identical at both ends, so the compiled code the
   // measurements ran did not change. `adjudicates` is what that binary speaks for: the crate trees
   // it compiles, plus the build inputs that reach it only through the build.
@@ -1292,7 +1292,7 @@ const V3_AUDIT_METHOD =
  * Freezing it in source is what stops the checked-in record from authorizing itself.
  *
  * sc-17524: only v3 is accepted. v1 and v2 describe sc-15833's SEVEN-path closure, which omits
- * `Cargo.lock` and `rust-toolchain.toml`; re-grading such a record against the ten-path
+ * `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; re-grading it against the ten-path
  * expectations would read it as evidence about two inputs it never looked at. The closure-identity
  * check below would reject them on size anyway — this is the loud version of the same refusal.
  *

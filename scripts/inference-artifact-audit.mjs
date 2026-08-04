@@ -320,7 +320,15 @@ function defaultToolchain(workdir) {
   return execFileSync("rustc", ["--version"], { cwd: workdir, encoding: "utf8" }).trim();
 }
 
-/** The checked-out workspace's cargo config, or "" when there is none. */
+/**
+ * The checked-out workspace's cargo config, or "" when there is none.
+ *
+ * The extension-less `.cargo/config` is cargo's legacy spelling and is read here so the rustflags
+ * guard cannot be sidestepped by renaming the file. Note the closure lists only `.cargo/config.toml`
+ * — a switch to the legacy name would leave the closure while still being honoured by cargo, so the
+ * guard still applies but object identity would stop tracking it. Add the other spelling to
+ * `AUDIT_CLOSURE_BUILD_INPUTS` if inference ever adopts it.
+ */
 export function readCargoConfig(workdir, read = readFileSync) {
   for (const name of ["config.toml", "config"]) {
     try {
@@ -349,10 +357,21 @@ export function readCargoConfig(workdir, read = readFileSync) {
  * which is the same bargain `assertRealCudaCompiler` makes with the stub `nvcc`.
  */
 export function assertNoConfigRustflags(configToml, revision) {
-  // Deliberately blunt: any `rustflags` key at all, in any table. Narrowing it to `[build]` would
-  // miss `[target.x86_64-pc-windows-msvc]`, and there is no reading of a declared rustflags this
-  // tool can honour while it owns the environment variable that overrides them.
-  if (!/^\s*rustflags\s*=/m.test(configToml)) return;
+  // Deliberately blunt: any `rustflags` key at all, in any table, in any spelling TOML allows.
+  // Narrowing it to `[build]` would miss `[target.x86_64-pc-windows-msvc]`, and there is no reading
+  // of a declared rustflags this tool can honour while it owns the variable that overrides them.
+  //
+  // Anchoring to line-start (as this first did) missed four forms cargo honours — `build.rustflags
+  // = [...]`, `build = { rustflags = [...] }`, `target."cfg(all())".rustflags = [...]` and a quoted
+  // `"rustflags" = [...]`. A guard that is the only thing standing between the tool and a false
+  // green cannot be approximate, so the key is matched wherever TOML can put it: after a dot, a
+  // brace, a comma, or leading whitespace. Comments are stripped first so a commented-out example
+  // does not wedge the run.
+  const uncommented = configToml
+    .split("\n")
+    .map((line) => line.replace(/#.*$/, ""))
+    .join("\n");
+  if (!/(?:^|[.\s{,])["']?rustflags["']?\s*=/m.test(uncommented)) return;
   throw new Error(
     `${revision}: .cargo/config.toml declares rustflags, which this audit cannot honour. It sets ` +
       "CARGO_ENCODED_RUSTFLAGS for the path remapping, and cargo REPLACES the config's flags with " +
@@ -570,6 +589,16 @@ function resolvedPath(target) {
   }
 }
 
+/** `readdirSync` on a path that exists as a FILE throws a raw ENOTDIR, which is not the message an
+ *  operator who mistyped `--workdir` needs. Anything that is not an empty directory is refused. */
+function isEmptyDirectory(target) {
+  try {
+    return readdirSync(target).length === 0;
+  } catch {
+    return false;
+  }
+}
+
 function cargoHome() {
   return process.env.CARGO_HOME || path.join(os.homedir(), ".cargo");
 }
@@ -676,10 +705,10 @@ export async function main(argv) {
     // The failure path below `rmSync`s the workdir when `git worktree add` fails, which is fine for
     // a directory this script made and NOT fine for one an operator handed it. Now that the usage
     // text actively recommends a persistent path, refuse to adopt a non-empty one at all.
-    if (requestedWorkdir && existsSync(requestedWorkdir) && readdirSync(requestedWorkdir).length > 0) {
+    if (requestedWorkdir && existsSync(requestedWorkdir) && !isEmptyDirectory(requestedWorkdir)) {
       throw new Error(
-        `--workdir ${requestedWorkdir} already exists and is not empty. This script checks revisions ` +
-          "out into it and removes it afterwards; point it somewhere it owns.",
+        `--workdir ${requestedWorkdir} already exists and is not an empty directory. This script ` +
+          "checks revisions out into it and removes it afterwards; point it somewhere it owns.",
       );
     }
     const workdir = requestedWorkdir ?? mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-build-"));

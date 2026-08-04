@@ -109,7 +109,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     #
     # Derived from the live pin rather than hardcoded, so a bump does not make this test wrong; it
     # degrades to `{"historical"}` on its own and comes back when the window is re-audited. sc-17524
-    # did exactly that for a4f409ae -- `Cargo.lock`, gen-core and candle-gen all moved, and the
+    # did exactly that for a4f409ae -- `Cargo.lock` and `candle-gen` both moved, and the
     # compiled measurement binary was byte-identical at both ends. Only a measurement re-opens this
     # window; editing the constant below does not.
     audited_live_revision = "a4f409ae8ce73eda2ee8117b89b5f479666606b8"

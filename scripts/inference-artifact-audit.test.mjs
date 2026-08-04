@@ -382,10 +382,17 @@ test("a cargo config that declares rustflags is refused, because this script ove
   ok('[env]\nRUST_TEST_THREADS = { value = "1", force = true }\n');
   ok("");
   ok('# rustflags = "-Ctarget-cpu=native" is commented out\n');
+  ok('[build]\nrustdocflags = ["-Dwarnings"]\n');
   for (const declared of [
     '[build]\nrustflags = ["-Ctarget-cpu=native"]\n',
+    '[build]\nrustflags=["-Ctarget-cpu=native"]\n',
     '[target.x86_64-pc-windows-msvc]\nrustflags = ["-Clink-arg=/STACK:8000000"]\n',
     '[target."cfg(all())"]\n  rustflags = ["-Dwarnings"]\n',
+    // TOML spellings a line-anchored regex misses, all of which cargo honours.
+    'build.rustflags = ["-Ctarget-cpu=native"]\n',
+    'build = { rustflags = ["-C", "target-cpu=native"] }\n',
+    'target."cfg(all())".rustflags = ["-Dwarnings"]\n',
+    '[build]\n"rustflags" = ["-Dwarnings"]\n',
   ]) {
     assert.throws(
       () => assertNoConfigRustflags(declared, "5ffd7612"),

@@ -1075,7 +1075,7 @@ mod tests {
         // Deliberately NOT "fixed" by widening `FLUX2_COMPATIBLE_INFERENCE_REVISION`: re-certifying
         // needs a new `inference-compatibility-<rev>.json` proof. sc-17524 produced one for the
         // window ending at the live `a4f409ae` pin, by measuring the compiled artifact on the RTX
-        // box — three closure paths moved and the measurement binary was byte-identical at both
+        // box — two closure paths moved and the measurement binary was byte-identical at both
         // ends. That is what a re-certification looks like; editing this constant is not.
         if crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
             != FLUX2_COMPATIBLE_INFERENCE_REVISION

@@ -15,8 +15,8 @@ pub(crate) const FLUX2_COMPATIBLE_INFERENCE_REVISION: &str =
 pub(crate) const FLUX2_INFERENCE_COMPATIBILITY_AUDIT: &str =
     include_str!("../../../docs/calibration/sc-15833/inference-compatibility-a4f4.json");
 /// sc-17524: v3 is the ten-path closure. v1 and v2 describe sc-15833's seven-path one, which omits
-/// `Cargo.lock` and `rust-toolchain.toml`; accepting one would read it as evidence about two build
-/// inputs it never looked at.
+/// `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; accepting one would read it as
+/// evidence about build inputs it never looked at.
 pub(crate) const FLUX2_AUDIT_SCHEMA_VERSION: u64 = 3;
 pub(crate) const FLUX2_V3_AUDIT_METHOD: &str = concat!(
     "compiled artifact identity for changed paths, git object identity for unchanged paths, ",
@@ -31,7 +31,7 @@ pub(crate) const FLUX2_V3_AUDIT_METHOD: &str = concat!(
 /// leaves the measurement binary byte-identical. Without this the unchanged digest would be read as
 /// proof over a path that was never compiled into it.
 ///
-/// sc-17524: it also carries the three workspace build inputs, which cargo can never name because
+/// sc-17524: it also carries the four workspace build inputs, which cargo can never name because
 /// they are not packages. They belong there for a different reason than the crate trees — not
 /// "compiled into the binary" but "an input to the build that produced it", which is the only route
 /// they have to the measured code at all.
@@ -53,7 +53,8 @@ pub(crate) const FLUX2_AUDIT_ARTIFACT_PROOF: Option<(&str, &[&str])> = Some((
 ));
 /// The CAPTURED side of the closure — the code the measurements were taken against. Immutable.
 ///
-/// sc-17524 added the three workspace build inputs. They are not packages, so cargo's
+/// sc-17524 added three more workspace build inputs, bringing that kind to four. They are not
+/// packages, so cargo's
 /// `compiler-artifact` stream can never name them, but they feed every build in the closure — and
 /// `Cargo.lock` had already moved inside the authorized window while all seven crate trees stayed
 /// byte-identical, which is a changed build input sailing through the free path unexamined.
@@ -213,9 +214,10 @@ mod sc_17497_artifact_audit_tests {
     const RUNTIME_CUDA: &str = "crates/bundles/runtime-cuda";
     const CARGO_LOCK: &str = "Cargo.lock";
     const RUST_TOOLCHAIN: &str = "rust-toolchain.toml";
+    const CARGO_CONFIG: &str = ".cargo/config.toml";
     const DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     /// What the `candle-gen-flux2` lib test binary speaks for. The crate trees are the ones it
-    /// COMPILES; the three workspace build inputs are there because they are inputs to that very
+    /// COMPILES; the four workspace build inputs are there because they are inputs to that very
     /// build, so anything they change about the measured code lands in its digest. `runtime-cuda` is
     /// deliberately absent: it depends on the provider, not the other way round.
     const ADJUDICATES: &[&str] = &[
@@ -275,8 +277,8 @@ mod sc_17497_artifact_audit_tests {
 
     #[test]
     fn the_shipped_record_authorizes_its_own_pin_only_with_the_frozen_proof() {
-        // sc-17524: the packaged record's closure is NOT quiet. `Cargo.lock`, gen-core and
-        // candle-gen all moved between the captured revision and the live pin, so this record
+        // sc-17524: the packaged record's closure is NOT quiet. `Cargo.lock` and `candle-gen`
+        // both moved between the captured revision and the live pin, so this record
         // authorizes only in company with the compiled-artifact proof frozen above — and the
         // negative half is the load-bearing one, because a validator that accepts the shipped
         // record no matter what is frozen would pass with the whole artifact layer deleted.
@@ -301,8 +303,8 @@ mod sc_17497_artifact_audit_tests {
     #[test]
     fn the_seven_path_schema_versions_are_refused_rather_than_re_graded() {
         // sc-17524: v1 and v2 record sc-15833's seven-path closure, which never looked at
-        // `Cargo.lock` or `rust-toolchain.toml`. Accepting one would read it as evidence about two
-        // build inputs it did not audit, so the version itself is the refusal.
+        // `Cargo.lock`, `rust-toolchain.toml` or `.cargo/config.toml`. Accepting one would read it
+        // as evidence about build inputs it did not audit, so the version itself is the refusal.
         for stale in [1, 2] {
             let mut audit: Value =
                 serde_json::from_str(&v3(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
@@ -327,10 +329,12 @@ mod sc_17497_artifact_audit_tests {
         );
     }
 
-    /// sc-17524: the two build inputs the seven-path closure omitted.
+    /// sc-17524: the build inputs the seven-path closure omitted. `.cargo/config.toml` is the
+    /// only closure entry containing a path separator, so it is the transcription most likely to
+    /// break — it is exercised here rather than assumed to behave like its siblings.
     #[test]
     fn a_moved_build_input_demands_a_digest_and_is_adjudicated_by_one() {
-        for input in [CARGO_LOCK, RUST_TOOLCHAIN] {
+        for input in [CARGO_LOCK, RUST_TOOLCHAIN, CARGO_CONFIG] {
             assert!(
                 compatibility_audit_authorizes(&v3(&[input], None), None).is_none(),
                 "{input} moving must force the artifact layer, not sail through the free path"

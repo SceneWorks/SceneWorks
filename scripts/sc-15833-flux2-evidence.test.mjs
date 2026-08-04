@@ -535,8 +535,8 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
   //
   // Re-certifying FLUX.2 on a newer pin is deliberately NOT something this test can do by relaxing:
   // it needs a new `inference-compatibility-<rev>.json` proof. sc-17524 produced one for the window
-  // ending at a4f409ae by MEASURING the compiled artifact on the RTX box — `Cargo.lock`, gen-core
-  // and candle-gen all moved and the `candle-gen-flux2` lib test binary was byte-identical at both
+  // ending at a4f409ae by MEASURING the compiled artifact on the RTX box — `Cargo.lock` and
+  // `candle-gen` both moved and the `candle-gen-flux2` lib test binary was byte-identical at both
   // ends. That is the only thing that re-opens this window; editing a constant is not.
   const workerCargo = await readFile(new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url), "utf8");
   const livePin = workerCargo.match(
@@ -940,7 +940,7 @@ const CANDLE_GEN = "crates/media/candle-gen/candle-gen";
 const RUNTIME_CUDA = "crates/bundles/runtime-cuda";
 const CARGO_LOCK = "Cargo.lock";
 // What the `candle-gen-flux2` lib test binary speaks for: the crate trees it COMPILES, plus the
-// three workspace build inputs, which reach the measured code only by being inputs to that build.
+// four workspace build inputs, which reach the measured code only by being inputs to that build.
 // `runtime-cuda` is deliberately absent: it depends on the provider, not the other way round.
 const ADJUDICATES = [
   "Cargo.toml",
@@ -1060,8 +1060,8 @@ test("SC-17524 the shipped record validates only against the proof frozen in sou
 });
 
 test("SC-17524 the seven-path schema versions are refused rather than re-graded", async () => {
-  // v1 and v2 record sc-15833's seven-path closure, which never looked at `Cargo.lock` or
-  // `rust-toolchain.toml`. Accepting one would read it as evidence about inputs it did not audit.
+  // v1 and v2 record sc-15833's seven-path closure, which never looked at `Cargo.lock`,
+  // `rust-toolchain.toml` or `.cargo/config.toml` — evidence about inputs it did not audit.
   const audit = await shippedAudit();
   for (const stale of [1, 2]) {
     rejects(
@@ -1075,7 +1075,9 @@ test("SC-17524 the seven-path schema versions are refused rather than re-graded"
 
 test("SC-17524 a moved build input demands a digest, and is adjudicated by one", async () => {
   const audit = await shippedAudit();
-  for (const input of [CARGO_LOCK, "rust-toolchain.toml"]) {
+  // `.cargo/config.toml` is the only closure entry with a path separator in it, so it is the
+  // transcription most likely to break; exercised rather than assumed to match its siblings.
+  for (const input of [CARGO_LOCK, "rust-toolchain.toml", ".cargo/config.toml"]) {
     rejects(
       v3Record(audit, { moved: [input] }),
       PROOF,
