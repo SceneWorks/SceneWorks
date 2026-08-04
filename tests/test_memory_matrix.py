@@ -98,9 +98,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "runtimeComplete": records_by_status["runtime_complete"],
     }
 
-    # `current` vs `historical` is decided against the shipped inference pin. The 33 Full records
-    # predate it and remain retained history. SC-15823's ten base-only FLUX records target the exact
-    # shipped pin, so they are runtime-current without being promoted to Full verification.
+    # `current` vs `historical` is decided against the shipped inference pin. The MLX shared-ladder
+    # wave advances that pin beyond all 43 retained records, so none may authorize the new runtime.
     full_runs = [
         run for run in matrix["calibrationRuns"] if run["record"]["status"] == "complete"
     ]
@@ -110,16 +109,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         if run["record"]["status"] == "runtime_complete"
     ]
     assert {run["semantics"] for run in full_runs} == {"historical"}
-    assert {run["semantics"] for run in runtime_complete_runs} == {"current"}
+    assert {run["semantics"] for run in runtime_complete_runs} == {"historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert {run["record"]["id"] for run in current_eligible} == {
-        run["record"]["id"] for run in runtime_complete_runs
-    }
+    assert current_eligible == []
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.
