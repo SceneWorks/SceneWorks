@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:0e40f95dfaf8bd39526e026e2355c77b85e1747636237738d028987022fa90e5",
-    "matrixRevision": "source-tree:ca4728b72a54434cf08beffd556992cd263e65e391cc81a64a0df47ead52b29e",
-    "inferenceRevision": "35251a8875d695144c3c1046d14cd35840fd5838",
+    "sceneWorksRevision": "source-tree:54eb19c63ef42a85ef9d3044d4a0485de6556ecafefe89c204819d7ca4ac5e89",
+    "matrixRevision": "source-tree:155935441e7a5ad493371fef5167120d897e9456dcaa46a9082694f7aa605c8f",
+    "inferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "6fa61b3ccc7ed677ed885b18d48ccdcfe269576e649b491718eaafc09d5ee9bc"
+        "sha256": "c681cd7d3b8484246dc9c28c99a85969068002fada7a5de04d5b7951fc55f8e3"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
