@@ -82,6 +82,10 @@ pub(crate) fn compatibility_audit_authorizes(
         || audit.get("compatibleInferenceRevision")?.as_str()?
             != FLUX2_COMPATIBLE_INFERENCE_REVISION
         || audit.get("method")?.as_str()? != expected_method
+        // JS requires this too; a record one language accepts and the other rejects is a split brain.
+        || audit.get("command")?.as_str().is_none()
+        || (schema_version == 1
+            && audit.get("command")?.as_str()? != "git rev-parse <revision>:<path>")
     {
         return None;
     }
@@ -157,7 +161,20 @@ pub(crate) fn compatibility_audit_authorizes(
             // The digest speaks only for what the binary linked; anything else that moved is
             // unproven, and silently accepting it would be strictly worse than the false positive
             // this story removes.
-            if changed.iter().any(|path| !adjudicates.contains(path)) {
+            //
+            // Intersected with the RECORD's own `adjudicates`, not just the frozen set. The frozen
+            // half is a human transcription, and unlike the digest — where a typo fails closed — an
+            // over-wide set fails OPEN. Intersecting lets the record narrow the claim, never widen
+            // it, so both halves must be wrong the same way to do harm.
+            let recorded = artifact.get("adjudicates")?.as_array()?;
+            let recorded = recorded
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            if changed
+                .iter()
+                .any(|path| !adjudicates.contains(path) || !recorded.contains(path))
+            {
                 return None;
             }
         }
@@ -221,6 +238,7 @@ mod sc_17497_artifact_audit_tests {
             "test": "tests::flux2_dev_probed_generate_for_offload_ab",
             "profile": "release",
             "lane": "cuda",
+            "adjudicates": ADJUDICATES,
             "capturedDigest": DIGEST,
             "compatibleDigest": DIGEST,
         })
@@ -356,5 +374,60 @@ mod sc_17497_artifact_audit_tests {
             serde_json::from_str(&v2(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
         future["schemaVersion"] = json!(3);
         reject("a v3 nobody has defined", future.to_string(), PROOF);
+        let mut other_test = cuda_artifact();
+        other_test["test"] = json!("tests::flux2_dev_smoke");
+        reject(
+            "auditing some other test than the one that produced the measurements",
+            v2(&[CANDLE_GEN], Some(other_test)),
+            PROOF,
+        );
+        let mut captured_off = cuda_artifact();
+        captured_off["capturedDigest"] = json!(format!("sha256:{}", "d".repeat(64)));
+        reject(
+            "a captured digest that does not match the frozen one",
+            v2(&[CANDLE_GEN], Some(captured_off)),
+            PROOF,
+        );
+        let mut not_a_list = cuda_artifact();
+        not_a_list["adjudicates"] = json!("everything");
+        reject(
+            "a record whose own adjudicable set is not a list of paths",
+            v2(&[CANDLE_GEN], Some(not_a_list)),
+            PROOF,
+        );
+        // The frozen set is a HUMAN TRANSCRIPTION and, unlike the digest, an over-wide one fails
+        // OPEN. Intersecting it with what the build reported linking means both halves have to be
+        // wrong the same way before anything is authorized.
+        const OVER_WIDE: &[&str] = &[
+            "crates/contracts/gen-core",
+            "crates/media/candle-gen/candle-gen",
+            "crates/media/candle-gen/candle-gen-pid",
+            "crates/media/candle-gen/candle-gen-flux2",
+            "crates/media/candle-gen/vendor/candle-kernels",
+            "crates/bundles/runtime-cuda",
+        ];
+        reject(
+            "an over-wide frozen set is still checked against what the build reported linking",
+            v2(&[RUNTIME_CUDA], Some(cuda_artifact())),
+            Some((DIGEST, OVER_WIDE)),
+        );
+        let mut links_the_bundle = cuda_artifact();
+        links_the_bundle["adjudicates"] = json!(OVER_WIDE);
+        assert!(
+            compatibility_audit_authorizes(
+                &v2(&[RUNTIME_CUDA], Some(links_the_bundle)),
+                Some((DIGEST, OVER_WIDE))
+            )
+            .is_some(),
+            "an artifact that DOES link it may adjudicate it — the rule is coverage, not a blocklist"
+        );
+        let mut no_command: Value =
+            serde_json::from_str(&v2(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
+        no_command.as_object_mut().unwrap().remove("command");
+        reject(
+            "a record with no command is not a record either language accepts",
+            no_command.to_string(),
+            PROOF,
+        );
     }
 }

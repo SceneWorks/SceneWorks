@@ -64,6 +64,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 /** FLUX.2's complete Candle/CUDA compile closure — the sc-15833 audit set, unchanged. */
 export const AUDIT_CLOSURE_PATHS = Object.freeze([
@@ -196,8 +197,13 @@ export function buildMeasurementBinary({
   runGit = git,
   runCargo = defaultCargoRunner,
   readArtifact = (file) => readFileSync(file),
+  readToolchain = defaultToolchain,
 }) {
   runGit(workdir, ["checkout", "--detach", revision]);
+  // AFTER the checkout, because the checkout also swaps `rust-toolchain.toml` and rustup will
+  // silently hand the second build a different compiler. Reading this once up front — as this did
+  // originally — records a toolchain that may not be the one that built both artifacts.
+  const rustc = readToolchain(workdir);
   // Both spellings: on macOS `os.tmpdir()` hands back `/var/folders/...` while cargo and rustc see
   // the canonical `/private/var/folders/...`, and a remap that does not match the path rustc is
   // given silently does nothing.
@@ -231,9 +237,14 @@ export function buildMeasurementBinary({
   const executable = selectMeasurementExecutable(report);
   return {
     executable,
+    rustc,
     digest: digestBytes(readArtifact(executable)),
     covered: coveredClosurePaths(report, workdir),
   };
+}
+
+function defaultToolchain(workdir) {
+  return execFileSync("rustc", ["--version"], { cwd: workdir, encoding: "utf8" }).trim();
 }
 
 /**
@@ -307,10 +318,18 @@ export function selectMeasurementExecutable(cargoJsonLines) {
 }
 
 function defaultCargoRunner({ cwd, args, env }) {
-  const result = spawnSync("cargo", args, { cwd, env, encoding: "utf8", maxBuffer: 512 * 1024 * 1024 });
+  // stderr inherited, not captured: this is a release build of the FLUX.2 closure and an operator
+  // watching a silent terminal for an hour cannot tell it apart from a hang.
+  const result = spawnSync("cargo", args, {
+    cwd,
+    env,
+    encoding: "utf8",
+    maxBuffer: 512 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "inherit"],
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`cargo ${args.slice(0, 4).join(" ")} failed in ${cwd}:\n${result.stderr.slice(-4000)}`);
+    throw new Error(`cargo ${args.slice(0, 4).join(" ")} failed in ${cwd} (see the output above)`);
   }
   return result.stdout.split("\n");
 }
@@ -398,19 +417,31 @@ export async function main(argv) {
     process.stderr.write(`[audit] closure paths moved: ${changed.join(", ")}\n`);
     const cudaRelease = lane === "cuda" ? assertRealCudaCompiler() : null;
     const workdir = value("--workdir") ?? mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-build-"));
+    // `--remap-path-prefix` arguments are joined with spaces before rustc splits them again, so a
+    // path containing whitespace would silently produce a remap that never matches.
+    if (/\s/.test(workdir)) {
+      throw new Error(`--workdir must not contain whitespace (got ${JSON.stringify(workdir)})`);
+    }
     const cargoTargetDir = path.join(workdir, "..", `${path.basename(workdir)}-target`);
-    git(repo, ["worktree", "add", "--detach", workdir, captured]);
     try {
-      const rustc = execFileSync("rustc", ["--version"], { cwd: workdir, encoding: "utf8" }).trim();
-      process.stderr.write(`[audit] building ${captured} (${lane}, ${rustc})\n`);
+      git(repo, ["worktree", "add", "--detach", workdir, captured]);
+      process.stderr.write(`[audit] building ${captured} (${lane})\n`);
       const capturedBuild = buildMeasurementBinary({ workdir, revision: captured, lane, cargoTargetDir });
-      process.stderr.write(`[audit] building ${compatible} (${lane}, ${rustc})\n`);
+      process.stderr.write(`[audit] building ${compatible} (${lane})\n`);
       const compatibleBuild = buildMeasurementBinary({ workdir, revision: compatible, lane, cargoTargetDir });
+      // A checkout swaps `rust-toolchain.toml` too. Two builds under two compilers cannot be
+      // compared at all, so this is a hard stop rather than a note in the record.
+      if (capturedBuild.rustc !== compatibleBuild.rustc) {
+        throw new Error(
+          "the two revisions built under different toolchains, so their digests are not comparable:\n" +
+            `  ${captured}: ${capturedBuild.rustc}\n  ${compatible}: ${compatibleBuild.rustc}`,
+        );
+      }
       artifact = {
         ...AUDIT_ARTIFACT_TARGET,
         lane,
         features: [LANE_FEATURES[lane]],
-        rustc,
+        rustc: capturedBuild.rustc,
         cudaRelease,
         // Both builds must agree on what was linked; a feature or resolution change between the two
         // revisions could otherwise silently shrink what the digest speaks for.
@@ -419,7 +450,13 @@ export async function main(argv) {
         compatibleDigest: compatibleBuild.digest,
       };
     } finally {
-      git(repo, ["worktree", "remove", "--force", workdir]);
+      // `|| true`-style tolerance: if `worktree add` was what failed there is nothing to remove, and
+      // masking that error with a second one would hide the real cause.
+      try {
+        git(repo, ["worktree", "remove", "--force", workdir]);
+      } catch {
+        rmSync(workdir, { recursive: true, force: true });
+      }
       rmSync(cargoTargetDir, { recursive: true, force: true });
     }
     if (artifact.capturedDigest !== artifact.compatibleDigest) {
@@ -442,7 +479,7 @@ export async function main(argv) {
   return artifact && artifact.capturedDigest !== artifact.compatibleDigest ? 1 : 0;
 }
 
-if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (error) => {

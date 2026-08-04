@@ -30,8 +30,14 @@ The binary hashed is the one that produced the measurements: the `candle-gen-flu
 binary** carrying `tests::flux2_dev_probed_generate_for_offload_ab` — the target named in the
 approved capture command that `scripts/sc-15833-flux2-evidence.mjs` prints.
 
-Confirmed on the real closure at the real revisions: `277f4238` and `d2216f6b` — the pin bump the doc
-comment blocked — produce a **byte-identical** measurement binary.
+Confirmed on the real closure at the real revisions, **on the Metal lane**: `277f4238` and
+`d2216f6b` — the pin bump the doc comment blocked — both produce
+`sha256:7d69fc2665da1a453209820bd4310aabfdcada9c852d711f97424c797423caea`, and the digest is stable
+across a `277f → d2216 → 277f` round trip in one worktree.
+
+That is evidence the mechanism works and that this particular delta is codegen-inert; it is **not**
+the proof, and no validator will accept it — a Metal record is refused on `lane`. The CUDA-lane
+digests are still owed and can only be produced on a box with a real toolkit.
 
 ## The two layers
 
@@ -89,9 +95,35 @@ are inert by construction, because every consumer requires `lane: "cuda"`.
 
 **Determinism.** Both revisions are checked out into one worktree and built there, because `file!()`
 bakes source paths into panic locations; the worktree and `CARGO_HOME` are additionally remapped out
-of the artifact, `CARGO_INCREMENTAL=0`, and `--locked`. The toolchain is whatever the inference
-repo's `rust-toolchain.toml` pins, and it is recorded — a rustc bump genuinely does change the
-compiled code, so it should invalidate the proof.
+of the artifact, `CARGO_INCREMENTAL=0`, and `--locked`. The toolchain is re-read after **each**
+checkout — a checkout swaps `rust-toolchain.toml` too — and two builds under different compilers are
+a hard stop, because their digests are not comparable at all.
+
+## Known gap: the closure omits two build inputs (sc-17524)
+
+sc-15833 defined the closure as seven paths. Two root-level siblings that feed every one of those
+builds are **not** in it:
+
+- **`Cargo.lock`** — verified moved *inside the currently authorized window*:
+  `5ffd7612:Cargo.lock` is `8ab01e00…` and `277f4238:Cargo.lock` is `e5014b40…`, while all seven
+  audited objects stayed byte-identical. That particular diff is inert for FLUX.2, but that is luck,
+  not the audit. A `cargo update` bumping a semver-compatible transitive dependency the binary links
+  moves only the lockfile, and the free path reports "no build needed".
+- **`rust-toolchain.toml`** — same shape. It has not moved across this window, so the gap is
+  unrealized, but nothing on the free path looks at it.
+
+This gap predates sc-17497 and is not introduced by it — the free path behaves exactly as the v1
+audit always did. It is **not** fixed here because closing it revokes the current authorization: the
+lockfile already moved, so adding it to the closure immediately demands a CUDA build that this
+machine cannot produce, dropping the five `flux2_dev` cells to `historical` and blocking sc-17396
+harder than today.
+
+Related: the artifact layer cannot adjudicate non-crate closure entries at all. Cargo's
+`compiler-artifact` stream only ever names *package* manifests, and inference's root `Cargo.toml` is
+a virtual manifest, so it can never appear in `adjudicates`. Any `[workspace.dependencies]` or
+`[patch]` edit therefore falls back to demanding object identity. Closing that properly means
+auditing an artifact that links the whole closure — `runtime-cuda`'s own test binary rather than the
+provider's — which needs a CUDA box to validate. Both are tracked in [sc-17524](https://app.shortcut.com/trefry/story/17524).
 
 ## After a build was needed
 
@@ -107,13 +139,25 @@ Three edits, in this order:
 On the free path, leave both proofs `null`/`None`: one frozen while the closure is quiet demands a
 build that is not due, and both validators reject that.
 
-Moving the live pin at all — with or without a build — also means updating the five `flux2_dev`
-`compatibleInferenceRevision` bindings in `config/manifests/builtin.models.jsonc` and the three
-places that lock the window to a literal revision: `LIVE_INFERENCE_REVISION` in
-`scripts/sc-15833-flux2-evidence.test.mjs`, the evidence-classification test in
-`scripts/calibration-cost-model.test.mjs`, and
-`tests/test_memory_matrix.py::test_calibration_evidence_is_schema_valid_and_matrix_ingested` on the
-parity lane. Regenerate `docs/generated/*` afterwards; never hand-edit them.
+Moving the live pin at all — with or without a build — also means:
+
+- the five `flux2_dev` `compatibleInferenceRevision` bindings in
+  `config/manifests/builtin.models.jsonc`;
+- `SOURCE_PATHS.inferenceCompatibility` (`scripts/generate-memory-matrix.mjs`) and the same filename
+  hardcoded in `scripts/sc-15833-flux2-evidence.test.mjs`;
+- `LIVE_INFERENCE_REVISION` in `scripts/sc-15833-flux2-evidence.test.mjs`, plus two assertions in
+  that file's v1-shaped test: `capturedObject === compatibleObject` for every audited object, and
+  the `changedPathDisposition` assertions — **a v2 record does not emit that field at all**, so they
+  must move to `changedClosurePaths`;
+- `crates/sceneworks-worker/src/candle_memory_strategy.rs`'s binding test, which asserts the literal
+  revision pair;
+- the evidence-classification test in `scripts/calibration-cost-model.test.mjs` and
+  `tests/test_memory_matrix.py::test_calibration_evidence_is_schema_valid_and_matrix_ingested` on the
+  parity lane.
+
+Regenerate `docs/generated/*` afterwards; never hand-edit them. `scripts/bump-inference.mjs` is the
+tool that moves the pin and does not yet know about any of this — running this audit is still a
+manual step alongside it.
 
 The Rust half deliberately lives in its own module rather than in `candle_memory_strategy`, which
 compiles only under `all(not(target_os = "macos"), feature = "backend-candle")` and whose tests link

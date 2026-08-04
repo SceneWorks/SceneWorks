@@ -178,7 +178,8 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
     profile: { test: true },
     target: { kind: ["lib"], name: "candle_gen_flux2" },
   });
-  const build = (revision) =>
+  const toolchains = [];
+  const build = (revision, rustc = "rustc 1.96.0 (ac68faa20 2026-05-25)") =>
     buildMeasurementBinary({
       workdir: "/w",
       revision,
@@ -193,6 +194,10 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
         return [report];
       },
       readArtifact: () => Buffer.from(`bytes for ${revision}`),
+      readToolchain: (cwd) => {
+        toolchains.push([cwd, checkouts.length]);
+        return rustc;
+      },
     });
 
   const first = build("5ffd7612");
@@ -209,6 +214,33 @@ test("both revisions are built in one worktree, under one remapped, non-incremen
   }
   assert.notEqual(first.digest, second.digest, "different bytes, different digest");
   assert.equal(first.executable, "/w/target/deps/candle_gen_flux2-1");
+  // The toolchain is read AFTER each checkout, not once up front: a checkout swaps
+  // `rust-toolchain.toml`, so rustup can hand the second build a different compiler and a
+  // single up-front read would record one that did not build both artifacts.
+  assert.deepEqual(toolchains, [["/w", 1], ["/w", 2]]);
+  assert.equal(first.rustc, second.rustc);
+});
+
+test("two revisions built under different toolchains are refused, not quietly compared", async () => {
+  // Digests from two different compilers are not comparable at all, so this is a hard stop.
+  const report = JSON.stringify({
+    reason: "compiler-artifact",
+    executable: "/w/target/deps/candle_gen_flux2-1",
+    profile: { test: true },
+    target: { kind: ["lib"], name: "candle_gen_flux2" },
+  });
+  const build = (rustc) =>
+    buildMeasurementBinary({
+      workdir: "/w",
+      revision: "abc",
+      lane: "cuda",
+      cargoTargetDir: "/w-target",
+      runGit: () => "",
+      runCargo: () => [report],
+      readArtifact: () => Buffer.from("same bytes"),
+      readToolchain: () => rustc,
+    });
+  assert.notEqual(build("rustc 1.96.0").rustc, build("rustc 1.97.0").rustc);
 });
 
 test("coverage is read off what cargo actually compiled, and a gap is refused not glossed", () => {

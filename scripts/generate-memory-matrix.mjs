@@ -1259,11 +1259,14 @@ const V2_AUDIT_METHOD =
  * the moment a path moves, and it must agree with the digest frozen in `FLUX2_COMPATIBILITY_AUDIT`.
  * Freezing it in source is what stops the checked-in record from authorizing itself.
  *
- * `expected` is injectable so the tests can exercise the ACCEPTING side of the artifact layer while
- * the shipped constant still carries `artifactProof: null`. Without it the only reachable v2 cases
- * would be rejections, and a validator only ever tested against its own default is a false green.
+ * Only the PROOF is injectable, and only so the tests can exercise the ACCEPTING side of the artifact
+ * layer while the shipped constant still carries `artifactProof: null` — a validator exercised solely
+ * against its own default is a false green. Everything else (story, both revisions, the captured
+ * closure) is read from the frozen constant and cannot be overridden, so a test cannot accidentally
+ * grade a record against expectations derived from that same record.
  */
-export function validatedInferenceCompatibility(body, expected = FLUX2_COMPATIBILITY_AUDIT) {
+export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMPATIBILITY_AUDIT.artifactProof) {
+  const expected = FLUX2_COMPATIBILITY_AUDIT;
   const audit = JSON.parse(body);
   const schemaVersion = audit.schemaVersion;
   if (
@@ -1306,8 +1309,8 @@ export function validatedInferenceCompatibility(body, expected = FLUX2_COMPATIBI
     throw new Error("SC-15833 inference compatibility audit object pair is invalid");
   }
   if (schemaVersion === 2) {
-    validatedCompatibilityArtifact(audit, changed, expected);
-  } else if (expected.artifactProof !== null) {
+    validatedCompatibilityArtifact(audit, changed, expectedProof);
+  } else if (expectedProof !== null) {
     throw new Error("SC-15833 inference compatibility audit is missing its expected artifact proof");
   }
   return expected;
@@ -1320,7 +1323,7 @@ export function validatedInferenceCompatibility(body, expected = FLUX2_COMPATIBI
  * and `scripts/inference-artifact-audit.mjs` can also build the same closure on Metal, which must
  * never be mistaken for proof of the CUDA artifact.
  */
-function validatedCompatibilityArtifact(audit, changed, expected) {
+function validatedCompatibilityArtifact(audit, changed, expectedProof) {
   const declared = audit.changedClosurePaths;
   const declaredPaths = Array.isArray(declared) ? declared.slice().sort() : null;
   const changedPaths = changed.slice().sort();
@@ -1332,7 +1335,7 @@ function validatedCompatibilityArtifact(audit, changed, expected) {
     throw new Error("SC-15833 inference compatibility audit misdeclares which closure paths changed");
   }
   if (changed.length === 0) {
-    if (expected.artifactProof !== null) {
+    if (expectedProof !== null) {
       throw new Error("SC-15833 inference compatibility audit is missing its expected artifact proof");
     }
     return;
@@ -1346,13 +1349,24 @@ function validatedCompatibilityArtifact(audit, changed, expected) {
     artifact.profile !== "release" ||
     !/^sha256:[0-9a-f]{64}$/.test(artifact.capturedDigest ?? "") ||
     artifact.capturedDigest !== artifact.compatibleDigest ||
-    expected.artifactProof === null ||
-    artifact.capturedDigest !== expected.artifactProof.digest
+    expectedProof === null ||
+    artifact.capturedDigest !== expectedProof.digest
   ) {
     throw new Error("SC-15833 inference compatibility audit compiled-artifact proof is invalid");
   }
   // The digest only speaks for what the binary linked. Anything else that moved is unproven.
-  const unadjudicable = changed.filter((objectPath) => !expected.artifactProof.adjudicates.includes(objectPath));
+  //
+  // Intersected with the RECORD's own `adjudicates`, not just the frozen set: the frozen half is a
+  // human transcription, and unlike the digest — where a typo fails closed — an over-wide set fails
+  // OPEN and would authorize a path the binary never linked. Intersecting lets the record narrow the
+  // claim but never widen it, so both halves have to be wrong in the same direction to do harm.
+  const recorded = artifact.adjudicates;
+  if (!Array.isArray(recorded) || recorded.some((objectPath) => typeof objectPath !== "string")) {
+    throw new Error("SC-15833 inference compatibility audit compiled-artifact proof is invalid");
+  }
+  const unadjudicable = changed.filter(
+    (objectPath) => !expectedProof.adjudicates.includes(objectPath) || !recorded.includes(objectPath),
+  );
   if (unadjudicable.length > 0) {
     throw new Error(
       `SC-15833 inference compatibility audit cannot adjudicate ${unadjudicable.join(", ")}: the audited ` +
