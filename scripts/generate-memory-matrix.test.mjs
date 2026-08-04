@@ -25,6 +25,7 @@ import {
 import { recordId } from "./memory-calibration-harness.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
+import { routedLanes } from "./check-tier-integrity.mjs";
 
 // Line-ending and comment normalisation now lives in `scripts/lib/source-revision.mjs` and is unit
 // tested there; these tests cover the same rules end to end, through the real generator.
@@ -117,6 +118,9 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "manifest",
     "memoryStrategy",
     "mlxFitGate",
+    "routingCandle",
+    "routingCatalog",
+    "routingMlx",
     "rung4Survey",
     "vramGate",
   ]);
@@ -127,6 +131,9 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "instantId",
     "memoryStrategy",
     "mlxFitGate",
+    "routingCandle",
+    "routingCatalog",
+    "routingMlx",
     "vramGate",
   ]);
 
@@ -689,31 +696,40 @@ test("MLX generated evidence derives the same exact additive host requirement as
   );
 });
 
-// SC-15510: `z_image_edit` is a catalog id, not a provider. Both backends serve it from the
-// `z_image_turbo` provider (MLX: `jobs_store::routing::mlx` maps `z_image_turbo | z_image_edit` to the
-// same eligibility and engine; Candle: the `ZImageEdit` lane runs on Turbo weights), so its advertised
-// backend scopes must be INHERITED from `z_image_turbo` rather than read off its own manifest entry —
-// which carries no `mlx`/`candle` block of its own.
-//
-// Without the inheritance the entry silently advertises zero backends, and every one of its 150 matrix
-// cells disappears instead of failing loudly. That is exactly the "route unavailable" state the epic
-// distinguishes from "verified", so it is worth a test rather than a comment.
-test("z_image_edit inherits its backend scopes from the z_image_turbo provider", () => {
-  const manifestById = new Map([
-    ["z_image_turbo", { id: "z_image_turbo", mlx: { quantize: 4 }, candle: { quantize: 4 } }],
-    ["z_image_edit", { id: "z_image_edit" }],
+test("backend scopes preserve the routing oracle's canonical lane order", () => {
+  const lanes = new Map([
+    ["dual", new Set(["candle", "mlx"])],
+    ["mlx_only", new Set(["mlx"])],
   ]);
-  const edit = manifestById.get("z_image_edit");
-  assert.deepEqual(backendScopes(edit, manifestById), ["mlx", "candle"]);
+  assert.deepEqual(backendScopes({ id: "dual" }, lanes), ["mlx", "candle"]);
+  assert.deepEqual(backendScopes({ id: "mlx_only" }, lanes), ["mlx"]);
+  assert.deepEqual(backendScopes({ id: "unrouted" }, lanes), []);
+});
 
-  // The inheritance is specific, not a blanket fallback: an ordinary entry with no backend blocks
-  // advertises nothing, and the alias tracks whatever Turbo actually advertises.
-  assert.deepEqual(backendScopes({ id: "some_other_model" }, manifestById), []);
-  const mlxOnly = new Map([
-    ["z_image_turbo", { id: "z_image_turbo", mlx: { quantize: 4 } }],
-    ["z_image_edit", { id: "z_image_edit" }],
+test("backend scopes follow real routing even when manifest tuning blocks are absent", async () => {
+  const [manifestBody, routingCatalog, routingCandle, routingMlx] = await Promise.all([
+    readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+    readFile(
+      new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
   ]);
-  assert.deepEqual(backendScopes(mlxOnly.get("z_image_edit"), mlxOnly), ["mlx"]);
+  const manifest = JSON.parse(stripJsoncComments(manifestBody));
+  const byId = new Map(manifest.models.map((model) => [model.id, model]));
+  const lanes = routedLanes({ routingCatalog, routingCandle, routingMlx });
+
+  assert.equal(byId.get("anima_base").candle, undefined, "fixture premise: no candle tuning block");
+  assert.deepEqual(backendScopes(byId.get("anima_base"), lanes), ["mlx", "candle"]);
+  assert.deepEqual(
+    backendScopes({ id: "scail2_14b" }, lanes),
+    ["mlx"],
+    "the routing oracle must not collapse to both lanes for every model",
+  );
 });
 
 // SC-15812: ownership is keyed by backend. The generator used to assign one story pair per MODEL and
@@ -731,39 +747,32 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   assert.equal(modelStory("instantid_realvisxl", "candle"), 15934);
   assert.equal(familyStory("pulid_flux_dev", "candle"), 15839);
 
-  // An mlx-only entry has no candle key, so a candle lookup FAILS rather than silently returning the
-  // MLX story. These four sit in families that DID get Candle twins but advertise mlx only, which is
-  // exactly where a fallback would have looked plausible.
-  for (const mlxOnly of [
+  // SC-17422: these entries had real Candle routes but no manifest candle tuning block, so the old
+  // lane oracle hid their Candle cells. Every one now has an independent Candle model owner.
+  for (const formerlyHidden of [
     "lens",
     "boogu_image_edit",
     "flux2_klein_9b_kv",
     "flux2_klein_9b_true_v2",
   ]) {
-    assert.equal(MODEL_STORIES[mlxOnly].candle, undefined);
-    assert.throws(() => modelStory(mlxOnly, "candle"), /no candle owning model story/);
-    // Their family twin exists, so the family lookup must NOT be what stops them — the model does.
-    assert.ok(Number.isInteger(familyStory(mlxOnly, "candle")));
+    assert.ok(Number.isInteger(modelStory(formerlyHidden, "candle")));
+    assert.ok(Number.isInteger(familyStory(formerlyHidden, "candle")));
   }
 
-  // A family owning no dual model has no candle twin, and asking for one throws.
-  assert.equal(FAMILY_STORIES[15520].candle, undefined);
-  assert.throws(() => familyStory("chroma1_hd", "candle"), /owns no candle story/);
+  assert.equal(familyStory("chroma1_hd", "candle"), 17410);
   assert.throws(() => modelStory("not_a_model", "mlx"), /no owning model story/);
 
-  // The applied split: 35 dual models, 15 dual families, 18 and 5 respectively left unsplit.
+  // The routed image inventory is dual-backend throughout: 53 model twins across 20 families.
   const candleModels = Object.values(MODEL_STORIES).filter((stories) => stories.candle);
   const candleFamilies = Object.values(FAMILY_STORIES).filter((stories) => stories.candle);
-  assert.equal(candleModels.length, 35);
-  assert.equal(Object.keys(MODEL_STORIES).length - candleModels.length, 18);
-  assert.equal(candleFamilies.length, 15);
-  assert.equal(Object.keys(FAMILY_STORIES).length - candleFamilies.length, 5);
+  assert.equal(candleModels.length, 53);
+  assert.equal(candleFamilies.length, 20);
 });
 
 test("the ownership tables scope every story to exactly one backend", () => {
-  // 53 MLX + 35 Candle model stories, 20 MLX + 15 Candle family stories, all distinct.
+  // 53 model stories and 20 family stories per backend, all distinct.
   const scope = buildStoryBackendScope();
-  assert.equal(scope.size, 123);
+  assert.equal(scope.size, 146);
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
   assert.deepEqual(scope.get(15827), {
     backend: "candle",
@@ -929,24 +938,33 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
     id,
     backends: stories.candle ? ["mlx", "candle"] : ["mlx"],
   }));
-  assert.deepEqual(assertTwinCoverage(models), { dualModels: 35, dualFamilies: 15 });
+  assert.deepEqual(assertTwinCoverage(models), { dualModels: 53, dualFamilies: 20 });
 
-  // A newly dual model with no Candle twin must stop generation, not quietly reuse the MLX story.
+  // A dual model with a missing Candle twin must stop generation, not quietly reuse the MLX story.
   assert.throws(
-    () =>
-      assertTwinCoverage(
-        models.map((model) => (model.id === "lens" ? { ...model, backends: ["mlx", "candle"] } : model)),
-      ),
+    () => assertTwinCoverage(models, { ...MODEL_STORIES, lens: { mlx: 15462 } }),
     /lens: advertises candle but has no Candle twin/,
   );
   // And an empty Candle twin on an mlx-only entry is equally a defect: it could never be closed.
   assert.throws(
-    () => assertTwinCoverage(models, { ...MODEL_STORIES, lens: { mlx: 15462, candle: 99999 } }),
-    /lens: advertises mlx only but carries Candle twin SC-99999/,
+    () =>
+      assertTwinCoverage(
+        models.map((model) => (model.id === "lens" ? { ...model, backends: ["mlx"] } : model)),
+      ),
+    /lens: advertises mlx only but carries Candle twin SC-17489/,
   );
+  const chromaMlxOnly = models.map((model) =>
+    model.id.startsWith("chroma1") ? { ...model, backends: ["mlx"] } : model,
+  );
+  const chromaModelStories = {
+    ...MODEL_STORIES,
+    chroma1_hd: { mlx: 15483 },
+    chroma1_base: { mlx: 15484 },
+    chroma1_flash: { mlx: 15485 },
+  };
   assert.throws(
-    () => assertTwinCoverage(models, MODEL_STORIES, { ...FAMILY_STORIES, 15520: { mlx: 15520, candle: 99999 } }),
-    /family SC-15520: owns no dual model but carries Candle twin SC-99999/,
+    () => assertTwinCoverage(chromaMlxOnly, chromaModelStories),
+    /family SC-15520: owns no dual model but carries Candle twin SC-17410/,
   );
   assert.throws(
     () => assertTwinCoverage(models, MODEL_STORIES, { ...FAMILY_STORIES, 15516: { mlx: 15516 } }),
@@ -955,7 +973,7 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
   // Two dual models sharing one Candle twin would under-count the split silently.
   assert.throws(
     () => assertTwinCoverage(models, { ...MODEL_STORIES, boogu_image: { mlx: 15474, candle: 15910 } }),
-    /35 dual models map onto only 34 distinct Candle model twins/,
+    /53 dual models map onto only 52 distinct Candle model twins/,
   );
 });
 
@@ -1342,7 +1360,12 @@ test("an implemented family is Implemented/unverified only where the provider ac
   assert.ok(candleLens.length > 0);
   assert.ok(
     candleLens
-      .filter((cell) => ["q4", "q8"].includes(cell.tier) && cell.overlay === "none")
+      .filter(
+        (cell) =>
+          cell.modelId === "lens_turbo" &&
+          ["q4", "q8"].includes(cell.tier) &&
+          cell.overlay === "none",
+      )
       .every(
       (cell) =>
         cell.owningFamilyStory === 15819 &&
@@ -1653,7 +1676,10 @@ test("a Structurally N/A survey verdict without structural evidence is rejected"
     sourceOverrides: { rung4Survey: JSON.stringify(survey) },
   });
   const cells = matrix.cells.filter(
-    (cell) => cell.modelId === "sdxl" && cell.rung === "bounded_transformer_residency",
+    (cell) =>
+      cell.modelId === "sdxl" &&
+      cell.backend === "mlx" &&
+      cell.rung === "bounded_transformer_residency",
   );
   assert.ok(cells.length > 0);
   assert.ok(
@@ -1875,9 +1901,9 @@ test("a survey verdict that reaches no cell is rejected, not silently carried", 
   // a family or backend the catalog does not advertise appears nowhere at all — it would sit in the
   // file being maintained, reviewed and trusted while having no effect.
   const survey = await surveyFixture();
-  survey.families["15523"].backends.candle = {
+  survey.families["15523"].backends.cuda = {
     ...survey.families["15523"].backends.mlx,
-    summary: "fixture: SANA advertises no candle entry",
+    summary: "fixture: cuda is not a matrix backend",
   };
   await assert.rejects(
     buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),

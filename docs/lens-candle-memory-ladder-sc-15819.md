@@ -50,6 +50,6 @@ Implemented/unverified where applicable.
 
 SC-15874 retains Lens-Turbo entry-level ownership. During SC-15819 integration the matrix correctly
 rejected reusing the MLX base story SC-15462 or the family story SC-15819 for a Candle model cell.
-Follow-up SC-17511 owns base `lens` Candle/CUDA calibration, admission values, and catalog/matrix
-promotion. Until it completes, no `lens.candle` manifest block or base Candle model-story cell is
-fabricated.
+Existing follow-up SC-17489 owns base `lens` Candle/CUDA calibration, admission values, and
+catalog/matrix promotion. Until it completes, the current base Candle model cell remains Missing and
+no `lens.candle` manifest block is fabricated.

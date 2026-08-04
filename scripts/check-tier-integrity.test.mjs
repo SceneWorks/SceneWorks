@@ -22,6 +22,10 @@ import {
   validate,
 } from "./check-tier-integrity.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import {
+  VAE_RESIDENCY_SCOPES,
+  VAE_SCOPES,
+} from "./tier-integrity-measurement-receipts.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -262,6 +266,58 @@ test("exact bytes reproduce the independent safetensors-header receipt", async (
   assert.ok(
     errors.some((error) => error.includes("does not reproduce the independent safetensors-header receipt")),
     `expected receipt arithmetic enforcement to fire, got: ${errors.join(" | ")}`,
+  );
+});
+
+test("every VAE row uses its structured, numeric-receipt-bound residency scope", async () => {
+  const inputs = await realInputs();
+  const vaeRows = inputs.ledger.exceptions.filter((row) => row.component === "vae");
+  assert.ok(vaeRows.length > 0, "the fixture must contain VAE rows");
+  for (const row of vaeRows) {
+    const key = `${row.model}::vae::${row.backends.join("+")}`;
+    assert.equal(
+      row.evidence.vaeScope,
+      VAE_RESIDENCY_SCOPES[key],
+      `${key}: the row scope must equal its numeric receipt scope`,
+    );
+  }
+
+  const ledger = clone(inputs.ledger);
+  const victim = ledger.exceptions.find(
+    (row) =>
+      row.model === "chroma1_base" &&
+      row.component === "vae" &&
+      row.backends.join() === "mlx",
+  );
+  victim.evidence.vaeScope = VAE_SCOPES.DECODER;
+  const { errors } = validate({ ...inputs, ledger });
+  assert.ok(
+    errors.some((error) => error.includes("does not match the numeric receipt scope")),
+    `expected a mixed VAE scope to fail, got: ${errors.join(" | ")}`,
+  );
+});
+
+test("decoder-only VAE costs cannot drift back to whole-file numbers", async () => {
+  const inputs = await realInputs();
+
+  const lensMlx = inputs.ledger.exceptions.find(
+    (row) => row.model === "lens" && row.component === "vae" && row.backends.join() === "mlx",
+  );
+  const lensCandle = inputs.ledger.exceptions.find(
+    (row) => row.model === "lens" && row.component === "vae" && row.backends.join() === "candle",
+  );
+  assert.equal(lensMlx.evidence.costBytesByTier.q4, 84046371 * 4);
+  assert.equal(lensCandle.evidence.costBytesByTier.q4, 49620515 * 4);
+
+  const mageLedger = clone(inputs.ledger);
+  const mage = mageLedger.exceptions.find(
+    (row) => row.model === "mage_flow" && row.component === "vae",
+  );
+  mage.evidence.costBytesByTier.q4 = 172478148 * 2;
+  const { errors } = validate({ ...inputs, ledger: mageLedger });
+  assert.ok(
+    errors.some((error) => error.includes("does not reproduce the independent safetensors-header receipt")),
+    `expected Mage's old whole-file count to fail, got: ${errors.join(" | ")}`,
   );
 });
 
@@ -521,12 +577,12 @@ test("no two rows claim the same (model, component, lane)", async () => {
   }
 });
 
-test("chroma declares BOTH lanes: mlx bf16 and candle f32", async () => {
+test("chroma keeps its MLX bf16 rows and needs no Candle T5/VAE exception", async () => {
   const { ledger } = await realInputs();
   for (const model of ["chroma1_base", "chroma1_hd", "chroma1_flash"]) {
-    for (const [component, mlxBytes, candleBytes] of [
-      ["textEncoder", 9524621312, 19049242624],
-      ["vae", 167639366, 335278732],
+    for (const [component, mlxBytes] of [
+      ["textEncoder", 9524621312],
+      ["vae", 167639366],
     ]) {
       const rows = ledger.exceptions.filter(
         (row) => row.model === model && row.component === component,
@@ -534,20 +590,22 @@ test("chroma declares BOTH lanes: mlx bf16 and candle f32", async () => {
       const mlx = rows.find((row) => row.backends.join() === "mlx");
       const candle = rows.find((row) => row.backends.join() === "candle");
       assert.ok(mlx, `${model}/${component}: missing the mlx-lane row`);
-      assert.ok(
+      assert.equal(
         candle,
-        `${model}/${component}: missing the candle-lane row. sc-16462 halved the mlx figure correctly ` +
-          `but then DELETED the f32 fact, on the premise that chroma hosts no candle lane. It does — ` +
-          `candle_routed:true, candle_gen_chroma::register_providers — so the f32 residency was ` +
-          `reachable and undeclared until sc-17395 split the row per lane`,
+        undefined,
+        `${model}/${component}: Candle now constructs this component in native bf16, so an f32 ` +
+          `above-tier exception would regress sc-17439`,
       );
       assert.equal(mlx.residentTier, "bf16");
-      assert.equal(candle.residentTier, "f32");
-      // Non-constant on both axes: the lanes differ by exactly the 2-vs-4 byte runtime width over the
-      // SAME element count, so a copy-paste of either row's number into the other fails here.
       assert.equal(mlx.evidence.costBytesByTier.q4, mlxBytes);
-      assert.equal(candle.evidence.costBytesByTier.q4, candleBytes);
-      assert.equal(candleBytes, mlxBytes * 2);
+      if (component === "vae") {
+        assert.equal(mlx.evidence.vaeScope, VAE_SCOPES.FULL);
+        assert.equal(
+          VAE_RESIDENCY_SCOPES[`${model}::vae::candle`],
+          undefined,
+          `${model}/vae: a removed decoder-only Candle receipt must not survive the exception row`,
+        );
+      }
     }
   }
 });
