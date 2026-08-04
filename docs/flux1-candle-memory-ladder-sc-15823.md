@@ -6,8 +6,8 @@ SC-15823 certifies the five shared image memory rungs for the exact base-only co
 
 - `flux_schnell` / runtime provider `flux1_schnell`, q4, text-to-image, 1024×1024, batch 1, one frame
 - `flux_dev` / runtime provider `flux1_dev`, q4, text-to-image, 1024×1024, batch 1, one frame
-- Candle/CUDA at inference revision `5b6d6aa02f9d85503d26e66a0732fcb1b841fa5b`
-- SceneWorks pre-evidence revision `002e19717c322ba0520ebff28c96c71d0dea21eb` and matrix source `source-tree:8006080e1f8ee1c5907cbae552797c40dffdd5eb7ba929cf52d7f25cf41609a2`
+- Candle/CUDA at inference revision `5f973a73bf00307240afd81d2778ba9d89349e51`
+- SceneWorks pre-evidence revision `f936e7e6a17a0b592752f634d21db17f5e8f2db7` and matrix source `source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5`
 
 These records do **not** certify q8/bf16, another geometry or mode, LoRA, FLUX IP-Adapter identity, FLUX ControlNet, or PuLID. The manifest has no calibration binding for those coordinates, so they retain the fail-closed resident fallback. In particular, declared identity/control runtime capabilities are not evidence that an overlay was executed.
 
@@ -15,7 +15,9 @@ The records use `runtime_complete`, not Full `complete`. This status makes the e
 
 ## Hardware and method
 
-All ten accepted runs were fresh processes on device 0 with `CUDA_VISIBLE_DEVICES=0`:
+All ten accepted runs were refreshed on 2026-08-04 as fresh processes on device 0 with
+`CUDA_VISIBLE_DEVICES=0` after the inference merge pin changed. The exact live-allocation peaks,
+RGB output hashes, and parity metrics reproduced the original SC-15823 campaign:
 
 | Item | Value |
 |---|---|
@@ -47,15 +49,15 @@ The driver column reproduces the harness's rounded display and is not substitute
 
 | Model | Rung | Load shape | Authoritative peak bytes | Driver diagnostic |
 |---|---|---|---:|---:|
-| schnell | resident | eager | 17,642,573,594 | 27.1 GB |
+| schnell | resident | eager | 17,642,573,594 | 23.6 GB |
 | schnell | staged residency | eager | 14,588,695,430 | 20.8 GB |
-| schnell | bounded decode | eager | 9,608,827,400 | 10.4 GB |
+| schnell | bounded decode | eager | 9,608,827,400 | 10.5 GB |
 | schnell | bounded attention | eager | 8,234,088,968 | 9.1 GB |
 | schnell | bounded transformer residency | deferred | 3,843,456,916 | 4.5 GB |
-| dev | resident | eager | 17,651,074,970 | 22.4 GB |
-| dev | staged residency | eager | 14,597,196,806 | 19.1 GB |
-| dev | bounded decode | eager | 9,858,108,040 | 11.7 GB |
-| dev | bounded attention | eager | 8,272,605,832 | 9.1 GB |
+| dev | resident | eager | 17,651,074,970 | 23.8 GB |
+| dev | staged residency | eager | 14,597,196,806 | 20.5 GB |
+| dev | bounded decode | eager | 9,858,108,040 | 10.7 GB |
+| dev | bounded attention | eager | 8,272,605,832 | 9.4 GB |
 | dev | bounded transformer residency | deferred | 3,843,457,940 | 4.5 GB |
 
 ## Output parity
@@ -71,4 +73,11 @@ Metrics are raw RGB8 channel-space differences versus the corresponding resident
 
 Within schnell, all three bounded rungs produced SHA-256 `b84dd88f02854e15df837216d6f67a37e2d538f9c221ca5c1a14a741bcffcfef`; resident/staged produced `fe0e5ff1a022da5cefe4be7dfeb2bac51bc3870bbfd9bb36949ab8381ba3d9e0`. Within dev, the bounded digest was `3727e3e9c323be1be2b25ce4237c5280876832381c5e8bc64e1e36b2937348d4`, and resident/staged was `009e11f9bbcaca6edebe3658e221589bd7404d7a4c9db8ee251c0eae57801964`.
 
-The authoritative machine-readable records are in `docs/generated/memory-calibration-evidence.json`; exact manifest bindings are in `config/manifests/builtin.models.jsonc`.
+The authoritative machine-readable records are in `docs/generated/memory-calibration-evidence.json`;
+exact manifest bindings are in `config/manifests/builtin.models.jsonc`. Ten immutable refresh logs
+under `docs/calibration/sc-15823-refresh-*.log` are registered as physical-CUDA source sessions.
+Setup attempts that lacked the current testkit's independent expected-calibration receipts were
+rejected before evidence emission. An unrelated preview test briefly claimed GPU 0 later in the
+campaign: the idle guard rejected the affected attention attempt, and the overlapping decode
+diagnostic was discarded and rerun from a 19 MiB idle boundary. Neither excluded attempt contributes
+to the records or source sessions.
