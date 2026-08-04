@@ -1116,7 +1116,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
     [
-      "15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx",
+      "15510:candle", "15510:mlx", "15511:mlx", "15512:candle", "15512:mlx", "15517:candle", "15517:mlx",
       "15519:candle",
     ],
   );
@@ -1341,13 +1341,31 @@ test("an implemented family is Implemented/unverified only where the provider ac
   );
   assert.ok(candleLens.length > 0);
   assert.ok(
+    candleLens
+      .filter((cell) => ["q4", "q8"].includes(cell.tier) && cell.overlay === "none")
+      .every(
+      (cell) =>
+        cell.owningFamilyStory === 15819 &&
+        cell.state === "Implemented/unverified" &&
+        cell.rung4Survey.implementation === "shared-primitive" &&
+        cell.strategyParameters.transformerWindowSize === 1 &&
+        cell.strategyParameters.transformerWindowComponent === "Dit",
+      ),
+    "SC-15819 exposes the exact packed q4/q8 plain Candle Lens-Turbo ladder",
+  );
+  assert.ok(
+    candleLens
+      .filter((cell) => cell.tier === "bf16" || cell.overlay !== "none")
+      .every((cell) => cell.state === "Missing"),
+    "dense and adapter-bearing Candle Lens-Turbo cells remain fail-closed",
+  );
+  assert.ok(
     candleLens.every(
       (cell) =>
         cell.owningFamilyStory === 15819 &&
-        cell.state === "Missing" &&
-        cell.rung4Survey.implementation === "none",
+        cell.rung4Survey.implementation === "shared-primitive",
     ),
-    "the MLX reconciliation must preserve SC-15819's independent Candle ownership and verdict",
+    "the MLX reconciliation must preserve SC-15819's independent Candle ownership",
   );
 
   // MLX Krea registers the contract on all four base descriptors, so both catalog entries and both

@@ -559,8 +559,27 @@
         },
         "candle": {
           "structuralApplicability": "full",
-          "implementation": "none",
-          "summary": "Same uniform 48-block trunk; no Candle block-window path.",
+          "implementation": "shared-primitive",
+          "implementationScopes": [
+            {
+              "entries": [
+                "lens",
+                "lens_turbo"
+              ],
+              "tiers": [
+                "q4",
+                "q8"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSizes": [1, 2, 4, 8, 12, 24],
+                "transformerWindowComponent": "Dit"
+              }
+            }
+          ],
+          "summary": "Both Candle Lens providers expose the uniform 48-block DiT through the shared block-window driver for exact packed q4/q8, deferred, no-overlay loads. Device-format sidecars are prepared outside the measured request and each selected window transfers only its packed blocks to CUDA.",
           "blockStacks": [
             {
               "name": "blocks",
@@ -571,14 +590,36 @@
           "evidence": [
             {
               "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs",
-              "reason": "The Candle Lens provider declares no memory_strategy_contract and does not advertise sequential offload, so neither rung 4 nor its rung-1 prerequisite is reachable."
+              "reason": "The `lens` and `lens_turbo` registrations publish provider-specific memory_strategy_contract callbacks. Exact packed q4/q8 deferred loads expose staged residency plus bounded decode, attention, and DiT-window parameters; adapters, PiD, eager loads, dense tiers, and mismatched packed formats fail closed."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/transformer.rs",
+              "reason": "The 48-block DiT reopens content-addressed packed sidecars and drives each request-selected window through candle_gen::block_window::run_windowed without device-to-host reconstruction."
             }
           ],
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Lens."
+            "scopes": [
+              {
+                "entries": ["lens_turbo"],
+                "tiers": ["q4"],
+                "modes": ["text_to_image"],
+                "overlays": ["none"],
+                "finding": "moves"
+              }
+            ],
+            "reason": "SC-15819's serial GPU-0 implementation run moved the exact Lens-Turbo q4 1024x1024 one-step request from 30.522 GiB resident live high-water to 3.455 GiB at bounded transformer residency. This is implementation evidence, not entry-level calibration or matrix promotion.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs",
+                "reason": "The ignored `integration_tests::sc15819_real_weights_five_rung_sequence` harness runs every cumulative rung, output parity groups, cancellation, invalid-prerequisite cleanup, and idle-floor recovery against the pinned Lens-Turbo q4 artifact."
+              }
+            ]
           },
-          "findings": []
+          "findings": [
+            "The q4 implementation run is entry-, tier-, mode-, overlay-, geometry-, batch-, and step-specific. It does not certify q8, bf16, base `lens`, style variation, adapters, or a reusable fit.",
+            "Base `lens` remains outside the Candle catalog matrix until SC-17511 supplies its unique model-story ownership and calibration. SC-15874 retains Lens-Turbo entry-level calibration ownership."
+          ]
         }
       }
     },
