@@ -87,6 +87,34 @@ const STRATEGY_DEBUG = {
   bounded_transformer_residency: "BoundedTransformerResidency",
 };
 
+function outputForRung(rung) {
+  const output = Buffer.from(OUTPUT);
+  if (rung.startsWith("bounded_")) output[0] += 2;
+  return output;
+}
+
+function parityMetrics(reference, candidate) {
+  let changed = 0;
+  let maximum = 0;
+  let absolute = 0;
+  let squared = 0;
+  for (let index = 0; index < reference.length; index += 1) {
+    const error = Math.abs(reference[index] - candidate[index]);
+    if (error !== 0) changed += 1;
+    maximum = Math.max(maximum, error);
+    absolute += error;
+    squared += error * error;
+  }
+  const rmse = Math.sqrt(squared / reference.length);
+  return {
+    changed: changed / reference.length,
+    maximum,
+    mean: absolute / reference.length,
+    rmse,
+    psnr: rmse === 0 ? "inf" : 20 * Math.log10(255 / rmse),
+  };
+}
+
 function memoryRecord(rung) {
   const [decodeTile, overlap, attention, window, component] = PARAMS[rung];
   const bounded = rung.startsWith("bounded_");
@@ -147,12 +175,12 @@ function baseLog(rung, capturedAt, overrides = {}) {
   Object.assign(record, overrides.record ?? {});
   let diagnostic = "";
   if (rung !== "resident") {
-    const bounded = rung.startsWith("bounded_");
-    const maximum = overrides.maximumError ?? (bounded ? 2 : 0);
-    const changed = maximum === 0 ? 0 : 0.040744145711;
-    const mean = maximum === 0 ? 0 : 0.040746370951;
-    const rmse = maximum === 0 ? 0 : 0.201868326965;
-    const psnr = maximum === 0 ? "inf" : "62.029439934468";
+    const measured = parityMetrics(OUTPUT, outputForRung(rung));
+    const maximum = overrides.maximumError ?? measured.maximum;
+    const changed = overrides.maximumError === undefined ? measured.changed : (maximum === 0 ? 0 : measured.changed);
+    const mean = overrides.maximumError === undefined ? measured.mean : (maximum === 0 ? 0 : measured.mean);
+    const rmse = overrides.maximumError === undefined ? measured.rmse : (maximum === 0 ? 0 : measured.rmse);
+    const psnr = overrides.maximumError === undefined ? measured.psnr : (maximum === 0 ? "inf" : measured.psnr);
     diagnostic = `MEMORY_PARITY_DIAGNOSTIC strategy=${STRATEGY_DEBUG[rung]} reference=docs/calibration/sc-15833/base-q4-resident.rgb changed_fraction=${changed} max_abs=${maximum} mean_abs=${mean} rmse=${rmse} psnr_db=${psnr}\n`;
   }
   return Buffer.from(
@@ -199,8 +227,11 @@ function fixture({ promotionIntent = "complete", support = true } = {}) {
     const sourcePath = `docs/calibration/sc-15833/base-q4-${rung}.log`;
     const outputPath = `docs/calibration/sc-15833/base-q4-${rung}.rgb`;
     const capturedAt = `2026-08-04T04:0${index}:00Z`;
-    files.set(sourcePath, baseLog(rung, capturedAt));
-    files.set(outputPath, OUTPUT);
+    const output = outputForRung(rung);
+    files.set(sourcePath, baseLog(rung, capturedAt, {
+      record: { output_sha256: createHash("sha256").update(output).digest("hex") },
+    }));
+    files.set(outputPath, output);
     return {
       rung,
       command: `CUDA_VISIBLE_DEVICES=0 FLUX2_MEMORY_RUNG=${rung} cargo test --release --ignored`,
@@ -353,9 +384,28 @@ test("SC-15833 rejects staged drift and bounded diagnostics above provider maxAb
     "docs/calibration/sc-15833/base-q4-staged_residency.rgb",
     differentOutput,
   );
-  const blocked = await ingestFlux2Capture(stagedDigest.capture, { reader: stagedDigest.reader });
-  assert.equal(blocked.report.promotionEligible, false);
-  assert.match(blocked.report.blockers.join("\n"), /not byte-identical to the resident source output/);
+  await assert.rejects(
+    ingestFlux2Capture(stagedDigest.capture, { reader: stagedDigest.reader }),
+    /does not match parity recomputed from the accepted resident RGB8 bytes|not byte-exact/,
+  );
+
+  const boundedBytes = fixture();
+  const mutatedOutput = Buffer.alloc(1024 * 1024 * 3, 255);
+  const mutatedSha = createHash("sha256").update(mutatedOutput).digest("hex");
+  boundedBytes.files.set(
+    "docs/calibration/sc-15833/base-q4-bounded_decode.log",
+    baseLog("bounded_decode", "2026-08-04T04:02:00Z", {
+      record: { output_sha256: mutatedSha },
+    }),
+  );
+  boundedBytes.files.set(
+    "docs/calibration/sc-15833/base-q4-bounded_decode.rgb",
+    mutatedOutput,
+  );
+  await assert.rejects(
+    ingestFlux2Capture(boundedBytes.capture, { reader: boundedBytes.reader }),
+    /does not match parity recomputed from the accepted resident RGB8 bytes|recomputed bounded parity exceeds/,
+  );
 });
 
 test("SC-15833 rejects dirty naming, dirty repositories, malformed provenance, and accepted/excluded overlap", async () => {
@@ -376,6 +426,31 @@ test("SC-15833 rejects dirty naming, dirty repositories, malformed provenance, a
   const zero = fixture();
   zero.capture.repositories.inference.revision = "0".repeat(40);
   await assert.rejects(ingestFlux2Capture(zero.capture, { reader: zero.reader }), /nonzero lowercase Git SHA/);
+
+  const mutableModel = fixture();
+  mutableModel.capture.baseInput.resolvedRevision = "main";
+  await assert.rejects(
+    ingestFlux2Capture(mutableModel.capture, { reader: mutableModel.reader }),
+    /baseInput\.resolvedRevision must be a nonzero lowercase Git SHA/,
+  );
+
+  const mutableControl = fixture();
+  mutableControl.capture.controlInput.resolvedRevision = "latest";
+  await assert.rejects(
+    ingestFlux2Capture(mutableControl.capture, { reader: mutableControl.reader }),
+    /controlInput\.resolvedRevision must be a nonzero lowercase Git SHA/,
+  );
+
+  const wrongAbi = fixture();
+  wrongAbi.capture.calibrationAbi += 1;
+  await assert.rejects(ingestFlux2Capture(wrongAbi.capture, { reader: wrongAbi.reader }), /provider ABI 3/);
+
+  const vagueFingerprint = fixture();
+  vagueFingerprint.capture.calibrationFingerprint = "candidate-full-edge-decode";
+  await assert.rejects(
+    ingestFlux2Capture(vagueFingerprint.capture, { reader: vagueFingerprint.reader }),
+    /exact reviewed FLUX\.2 dev provider fingerprint/,
+  );
 
   const hardware = fixture();
   hardware.capture.hardware.driverVersion = "unexpected-driver";

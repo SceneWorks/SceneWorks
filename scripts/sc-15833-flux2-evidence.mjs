@@ -24,6 +24,9 @@ const MODEL_ID = "flux2_dev";
 const BASE_HARNESS = "candle-flux2-memory-ladder-v1";
 const PARITY_METRIC = "rgb8_max_abs_error";
 const BOUNDED_MAX_ABS = 2;
+const EXPECTED_CALIBRATION_ABI = 3;
+const EXPECTED_CALIBRATION_FINGERPRINT =
+  "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
 const SHA256 = /^[0-9a-f]{64}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
@@ -219,6 +222,61 @@ function parityDiagnostic(text, filename) {
   };
 }
 
+function rgb8Parity(reference, candidate, filename) {
+  if (reference.length !== candidate.length || reference.length === 0) {
+    fail(`${filename} cannot be compared with the resident RGB8 output`);
+  }
+  let changed = 0;
+  let maximumError = 0;
+  let absoluteError = 0;
+  let squaredError = 0;
+  for (let index = 0; index < reference.length; index += 1) {
+    const error = Math.abs(reference[index] - candidate[index]);
+    if (error !== 0) changed += 1;
+    if (error > maximumError) maximumError = error;
+    absoluteError += error;
+    squaredError += error * error;
+  }
+  const meanError = absoluteError / reference.length;
+  const rootMeanSquareError = Math.sqrt(squaredError / reference.length);
+  return {
+    changedFraction: changed / reference.length,
+    maximumError,
+    meanError,
+    rootMeanSquareError,
+    psnrDb: rootMeanSquareError === 0
+      ? Number.POSITIVE_INFINITY
+      : 20 * Math.log10(255 / rootMeanSquareError),
+  };
+}
+
+function sameSerializedMetric(actual, reported) {
+  if (actual === reported) return true;
+  if (!Number.isFinite(actual) || !Number.isFinite(reported)) return false;
+  return Math.abs(actual - reported) <= Math.max(1e-12, Math.abs(actual) * 1e-9);
+}
+
+function validateMeasuredParity(resident, candidate) {
+  const filename = candidate.descriptor.sourcePath;
+  const measured = rgb8Parity(resident.outputBytes, candidate.outputBytes, filename);
+  const diagnostic = candidate.diagnostic;
+  if (!diagnostic) fail(`${filename} is missing its resident parity diagnostic`);
+  for (const key of [
+    "changedFraction", "maximumError", "meanError", "rootMeanSquareError", "psnrDb",
+  ]) {
+    if (!sameSerializedMetric(measured[key], diagnostic[key])) {
+      fail(`${filename} ${key} does not match parity recomputed from the accepted resident RGB8 bytes`);
+    }
+  }
+  if (candidate.descriptor.rung === "staged_residency" && measured.maximumError !== 0) {
+    fail(`${filename} staged output is not byte-exact to the accepted resident RGB8 bytes`);
+  }
+  if (candidate.descriptor.rung.startsWith("bounded_") && measured.maximumError > BOUNDED_MAX_ABS) {
+    fail(`${filename} recomputed bounded parity exceeds maxAbs ${BOUNDED_MAX_ABS}`);
+  }
+  return measured;
+}
+
 function expectedSnakeParameters(rung) {
   const parameters = PARAMETERS[rung];
   return {
@@ -341,9 +399,12 @@ function validateCaptureEnvelope(capture) {
     requireText(capture.hardware[key], `hardware.${key}`);
   }
   if (!Number.isSafeInteger(capture.hardware.memoryBytes) || capture.hardware.memoryBytes <= 0) fail("hardware.memoryBytes is invalid");
-  if (!Number.isSafeInteger(capture.calibrationAbi) || capture.calibrationAbi <= 0) fail("calibrationAbi is invalid");
-  requireText(capture.calibrationFingerprint, "calibrationFingerprint");
-  if (!capture.calibrationFingerprint.includes("full-edge-decode")) fail("fingerprint must identify the full-edge decode implementation");
+  if (capture.calibrationAbi !== EXPECTED_CALIBRATION_ABI) {
+    fail(`calibrationAbi must equal the provider ABI ${EXPECTED_CALIBRATION_ABI}`);
+  }
+  if (capture.calibrationFingerprint !== EXPECTED_CALIBRATION_FINGERPRINT) {
+    fail("calibrationFingerprint must equal the exact reviewed FLUX.2 dev provider fingerprint");
+  }
   validateInput(capture.baseInput, "baseInput", "base", "q4");
   validateInput(capture.controlInput, "controlInput", "control", null);
   for (const name of ["baseSessions", "routeSessions", "supportSessions", "excludedAttempts"]) {
@@ -358,7 +419,7 @@ function validateInput(input, label, role, variant) {
   if (!Number.isSafeInteger(input.bytes) || input.bytes <= 0) fail(`${label}.bytes is invalid`);
   requireDigest(input.sha256, `${label}.sha256`);
   requireText(input.repository, `${label}.repository`);
-  requireText(input.resolvedRevision, `${label}.resolvedRevision`);
+  requireRevision(input.resolvedRevision, `${label}.resolvedRevision`);
   requireText(input.variant, `${label}.variant`);
 }
 
@@ -412,7 +473,7 @@ async function ingestBaseSession(descriptor, capture, reader) {
     outputs: [{ path: outputPath, sha256: outputSha256 }],
     claims: ["memory", "quality", "loadability"],
   });
-  return { descriptor, record, diagnostic, session };
+  return { descriptor, record, diagnostic, outputBytes, session };
 }
 
 async function ingestRouteSession(descriptor, capture, reader) {
@@ -670,6 +731,7 @@ export async function ingestFlux2Capture(capture, { reader = (relative) => readF
       if (!reference || !reference.endsWith(residentPath)) {
         blockers.push(`${item.descriptor.rung} parity diagnostic does not bind the resident source output`);
       }
+      validateMeasuredParity(resident, item);
     }
   }
   const routeByName = new Map(route.map((item) => [item.descriptor.route, item]));
