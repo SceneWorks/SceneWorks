@@ -107,7 +107,7 @@ function baseCommand(rung) {
   const parity = rung === "resident"
     ? ""
     : " FLUX2_PARITY_REFERENCE=docs/calibration/sc-15833/base-q4-resident.rgb";
-  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${BASE_INPUT.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[rung]} FLUX2_OUT=${outputPath}${parity} MEMORY_INFERENCE_REVISION=${INFERENCE_REVISION} MEMORY_SCENEWORKS_REVISION=${SCENEWORKS_REVISION} MEMORY_MODEL_REVISION=${MODEL_REVISION} MEMORY_MODEL_INVENTORY_SHA256=${MODEL_INVENTORY} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
+  return `CUDA_VISIBLE_DEVICES=0 FLUX2_DEV_DIR=${BASE_INPUT.path} FLUX2_QUANT=q4 FLUX2_MEMORY_RUNG=${RUNG_ENV[rung]} FLUX2_OUT=${outputPath}${parity} MEMORY_EXPECTED_ABI=3 MEMORY_EXPECTED_FINGERPRINT=${FINGERPRINT} MEMORY_INFERENCE_REVISION=${INFERENCE_REVISION} MEMORY_SCENEWORKS_REVISION=${SCENEWORKS_REVISION} MEMORY_MODEL_REVISION=${MODEL_REVISION} MEMORY_MODEL_INVENTORY_SHA256=${MODEL_INVENTORY} cargo test -p candle-gen-flux2 --release --features cuda tests::flux2_dev_probed_generate_for_offload_ab -- --ignored --nocapture --test-threads=1`;
 }
 
 function routeCommand(route) {
