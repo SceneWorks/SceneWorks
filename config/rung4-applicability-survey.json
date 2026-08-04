@@ -1770,8 +1770,20 @@
         },
         "candle": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "The Candle PuLID provider now delegates its FLUX.1 trunk to the shared staged/windowed reference backbone, but the PuLID worker route does not select or pass a memory strategy and no PuLID overlay evidence is certified. The family therefore remains implementation:none until SC-15839 wires admission and validates the complete identity request.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "pulid_flux_dev"
+          ],
+          "implementedModes": [
+            "character_image"
+          ],
+          "implementedOverlays": [
+            "identity"
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1
+          },
+          "summary": "The bespoke Candle PuLID route now owns a distinct full-request memory contract and lifecycle while delegating its FLUX.1-dev trunk to the shared staged/windowed reference backbone. The exact EVA-CLIP, IdFormer/CA, SCRFD, ArcFace, and BiSeNet bytes remain resident and are priced as five identity components; only the 57-block DiT is windowed. PiD and every non-identity route fail closed.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -1802,7 +1814,15 @@
           "evidence": [
             {
               "source": "inference:crates/media/candle-gen/candle-gen-pulid/src/pulid_flux.rs",
-              "reason": "The Candle PuLID provider now uses `FluxRefBackbone` and its memory-aware injected forward, so the shared FLUX trunk can stage components and stream absolute-index block windows. Its public load path still uses default resident memory, and the SceneWorks PuLID worker does not perform shared selector admission or supply a `GenerationMemory`."
+              "reason": "`load_with_memory_context` rebuilds and validates the exact contract from resolved paths before deriving `GenerationMemory`; `generate_with_memory_context` rechecks route and geometry, preserves absolute PuLID injection indices through the shared backbone, and synchronizes CUDA on every terminal request path."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-pulid/src/memory_strategy.rs",
+              "reason": "The provider-specific calibration identity publishes the five-rung candidate ranges, sizes five resident identity components from the actual files, binds character_image + one identity reference, and rejects base-overlay or optimized PiD reuse."
+            },
+            {
+              "source": "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
+              "reason": "The production bespoke route builds that exact contract after provisioning, submits it to the shared selector with mode/overlay/geometry/tier/load-shape identity, retains the returned MemoryRunContext through load and generation, and records the selected strategy/evidence revision."
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/ca.rs",
@@ -1818,8 +1838,8 @@
             "reason": "No rung-4 run exists for PuLID."
           },
           "findings": [
-            "Shared-backbone plumbing is available but not a shipped PuLID capability: the worker has no PuLID memory-strategy selection/context, the provider's normal load remains resident, and there is no exact full-request overlay evidence. Keep implementation:none and uncertified until SC-15839 wires those boundaries and measures the complete request.",
-            "A future PuLID rung 4 bounds only the 57-block FLUX trunk. EVA-CLIP, the 10-layer IdFormer, the face stack, and 20 per-step cross-attention modules remain resident, so their exact bytes must be priced and the peak improvement cannot be inferred from the trunk block count."
+            "Rung 4 bounds only the 57-block FLUX trunk. EVA-CLIP, the 10-layer IdFormer, the face stack, and 20 per-step cross-attention modules remain resident and are explicitly priced, so no saving is inferred from block count alone.",
+            "Implementation and loadability do not promote evidence: the shared selector continues to choose resident execution until a current full PuLID identity request is present in the packaged evidence bundle. Base FLUX measurements are a different calibration identity and cannot match."
           ]
         }
       }

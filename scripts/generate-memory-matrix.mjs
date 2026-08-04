@@ -1173,7 +1173,6 @@ function stagedResidencyIsAvailable({ backend, model, route, sequentialEngines, 
 }
 
 function staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }) {
-  if (overlay === "none") return true;
   const declaredModel =
     model.id === "z_image_edit" && route.engine === "z_image_turbo"
       ? manifestById.get("z_image_turbo")
@@ -1324,7 +1323,9 @@ function strategyStatus({
   }
   if (
     rung === "resident" &&
-    !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image")
+    !(model.id === "krea_2_turbo" && backend === "candle" && mode === "text_to_image") &&
+    (backend !== "candle" ||
+      staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }))
   ) {
     return {
       state: "Implemented/unverified",

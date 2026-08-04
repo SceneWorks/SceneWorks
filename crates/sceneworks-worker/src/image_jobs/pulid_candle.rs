@@ -1,11 +1,13 @@
 use super::{
-    admit_conditioning_paths, consume_gen_events, curated_image_menu, drive_gen_items_scored,
-    load_reference_image, non_empty, normalize_sampling_knob, pid_effective_dims, pid_output_tier,
-    read_advanced_sampling_knobs, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_character_image_likeness_source, resolve_pid_weights,
-    resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream, ApiClient, Image,
-    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, PulidFlux, PulidFluxPaths,
-    PulidFluxRequest, Settings, Value, WorkerError, WorkerResult,
+    admit_conditioning_paths, candle_artifact_path_matches, candle_certified_artifact_path,
+    candle_certified_hf_artifact_path, consume_gen_events, curated_image_menu,
+    drive_gen_items_scored, load_reference_image, non_empty, normalize_sampling_knob,
+    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
+    resolve_character_image_likeness_source, resolve_pid_weights, resolve_seed, stage_likeness,
+    standard_tier_subdir, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, Path, PathBuf, PulidFlux, PulidFluxPaths, PulidFluxRequest, Settings, Value,
+    WorkerError, WorkerResult,
 };
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, DownloadContext};
@@ -386,6 +388,96 @@ pub(super) async fn generate_candle_pulid_stream(
         .collect();
     let total = work.len();
 
+    // SC-15839: build the bespoke provider's exact contract from the paths it will actually load.
+    // The contract prices the full PuLID identity stack separately from the shared FLUX trunk, so
+    // base FLUX evidence cannot authorize this route.
+    let tier = match flux_base.file_name().and_then(|name| name.to_str()) {
+        Some("q4") => "q4",
+        Some("q8") => "q8",
+        _ => "bf16",
+    };
+    let contract_paths = PulidFluxPaths {
+        flux_base: flux_base.clone(),
+        pulid_weights: adapter.clone(),
+        eva_weights: eva.clone(),
+        face_dir: face_dir.clone(),
+    };
+    let pulid_contract =
+        runtime_cuda::providers::pulid::memory_strategy::provider_contract(&contract_paths)
+            .map_err(|error| {
+                WorkerError::Engine(format!("PuLID-FLUX memory contract failed: {error}"))
+            })?;
+    let runtime_overlay_bytes = pulid_contract.asset_facts.overlay_bytes;
+    let strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux_base.clone()))
+        .with_offload_policy(gen_core::OffloadPolicy::Sequential)
+        .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        tier,
+        runtime_overlay_bytes,
+    );
+    let artifact_is_certified =
+        candle_certified_artifact_path("flux1_dev", settings, &flux_base, tier)
+            && candle_certified_hf_artifact_path(
+                settings,
+                PULID_CANDLE_ADAPTER_REPO,
+                PULID_CANDLE_ADAPTER_REVISION,
+                Path::new(PULID_CANDLE_ADAPTER_FILE),
+                &adapter,
+            )
+            && candle_certified_hf_artifact_path(
+                settings,
+                PULID_CANDLE_MLX_REPO,
+                PULID_CANDLE_MLX_REVISION,
+                Path::new(PULID_CANDLE_EVA_FILE),
+                &eva,
+            )
+            && candle_artifact_path_matches(
+                &face_dir,
+                &settings.data_dir.join("cache").join("pulid-flux"),
+            );
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_bespoke_image(
+        "pulid_flux",
+        PULID_CANDLE_MODEL,
+        &strategy_spec,
+        artifact_is_certified,
+        &request.model_manifest_entry,
+        tier,
+        "character_image",
+        Some("identity"),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 1,
+        },
+        true,
+        use_pid,
+        false,
+        raw_budget,
+        predicted_peak,
+        runtime_overlay_bytes,
+        gen_core::MemoryCacheState::Cold,
+        pulid_contract,
+    )?;
+    if let Some(evaluation) = &memory_evaluation {
+        raw_settings.insert(
+            "memoryStrategy".to_owned(),
+            Value::String(format!("{:?}", evaluation.context.selection.strategy)),
+        );
+        raw_settings.insert(
+            "memoryEvidenceRevision".to_owned(),
+            Value::String(evaluation.context.evidence_revision.clone()),
+        );
+    }
+    let memory_context = memory_evaluation.map(|evaluation| evaluation.context);
+    let load_memory_context = memory_context.clone();
+
     // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FLUX.1-dev base held co-resident
     // with PuLID's whole identity stack: the ID adapter, the EVA-CLIP vision tower, the BiSeNet face
     // parser, and an opted-in PiD decoder pair. This lane loads through the UNcached `start_gen_stream`
@@ -416,8 +508,11 @@ pub(super) async fn generate_candle_pulid_stream(
                 eva_weights: eva,
                 face_dir,
             };
-            let model = PulidFlux::load(&paths)
-                .map_err(|error| WorkerError::Engine(format!("PuLID-FLUX load failed: {error}")))?;
+            let model = match load_memory_context.as_ref() {
+                Some(context) => PulidFlux::load_with_memory_context(&paths, context.clone()),
+                None => PulidFlux::load(&paths),
+            }
+            .map_err(|error| WorkerError::Engine(format!("PuLID-FLUX load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
             let model = match &pid_weights {
                 Some(pid) => model.with_pid(pid).map_err(|error| {
@@ -441,7 +536,7 @@ pub(super) async fn generate_candle_pulid_stream(
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt), _preview, on_progress| {
+                move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -455,11 +550,21 @@ pub(super) async fn generate_candle_pulid_stream(
                         seed: seed as u64,
                         sampler: sampler.clone(),
                         scheduler: scheduler.clone(),
+                        preview: preview.clone(),
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
                         cancel: cancel.clone(),
                     };
-                    let out = match model.generate(&req, &reference, &mut *on_progress) {
+                    let generated = match memory_context.as_ref() {
+                        Some(context) => model.generate_with_memory_context(
+                            context,
+                            &req,
+                            &reference,
+                            &mut *on_progress,
+                        ),
+                        None => model.generate(&req, &reference, &mut *on_progress),
+                    };
+                    let out = match generated {
                         Ok(out) => out,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {

@@ -23,6 +23,7 @@ use crate::{WorkerError, WorkerResult};
 const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
 const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
 const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
+const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 pub(crate) struct CandleMemoryEvaluation {
@@ -394,6 +395,93 @@ pub(crate) fn evaluate_shared_image(
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_inner(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        budget,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        None,
+        None,
+    )
+}
+
+/// Shared-selector entry point for a bespoke Candle provider whose exact contract is built from
+/// caller-provisioned paths rather than the registered provider catalog.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shared_bespoke_image(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    budget: Option<VramBudget>,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    contract: gen_core::MemoryProviderContract,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_inner(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        budget,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        Some(contract),
+        Some(PULID_FLUX_REQUEST_EVIDENCE_REVISION),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_shared_image_inner(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    budget: Option<VramBudget>,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    contract_override: Option<gen_core::MemoryProviderContract>,
+    request_evidence_revision_override: Option<&'static str>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     if !matches!(
         engine_id,
         "z_image"
@@ -404,14 +492,15 @@ pub(crate) fn evaluate_shared_image(
             | "qwen_image_edit"
             | "flux1_schnell"
             | "flux1_dev"
-    ) {
+    ) && contract_override.is_none()
+    {
         return Ok(None);
     }
-    let request_evidence_revision = match engine_id {
+    let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
         "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
         "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
         _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
-    };
+    });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
     // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
     // Keep that surface on its established path until it mints one scope per pass.
@@ -428,13 +517,19 @@ pub(crate) fn evaluate_shared_image(
     let Some(resident_peak_gb) = predicted_peak_gb else {
         return Ok(None);
     };
-    let Some(contract) = crate::inference_runtime::media()
-        .memory_strategy_contract(engine_id, spec)
-        .map_err(|error| {
-            WorkerError::Engine(format!("{engine_id} memory contract failed: {error}"))
-        })?
-    else {
-        return Ok(None);
+    let contract = match contract_override {
+        Some(contract) => contract,
+        None => {
+            let Some(contract) = crate::inference_runtime::media()
+                .memory_strategy_contract(engine_id, spec)
+                .map_err(|error| {
+                    WorkerError::Engine(format!("{engine_id} memory contract failed: {error}"))
+                })?
+            else {
+                return Ok(None);
+            };
+            contract
+        }
     };
     let calibration = contract.calibration.as_ref();
     let resident_selection = MemorySelection {
