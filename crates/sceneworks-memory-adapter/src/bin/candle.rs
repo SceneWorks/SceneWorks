@@ -567,7 +567,17 @@ fn planned_tier(request: &Value) -> Result<&str, String> {
 
 /// The fixture must name the tier and geometry it measured, so a bf16 record can never be emitted
 /// against a q4 capture that merely reused the fixture string.
+///
+/// Scoped to `krea_2_turbo` DELIBERATELY. Krea is the only provider here whose plan spans several
+/// (tier, geometry) legs through one adapter path — six of them, which is exactly how a mislabelled
+/// capture would arise. The Qwen legs declare a single tier and geometry each and their fixture names
+/// (`qwen-image-candle-q4-seed15817-step2`) predate this convention: applying the geometry token
+/// requirement to them would reject five plan rows that measure correctly today. Widen this when
+/// those fixtures are renamed, not before.
 fn validate_fixture_binds_tier_and_geometry(request: &Value) -> Result<(), String> {
+    if planned_provider(request)? != KREA_ID {
+        return Ok(());
+    }
     let planned = protocol::planned(request)?;
     let fixture = planned
         .get("fixture")
@@ -1261,7 +1271,7 @@ fn run(request: &Value) -> Result<Value, String> {
             &strategy,
             actual_calibration.load_shape,
             format!(
-                "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to the                  validated {tier} snapshot"
+                "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to                  the validated {tier} snapshot"
             ),
             "missingWeights",
             &repository,

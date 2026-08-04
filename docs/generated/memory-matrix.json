@@ -1,12 +1,12 @@
 {
   "schemaVersion": 6,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2fc806b02c4636f5bd6a199949b6852dfb0a99a6883690ec4bae975557f82459",
+    "sceneWorksRevision": "source-tree:06b035d15b79581cc34952f72b17985f7e0f0496e0316a28ba550df91259a462",
     "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "fd1a2ceea2aafefefcc54cd3b5264edad43672440726c5dd39ebddbb998f22db"
+        "sha256": "00193491bfc8411f4e51c91a87463bb5079fb2d4e9351fc6fd74e7cbb8636f8b"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -14,7 +14,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "fa07a95c8e9590387db7298611f15cc5641d74a63c0c6af618cebf37d51bee17"
+        "sha256": "5f5d97ff5cf78cc41a2897308c77d8633c7b4dba97d98ef5bec5484de7d1826f"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -26,7 +26,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "4fd98762040d7be8d62019827d918226e6cc9f0577a1483e21590ed75b4ab153"
+        "sha256": "98883033b9d74d4b831af87e259e02460f8db4490ac4ead47d90ae7378558720"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -38,7 +38,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "068f65f947ba1bf4332f0a8fb74bef6d5c1803a0a6997bdbfa1df94a5ff0badf"
+        "sha256": "1797099376877ab6c5f25c0cedc34e3c70e610fa2ff83e229c08c7d464ac2e48"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -229190,44 +229190,44 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "bf16",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:56:48Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode",
               "bounded_attention"
             ],
-            "observedPeakGb": 27.552
+            "observedPeakGb": 25.659
           },
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:55:42Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode",
               "bounded_attention"
             ],
-            "observedPeakGb": 27.652,
+            "observedPeakGb": 25.753,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.046175,
-              "fixture": "sc-15206-bf16-1024-seed42"
+              "maximumError": 0.016239,
+              "fixture": "krea-bf16-1024-seed42"
             }
           }
         ],
@@ -229244,7 +229244,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "768x768",
-            "predictedPeakGb": 27.65976128,
+            "predictedPeakGb": 25.66386,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229261,7 +229261,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "1024x1024",
-            "predictedPeakGb": 27.76068672,
+            "predictedPeakGb": 25.7602,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229357,42 +229357,42 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "bf16",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:56:48Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode"
             ],
-            "observedPeakGb": 28.39
+            "observedPeakGb": 26.472
           },
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:55:42Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode"
             ],
-            "observedPeakGb": 32.014,
+            "observedPeakGb": 29.847,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.046175,
-              "fixture": "sc-15206-bf16-1024-seed42"
+              "maximumError": 0.016239,
+              "fixture": "krea-bf16-1024-seed42"
             }
           }
         ],
@@ -229409,7 +229409,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "768x768",
-            "predictedPeakGb": 28.4896096,
+            "predictedPeakGb": 26.4811,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229424,7 +229424,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "1024x1024",
-            "predictedPeakGb": 32.1137504,
+            "predictedPeakGb": 29.85752,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229554,14 +229554,14 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "bf16",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:56:48Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229569,17 +229569,17 @@
               "bounded_attention",
               "bounded_transformer_residency"
             ],
-            "observedPeakGb": 8.535
+            "observedPeakGb": 8.097
           },
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:55:42Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229587,13 +229587,13 @@
               "bounded_attention",
               "bounded_transformer_residency"
             ],
-            "observedPeakGb": 8.526,
+            "observedPeakGb": 8.408,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.046175,
-              "fixture": "sc-15206-bf16-1024-seed42"
+              "maximumError": 0.016239,
+              "fixture": "krea-bf16-1024-seed42"
             }
           }
         ],
@@ -229610,7 +229610,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "768x768",
-            "predictedPeakGb": 8.64,
+            "predictedPeakGb": 8.1,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229629,7 +229629,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "1024x1024",
-            "predictedPeakGb": 8.64,
+            "predictedPeakGb": 8.42003,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -229723,30 +229723,30 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "bf16",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323"
+            "capturedAt": "2026-08-04T15:56:48Z",
+            "harnessVersion": "sceneworks-memory-v5"
           },
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:55:42Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.046175,
-              "fixture": "sc-15206-bf16-1024-seed42"
+              "maximumError": 0.016239,
+              "fixture": "krea-bf16-1024-seed42"
             }
           }
         ],
@@ -229838,40 +229838,40 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "bf16",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:56:48Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency"
             ],
-            "observedPeakGb": 28.39
+            "observedPeakGb": 32.255
           },
           {
-            "source": "Shortcut sc-15206 activity 15314",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "bf16",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T11:24:32Z",
-            "harnessVersion": "sc-15206-activity-15314-waiver-15323",
+            "capturedAt": "2026-08-04T15:55:42Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency"
             ],
-            "observedPeakGb": 32.014,
+            "observedPeakGb": 36.724,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.046175,
-              "fixture": "sc-15206-bf16-1024-seed42"
+              "maximumError": 0.016239,
+              "fixture": "krea-bf16-1024-seed42"
             }
           }
         ],
@@ -229888,7 +229888,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "768x768",
-            "predictedPeakGb": 28.4896096,
+            "predictedPeakGb": 32.26078,
             "engagedRungs": [
               "resident",
               "staged_residency"
@@ -229899,7 +229899,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "bf16",
             "geometry": "1024x1024",
-            "predictedPeakGb": 32.1137504,
+            "predictedPeakGb": 36.73362,
             "engagedRungs": [
               "resident",
               "staged_residency"
@@ -232199,51 +232199,51 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:43:06Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode",
               "bounded_attention"
             ],
-            "observedPeakGb": 11.076,
+            "observedPeakGb": 9.753,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.213,
-              "fixture": "sc-15117-q4-768-seed42"
+              "maximumError": 0.011188,
+              "fixture": "krea-q4-768-seed42"
             }
           },
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:41:33Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode",
               "bounded_attention"
             ],
-            "observedPeakGb": 11.345,
+            "observedPeakGb": 10.534,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.0528,
-              "fixture": "sc-15117-q4-1024-seed42"
+              "maximumError": 0.01681,
+              "fixture": "krea-q4-1024-seed42"
             }
           }
         ],
@@ -232260,7 +232260,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "768x768",
-            "predictedPeakGb": 11.18799616,
+            "predictedPeakGb": 9.7586,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232277,7 +232277,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "1024x1024",
-            "predictedPeakGb": 11.45865984,
+            "predictedPeakGb": 10.54306,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232373,49 +232373,49 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:43:06Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode"
             ],
-            "observedPeakGb": 11.747,
+            "observedPeakGb": 10.409,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.213,
-              "fixture": "sc-15117-q4-768-seed42"
+              "maximumError": 0.011188,
+              "fixture": "krea-q4-768-seed42"
             }
           },
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:41:33Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode"
             ],
-            "observedPeakGb": 15.405,
+            "observedPeakGb": 13.316,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.0528,
-              "fixture": "sc-15117-q4-1024-seed42"
+              "maximumError": 0.01681,
+              "fixture": "krea-q4-1024-seed42"
             }
           }
         ],
@@ -232432,7 +232432,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "768x768",
-            "predictedPeakGb": 11.85679552,
+            "predictedPeakGb": 10.40948,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232447,7 +232447,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "1024x1024",
-            "predictedPeakGb": 15.51763648,
+            "predictedPeakGb": 13.31797,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232577,14 +232577,14 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:43:06Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232592,24 +232592,24 @@
               "bounded_attention",
               "bounded_transformer_residency"
             ],
-            "observedPeakGb": 4.736,
+            "observedPeakGb": 4.317,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.213,
-              "fixture": "sc-15117-q4-768-seed42"
+              "maximumError": 0.011188,
+              "fixture": "krea-q4-768-seed42"
             }
           },
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:41:33Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232617,13 +232617,13 @@
               "bounded_attention",
               "bounded_transformer_residency"
             ],
-            "observedPeakGb": 5.676,
+            "observedPeakGb": 3.69,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.0528,
-              "fixture": "sc-15117-q4-1024-seed42"
+              "maximumError": 0.01681,
+              "fixture": "krea-q4-1024-seed42"
             }
           }
         ],
@@ -232640,7 +232640,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "768x768",
-            "predictedPeakGb": 4.8491392,
+            "predictedPeakGb": 4.32,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232659,7 +232659,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "1024x1024",
-            "predictedPeakGb": 5.7895808,
+            "predictedPeakGb": 4.32,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -232753,37 +232753,37 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:43:06Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.213,
-              "fixture": "sc-15117-q4-768-seed42"
+              "maximumError": 0.011188,
+              "fixture": "krea-q4-768-seed42"
             }
           },
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:41:33Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.0528,
-              "fixture": "sc-15117-q4-1024-seed42"
+              "maximumError": 0.01681,
+              "fixture": "krea-q4-1024-seed42"
             }
           }
         ],
@@ -232875,47 +232875,47 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "768x768",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:43:06Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency"
             ],
-            "observedPeakGb": 11.747,
+            "observedPeakGb": 16.286,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.213,
-              "fixture": "sc-15117-q4-768-seed42"
+              "maximumError": 0.011188,
+              "fixture": "krea-q4-768-seed42"
             }
           },
           {
-            "source": "Shortcut sc-15117 activity 15189",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q4",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-26T21:22:50Z",
-            "harnessVersion": "sc-15117-activity-15189",
+            "capturedAt": "2026-08-04T15:41:33Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency"
             ],
-            "observedPeakGb": 15.44,
+            "observedPeakGb": 21.285,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.0528,
-              "fixture": "sc-15117-q4-1024-seed42"
+              "maximumError": 0.01681,
+              "fixture": "krea-q4-1024-seed42"
             }
           }
         ],
@@ -232932,7 +232932,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "768x768",
-            "predictedPeakGb": 11.85679552,
+            "predictedPeakGb": 16.28908,
             "engagedRungs": [
               "resident",
               "staged_residency"
@@ -232943,7 +232943,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q4",
             "geometry": "1024x1024",
-            "predictedPeakGb": 15.55721728,
+            "predictedPeakGb": 21.28948,
             "engagedRungs": [
               "resident",
               "staged_residency"
@@ -235243,44 +235243,44 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "q8",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:50:32Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode",
               "bounded_attention"
             ],
-            "observedPeakGb": 17.619
+            "observedPeakGb": 14.878
           },
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:49:46Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode",
               "bounded_attention"
             ],
-            "observedPeakGb": 18.156,
+            "observedPeakGb": 15.253,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.045161,
-              "fixture": "sc-15205-q8-1024-seed42"
+              "maximumError": 0.016112,
+              "fixture": "krea-q8-1024-seed42"
             }
           }
         ],
@@ -235297,7 +235297,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "768x768",
-            "predictedPeakGb": 17.72599232,
+            "predictedPeakGb": 14.88366,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235314,7 +235314,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "1024x1024",
-            "predictedPeakGb": 18.26731968,
+            "predictedPeakGb": 15.25983,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235410,42 +235410,42 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "q8",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:50:32Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode"
             ],
-            "observedPeakGb": 18.357
+            "observedPeakGb": 15.503
           },
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:49:46Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
               "bounded_decode"
             ],
-            "observedPeakGb": 22.015,
+            "observedPeakGb": 19.034,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.045161,
-              "fixture": "sc-15205-q8-1024-seed42"
+              "maximumError": 0.016112,
+              "fixture": "krea-q8-1024-seed42"
             }
           }
         ],
@@ -235462,7 +235462,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "768x768",
-            "predictedPeakGb": 18.46679552,
+            "predictedPeakGb": 15.51164,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235477,7 +235477,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "1024x1024",
-            "predictedPeakGb": 22.12763648,
+            "predictedPeakGb": 19.04404,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235607,14 +235607,14 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "q8",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:50:32Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235622,17 +235622,17 @@
               "bounded_attention",
               "bounded_transformer_residency"
             ],
-            "observedPeakGb": 6.345
+            "observedPeakGb": 5.003
           },
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:49:46Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235640,13 +235640,13 @@
               "bounded_attention",
               "bounded_transformer_residency"
             ],
-            "observedPeakGb": 6.847,
+            "observedPeakGb": 5.003,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.045161,
-              "fixture": "sc-15205-q8-1024-seed42"
+              "maximumError": 0.016112,
+              "fixture": "krea-q8-1024-seed42"
             }
           }
         ],
@@ -235663,7 +235663,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "768x768",
-            "predictedPeakGb": 6.4488064,
+            "predictedPeakGb": 5.01,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235682,7 +235682,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "1024x1024",
-            "predictedPeakGb": 6.9534336,
+            "predictedPeakGb": 5.01,
             "engagedRungs": [
               "resident",
               "staged_residency",
@@ -235776,30 +235776,30 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "q8",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272"
+            "capturedAt": "2026-08-04T15:50:32Z",
+            "harnessVersion": "sceneworks-memory-v5"
           },
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:49:46Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.045161,
-              "fixture": "sc-15205-q8-1024-seed42"
+              "maximumError": 0.016112,
+              "fixture": "krea-q8-1024-seed42"
             }
           }
         ],
@@ -235891,40 +235891,40 @@
         ],
         "historicalVerification": [
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "phase_fit_only",
             "runtimeAdmission": false,
             "tier": "q8",
             "geometry": "768x768",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:50:32Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency"
             ],
-            "observedPeakGb": 18.357
+            "observedPeakGb": 21.411
           },
           {
-            "source": "Shortcut sc-15205 activity 15272",
+            "source": "Shortcut sc-17097 activity 17466",
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
             "evidenceScope": "exact_request",
             "runtimeAdmission": true,
             "tier": "q8",
             "geometry": "1024x1024",
-            "capturedAt": "2026-07-27T03:22:43Z",
-            "harnessVersion": "sc-15205-activity-15272",
+            "capturedAt": "2026-08-04T15:49:46Z",
+            "harnessVersion": "sceneworks-memory-v5",
             "engagedRungs": [
               "resident",
               "staged_residency"
             ],
-            "observedPeakGb": 22.015,
+            "observedPeakGb": 25.911,
             "parity": {
               "contract": "golden",
               "result": "passed",
               "metric": "mean_absolute_rgb_delta_255",
-              "maximumError": 0.045161,
-              "fixture": "sc-15205-q8-1024-seed42"
+              "maximumError": 0.016112,
+              "fixture": "krea-q8-1024-seed42"
             }
           }
         ],
@@ -235941,7 +235941,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "768x768",
-            "predictedPeakGb": 18.46679552,
+            "predictedPeakGb": 21.41617,
             "engagedRungs": [
               "resident",
               "staged_residency"
@@ -235952,7 +235952,7 @@
             "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/candle/turboFit/evidenceRecords",
             "tier": "q8",
             "geometry": "1024x1024",
-            "predictedPeakGb": 22.12763648,
+            "predictedPeakGb": 25.91653,
             "engagedRungs": [
               "resident",
               "staged_residency"

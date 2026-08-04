@@ -490,6 +490,15 @@ impl KreaRuntimeEvidenceContext {
 /// decrease; the manifest names each such pair. `maxMeasuredPixels` remains 1024² because larger
 /// attention shapes have not been validated, so the curve is fitted within that bound rather than
 /// extrapolated beyond it.
+fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
+    let fixed = phase.get("fixedGb").and_then(json_f64)?;
+    let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
+    if !fixed.is_finite() || !per_mpx.is_finite() || fixed < 0.0 || per_mpx < 0.0 {
+        return None;
+    }
+    Some(fixed + per_mpx * pixels as f64 / 1_000_000.0)
+}
+
 /// The typed materialization shape the shipped Krea Turbo curves were measured under (sc-17097).
 ///
 /// `None` for a missing or unrecognized value, which fails the fit closed rather than defaulting: a
@@ -500,15 +509,6 @@ pub(crate) fn krea_turbo_load_shape(turbo_fit: &Value) -> Option<gen_core::LoadS
         "deferred_materialization" => Some(gen_core::LoadShape::DeferredMaterialization),
         _ => None,
     }
-}
-
-fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
-    let fixed = phase.get("fixedGb").and_then(json_f64)?;
-    let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
-    if !fixed.is_finite() || !per_mpx.is_finite() || fixed < 0.0 || per_mpx < 0.0 {
-        return None;
-    }
-    Some(fixed + per_mpx * pixels as f64 / 1_000_000.0)
 }
 
 fn krea_rung_phase_peaks(
@@ -1833,17 +1833,29 @@ mod tests {
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
                 .expect("builtin model manifest parses");
 
+        // Two shapes carry a live calibration ABI: `turboFit.calibrationAbi` (Krea's bespoke opt-in)
+        // and `<backend>.calibrations[].abi` (the packaged-evidence bindings, read into
+        // `MemoryEvidence::calibration_abi` by `candle_memory_strategy::binding`). Both are swept.
         fn walk(value: &Value, path: &str, found: &mut Vec<(String, u64)>) {
             match value {
                 Value::Object(map) => {
                     for (key, child) in map {
-                        if key == "calibrationAbi" {
+                        let child_path = format!("{path}.{key}");
+                        let is_stamp = key == "calibrationAbi"
+                            // `mlx.calibrations[]` rows are HISTORICAL receipts: sc-16482 forbids
+                            // backfilling them and `mlx_fit_gate` demotes a stale one to
+                            // `AdmissionPath::Legacy`, so an ABI-1 row there is correct provenance,
+                            // not drift. The candle rows have no such carve-out.
+                            || (key == "abi" && path.ends_with("]") && path.contains(".candle.calibrations"));
+                        if is_stamp {
                             found.push((
-                                format!("{path}.{key}"),
-                                child.as_u64().expect("calibrationAbi is an integer"),
+                                child_path.clone(),
+                                child
+                                    .as_u64()
+                                    .expect("a calibration ABI stamp is an integer"),
                             ));
                         }
-                        walk(child, &format!("{path}.{key}"), found);
+                        walk(child, &child_path, found);
                     }
                 }
                 Value::Array(items) => {
@@ -1957,7 +1969,11 @@ mod tests {
                 .as_str()
                 .expect("shipped calibrationFingerprint")
                 .to_owned(),
-            load_shape: identity.load_shape,
+            // From the MANIFEST, exactly as `image_jobs::base` does. Reading it back off `identity`
+            // would compare the provider against itself and could never catch a shape mismatch -
+            // which is the whole reason calibration ABI 2 added this axis.
+            load_shape: krea_turbo_load_shape(&manifest["candle"]["turboFit"])
+                .expect("the shipped turbo fit declares a load shape"),
             mode: gen_core::MemoryMode::TextToImage,
             has_reference: false,
             use_pid: false,
@@ -1983,8 +1999,12 @@ mod tests {
             ),
         };
 
-        let decision =
-            gen_core::standard_memory_strategy_safety_check(&provider_contract, &context, None, None);
+        let decision = gen_core::standard_memory_strategy_safety_check(
+            &provider_contract,
+            &context,
+            None,
+            None,
+        );
         assert_eq!(
             decision,
             gen_core::MemorySafetyDecision::Accept,
@@ -2577,6 +2597,19 @@ mod tests {
                 ..
             })
         ));
+        // Moving the 16 GiB probe down to bounded-decode left bounded-attention unprobed: after the
+        // sc-17097 re-measurement it is selected only for free_gb in [12.54, 15.32). Probe inside
+        // that window so every rung the ladder can still reach keeps a golden.
+        assert!(matches!(
+            fit(14.0),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedAttention,
+                    ..
+                },
+                ..
+            })
+        ));
         assert!(matches!(
             fit(12.0),
             Some(KreaTurboFit::Fits {
@@ -2665,18 +2698,16 @@ mod tests {
                 ..
             })
         ));
-        for free_gb in [12.0] {
-            assert!(matches!(
-                fit(free_gb),
-                Some(KreaTurboFit::Fits {
-                    selection: gen_core::MemorySelection {
-                        strategy: MemoryStrategy::BoundedTransformerResidency,
-                        ..
-                    },
+        assert!(matches!(
+            fit(12.0),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedTransformerResidency,
                     ..
-                })
-            ));
-        }
+                },
+                ..
+            })
+        ));
 
         let three_stage =
             krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::StagedResidency, 1024, 1024)
@@ -2920,6 +2951,19 @@ mod tests {
                 ..
             })
         ));
+        // Newly reachable: under the ABI-1 curves the BF16 tiled-VAE and three-stage peaks were tied
+        // at 32.1157 GiB, so bounded-decode could never be selected. The re-measurement separates
+        // them (29.86 against 36.73), making this a live rung for free_gb in [31.86, 38.73).
+        assert!(matches!(
+            fit(33.0),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
+                ..
+            })
+        ));
         assert!(matches!(
             fit(31.0),
             Some(KreaTurboFit::Fits {
@@ -2963,10 +3007,10 @@ mod tests {
             three_stage.peak_gb()
         );
 
-        // sc-17097: the BF16 streamed floor re-measured 8.53 -> 8.41 GiB, moving the boundary from
-        // ~10.63 to ~10.41. Probed 0.01 GiB clear on each side, as for Q8.
+        // sc-17097: the BF16 streamed floor re-measured 8.53 -> 8.42 GiB, moving the boundary from
+        // ~10.63 to ~10.42. Probed 0.01 GiB clear on each side, as for Q8.
         assert!(matches!(
-            fit(10.42),
+            fit(10.43),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedTransformerResidency,
@@ -2975,10 +3019,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(fit(10.40), Some(KreaTurboFit::Reject { .. })));
+        assert!(matches!(fit(10.41), Some(KreaTurboFit::Reject { .. })));
         let immediate_below = Some(VramBudget {
-            free_gb: 10.40,
-            total_gb: 10.40,
+            free_gb: 10.41,
+            total_gb: 10.41,
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "bf16", 1024, 1024, immediate_below, true),

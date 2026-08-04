@@ -6884,9 +6884,9 @@ mod krea_turbo_memory_route_tests {
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
 
         let manifest = historical_builtin_krea_turbo_manifest();
-        // sc-17097: BF16's streamed floor is 10.41 GiB after the re-measurement, so this budget keeps
+        // sc-17097: BF16's streamed floor is 10.42 GiB after the re-measurement, so this budget keeps
         // BF16 unfittable while BOTH lower tiers fit - the case where downtiering is most tempting.
-        let available_gb = 10.40;
+        let available_gb = 10.41;
         let budget = Some(VramBudget {
             free_gb: available_gb,
             total_gb: available_gb,

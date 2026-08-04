@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9e475c8ade3ae57154d964ab99136dc270bf74a83e12c19d2fecab8b465f9ddb",
-    "matrixRevision": "source-tree:2fc806b02c4636f5bd6a199949b6852dfb0a99a6883690ec4bae975557f82459",
+    "sceneWorksRevision": "source-tree:6fb9acfb8dc2dc6c7abbff1764bc8e047542047b78ed07bfbcd835b1b2cac233",
+    "matrixRevision": "source-tree:06b035d15b79581cc34952f72b17985f7e0f0496e0316a28ba550df91259a462",
     "inferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "d31992e0b67e7dd59c9160faa5531753edc13f49e475bf30ebc243f83260f1d0"
+        "sha256": "51ff3beeb89d85a11265a7c4159e1d02cb44240700d5f1b30fb95a715b988cc1"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "4f4744f1f09390dd333fabbfc81e1d5d1c1fbe773a7eb535a2b21368a71fcb7c"
+        "sha256": "31bbf107da8be978238357da8100a7cc38d0872a7458c7afb9c49e960808bd38"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -31,11 +31,11 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "068f65f947ba1bf4332f0a8fb74bef6d5c1803a0a6997bdbfa1df94a5ff0badf"
+        "sha256": "1797099376877ab6c5f25c0cedc34e3c70e610fa2ff83e229c08c7d464ac2e48"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "4fd98762040d7be8d62019827d918226e6cc9f0577a1483e21590ed75b4ab153"
+        "sha256": "98883033b9d74d4b831af87e259e02460f8db4490ac4ead47d90ae7378558720"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
@@ -43,7 +43,7 @@
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
-        "sha256": "fa14300eac874b295ceb666e2589e8006a8bd733cf9b20f047db7f5e684f85ad"
+        "sha256": "bbaca6f7e52ef7252edf7952c6f3be85f3dd79a8428649a13cf6b2958faf7cc7"
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
@@ -643,6 +643,256 @@
         "modelLoadGroup": null
       },
       {
+        "name": "candle-krea-q4-768-fresh-reference-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q4-768-fresh-reference-staged",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q4-768-fresh-reference-bounded-decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q4-768-fresh-reference-bounded-attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q4-768-fresh-reference-bounded-transformer",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-1024-fresh-reference-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-1024-fresh-reference-staged",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-1024-fresh-reference-bounded-decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-1024-fresh-reference-bounded-attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-1024-fresh-reference-bounded-transformer",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-768-fresh-reference-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-768-fresh-reference-staged",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-768-fresh-reference-bounded-decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-768-fresh-reference-bounded-attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-q8-768-fresh-reference-bounded-transformer",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-1024-fresh-reference-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-1024-fresh-reference-staged",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-1024-fresh-reference-bounded-decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-1024-fresh-reference-bounded-attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-1024-fresh-reference-bounded-transformer",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-768-fresh-reference-resident",
+        "backend": "candle",
+        "rung": "resident",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-768-fresh-reference-staged",
+        "backend": "candle",
+        "rung": "staged_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-768-fresh-reference-bounded-decode",
+        "backend": "candle",
+        "rung": "bounded_decode",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-768-fresh-reference-bounded-attention",
+        "backend": "candle",
+        "rung": "bounded_attention",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-bf16-768-fresh-reference-bounded-transformer",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
         "name": "mlx-qwen-bf16-resident",
         "backend": "mlx",
         "rung": "resident",
@@ -754,6 +1004,36 @@
       },
       {
         "name": "candle-krea-production-current-v1",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-production-current-q8-v1",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-production-current-bf16-v1",
+        "backend": "candle",
+        "rung": "bounded_transformer_residency",
+        "evidenceScope": "authoritative",
+        "plannedCases": 1,
+        "positiveCases": 1,
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      {
+        "name": "candle-krea-production-current-q4-768-v1",
         "backend": "candle",
         "rung": "bounded_transformer_residency",
         "evidenceScope": "authoritative",
@@ -2287,17 +2567,17 @@
         "bf16": {
           "geometryPoints": 2,
           "geometrySensitiveCurves": 8,
-          "flatSlopes": 3
+          "flatSlopes": 2
         },
         "q4": {
           "geometryPoints": 2,
           "geometrySensitiveCurves": 8,
-          "flatSlopes": 1
+          "flatSlopes": 3
         },
         "q8": {
           "geometryPoints": 2,
           "geometrySensitiveCurves": 8,
-          "flatSlopes": 4
+          "flatSlopes": 2
         }
       },
       "underDeterminedTiers": [],

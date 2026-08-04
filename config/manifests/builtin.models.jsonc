@@ -5267,14 +5267,20 @@
             "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB; every fitted curve pinned at or above BOTH measured geometries after rounding, so no measured point can be under-predicted",
             "outputParity": "ordinary CUDA text-to-image retains tier and output bytes; sc-17097 additionally compares a resident render against the deepest bounded rung from one loaded generator per tier, after proving the resident A-B-A repeat is bit-identical"
           },
-          // Machine-readable evidence cells. `exact_request` rows carry geometry-specific output
+          // Machine-readable evidence cells. Each row's `sceneWorksCommit` / `capturedAt` name its
+          // PHASE capture; the `parity` block on an `exact_request` row comes from a second run of the
+          // same source tree (the five-rung lane measures per-rung memory but compares no outputs, so
+          // parity needs the resident-versus-bounded lane). Both runs are recorded in sc-17097
+          // activity 17466 with their own timestamps.
+          //
+          // `exact_request` rows carry geometry-specific output
           // parity and may admit that exact request after runtime fingerprint/loadability checks.
           // `phase_fit_only` rows carry direct per-phase measurements that determine a bounded curve,
           // but cannot authorize runtime admission without parity for that same geometry. Observed
           // values come from the cited Shortcut activities; artifact revisions name the merged path.
           "evidenceRecords": [
             {
-              "evidenceScope": "phase_fit_only",
+              "evidenceScope": "exact_request",
               "tier": "q4",
               "width": 768,
               "height": 768,
@@ -5298,7 +5304,7 @@
               "predictedPeaksGb": {
                 "threeStage": 16.28908,
                 "tiledVae": 10.40948,
-                "chunkedAttention": 9.7627,
+                "chunkedAttention": 9.7586,
                 "streamedBlocks": 4.32
               },
               "predictedPhasesGb": {
@@ -5313,13 +5319,13 @@
                   "decode": 8.6
                 },
                 "chunkedAttention": {
-                  "text": 3.44925,
-                  "denoise": 9.7627,
+                  "text": 3.44515,
+                  "denoise": 9.7586,
                   "decode": 8.6
                 },
                 "streamedBlocks": {
                   "text": 3.57,
-                  "denoise": 3.4485,
+                  "denoise": 3.4444,
                   "decode": 4.32
                 }
               },
@@ -5374,6 +5380,13 @@
                   "bounded_attention",
                   "bounded_transformer_residency"
                 ]
+              },
+              "parity": {
+                "contract": "golden",
+                "result": "passed",
+                "metric": "mean_absolute_rgb_delta_255",
+                "maximumError": 0.011188,
+                "fixture": "krea-q4-768-seed42"
               }
             },
             {
@@ -5401,7 +5414,7 @@
               "predictedPeaksGb": {
                 "threeStage": 21.28948,
                 "tiledVae": 13.31797,
-                "chunkedAttention": 10.54258,
+                "chunkedAttention": 10.54306,
                 "streamedBlocks": 4.32
               },
               "predictedPhasesGb": {
@@ -5416,14 +5429,36 @@
                   "decode": 8.6
                 },
                 "chunkedAttention": {
-                  "text": 3.57312,
-                  "denoise": 10.54258,
+                  "text": 3.5736,
+                  "denoise": 10.54306,
                   "decode": 8.6
                 },
                 "streamedBlocks": {
                   "text": 3.57,
-                  "denoise": 3.69623,
+                  "denoise": 3.69672,
                   "decode": 4.32
+                }
+              },
+              "observedPhasesGb": {
+                "threeStage": {
+                  "text": 3.44,
+                  "denoise": 14.533,
+                  "decode": 21.285
+                },
+                "tiledVae": {
+                  "text": 3.098,
+                  "denoise": 13.316,
+                  "decode": 8.1
+                },
+                "chunkedAttention": {
+                  "text": 3.565,
+                  "denoise": 10.534,
+                  "decode": 8.599
+                },
+                "streamedBlocks": {
+                  "text": 3.565,
+                  "denoise": 3.69,
+                  "decode": 3.567
                 }
               },
               "observedPeaksGb": {
@@ -5495,7 +5530,7 @@
               "predictedPhasesGb": {
                 "threeStage": {
                   "text": 5.01,
-                  "denoise": 15.69907,
+                  "denoise": 15.69497,
                   "decode": 21.41617
                 },
                 "tiledVae": {
@@ -5598,7 +5633,7 @@
               "predictedPhasesGb": {
                 "threeStage": {
                   "text": 5.01,
-                  "denoise": 19.16723,
+                  "denoise": 19.16772,
                   "decode": 25.91653
                 },
                 "tiledVae": {
@@ -5615,6 +5650,28 @@
                   "text": 5.01,
                   "denoise": 4.88,
                   "decode": 4.42
+                }
+              },
+              "observedPhasesGb": {
+                "threeStage": {
+                  "text": 5.003,
+                  "denoise": 19.159,
+                  "decode": 25.911
+                },
+                "tiledVae": {
+                  "text": 5.003,
+                  "denoise": 19.034,
+                  "decode": 13.724
+                },
+                "chunkedAttention": {
+                  "text": 5.003,
+                  "denoise": 15.253,
+                  "decode": 13.724
+                },
+                "streamedBlocks": {
+                  "text": 5.003,
+                  "denoise": 4.878,
+                  "decode": 3.661
                 }
               },
               "observedPeaksGb": {
@@ -5678,16 +5735,16 @@
                 "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 32.26489,
+                "threeStage": 32.26078,
                 "tiledVae": 26.4811,
-                "chunkedAttention": 25.66796,
+                "chunkedAttention": 25.66386,
                 "streamedBlocks": 8.1
               },
               "predictedPhasesGb": {
                 "threeStage": {
                   "text": 7.94129,
                   "denoise": 26.57239,
-                  "decode": 32.26489
+                  "decode": 32.26078
                 },
                 "tiledVae": {
                   "text": 8.1,
@@ -5696,12 +5753,12 @@
                 },
                 "chunkedAttention": {
                   "text": 8.1,
-                  "denoise": 25.66796,
+                  "denoise": 25.66386,
                   "decode": 24.6
                 },
                 "streamedBlocks": {
                   "text": 8.1,
-                  "denoise": 7.94162,
+                  "denoise": 7.94752,
                   "decode": 4.48
                 }
               },
@@ -5781,16 +5838,16 @@
                 "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 36.73313,
+                "threeStage": 36.73362,
                 "tiledVae": 29.85752,
-                "chunkedAttention": 25.75972,
-                "streamedBlocks": 8.40955
+                "chunkedAttention": 25.7602,
+                "streamedBlocks": 8.42003
               },
               "predictedPhasesGb": {
                 "threeStage": {
                   "text": 7.9734,
                   "denoise": 29.98092,
-                  "decode": 36.73313
+                  "decode": 36.73362
                 },
                 "tiledVae": {
                   "text": 8.1,
@@ -5799,13 +5856,35 @@
                 },
                 "chunkedAttention": {
                   "text": 8.1,
-                  "denoise": 25.75972,
+                  "denoise": 25.7602,
                   "decode": 24.6
                 },
                 "streamedBlocks": {
                   "text": 8.1,
-                  "denoise": 8.40955,
+                  "denoise": 8.42003,
                   "decode": 4.48
+                }
+              },
+              "observedPhasesGb": {
+                "threeStage": {
+                  "text": 7.972,
+                  "denoise": 29.972,
+                  "decode": 36.724
+                },
+                "tiledVae": {
+                  "text": 8.097,
+                  "denoise": 29.847,
+                  "decode": 24.63
+                },
+                "chunkedAttention": {
+                  "text": 8.097,
+                  "denoise": 25.753,
+                  "decode": 24.599
+                },
+                "streamedBlocks": {
+                  "text": 7.94,
+                  "denoise": 8.408,
+                  "decode": 3.848
                 }
               },
               "observedPeaksGb": {
@@ -5914,12 +5993,12 @@
               },
               "chunkedAttention": {
                 "text": {
-                  "fixedGb": 3.29,
-                  "perMpxGb": 0.27
+                  "fixedGb": 3.28,
+                  "perMpxGb": 0.28
                 },
                 "denoise": {
-                  "fixedGb": 8.76,
-                  "perMpxGb": 1.7
+                  "fixedGb": 8.75,
+                  "perMpxGb": 1.71
                 },
                 "decode": {
                   "fixedGb": 8.6,
@@ -5932,8 +6011,8 @@
                   "perMpxGb": 0
                 },
                 "denoise": {
-                  "fixedGb": 3.13,
-                  "perMpxGb": 0.54
+                  "fixedGb": 3.12,
+                  "perMpxGb": 0.55
                 },
                 "decode": {
                   "fixedGb": 4.32,
@@ -5948,8 +6027,8 @@
                   "perMpxGb": 0
                 },
                 "denoise": {
-                  "fixedGb": 11.24,
-                  "perMpxGb": 7.56
+                  "fixedGb": 11.23,
+                  "perMpxGb": 7.57
                 },
                 "decode": {
                   "fixedGb": 15.63,
@@ -6010,8 +6089,8 @@
                   "perMpxGb": 7.43
                 },
                 "decode": {
-                  "fixedGb": 26.52,
-                  "perMpxGb": 9.74
+                  "fixedGb": 26.51,
+                  "perMpxGb": 9.75
                 }
               },
               "tiledVae": {
@@ -6034,8 +6113,8 @@
                   "perMpxGb": 0
                 },
                 "denoise": {
-                  "fixedGb": 25.55,
-                  "perMpxGb": 0.2
+                  "fixedGb": 25.54,
+                  "perMpxGb": 0.21
                 },
                 "decode": {
                   "fixedGb": 24.6,
@@ -6049,7 +6128,7 @@
                 },
                 "denoise": {
                   "fixedGb": 7.34,
-                  "perMpxGb": 1.02
+                  "perMpxGb": 1.03
                 },
                 "decode": {
                   "fixedGb": 4.48,
