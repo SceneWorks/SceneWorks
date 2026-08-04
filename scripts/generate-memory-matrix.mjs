@@ -33,12 +33,31 @@ const RUNGS = [
   "bounded_transformer_residency",
 ];
 
+// sc-17497: the audit is layered. `auditedObjects` pins the CAPTURED side of FLUX.2's Candle/CUDA
+// compile closure — the code the measurements were taken against, immutable forever. A live pin
+// whose objects are all byte-identical is authorized by that alone, for free (the v1 shape).
+//
+// When a path moves, object identity can no longer decide: the 42-line `//!` doc comment in
+// inference `35251a88` moved `candle-gen`'s tree while provably changing nothing that compiles.
+// `artifactProof` is then the answer — the SHA-256 of the LINKED `candle-gen-flux2` lib test binary
+// (the exact target that produced the measurements), built at both revisions under one toolchain by
+// `scripts/inference-artifact-audit.mjs`. Identical bytes there mean identical compiled code, which
+// is the claim the calibration actually depends on.
+//
+// `null` means "the live pin needs no artifact proof". Setting it demands a real CUDA build: the
+// digest is frozen HERE, in source, so the checked-in record cannot authorize itself.
+//
+// `adjudicates` is the other half, and it is not optional. A digest speaks only for the paths the
+// audited binary LINKS: `runtime-cuda` depends on `candle-gen-flux2`, not the reverse, so a commit
+// into the CUDA bundle leaves the measurement binary byte-identical. Pinning the adjudicable set
+// here keeps an unchanged digest from being read as proof over a path it never compiled.
 const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
   story: "SC-15833",
   modelId: "flux2_dev",
   provider: "flux2_dev",
   capturedInferenceRevision: "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
   compatibleInferenceRevision: "277f423822bf1899340ed3d867c3d6a773473d7b",
+  artifactProof: null,
   auditedObjects: Object.freeze({
     "Cargo.toml": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
     "crates/contracts/gen-core": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
@@ -1226,32 +1245,59 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-function validatedInferenceCompatibility(body) {
-  const audit = JSON.parse(body);
+const V1_AUDIT_METHOD = "git object identity across the complete Candle FLUX.2 runtime dependency closure";
+const V2_AUDIT_METHOD =
+  "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
+  "the complete Candle FLUX.2 runtime dependency closure";
+
+/**
+ * sc-17497: accept either audit shape, and require the artifact layer exactly when object identity
+ * has stopped being sufficient.
+ *
+ * v1 records carry no artifact proof, so they remain valid only while every closure object is
+ * byte-identical — which is all v1 ever asserted. v2 adds `auditedArtifact`; it becomes MANDATORY
+ * the moment a path moves, and it must agree with the digest frozen in `FLUX2_COMPATIBILITY_AUDIT`.
+ * Freezing it in source is what stops the checked-in record from authorizing itself.
+ *
+ * Only the PROOF is injectable, and only so the tests can exercise the ACCEPTING side of the artifact
+ * layer while the shipped constant still carries `artifactProof: null` — a validator exercised solely
+ * against its own default is a false green. Everything else (story, both revisions, the captured
+ * closure) is read from the frozen constant and cannot be overridden, so a test cannot accidentally
+ * grade a record against expectations derived from that same record.
+ */
+export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMPATIBILITY_AUDIT.artifactProof) {
   const expected = FLUX2_COMPATIBILITY_AUDIT;
+  const audit = JSON.parse(body);
+  const schemaVersion = audit.schemaVersion;
   if (
-    audit.schemaVersion !== 1 ||
+    (schemaVersion !== 1 && schemaVersion !== 2) ||
     audit.story !== expected.story ||
     audit.capturedInferenceRevision !== expected.capturedInferenceRevision ||
     audit.compatibleInferenceRevision !== expected.compatibleInferenceRevision ||
-    audit.method !== "git object identity across the complete Candle FLUX.2 runtime dependency closure" ||
-    audit.command !== "git rev-parse <revision>:<path>" ||
+    audit.method !== (schemaVersion === 1 ? V1_AUDIT_METHOD : V2_AUDIT_METHOD) ||
+    (schemaVersion === 1 && audit.command !== "git rev-parse <revision>:<path>") ||
+    typeof audit.command !== "string" ||
     !Array.isArray(audit.auditedObjects)
   ) {
     throw new Error("SC-15833 inference compatibility audit identity is invalid");
   }
   const objects = new Map();
+  const changed = [];
   for (const entry of audit.auditedObjects) {
     if (
       !entry ||
       typeof entry.path !== "string" ||
-      typeof entry.capturedObject !== "string" ||
-      entry.capturedObject !== entry.compatibleObject ||
+      !/^[0-9a-f]{40}$/.test(entry.capturedObject ?? "") ||
+      !/^[0-9a-f]{40}$/.test(entry.compatibleObject ?? "") ||
       objects.has(entry.path)
     ) {
       throw new Error("SC-15833 inference compatibility audit object pair is invalid");
     }
+    // The CAPTURED side is what the measurements were taken against, so it is the half that is
+    // frozen. A moved compatible object is not a failure here — it is what the artifact layer below
+    // exists to adjudicate.
     objects.set(entry.path, entry.capturedObject);
+    if (entry.capturedObject !== entry.compatibleObject) changed.push(entry.path);
   }
   if (
     objects.size !== Object.keys(expected.auditedObjects).length ||
@@ -1259,7 +1305,74 @@ function validatedInferenceCompatibility(body) {
   ) {
     throw new Error("SC-15833 inference compatibility audit closure is incomplete or unrecognized");
   }
+  if (schemaVersion === 1 && changed.length > 0) {
+    throw new Error("SC-15833 inference compatibility audit object pair is invalid");
+  }
+  if (schemaVersion === 2) {
+    validatedCompatibilityArtifact(audit, changed, expectedProof);
+  } else if (expectedProof !== null) {
+    throw new Error("SC-15833 inference compatibility audit is missing its expected artifact proof");
+  }
   return expected;
+}
+
+/**
+ * The compiled-artifact half of a v2 record.
+ *
+ * Only a `cuda` build can authorize a FLUX.2 calibration: the measurements come from an RTX capture,
+ * and `scripts/inference-artifact-audit.mjs` can also build the same closure on Metal, which must
+ * never be mistaken for proof of the CUDA artifact.
+ */
+function validatedCompatibilityArtifact(audit, changed, expectedProof) {
+  const declared = audit.changedClosurePaths;
+  const declaredPaths = Array.isArray(declared) ? declared.slice().sort() : null;
+  const changedPaths = changed.slice().sort();
+  if (
+    !declaredPaths ||
+    declaredPaths.length !== changedPaths.length ||
+    declaredPaths.some((objectPath, index) => objectPath !== changedPaths[index])
+  ) {
+    throw new Error("SC-15833 inference compatibility audit misdeclares which closure paths changed");
+  }
+  if (changed.length === 0) {
+    if (expectedProof !== null) {
+      throw new Error("SC-15833 inference compatibility audit is missing its expected artifact proof");
+    }
+    return;
+  }
+  const artifact = audit.auditedArtifact;
+  if (
+    !artifact ||
+    artifact.lane !== "cuda" ||
+    artifact.package !== "candle-gen-flux2" ||
+    artifact.test !== "tests::flux2_dev_probed_generate_for_offload_ab" ||
+    artifact.profile !== "release" ||
+    !/^sha256:[0-9a-f]{64}$/.test(artifact.capturedDigest ?? "") ||
+    artifact.capturedDigest !== artifact.compatibleDigest ||
+    expectedProof === null ||
+    artifact.capturedDigest !== expectedProof.digest
+  ) {
+    throw new Error("SC-15833 inference compatibility audit compiled-artifact proof is invalid");
+  }
+  // The digest only speaks for what the binary linked. Anything else that moved is unproven.
+  //
+  // Intersected with the RECORD's own `adjudicates`, not just the frozen set: the frozen half is a
+  // human transcription, and unlike the digest — where a typo fails closed — an over-wide set fails
+  // OPEN and would authorize a path the binary never linked. Intersecting lets the record narrow the
+  // claim but never widen it, so both halves have to be wrong in the same direction to do harm.
+  const recorded = artifact.adjudicates;
+  if (!Array.isArray(recorded) || recorded.some((objectPath) => typeof objectPath !== "string")) {
+    throw new Error("SC-15833 inference compatibility audit compiled-artifact proof is invalid");
+  }
+  const unadjudicable = changed.filter(
+    (objectPath) => !expectedProof.adjudicates.includes(objectPath) || !recorded.includes(objectPath),
+  );
+  if (unadjudicable.length > 0) {
+    throw new Error(
+      `SC-15833 inference compatibility audit cannot adjudicate ${unadjudicable.join(", ")}: the audited ` +
+        "artifact does not link it",
+    );
+  }
 }
 
 function compatibilityAuthorizes(binding, { modelId, provider, inferenceRevision, audit }) {
