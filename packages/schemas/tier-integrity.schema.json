@@ -105,6 +105,11 @@
           "minLength": 20,
           "description": "How the component cost was isolated. Required with costBytesByTier so a bundled total cannot masquerade as a component measurement. The source must also cite an immutable artifact revision that matches a pinned catalog download."
         },
+        "vaeScope": {
+          "type": "string",
+          "enum": ["decoder-only", "full-autoencoder"],
+          "description": "Required by the checker on every VAE row. Bound to the numeric receipt: decoder-only excludes encoder tensors; full-autoencoder includes encoder and decoder residency."
+        },
         "triageDecision": {
           "type": "string",
           "enum": ["measure", "eliminate"],

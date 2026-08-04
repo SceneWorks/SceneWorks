@@ -41,9 +41,9 @@
       // tier can never strand another that still needs them. All six variants at bf16 cost 58.62 GB
       // instead of 105.04 GB; a second variant is an ~8.2 GB delta.
       //
-      // The VAE is DENSE in every tier by design: its quantizable weights are the adaLN projections
-      // the one-step decoder folds away at load, so packing them on disk would corrupt the decode.
-      // It costs 0.345 GB per tier and is quantized at load exactly as before.
+      // The shared VAE ARTIFACT is 0.345 GB on disk in every tier. Runtime residency is smaller and
+      // mode-dependent: txt2img constructs the decoder half only, while edit routes also construct
+      // `student.dconv_encoder.*`; config/tier-integrity.jsonc records those selected element counts.
       //
       // sc-15071 — why the q4 text encoder (4.331 GB) is nearly the size of the q8 one (4.731 GB):
       // packed uniformly at 4 bits the q4 tier did not render the prompt at all, it produced a

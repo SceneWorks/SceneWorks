@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -100,7 +101,29 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
 
     # `current` vs `historical` is decided against the shipped inference pin plus exact audited
     # compatibility. SC-15833 proves the Candle FLUX.2 dependency closure tree-identical at 5ffd
-    # and 277f, so only its five records may authorize the later runtime.
+    # and 277f, so only its five records may authorize the later runtime -- and only while 277f is
+    # still the live pin. The audit is a WINDOW, not a permanent grant: once the pin moves past it
+    # those five join every other retained record as historical, which is the fail-closed rule
+    # SC-15833's own "refuses to authorize capture promotion against a newer live inference pin"
+    # test asserts directly.
+    #
+    # Derived from the live pin rather than hardcoded, so a bump does not make this test wrong.
+    # It asserted a flat `{"current"}`, which was only ever true at 277f; sc-17393's bump to
+    # 35251a88 is the first bump to arrive after SC-15833 landed. Re-certifying FLUX.2 needs a new
+    # `inference-compatibility-<rev>.json` proof, and that proof's audited-object set includes
+    # `crates/media/candle-gen/candle-gen`, which 277f->35251a88 changes -- so the window has to be
+    # re-audited by measurement, not widened by editing this assertion.
+    audited_live_revision = "277f423822bf1899340ed3d867c3d6a773473d7b"
+    worker_manifest = (
+        ROOT / "crates" / "sceneworks-worker" / "Cargo.toml"
+    ).read_text(encoding="utf-8")
+    live_pin_match = re.search(
+        r'github\.com/SceneWorks/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"',
+        worker_manifest,
+    )
+    assert live_pin_match, "could not read the pinned inference revision from the worker manifest"
+    within_audited_window = live_pin_match.group(1) == audited_live_revision
+    expected_flux2_semantics = {"current"} if within_audited_window else {"historical"}
     full_runs = [
         run for run in matrix["calibrationRuns"] if run["record"]["status"] == "complete"
     ]
@@ -126,7 +149,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         run["record"]["id"]: run["record"]["strategy"]["rung"]
         for run in flux2_runtime
     } == expected_flux2_runtime
-    assert {run["semantics"] for run in flux2_runtime} == {"current"}
+    assert {run["semantics"] for run in flux2_runtime} == expected_flux2_semantics
     assert {
         run["record"]["repositories"]["inference"]["revision"]
         for run in flux2_runtime
@@ -158,15 +181,20 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert len(runtime_complete_runs) == len(flux2_runtime) + len(
         historical_flux1_runtime
     )
-    assert {run["semantics"] for run in runtime_complete_runs} == {"current", "historical"}
+    # Inside the audited window the runtime-complete population is mixed (FLUX.2 current, FLUX.1
+    # historical); outside it every record is historical. `eligible` is unaffected either way —
+    # ageing past the window re-dates a record, it does not reject it.
+    assert {run["semantics"] for run in runtime_complete_runs} == (
+        {"current", "historical"} if within_audited_window else {"historical"}
+    )
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert {run["record"]["id"] for run in current_eligible} == set(
-        expected_flux2_runtime
+    assert {run["record"]["id"] for run in current_eligible} == (
+        set(expected_flux2_runtime) if within_audited_window else set()
     )
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
