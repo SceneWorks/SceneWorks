@@ -35,9 +35,10 @@
 //! **Both files are nevertheless VERIFIED on every PR** that can invalidate them. `macos-mlx.yml`
 //! re-dumps to a scratch dir and diffs `capabilities.mlx.json` against it (sc-17119); the
 //! self-hosted CUDA lane `windows-candle.yml` does the same for `capabilities.candle.json` under
-//! `shell: cmd` (sc-17592). Both lanes watch `config/engine-capabilities/**`, so the one edit these
-//! guards exist to catch — a **restamp**, where the `inferenceRevision` line is rewritten and the
-//! engine list is left stale — cannot slip through by touching that file alone. Without those steps
+//! `shell: cmd` (sc-17592). Each lane watches its OWN dump by exact path — not the directory
+//! (sc-17665), which would wake each self-hosted box for the other backend's file — so the one edit
+//! these guards exist to catch — a **restamp**, where the `inferenceRevision` line is rewritten and
+//! the engine list is left stale — cannot slip through by touching that file alone. Without those steps
 //! every remaining guard reads this file as a *source* and is satisfied by editing one line. (The
 //! other candle lanes still verify nothing: `desktop-windows.yml` builds the sidecar on main/release
 //! only, and `server-candle-linux.yml` is `workflow_dispatch`-only.)

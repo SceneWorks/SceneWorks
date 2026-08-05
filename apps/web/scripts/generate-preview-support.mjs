@@ -26,8 +26,10 @@
 //
 // Those two lanes DO verify their own dump on every PR that can invalidate it: `macos-mlx.yml`
 // re-dumps and diffs `capabilities.mlx.json` (sc-17119), and `windows-candle.yml` does the same for
-// `capabilities.candle.json` (sc-17592); both watch `config/engine-capabilities/**`. So a restamp —
-// the `inferenceRevision` line rewritten over a stale engine list — cannot reach main unnoticed.
+// `capabilities.candle.json` (sc-17592); each watches its OWN dump by exact path, not the whole
+// directory, so neither self-hosted box is woken for the other backend's file (sc-17665). So a
+// restamp — the `inferenceRevision` line rewritten over a stale engine list — cannot reach main
+// unnoticed.
 // (The remaining candle lanes verify nothing: `desktop-windows.yml` does its candle work in the
 // `package-windows` job, which is skipped on pull_request, and `server-candle-linux.yml` is
 // `workflow_dispatch`-only.) Descriptor-level truth is additionally guarded upstream and

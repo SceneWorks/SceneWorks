@@ -63,7 +63,24 @@ on:
       # config/engine-capabilities/capabilities.candle.json, which matches no other path
       # here, so the lane would not run at all on the PR that made the file wrong. Same
       # gap sc-17119 closed on the macOS side.
-      - "config/engine-capabilities/**"
+      #
+      # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also
+      # matched capabilities.mlx.json, so an mlx-only restamp woke this ENTIRE job — every
+      # step below, on the fleet's single `cuda` box — for a file the verify step never
+      # opens. Nothing in this lane reads it: no Rust reads the facts directory at all
+      # (`default_facts_dir()` only builds the dumper bin's default OUTPUT path; a repo-wide
+      # grep finds no reader), and the three consumers that DO glob the whole directory are
+      # all outside this job — `previewSupportCatalog.test.js` runs in check.yml's hosted
+      # Linux `web` job, while `generate-preview-support.mjs` and `bump-inference.mjs` are
+      # manual developer scripts that no workflow invokes at all.
+      #
+      # Narrowing costs no coverage. A restamp is the ONLY edit this drops, and it is
+      # precisely the edit this lane cannot check; any *material* change to the sibling dump
+      # also regenerates config/manifests/builtin.preview-support.jsonc, and
+      # `config/manifests/**` above still wakes both lanes. Path filters match DELETES and
+      # ADDS as well as modifications, so a restamp, a delete or a re-add of this file still
+      # triggers the lane, and a rename is a delete+add that still matches.
+      - "config/engine-capabilities/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/actions/prepare-rust-runner/**"

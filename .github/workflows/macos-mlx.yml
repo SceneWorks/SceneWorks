@@ -50,7 +50,22 @@ on:
       # the "real dump, not a restamp" step below is unreachable for the one edit it exists to
       # catch: a restamp touches ONLY config/engine-capabilities/capabilities.mlx.json, matching no
       # other path here, so the lane would not run at all on the PR that made the file wrong.
-      - "config/engine-capabilities/**"
+      #
+      # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also matched
+      # capabilities.candle.json, so a candle-only restamp woke this whole macOS job -- including the
+      # bare `cargo test` over every default member -- for a file its verify step never opens.
+      # Self-hosted runners are the fleet's most constrained resource. Nothing here reads the sibling
+      # file: no Rust reads the facts directory at all (`default_facts_dir()` only builds the dumper
+      # bin's default OUTPUT path), and the three consumers that DO glob it sit outside this job --
+      # previewSupportCatalog.test.js runs in check.yml's hosted Linux `web` job, and
+      # generate-preview-support.mjs / bump-inference.mjs are manual scripts no workflow invokes.
+      #
+      # No coverage is lost. A restamp is the only edit this drops, and it is exactly the edit this
+      # lane cannot check; a *material* sibling change also regenerates
+      # config/manifests/builtin.preview-support.jsonc, and `config/manifests/**` above still wakes
+      # both lanes. Path filters match DELETES and ADDS too, so a restamp, delete or re-add of this
+      # file still triggers the lane.
+      - "config/engine-capabilities/capabilities.mlx.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/config.toml"
