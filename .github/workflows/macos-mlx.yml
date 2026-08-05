@@ -235,13 +235,14 @@ jobs:
       # sc-17119. THE ONLY LANE THAT CAN PRODUCE capabilities.mlx.json, so it is the only place the
       # checked-in file can be checked against a real registry rather than taken on trust.
       #
-      # Every other guard reads that file as a source: `verifyEngineCapabilityFacts` compares its
-      # `inferenceRevision` string to the pin, and the vitest drift guard re-derives the catalog from
-      # its contents. Both are satisfied by editing one line. That is not hypothetical -- the file was
-      # RESTAMPED (revision line rewritten, 334 lines of content untouched) through two consecutive
-      # pin bumps, 35251a88 and 06e0c5e9, because no Mac was available to re-dump it and nothing
-      # could tell the difference. The restamps happened to be correct; nothing proved it until this
-      # step existed.
+      # Every other guard reads that file as a source: `verifyEngineCapabilityFacts` checks that it
+      # exists, names a backend SCENEWORKS_BACKENDS declares, and carries the current
+      # `inferenceRevision` -- nothing about the engine list -- and the vitest drift guard re-derives
+      # the catalog from its contents. Both are satisfied by editing one line. That is not
+      # hypothetical -- the file was RESTAMPED (revision line rewritten, 334 lines of content
+      # untouched) through two consecutive pin bumps, 35251a88 and 06e0c5e9, because no Mac was
+      # available to re-dump it and nothing could tell the difference. The restamps happened to be
+      # correct; nothing proved it until this step existed.
       #
       # Cheap: the build and test steps above already built the mlx-gen graph, so this is a link plus
       # a weights-free registry walk. Dumps to a scratch dir, never over the checked-in file, so a
@@ -258,10 +259,12 @@ jobs:
       # When this fails after a pin bump, the fix is to commit the dump it just produced and re-run
       # `npm run gen:preview-support` from apps/web -- not to restamp the revision line.
       #
-      # capabilities.candle.json still has this hole (it was restamped by the same commits). The
-      # mirror does NOT belong here: it needs the CUDA box, and windows-candle.yml runs every step
-      # under `shell: cmd`/`powershell` -- its own header records that `bash` there resolves to the
-      # box's WSL stub, and `cmd` has no `diff`. Tracked as sc-17592 rather than written blind.
+      # capabilities.candle.json had the same hole (it was restamped by the same commits); the mirror
+      # could NOT be written here, because it needs the CUDA box and windows-candle.yml runs every
+      # step under `shell: cmd`/`powershell` -- its own header records that `bash` there resolves to
+      # the box's WSL stub, and `cmd` has no `diff`. sc-17592 closed it there instead, as a `cmd` step
+      # using `git diff --no-index --exit-code`. Keep the two in sync: a change to the semantics here
+      # wants the same change in windows-candle.yml's "Verify capabilities.candle.json" step.
       - name: Verify capabilities.mlx.json is a real dump, not a restamp
         run: |
           set -euo pipefail

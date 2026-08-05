@@ -8350,6 +8350,76 @@ fn flux2_edit_candle_base_is_absent_without_the_turnkey() {
     assert!(!flux2_edit_candle_available(&edit, &settings));
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_closed() {
+    let cases = [
+        ("edit_image", "sourceAssetId"),
+        ("reference", "referenceAssetId"),
+        ("image_to_image", "referenceAssetId"),
+        ("character_image", "referenceAssetId"),
+        ("style_variations", "referenceAssetId"),
+    ];
+    for model in [
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        assert!(is_flux2_edit_candle_model(model));
+        for (mode, reference_field) in cases {
+            let mut payload = json!({
+                "projectId": "p", "model": model, "prompt": "keep the subject",
+                "mode": mode, "count": 1
+            });
+            payload
+                .as_object_mut()
+                .expect("request object")
+                .insert(reference_field.to_owned(), json!("asset_1"));
+            let with_reference = request(payload);
+            assert!(
+                flux2_edit_candle_mode(&with_reference),
+                "model={model} mode={mode}"
+            );
+            assert_eq!(
+                flux2_edit_candle_reference_ids(&with_reference),
+                vec!["asset_1".to_owned()],
+                "model={model} mode={mode}"
+            );
+
+            let missing = request(json!({
+                "projectId": "p", "model": model, "prompt": "keep the subject",
+                "mode": mode, "count": 1
+            }));
+            assert!(
+                !flux2_edit_candle_mode(&missing),
+                "model={model} mode={mode}"
+            );
+            assert!(flux2_klein_reference_bearing_mode(mode));
+        }
+    }
+
+    let dev_edit = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
+        "mode": "edit_image", "sourceAssetId": "asset_1", "count": 1
+    }));
+    assert!(flux2_edit_candle_mode(&dev_edit));
+    for mode in [
+        "reference",
+        "image_to_image",
+        "character_image",
+        "style_variations",
+    ] {
+        let dev_unsupported = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
+            "mode": mode, "referenceAssetId": "asset_1", "count": 1
+        }));
+        assert!(
+            !flux2_edit_candle_mode(&dev_unsupported),
+            "flux2_dev must remain edit_image-only; mode={mode}"
+        );
+    }
+}
+
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
 // base snapshot is NOT installed must route to the loud `PoseControlBaseMissing` reject, NOT fall through
 // to the plain candle txt2img lane (which would silently render an unconditioned image and drop the
