@@ -11366,16 +11366,31 @@
       "capabilities": [],
       "downloads": [
         {
-          // Mirrors the upstream Real-ESRGAN release weights in one HF repo so
-          // the existing model_download job can cache both optional upscalers.
+          // The ONNX exports the Rust upscaler ACTUALLY loads (sc-17633). This entry used to
+          // declare the upstream `RealESRGAN_x{2,4}plus.pth` pair from `nateraw/real-esrgan`
+          // (~134 MB) — weights no lane has read since the Python upscaler was retired. The
+          // ONNX the macOS/Windows Rust lane does load was side-loaded at JOB time into
+          // `<data_dir>/cache/upscale/` instead, where the Models screen cannot see, size or
+          // delete it (6.9 GiB observed). Declaring the real artifacts here makes the install
+          // match the load: one Model Manager install, into the HF cache, no mid-render fetch.
+          //
+          // `resources.imageUpscalers.real-esrgan.x{2,4}` still records the `.pth` provenance —
+          // `scripts/spikes/sc3489_export_reference.py` reproduces these ONNX files from it —
+          // but provenance is metadata, not something every user needs on disk.
+          //
+          // The revision is byte-for-byte the worker's own `ONNX_REVISION`
+          // (`upscale_jobs.rs`, sc-9682). They MUST agree: a manifest that installed one
+          // revision while the loader resolved another would recreate, at the revision level,
+          // exactly the declared-vs-loaded drift this story exists to remove.
           "provider": "huggingface",
-          "repo": "nateraw/real-esrgan",
-          "files": ["RealESRGAN_x2plus.pth", "RealESRGAN_x4plus.pth"],
-          "estimatedSizeBytes": 134100000
+          "repo": "SceneWorks/real-esrgan-onnx",
+          "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",
+          "files": ["real_esrgan_x2.onnx", "real_esrgan_x4.onnx"],
+          "estimatedSizeBytes": 134125050
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/nateraw/real-esrgan"
+        "model": "${HF_CACHE}/SceneWorks/real-esrgan-onnx"
       },
       "resources": {
         "imageUpscalers": {
