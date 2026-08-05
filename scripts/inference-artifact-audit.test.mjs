@@ -10,6 +10,7 @@ import {
   AUDIT_CLOSURE_BUILD_INPUTS,
   AUDIT_CLOSURE_CRATES,
   AUDIT_CLOSURE_PATHS,
+  COMPOSITION_ONLY_CRATES,
   FEATURE_WITNESS_RESOLUTION,
   assertComparableToolchains,
   assertNoConfigRustflags,
@@ -123,7 +124,7 @@ test("the fast path emits no artifact block, and a moved path cannot emit a reco
     pairs: pairs(),
     featureWitness: WITNESS(),
   });
-  assert.equal(clean.schemaVersion, 4);
+  assert.equal(clean.schemaVersion, 5);
   assert.deepEqual(clean.changedClosurePaths, []);
   assert.ok(!("auditedArtifact" in clean), "claiming an artifact proof that was never built would be a lie");
   // sc-17606: the witness is the one layer with NO fast path. The change it exists to catch moves no
@@ -349,7 +350,12 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
   ]);
   assert.ok(
     !covered.includes("crates/bundles/runtime-cuda"),
-    "runtime-cuda depends on the provider, not the reverse — the measurement binary never links it",
+    "a build-script line is not a compile, and the bundle is not in the closure either (sc-17607)",
+  );
+  assert.ok(
+    !covered.includes("crates/media/candle-gen/candle-gen-catalog"),
+    "the catalog IS compiled in this fixture and still covers nothing — coverage is intersected " +
+      "with the closure, so an out-of-closure crate can never widen what a digest speaks for",
   );
 
   // The build-input inference is anchored to the audited package, not to "some build happened".
@@ -389,9 +395,28 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
     rmSync(canonical, { recursive: true, force: true });
   }
 
-  // A move in an unlinked path cannot be signed off by a digest that could not have seen it.
-  const moved = pairs({ moved: ["crates/bundles/runtime-cuda"] });
+  // A move in a path the build did not report compiling cannot be signed off by its digest. Since
+  // sc-17607 no closure member is unlinked by construction, so this is driven by a build whose own
+  // report is short of one — a feature or resolution change between the two revisions doing exactly
+  // that is why `adjudicates` is intersected across BOTH builds rather than taken from either.
+  const moved = pairs({ moved: ["crates/media/candle-gen/candle-gen-pid"] });
   assert.throws(
+    () =>
+      auditRecord({
+        captured: OBJECT("a"),
+        compatible: OBJECT("b"),
+        pairs: moved,
+        featureWitness: WITNESS(),
+        artifact: {
+          lane: "cuda",
+          adjudicates: covered.filter((objectPath) => objectPath !== "crates/media/candle-gen/candle-gen-pid"),
+          capturedDigest: "x",
+          compatibleDigest: "x",
+        },
+      }),
+    /does not link crates\/media\/candle-gen\/candle-gen-pid/,
+  );
+  assert.doesNotThrow(
     () =>
       auditRecord({
         captured: OBJECT("a"),
@@ -400,7 +425,7 @@ test("coverage is read off what cargo actually compiled, and a gap is refused no
         featureWitness: WITNESS(),
         artifact: { lane: "cuda", adjudicates: covered, capturedDigest: "x", compatibleDigest: "x" },
       }),
-    /does not link crates\/bundles\/runtime-cuda/,
+    "and the same move IS authorized once the build reports having compiled it",
   );
 });
 
@@ -864,7 +889,7 @@ test("main exits 0 and records a witness when the shipped resolution is unchange
     );
     const record = JSON.parse(readFileSync(out, "utf8"));
     assert.equal(code, 0);
-    assert.equal(record.schemaVersion, 4);
+    assert.equal(record.schemaVersion, 5);
     assert.equal(record.featureWitness.capturedDigest, record.featureWitness.compatibleDigest);
     assert.equal(record.featureWitness.packages, 2, "the member count, from the member tree");
     assert.equal(record.featureWitness.scopeFeatures, "cuda");
@@ -950,11 +975,66 @@ test("the closure covers the workspace build inputs, not only the crate trees", 
   // changed build input. Asserting the membership rather than only the length means dropping one
   // and adding another cannot keep this green.
   assert.deepEqual([...AUDIT_CLOSURE_BUILD_INPUTS], ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml"]);
-  assert.equal(AUDIT_CLOSURE_PATHS.length, 10);
+  assert.equal(AUDIT_CLOSURE_PATHS.length, 9);
   assert.deepEqual([...AUDIT_CLOSURE_PATHS], [...AUDIT_CLOSURE_BUILD_INPUTS, ...AUDIT_CLOSURE_CRATES]);
   assert.equal(
     new Set(AUDIT_CLOSURE_PATHS).size,
     AUDIT_CLOSURE_PATHS.length,
     "a duplicated path would be audited twice and validated as a closure one entry short",
+  );
+});
+
+test("the two crates above the provider are excluded on purpose, and both of them", () => {
+  // sc-17607. `runtime-cuda` was in the closure because "the worker links it"; `candle-gen-catalog`
+  // — the intermediate node on that very edge, and the crate that actually moved inside the
+  // certified window — was in no list at all. Neither is compiled into the measurement binary, so
+  // the digest can neither convict nor clear either one, and re-adding either would put an
+  // unadjudicable member back in a closure whose only remedy is a 47.6 GB re-capture.
+  //
+  // Naming them is the point: the previous state was not a decision, it was an omission on one side
+  // and an inherited argument on the other. What they raise is asked instead by
+  // `crates/sceneworks-worker/src/flux2_composition_audit.rs`.
+  assert.deepEqual(
+    [...COMPOSITION_ONLY_CRATES],
+    ["crates/bundles/runtime-cuda", "crates/media/candle-gen/candle-gen-catalog"],
+  );
+  for (const objectPath of COMPOSITION_ONLY_CRATES) {
+    assert.ok(
+      !AUDIT_CLOSURE_PATHS.includes(objectPath),
+      `${objectPath} sits above the provider, so no digest of the measurement binary can speak for it`,
+    );
+  }
+  // The composition check is the other half of the trade, so its absence must be as loud as a
+  // closure regression: dropping it would leave both crates unexamined by anything at all.
+  //
+  // The tests themselves are candle-lane-only, so nothing this lane runs can execute them — which
+  // is exactly why the guard has to be about EXISTENCE AND WIRING rather than about text appearing
+  // somewhere in the file. Named `#[test]` functions, not keywords: every keyword also occurs in
+  // that module's prose, so a marker check would pass with both tests deleted. And the `mod`
+  // declaration, because a module that is not declared (or whose cfg is mistyped) compiles nowhere
+  // and fails nothing — the quietest way for this trade to be silently undone.
+  const composition = readFileSync(
+    new URL("../crates/sceneworks-worker/src/flux2_composition_audit.rs", import.meta.url),
+    "utf8",
+  );
+  for (const name of [
+    "the_bundle_routes_flux2_dev_to_the_provider_the_calibration_measured",
+    "the_bundle_keeps_flux2_devs_memory_strategy_route_intact",
+    "the_audited_composition_is_the_full_cuda_bundle",
+  ]) {
+    assert.match(
+      composition,
+      new RegExp(`#\\[test\\]\\s*\\n\\s*fn ${name}\\(`),
+      `the composition audit must still RUN ${name}, not merely mention it`,
+    );
+  }
+  const workerLib = readFileSync(
+    new URL("../crates/sceneworks-worker/src/lib.rs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    workerLib,
+    /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod flux2_composition_audit;/,
+    "an undeclared module is compiled by no lane, so the composition check would vanish in silence",
   );
 });

@@ -40,15 +40,15 @@
 // `cargo check` never links. Its stub `nvcc` writes EMPTY `.ptx` files. That is fine for a typecheck
 // and catastrophic here: `candle-kernels` `include_str!`s the PTX it was handed, so a stub-built
 // artifact embeds nothing of the kernels and is blind to every `.cu` change in the closure — a
-// silent false green over one of the seven audited objects. `--lane cuda` therefore probes the
+// silent false green over one of the audited objects. `--lane cuda` therefore probes the
 // compiler with a real compile and refuses anything that does not emit real PTX.
 //
 // ## What the closure is, and why it grew (sc-17524)
 //
-// sc-15833 declared it as seven crate trees. Three build inputs that feed every one of those
-// builds were not among them, and one of the gaps was already realized inside the authorized
-// window: `Cargo.lock` moved between `5ffd7612` and `277f4238` while all seven trees stayed
-// byte-identical, so the free path printed "no build needed" over a changed build input. A
+// sc-15833 declared it as seven paths — the root manifest plus six crate trees. Three build inputs
+// that feed every one of those builds were not among them, and one of the gaps was already realized
+// inside the authorized window: `Cargo.lock` moved between `5ffd7612` and `277f4238` while all
+// seven stayed byte-identical, so the free path printed "no build needed" over a changed input. A
 // `cargo update` bumping a transitive dependency the measurement binary links moves only that file.
 // `rust-toolchain.toml` is the same shape. Both are in the closure now, so either one moving forces
 // the artifact layer instead of sailing through the free path.
@@ -57,6 +57,30 @@
 // see `coveredClosurePaths` for why, and for why switching the audited artifact to `runtime-cuda`'s
 // bundle test binary (the other candidate) was measured and rejected.
 //
+// ## What the closure is NOT, and why it shrank (sc-17607)
+//
+// sc-15833 also put `crates/bundles/runtime-cuda` in it, on the argument that the worker links it.
+// That argument does not survive contact with the dependency graph. `runtime-cuda` does not depend
+// on `candle-gen-flux2` directly; the real edge is
+//
+//     runtime-cuda -> candle-gen-catalog -> candle-gen-flux2 -> candle-gen -> gen-core
+//
+// so `candle-gen-catalog` is "linked by the worker" in exactly the same sense — and it was in no
+// closure list at all, while moving 988 lines (+949/-39) inside the window sc-17524 certified —
+// against `crates/bundles/runtime-cuda`, which did not move at all across it. One crate
+// above the provider failing LOUD and one failing SILENT is not a line anyone drew on purpose.
+//
+// Both are above the provider, so neither can change FLUX.2's compiled code, and the measurement
+// binary links neither. What they *can* change is composition — which provider is registered under
+// `flux2_dev` — and a digest cannot answer that in either direction. Keeping `runtime-cuda` here
+// therefore bought no proof and cost a guaranteed false positive: a bundle edit adding some
+// unrelated provider is unadjudicable by construction, and the only remedy on offer is the ~47.6 GB
+// re-capture this whole epic exists to stop demanding.
+//
+// So the closure is now exactly what the measurement binary compiles, plus the inputs to that
+// compile, and the composition question is asked where it can actually be answered — against the
+// linked bundle, in `crates/sceneworks-worker/src/flux2_composition_audit.rs`. See
+// `COMPOSITION_ONLY_CRATES` and `docs/inference-artifact-audit-sc-17497.md`.
 // ## What the closure could NOT see, and the witness that closes it (sc-17606)
 //
 // The audited binary is built `-p candle-gen-flux2 --features cuda`. That resolves a strictly
@@ -83,7 +107,7 @@
 //
 // ## The fast path is the point
 //
-// When all ten objects are byte-identical there is nothing to compile and the script says so
+// When all nine objects are byte-identical there is nothing to compile and the script says so
 // without building anything, exactly as before. The build only happens when a path actually moved —
 // "cheap and automatic when nothing compiled changed, loud only when something did". The witness is
 // seconds of dependency resolution, not a build, so the free path stays free.
@@ -139,32 +163,64 @@ export const AUDIT_CLOSURE_BUILD_INPUTS = Object.freeze([
   ".cargo/config.toml",
 ]);
 
-/** The crate trees. These reach the audited binary exactly one way: by being compiled into it. */
+/**
+ * The crate trees. These reach the audited binary exactly one way: by being compiled into it.
+ *
+ * Every entry is therefore adjudicable by construction — cargo reports compiling it, so the digest
+ * speaks for it. That is the invariant sc-17607 restored by removing `crates/bundles/runtime-cuda`;
+ * it was the one member no build of the measurement binary could ever cover. Adding a path the
+ * audited target does not compile puts the closure back in the state where a move in it has no
+ * remedy but a re-capture, so `COMPOSITION_ONLY_CRATES` is the place for one.
+ */
 export const AUDIT_CLOSURE_CRATES = Object.freeze([
   "crates/contracts/gen-core",
-  "crates/bundles/runtime-cuda",
   "crates/media/candle-gen/candle-gen",
   "crates/media/candle-gen/candle-gen-pid",
   "crates/media/candle-gen/candle-gen-flux2",
   "crates/media/candle-gen/vendor/candle-kernels",
 ]);
 
-/** FLUX.2's complete Candle/CUDA compile closure: sc-15833's seven paths plus sc-17524's three. */
+/**
+ * The two crates that sit ABOVE the provider, deliberately in no closure list (sc-17607).
+ *
+ * `runtime-cuda` is the composition root the worker consumes and `candle-gen-catalog` is the
+ * registry between it and the provider. Neither is compiled into the measurement binary, so a
+ * digest can neither convict nor clear either one — they are here to be named and excluded on
+ * purpose rather than by omission, which is how `candle-gen-catalog` came to be absent while its
+ * own consumer was audited.
+ *
+ * What they raise instead is a composition question: is `flux2_dev` still registered, and still by
+ * `candle-gen-flux2`? That is asked of the LINKED bundle by
+ * `crates/sceneworks-worker/src/flux2_composition_audit.rs`, which runs on every windows-candle CI
+ * pass and needs no re-capture to answer.
+ *
+ * Exported so the disjointness is a test rather than a comment: silently promoting one of these
+ * into `AUDIT_CLOSURE_CRATES` would reintroduce an unadjudicable closure member.
+ */
+export const COMPOSITION_ONLY_CRATES = Object.freeze([
+  "crates/bundles/runtime-cuda",
+  "crates/media/candle-gen/candle-gen-catalog",
+]);
+
+/** The measurement binary's Candle/CUDA compile closure, plus the build inputs that feed it. */
 export const AUDIT_CLOSURE_PATHS = Object.freeze([
   ...AUDIT_CLOSURE_BUILD_INPUTS,
   ...AUDIT_CLOSURE_CRATES,
 ]);
 
-// v4 adds sc-17606's resolved-feature witness to v3's ten-path closure. Older versions are refused
-// outright rather than re-graded: a record that never looked at `Cargo.lock` (v1/v2) or at the
-// shipped feature resolution (v3) cannot be re-read as evidence about them, and a silent re-grade is
-// how an audit ends up asserting more than it measured.
-export const SCHEMA_VERSION = 4;
+// v5 is sc-17607's nine-path closure carrying sc-17606's resolved-feature witness. Every older
+// version is refused outright rather than re-graded, and the refusals run in both directions. A
+// record that never looked at `Cargo.lock` (v1/v2) or at the shipped feature resolution (v3) cannot
+// be re-read as evidence about them. A v4 record is not short of evidence at all — it audited
+// `crates/bundles/runtime-cuda`, a path this schema deliberately stopped asking about — and
+// quietly dropping an entry out of someone else's record to make it fit is the same unearned
+// re-reading, arrived at by subtraction instead of addition.
+export const SCHEMA_VERSION = 5;
 export const AUDIT_STORY = "SC-15833";
 export const AUDIT_METHOD =
   "compiled artifact identity for changed paths, git object identity for unchanged paths, and " +
-  "shipped-bundle resolved-feature identity, across the complete Candle FLUX.2 runtime dependency " +
-  "closure and its workspace build inputs";
+  "shipped-bundle resolved-feature identity, across the Candle FLUX.2 measurement binary's " +
+  "compile closure and its workspace build inputs";
 
 /**
  * The measurement target. `tests::` is a lib-inline module, so this is the `--lib` test binary.
@@ -766,10 +822,15 @@ export function unexplainedMeasurementDrift({
  * Two kinds of entry, adjudicated two different ways:
  *
  *   - **Crate trees** are covered when cargo reports having COMPILED a package whose manifest lives
- *     under them. This is not a detail. `runtime-cuda` depends on `candle-gen-flux2`, NOT the other
- *     way round, so a commit into `crates/bundles/runtime-cuda` leaves the measurement binary
- *     byte-identical, and reading an unchanged digest as proof over it would be a false green — the
- *     one failure mode strictly worse than the false positive this audit set out to remove.
+ *     under them, and never on the strength of being in the list. That distinction is what kept
+ *     `crates/bundles/runtime-cuda` out of this set for as long as it was a closure member:
+ *     `runtime-cuda` depends on `candle-gen-flux2`, NOT the other way round, so a commit into the
+ *     bundle leaves the measurement binary byte-identical and reading an unchanged digest as proof
+ *     over it would be a false green — the one failure mode strictly worse than the false positive
+ *     this audit set out to remove. sc-17607 removed it from the closure instead (see
+ *     `COMPOSITION_ONLY_CRATES`), so today every crate tree in the closure IS covered; the rule
+ *     stays derived from cargo's report rather than assumed, because the day it stops being true
+ *     is the day nobody re-reads this comment.
  *   - **Build inputs** (the virtual root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
  *     `.cargo/config.toml`) can never appear here, because cargo's `compiler-artifact` stream only
  *     ever names *package* manifests. They are covered anyway, and soundly: they are inputs to THIS
@@ -795,7 +856,9 @@ export function unexplainedMeasurementDrift({
  * `candle-gen-chroma`, `candle-gen-sdxl` and `candle-gen-sensenova` all moved, none of them in
  * FLUX.2's closure. It would have reported "the compiled code changed, re-capture" for FLUX.2 code
  * that did not change — the 47.6 GB false positive this epic exists to remove, with a wider trigger.
- * What that trade gives up is narrower feature unification than the shipped bundle resolves; see
+ * sc-17607 reached the same conclusion from the other end and dropped the bundle from the closure;
+ * what both trades give up is narrower feature unification than the shipped bundle resolves, and
+ * the composition facts a digest was never going to settle. See
  * `docs/inference-artifact-audit-sc-17497.md`.
  *
  * Crate coverage is derived from cargo's own report of what it compiled (`compiler-artifact` is
