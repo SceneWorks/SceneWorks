@@ -804,6 +804,8 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         "config/engine-capabilities/capabilities.candle.json", // the restamp-verify step diffs it
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
+        "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
+        ".cargo/config.toml", // git-fetch-with-cli, without which the token-injected inference fetch breaks
         ".github/actions/prepare-rust-runner/**", // the job's own first step
         ".github/workflows/windows-candle.yml", // the lane itself
       ],
@@ -815,6 +817,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         "config/engine-capabilities/capabilities.mlx.json", // the restamp-verify step diffs it
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the MLX revision the whole lane compiles
+        "rust-toolchain.toml", // governs the toolchain cargo resolves under the dtolnay install
         ".cargo/config.toml", // the MACOSX_DEPLOYMENT_TARGET=26.2 pin every build here compiles under
         ".github/workflows/macos-mlx.yml", // the lane itself
       ],

@@ -98,6 +98,20 @@ on:
       - "config/engine-capabilities/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
+      # The toolchain and cargo-config seams (sc-17703, Michael's call — these are
+      # UNDER-trigger fixes that deliberately spend box time on two rare-edit,
+      # high-blast-radius files whose breakage would otherwise merge green and red
+      # main misattributed). This lane runs no rust-toolchain action: cargo in-repo
+      # auto-selects the toolchain rust-toolchain.toml pins (see the step comment
+      # below), so a bump changes what this entire job compiles with. And
+      # .cargo/config.toml carries `git-fetch-with-cli = true`, without which
+      # cargo's built-in fetch ignores the GIT_CONFIG_* token injection in "Fetch
+      # the private inference release" and the lane cannot fetch at all. NB
+      # `channel = "stable"` is a floating channel — the effective toolchain can
+      # move with NO file changing, which no paths: entry can catch; that residual
+      # gap is tracked as its own story.
+      - "rust-toolchain.toml"
+      - ".cargo/config.toml"
       - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/windows-candle.yml"
   pull_request:
