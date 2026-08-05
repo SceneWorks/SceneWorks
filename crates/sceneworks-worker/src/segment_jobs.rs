@@ -23,9 +23,8 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use crate::asset_media::resolve_asset_media;
-use crate::downloads::DownloadContext;
 use crate::person_segment_sam3::{
-    ensure_segmenter_weights, segment_box_blocking, segment_points_blocking,
+    require_segmenter_weights, segment_box_blocking, segment_points_blocking,
 };
 use crate::single_child_asset::{write_single_child_asset, SingleChildAssetSpec};
 use crate::{
@@ -112,7 +111,6 @@ fn parse_points(payload: &JsonObject) -> WorkerResult<Option<Vec<(f32, f32, i32)
 pub(crate) async fn run_image_segment_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -222,16 +220,8 @@ pub(crate) async fn run_image_segment_job(
         ),
     )
     .await?;
-    let context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Smart-select canceled while fetching SAM3 weights.",
-        fresh_download: false,
-    };
-    // Both prompt modes load the same facebook/sam3 checkpoint — one resolve/download.
-    let (model_path, tokenizer_path) = ensure_segmenter_weights(settings, &context).await?;
+    // Both prompt modes load the same facebook/sam3 checkpoint — one resolve.
+    let (model_path, tokenizer_path) = require_segmenter_weights(settings)?;
 
     update_job(
         api,

@@ -37,7 +37,6 @@ mod imp {
         DEFAULT_MIN_EDGE, PREP_CANCEL_MESSAGE,
     };
     use crate::control_preprocess::{control_kind_label, PreprocessResources};
-    use crate::downloads::DownloadContext;
     use crate::paths::resolve_dataset_item_path;
     use crate::training_jobs::{
         parse_plan, run_training_execution, training_progress, validate_training_plan,
@@ -165,15 +164,7 @@ mod imp {
         // Optional person-presence gate (pose/people corpora), resolved through the shared YOLO11
         // detector the person-detect job uses.
         let person_filter = if plan_advanced_bool(&plan, "personGate") {
-            let context = DownloadContext {
-                api,
-                client: http_client,
-                settings,
-                job_id: &job.id,
-                cancel_message: "ControlNet training canceled while fetching the person detector.",
-                fresh_download: false,
-            };
-            let weights_path = person_jobs::ensure_detector_weights(settings, &context).await?;
+            let weights_path = person_jobs::require_detector_weights(settings)?;
             Some(PersonFilter {
                 weights_path,
                 min_conf: PERSON_GATE_MIN_CONF,

@@ -39,7 +39,7 @@ use crate::{WorkerError, WorkerResult};
 // the download helper + `AllPersonMasks` under this module's path so the existing off-Mac callers
 // (`media_jobs`, `video_jobs`, `scail2_masks`) keep referencing `person_segment_sam3_candle::…`
 // unchanged.
-pub(crate) use crate::person_segment_sam3_common::{ensure_segmenter_weights, AllPersonMasks};
+pub(crate) use crate::person_segment_sam3_common::{require_segmenter_weights, AllPersonMasks};
 
 /// Adapt this backend's `candle-gen-sam3` `VideoFrameOutput` to the shared association math
 /// ([`select_object`]); the two backends' `VideoFrameOutput` are the same shape but distinct types,

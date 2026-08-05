@@ -11915,16 +11915,42 @@
       "capabilities": [],
       "downloads": [
         {
-          // Mirrors the upstream Real-ESRGAN release weights in one HF repo so
-          // the existing model_download job can cache both optional upscalers.
+          // The ONNX exports the Rust upscaler ACTUALLY loads (sc-17633). This entry used to
+          // declare the upstream `RealESRGAN_x{2,4}plus.pth` pair from `nateraw/real-esrgan`
+          // (~134 MB) — weights no lane has read since the Python upscaler was retired. The
+          // ONNX the macOS/Windows Rust lane does load was side-loaded at JOB time into
+          // `<data_dir>/cache/upscale/` instead, where the Models screen cannot see, size or
+          // delete it (6.9 GiB observed). Declaring the real artifacts here makes the install
+          // match the load: one Model Manager install, into the HF cache, no mid-render fetch.
+          //
+          // The loader half landed with it — `upscale_jobs::resolve_onnx` is cache-only and reads
+          // this snapshot. Declaring the ONNX WITHOUT that change would have been worse than
+          // leaving it alone: install state keys on the declared repo, so the entry would have
+          // flipped to "not installed", prompted a 134 MB download the loader ignored, and then
+          // still fetched the same bytes mid-upscale.
+          //
+          // Migration: an existing install keeps working from the legacy `cache/upscale/` copy, so
+          // nothing re-downloads. Its old `nateraw/real-esrgan` `.pth` bytes are now orphaned in
+          // the HF cache — never loaded, and no longer reachable from this entry's artifact paths.
+          // Reclaiming them is tracked on sc-17636 (S11), which owns delete/size coverage.
+          //
+          // `resources.imageUpscalers.real-esrgan.x{2,4}` still records the `.pth` provenance —
+          // `scripts/spikes/sc3489_export_reference.py` reproduces these ONNX files from it —
+          // but provenance is metadata, not something every user needs on disk.
+          //
+          // The revision is byte-for-byte the worker's own `ONNX_REVISION`
+          // (`upscale_jobs.rs`, sc-9682). They MUST agree: a manifest that installed one
+          // revision while the loader resolved another would recreate, at the revision level,
+          // exactly the declared-vs-loaded drift this story exists to remove.
           "provider": "huggingface",
-          "repo": "nateraw/real-esrgan",
-          "files": ["RealESRGAN_x2plus.pth", "RealESRGAN_x4plus.pth"],
-          "estimatedSizeBytes": 134100000
+          "repo": "SceneWorks/real-esrgan-onnx",
+          "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",
+          "files": ["real_esrgan_x2.onnx", "real_esrgan_x4.onnx"],
+          "estimatedSizeBytes": 134125050
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/nateraw/real-esrgan"
+        "model": "${HF_CACHE}/SceneWorks/real-esrgan-onnx"
       },
       "resources": {
         "imageUpscalers": {
@@ -11972,6 +11998,132 @@
             { "label": "Hugging Face mirror", "url": "https://huggingface.co/nateraw/real-esrgan" }
           ]
         }
+      }
+    },
+    {
+      // sc-17627 / sc-17629 — SAM3 was a JOB-TIME auto-download with no install-flow
+      // representation at all: the repo and its pinned revision existed only as hardcoded
+      // constants in `person_segment_sam3_common.rs`, and the weights landed in
+      // `<data_dir>/cache/person-segment-sam3/` where the Models screen cannot see, size or
+      // delete them. Declaring it here is what lets the resolver be cache-only.
+      "id": "sam3_person_segment",
+      "name": "SAM3 Person Segmenter",
+      "family": "sam3",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // The stock `facebook/sam3` checkpoint mirrored by SceneWorks — the same
+          // `model.safetensors` + `tokenizer.json` BOTH backends load, with no MLX-specific
+          // conversion despite the `-mlx` repo name. Pinned (sc-9879, F-077): a re-push or a
+          // compromised token could otherwise silently swap the weights we load.
+          "provider": "huggingface",
+          "repo": "SceneWorks/sam3-mlx",
+          "revision": "3ed10b164a755c00b1a4d671dde95719c127e1a7",
+          "files": ["model.safetensors", "tokenizer.json"],
+          "estimatedSizeBytes": 3443580585
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sam3-mlx"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SAM3 Person Segmenter",
+        "description": "Text-concept person segmentation (\"person\" prompt, no manual box) behind person tracking and Smart Select. Required by person-mask features; installed once and shared by the MLX and candle lanes.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-17627 / sc-17629 — same story as SAM3 above: constants-only, job-time download into
+      // `<data_dir>/cache/person-segment/`. SAM2 is still live (macOS `run_person_track` box-prompt
+      // propagation), so it is a separate installable, not superseded by SAM3.
+      "id": "sam2_person_segment",
+      "name": "SAM2 Person Segmenter",
+      "family": "sam2",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // MLX-converted Meta SAM2.1 weights (sc-3707, converted from the official `.pt` via
+          // `tools/convert_sam2_to_mlx.py`; bit-identical to the avbiswas reference). Pinned for
+          // the same defense-in-depth reason as SAM3 (sc-9879).
+          "provider": "huggingface",
+          "repo": "SceneWorks/sam2-mlx",
+          "revision": "fbc86db0dceb8c744e5fc95feadc37572107be69",
+          "files": ["sam2.1_hiera_large.safetensors"],
+          "estimatedSizeBytes": 935568342,
+          // macOS-only: `mod person_segment` is `#[cfg(target_os = "macos")]`. Off-Mac person
+          // segmentation goes through the candle SAM3 seam, which needs the SAM3 entry above,
+          // not this one — so an off-Mac install must not offer or gate on SAM2 weights.
+          "platforms": ["macos"]
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sam2-mlx"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SAM2 Person Segmenter",
+        "description": "Box-prompt person mask propagation used by person tracking on macOS. Superseded by SAM3 for text-concept selection but still driven by the per-frame track propagation path.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-17627 / sc-17629 — the person detector, previously a job-time download into
+      // `<data_dir>/cache/person-detect/`. Two platform-scoped repos for the same model:
+      // `retain_downloads_for_os` (apps/rust-api/src/models.rs) keeps exactly one, so install
+      // size, install state and the download job all resolve to the right artifact per OS.
+      "id": "person_detector",
+      "name": "YOLO11m Person Detector",
+      "family": "yolo11m-person-detect",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Fused MLX safetensors for the macOS native detector. Pinned per repo (sc-9682, F-077).
+          "provider": "huggingface",
+          "repo": "SceneWorks/yolo11m-person-detect-mlx",
+          "revision": "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777",
+          "files": ["yolo11m_fused_mlx.safetensors"],
+          "estimatedSizeBytes": 80388864,
+          "platforms": ["macos"]
+        },
+        {
+          // Canonical ONNX export for the off-Mac `ort` lane (sc-5498). A DIFFERENT repo with its
+          // own pin — the two are not interchangeable and must not share one revision.
+          "provider": "huggingface",
+          "repo": "SceneWorks/yolo11m-person-detect-onnx",
+          "revision": "3cffbaccca4f239ae6301d8b66ba721401ecfa8d",
+          "files": ["yolo11m.onnx"],
+          "estimatedSizeBytes": 80622117,
+          "platforms": ["windows", "linux"]
+        }
+      ],
+      // No `paths.model`: the artifact repo differs per OS, and a single `${HF_CACHE}/…` string
+      // would name the wrong one off-Mac. It would be inert either way — `model_artifact_paths`
+      // and `model_manifest_installed_path` both skip any path containing `${` — but a value
+      // that is both wrong and unread is worse than none.
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "YOLO11m Person Detector",
+        "description": "Person bounding-box detection feeding ByteTrack person tracking and the segmentation prompts. Required by person-track features.",
+        "recommendedFor": []
       }
     },
     {
