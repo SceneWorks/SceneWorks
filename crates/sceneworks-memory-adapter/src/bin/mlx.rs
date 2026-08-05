@@ -645,7 +645,12 @@ fn krea_context(
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
         mode: MemoryMode::TextToImage,
-        has_reference: false,
+        // `krea_request` carries exactly one `Conditioning::Control`, and `image_reference_count()`
+        // counts Control alongside Reference/Depth/Mask — so the admitted geometry must declare one
+        // reference or `configure_request` refuses the render it just admitted. `has_reference` is
+        // the compatibility summary of the same fact and gen-core requires it to equal
+        // `reference_count > 0`, so the two move together.
+        has_reference: true,
         use_pid: false,
         has_phases: false,
         geometry: MemoryGeometry {
@@ -653,7 +658,7 @@ fn krea_context(
             height,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: 1,
         },
         overlay: Some("control:1".to_owned()),
         budget: MemoryBudget {
