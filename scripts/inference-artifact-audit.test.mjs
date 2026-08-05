@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -89,6 +89,27 @@ function closureRepo() {
   git("add", "-A");
   git("commit", "-qm", "doc comment only");
   return { repo, git, captured, compatible: git("rev-parse", "HEAD"), moved };
+}
+
+/**
+ * A temp build directory whose path is CANONICAL, for fixtures that also synthesize cargo
+ * `manifest_path` values underneath it.
+ *
+ * `coveredClosurePaths` resolves the workdir with `realpathSync` — deliberately, because real cargo
+ * reports canonical manifest paths. A fixture manifest does NOT exist on disk, so the same helper
+ * falls back to `path.resolve` and keeps whatever spelling the fixture used. On macOS `os.tmpdir()`
+ * is `/var/folders/…`, a symlink to `/private/var/folders/…`, so a raw `mkdtempSync` result and its
+ * realpath disagree: every closure path then resolves to "outside the worktree", the covered set
+ * comes back EMPTY, and `auditRecord` refuses the record with "the audited artifact does not
+ * link …".
+ *
+ * Canonicalizing here makes the fake cargo output match what real cargo emits, instead of
+ * describing a machine cargo could never produce. A no-op on Linux, where `/tmp` is its own
+ * realpath — which is why CI never caught this: `npm run check` runs only in the ubuntu-latest
+ * `parity` job, so nothing in `scripts/*.test.mjs` is exercised on macOS at all.
+ */
+function canonicalTempDir(prefix) {
+  return realpathSync(mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
 test("closure object pairs cover the declared closure and isolate the one path that moved", () => {
@@ -824,7 +845,7 @@ test("main resolves one witness per revision and puts each digest on its own sid
   // `capturedWitness.digest` makes the layer permanently green and leaves them all passing. This is
   // the same argument that pulled `assertComparableToolchains` out of `main` in sc-17497.
   const out = path.join(mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-")), "record.json");
-  const workdir = mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-wd-"));
+  const workdir = canonicalTempDir("sceneworks-audit-main-wd-");
   const members = ["candle-gen-flux2 v0.0.0|cuda"];
   const fake = fakeAudit({
     trees: {
@@ -876,7 +897,7 @@ test("main resolves one witness per revision and puts each digest on its own sid
 
 test("main exits 0 and records a witness when the shipped resolution is unchanged", async () => {
   const out = path.join(mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-")), "record.json");
-  const workdir = mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-wd-"));
+  const workdir = canonicalTempDir("sceneworks-audit-main-wd-");
   const tree = {
     "runtime-cuda": ["candle-gen-flux2 v0.0.0|cuda", "serde_json v1.0.150|default,std"],
     "candle-gen-flux2": ["candle-gen-flux2 v0.0.0|cuda", "serde_json v1.0.150|default,std"],
@@ -903,7 +924,7 @@ test("main puts each BUILD's digest on its own side, and reports both layers ind
   // The artifact layer's wiring has the same untestable-from-below shape as the witness layer's.
   // Driven on `--lane metal` so the nvcc probe is not reached; the record is inert by construction.
   const out = path.join(mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-")), "record.json");
-  const workdir = mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-wd-"));
+  const workdir = canonicalTempDir("sceneworks-audit-main-wd-");
   const moved = "crates/media/candle-gen/candle-gen";
   const tree = {
     "runtime-cuda": ["candle-gen-flux2 v0.0.0|metal"],
