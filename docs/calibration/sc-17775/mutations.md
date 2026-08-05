@@ -8,8 +8,9 @@ Each mutation is a single-file edit committed **out of the inference working tre
 `GIT_INDEX_FILE`, commit via `git commit-tree`, held by a throwaway `sc-17775-probe-*` branch that
 was deleted after the runs. The inference working tree was never modified and nothing was pushed.
 
-Author/committer identity and dates are fixed (`sc-17775 probe <probe@localhost>`,
-`2026-08-05T00:00:00Z`) so the commit SHAs below are reproducible.
+Author/committer identity, date and message are all fixed so the commit SHAs below are reproducible:
+identity `sc-17775 probe <probe@localhost>`, date `2026-08-05T00:00:00Z` (epoch `1785888000 +0000`),
+message exactly `sc-17775 probe M1` … `sc-17775 probe M4`. Change any of the four and the SHA moves.
 
 | # | Commit | File | Edit | Why this edit |
 | --- | --- | --- | --- | --- |

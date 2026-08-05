@@ -7,8 +7,15 @@ This is characterisation, not repair. The remedy is sc-17776's job; the numbers 
 be prioritised against something real.
 
 **Read against** SceneWorks `main` at inference pin `fbb00d6b` and
-`docs/generated/memory-matrix.json` `schemaVersion 5`, surveyed 2026-08-05. Every count below is
+`docs/generated/memory-matrix.json` `schemaVersion 6`, surveyed 2026-08-05. Every count below is
 reproducible from the commands in [Method](#method).
+
+**Out of scope by design: SceneWorks-side drift.** `evidenceSemantics` deliberately does *not* gate
+on `matrixSourceRevision`; the comment at `memory-calibration-harness.mjs:620` says why — treating it
+as a second gate "would stale every measurement on comments, formatting, or unrelated source edits".
+That decision is already correct and is not re-litigated here. It also means a SceneWorks change like
+sc-17707's temp-fixture sweep rotates the matrix's recorded `sceneWorksRevision` without touching a
+single calibration's semantics, which is the behaviour to preserve.
 
 ---
 
@@ -23,13 +30,21 @@ reproducible from the commands in [Method](#method).
 | Providers with **any** mechanism to extend a capture past a pin bump | **1 of 6** (`flux2_dev`) |
 | …and that mechanism is **already spent**: it authorizes one revision, and the pin has moved past it | ✅ |
 
+**Two populations, do not conflate them.** "Bound calibrations" above are the 31 entries in
+`models/<id>/<backend>/calibrations` in `config/manifests/builtin.models.jsonc` — the *declarations*
+that pin a cell to a fingerprint, parameters and an inference revision. Separately, the evidence
+bundle carries **65** calibration *runs* (`memory-matrix.json#calibrationRuns`), of which 17 are
+semantically `current` and 11 are both `current` and binding-eligible — which is what
+`summary.currentCalibrationRuns: 11` reports. That the two "11"s coincide is a coincidence of this
+snapshot, not the same number counted twice.
+
 The epic's framing — "invalidation over-triggers" — is one of two exposures, and it is the smaller
 one. It is visible only because `flux2_dev` is the single provider that has a relief mechanism at
 all. The other five have no extension path of any kind: a pin bump demotes them permanently and the
 only remedy on offer is a fresh capture at the new pin.
 
 **The sharpest single number in this survey:** `flux1_dev` and `flux1_schnell` hold 10 bound
-calibrations, demoted by a window of **65 commits, exactly zero of which touched
+calibrations, demoted by a window of **40 non-merge commits, exactly zero of which touched
 `crates/media/candle-gen/candle-gen-flux`** — the crate that implements them.
 
 ---
@@ -96,10 +111,10 @@ which blocks sc-15922 — not a new break.)
 
 | Provider | Backend | Crate | Crate-mates in the same crate | Fingerprint constant | Bound calibrations | Capture pin | Commits behind live pin | Semantics today | Artifact layer | Trigger classes that apply |
 | --- | --- | --- | --- | --- | ---: | --- | ---: | --- | --- | --- |
-| `flux2_dev` | candle | `candle-gen-flux2` | `flux2_klein_9b` (generator + memory), `flux2_dev_control`, `flux2_dev_edit` | `CALIBRATION_FINGERPRINT` (`memory_strategy.rs:41`) | 5 | `5ffd7612` | 41 | **historical** (extension spent at `a4f409ae`) | **yes**, v5, exhausted | 1, 2, 3, 4, 5, 6 |
-| `flux1_dev` | candle | `candle-gen-flux` | `flux1_schnell` — **shares the same fingerprint constant** | `CALIBRATION_FINGERPRINT` (`memory_strategy.rs:29`) | 5 | `5f973a73` | 65 | **historical** | none | 1, 2, 3, 4, 5 |
-| `flux1_schnell` | candle | `candle-gen-flux` | `flux1_dev` — **shares the same fingerprint constant** | same constant as above | 5 | `5f973a73` | 65 | **historical** | none | 1, 2, 3, 4, 5 |
-| `z_image_turbo` | mlx | `mlx-gen-z-image` | **3** — `z_image` base, `z_image_base_control`, `z_image_control`, all with registered memory strategies | `MEMORY_CALIBRATION_FINGERPRINT` (`memory_strategy.rs:395`) | 5 | `d4802320` | 195 | **historical** | none (and see §6 — not producible on this box) | 1, 2, 3, 5 |
+| `flux2_dev` | candle | `candle-gen-flux2` | `flux2_klein_9b` (generator + memory), `flux2_dev_control`, `flux2_dev_edit` | `CALIBRATION_FINGERPRINT` (`memory_strategy.rs:41`) | 5 | `5ffd7612` | 26 | **historical** (extension spent at `a4f409ae`) | **yes**, v5, exhausted | 1, 2, 3, 4, 5, 6 |
+| `flux1_dev` | candle | `candle-gen-flux` | `flux1_schnell` — **shares the same fingerprint constant** | `CALIBRATION_FINGERPRINT` (`memory_strategy.rs:29`) | 5 | `5f973a73` | 40 | **historical** | none | 1, 2, 3, 4, 5 |
+| `flux1_schnell` | candle | `candle-gen-flux` | `flux1_dev` — **shares the same fingerprint constant** | same constant as above | 5 | `5f973a73` | 40 | **historical** | none | 1, 2, 3, 4, 5 |
+| `z_image_turbo` | mlx | `mlx-gen-z-image` | **3** — `z_image`, `z_image_control`, `z_image_turbo_control`, all with registered memory strategies | `MEMORY_CALIBRATION_FINGERPRINT` (`memory_strategy.rs:395`) | 5 | `d4802320` | 132 | **historical** | none (and see §6 — not producible on this box) | 1, 2, 3, 5 |
 | `qwen_image` | mlx | `mlx-gen-qwen-image` | **2** — `qwen_image_control`, `qwen_image_edit`, both with registered memory strategies | `MEMORY_CALIBRATION_FINGERPRINT` (`memory_strategy.rs:22`) | 9 | `fbb00d6b` | 0 | **current** | none | 1, 2, 3, 5 (all latent — fires on the next bump) |
 | `krea_2_turbo_control` | mlx | `mlx-gen-krea` | **4** — `krea_2_turbo`, `krea_2_raw`, `krea_2_edit`, `krea_2_turbo_edit`; those four share `block_memory_strategy.rs`'s separate fingerprint, the calibrated control route uses `memory_strategy.rs` | `MEMORY_CALIBRATION_FINGERPRINT` (`memory_strategy.rs:24`) | 2 | `fbb00d6b` | 0 | **current** | none | 1, 2, 3, 5 (all latent) |
 
@@ -124,7 +139,7 @@ calibration: no exposure today, but they inherit this entire table the moment on
 | `mlx-gen-flux2` | `CALIBRATION_`, `KLEIN_MEMORY_CALIBRATION_FINGERPRINT` |
 | `mlx-gen-sana` | `MEMORY_`, `RESIDENT_MEMORY_CALIBRATION_FINGERPRINT` |
 | `mlx-gen-sensenova` | `QUALITY_`, `FAST_CALIBRATION_FINGERPRINT` |
-| `mlx-gen-anima`, `mlx-gen-flux`, `mlx-gen-mage`, `mlx-gen-pulid`, `mlx-gen-sd3`, `mlx-gen-krea::block_memory_strategy` | one each |
+| `mlx-gen-anima`, `mlx-gen-flux`, `mlx-gen-lens`, `mlx-gen-mage`, `mlx-gen-pulid`, `mlx-gen-sd3`, `mlx-gen-krea::block_memory_strategy` | one each |
 
 The story's warning about non-uniform naming is not theoretical: this survey's first inventory pass
 undercounted by 8 by grepping one spelling against the wrong revision. The reliable form is
@@ -144,11 +159,21 @@ Every row below is a real `scripts/inference-artifact-audit.mjs --lane cuda` run
 box (rustc 1.96.0, nvcc 12.9, `--features cuda`, warm `D:\repos\inference-audit\sc-17524-target`).
 Records are checked in under `docs/calibration/sc-17775/`.
 
-**Reproducibility.** Three separate runs, from three different captured revisions whose FLUX.2
-closure is byte-identical, each independently produced
-`sha256:d80844f24dcb95f957c1cd893f9238c9d753db8e1e40c5deefe9f6b6f740f9aa` — the same digest frozen in
-`FLUX2_COMPATIBILITY_AUDIT.artifactProof`. An `ARTIFACTS DIFFER` verdict below is therefore a real
-signal, not link nondeterminism.
+**Reproducibility — and its limit.** Every run here shares one warm
+`--workdir D:
+epos\inference-audit\sc-17524`, which is what makes a window cost ~40 s instead of
+~20 minutes. It also weakens the strongest reproducibility claim one could make from these numbers:
+when two captured revisions have a byte-identical closure, cargo may fingerprint-hit and hand back
+the cached binary without relinking, so repeated digests across such runs are **consistent with**
+link determinism rather than proof of it.
+
+What can be said honestly: the captured side reproduced
+`sha256:d80844f24dcb95f957c1cd893f9238c9d753db8e1e40c5deefe9f6b6f740f9aa` — the digest frozen
+independently in `FLUX2_COMPATIBILITY_AUDIT.artifactProof` from an earlier, separate session — and
+`sha256:fee1c2de…` at `fbb00d6b` across four runs. Windows-reproducible linking for this target was
+already established in sc-17524 (`/Brepro` + `/DEBUG:NONE`, see
+`docs/inference-artifact-audit-sc-17497.md`), which is the actual basis for trusting an
+`ARTIFACTS DIFFER` verdict; this survey did not re-establish it and does not claim to.
 
 ### 4.1 Historical windows
 
@@ -166,7 +191,11 @@ linked FLUX.2 measurement binary is byte-identical. Link-time DCE absorbed the e
 
 Row **C** is the same shape one layer down: an MLX-only commit that moves nothing but `Cargo.lock`.
 
-Row **F** is class 4's only observable shape (see §5.4).
+Row **F** is class 4's tree half; row H1 in §5.4 is its upstream-pin half.
+
+There is no row **E**. It was the attempt to measure the one historical in-`src`
+`#[cfg(test)]` commit (`1211ee58`), and it is unrunnable for the reason in §5.6. The letter is
+left as a gap rather than renumbered so the abandoned attempt stays visible.
 
 Row **A** is reported honestly rather than as the crate-mate proof it looks like. `41464d57` is a
 Klein commit, but it is not additive: it generalises `load_with_memory_context` over `Flux2Variant`
@@ -195,8 +224,11 @@ identically by all four independent runs.
 | M3 | positive control | bump the **dev** `CALIBRATION_FINGERPRINT` the calibration is bound to | `eb9a6ead…` | **DIFFER** | correct — the audit fails closed on a genuine invalidation |
 | M4 | 2 `gen-core` | add an unreferenced `pub fn` to `gen-core` | `fee1c2de…` | **identical** | DCE absorbs it; matches row B on a real commit |
 
-M3 is the one row that is *supposed* to differ. Without it, M1/M2/M4 would be a suite that passes
-with the artifact layer ripped out.
+M3 and M4 are a **two-sided control**, and both are load-bearing. M4 is the only row expecting
+`identical`, so it fails if the mechanism absolves nothing (a stuck-DIFFER audit). M3 is the only row
+that is a *semantically* genuine invalidation — the provider declaring its own calibration void — so
+it fails if the mechanism absolves everything (a stuck-IDENTICAL audit). M1 and M2 discriminate
+nothing on their own: they return DIFFER, which is also what a broken audit returns.
 
 ---
 
@@ -229,14 +261,58 @@ Measured: rows A, D and M1.
 117 no-merge commits touched `crates/contracts/gen-core` in the last 60 days (~4.5% of 2620) — the
 most frequent closure mover after `Cargo.lock`, and the most frequent one that is actually code.
 
-**Linked fraction.** Row B and mutation M4 both measure the mechanism directly: a `gen-core` change
-that FLUX.2's linked code does not reference produces a byte-identical binary. Of the `gen-core`
-commits inside the currently demoted windows, the one that reached `flux1`'s window (`d02b8fcf`) is
-*measured* inert for the Candle closure. This is an estimate, not a census: the honest statement is
-that the artifact layer resolves this class case-by-case for ~40 s per window, and that the observed
-cases so far all resolved to "absorbed".
+**Linked fraction — measured, and it came out the opposite way to the guess.** Mutation M4
+establishes the mechanism (a `gen-core` addition nothing in FLUX.2's closure references produces a
+byte-identical binary). To turn that into a fraction, nine `gen-core`-**only** windows — commits
+whose sole closure move is `crates/contracts/gen-core` — were each put through the artifact layer:
 
-Measured: rows B, D (combined) and M4.
+| # | Commit | `gen-core` files touched | Captured → compatible | Verdict |
+| --- | --- | --- | --- | --- |
+| B | `d02b8fcf` `feat(mlx): add the Anima 2B shared memory ladder` | `residency.rs` (+30) | `d80844f2…` → `d80844f2…` | **identical** |
+| G1 | `c95f5904` `fix: unify memory safety gates (sc-16580, sc-16581)` | `memory_strategy.rs`, `lib.rs` | `ba37d955…` → `faa6be04…` | DIFFER |
+| G2 | `117996cf` `test: add memory behavior conformance probes` | `memory_strategy.rs`, `registry.rs`, `generator.rs`, `lib.rs` | `a48637c3…` → `38e22f0d…` | DIFFER |
+| G3 | `78440d74` `feat: type load shape in memory evidence (sc-16583)` | `memory_strategy.rs` | `38e22f0d…` → `a8f649ec…` | DIFFER |
+| G4 | `cc5b30a9` `fix(memory): unify resident asset facts` | `memory_strategy.rs`, `registry.rs`, `weightsmeta.rs`, `lib.rs` | `0025b7cd…` → `766831f3…` | DIFFER |
+| G5 | `4fcf046e` `fix: define memory budget currency and footprint telemetry` | `memory_strategy.rs` | `8195bedd…` → `4ce41cbd…` | DIFFER |
+| G6 | `8d6ab05f` `feat(gen-core): shared media checkpoint licence table` (+1905) | `license/`, `lib.rs` | `4ce41cbd…` → `4ce41cbd…` | **identical** |
+| G7 | `c2a9c990` `feat(gen-core): licence families + typed terms + component rows` (+746) | `license.rs`, `lib.rs` | `0025b7cd…` → `131c8829…` | DIFFER |
+| G8 | `5ea4c662` `feat(audio): migrate the audio licence surface to schema 3` (−307) | `license.rs`, `lib.rs` | `613c8c94…` → `fd2f6c39…` | DIFFER |
+| G9 | `e6ee0d31` `feat(gen-core): land the licence family table` (+1268) | `license.rs`, `license/families.rs`, `lib.rs` | `974d2ac8…` → `235ac707…` | DIFFER |
+
+**Result: 2 of 9 absorbed (~22%).** `gen-core` is overwhelmingly a *genuine* closure mover, not a
+source of over-triggers.
+
+This corrects a hypothesis this survey held after row B and G1–G6 and which G7–G9 destroyed. The
+guess was "`gen-core`'s memory surface is linked; its licence surface is not" — supported by G6
+(1905 lines of licence table, absorbed) and by the fact that `candle-gen-flux2` references `license`
+zero times and the shared `candle-gen` references it once, inside a doc comment. G7, G8 and G9 are
+all licence commits and all three moved the binary. The rule is wrong and is recorded here rather
+than quietly deleted, because the reason it is wrong matters to sc-17776: **the two absorbed cases
+are both pure additions of items nothing calls (row B adds one constructor, G6 appends data rows to
+existing types), while all seven DIFFERs edit `lib.rs` or a type that flows through it.** That is a
+description of the sample, not a validated rule — nine windows cannot support one.
+
+**What "DIFFER" does and does not mean.** The artifact layer is sound in one direction only.
+`identical` proves the compiled code did not change, so the calibration certainly still describes it.
+`DIFFER` proves only that *some* linked byte moved — a type layout, a monomorphisation, an inlined
+constant — which is not the same as "the memory behaviour the measurements describe changed". Eight
+of these nine windows therefore land in the "unknown, must re-capture" bucket without anyone
+establishing that the ladder actually moved. **That gap is the real subject of sc-17776**: the
+digest is a conservative proxy for behaviour, and at ~22% absorption it is not a very efficient one.
+
+**Sampling honesty.** These nine come from 2026-08-01…04, a fortnight of concentrated memory- and
+licence-contract work. Over the full 60 days, of 117 `gen-core` commits: `src/lib.rs` 49,
+`src/generator.rs` 43, `src/registry.rs` 28, `src/memory_strategy.rs` 25, `src/weightsmeta.rs` 7,
+`src/license/` 5; 46 of 117 (39%) touch `memory_strategy.rs` ∪ `registry.rs`. The sample is not a
+random draw from that population and the ~22% should be read as "at least this often it is genuine",
+not as a repo-wide rate.
+
+Two chain checks fall out for free: G2's compatible digest equals G3's captured digest
+(`38e22f0d…`), and G5's compatible equals G6's captured (`4ce41cbd…`). In both cases the intervening
+commits leave the closure byte-identical, so two separate audit runs agreeing is an independent
+reproducibility check that cost nothing.
+
+Measured: rows B, D (combined), G1–G9 and M4.
 
 ### 5.3 `#[cfg(test)]` inside the audited crate — accepted false positive, quantified
 
@@ -252,8 +328,12 @@ So the accepted false positive is ~1 commit in 45 (~2%) for this crate, not the 
 rate. The `tests/` sub-class is cheaper than the footnote implies — it costs a 40 s build, not a
 capture.
 
-Measured: M2. The one historical in-`src` instance (`1211ee58`, 2026-07-13) is **unmeasurable** — see
-§5.6.
+Measured: M2. The one historical in-`src` instance (`1211ee58`, 2026-07-13) is **unmeasurable** —
+see §5.6 — and would have been contaminated anyway: its changes *inside* `candle-gen-flux2` are
+test-region-only, but the commit is a 61-file cross-crate refactor that edits production code in
+22 other `candle-gen` crates. Only `candle-gen-flux2`'s own tree is in FLUX.2's closure, so the
+classification in the table above is still correct for this crate; it is disclosed because M2
+carries the claim instead, and a reader comparing the two should know why.
 
 ### 5.4 Vendored `candle-kernels` — 3 moves in 60 days, all documentation
 
@@ -270,22 +350,53 @@ artifact layer absorbs them (row F). The dangerous shape this closure path exist
 edit that would silently change kernels — is **unobserved in the surveyed window**. Recorded as
 unobserved rather than dropped: the path earns its place on the risk, not on the frequency.
 
+**The other half of this class: upstream `candle-core` / `candle-nn`.** These are not crate trees;
+they arrive by git pin, all four (`candle-core`, `candle-nn`, `candle-transformers`,
+`candle-flash-attn`) at one revision in the workspace `Cargo.toml`
+(`rev = "1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d"` at the pin), with
+`[patch."https://github.com/huggingface/candle"] candle-kernels = { path = … }` redirecting the
+kernels to the vendored tree. Their only route into the closure is `Cargo.toml` + `Cargo.lock`,
+which are both watched.
+
+Measured frequency: the upstream candle rev moved **2 times in 60 days** (`579c0d8b` 2026-07-15,
+`7c236e92` 2026-07-12) — against **23** `Cargo.toml` commits over the same window. So ~91% of
+`Cargo.toml` closure moves are unrelated workspace edits that force a build without touching the
+upstream candle any provider executes. Both real bumps are genuine invalidations that the artifact
+layer would correctly refuse; the 21 others are the over-trigger, and they land in the same bucket
+as §5.5.
+
+**Measured** (row H1). `579c0d8b` *is* isolable: among closure paths it moves only `Cargo.toml` and
+`Cargo.lock` (its other files — two `candle-gen-sana` tests, a checkpoint note, a script — are
+outside the closure).
+
+| # | Class | Window | Closure paths that moved | Captured → compatible | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| H1 | 4b upstream candle pin | `85c0ea24 → 579c0d8b` `fix(candle): accelerate SANA depthwise convolution (sc-12111)` | `Cargo.toml`, `Cargo.lock` | `4a371432…` → `3440e1db…` | **DIFFER** |
+
+That is the correct answer: an upstream `candle-core`/`candle-nn` bump changes code FLUX.2 links, and
+the audit refuses it. Contrast row C, where a `Cargo.lock` move that did **not** carry an upstream
+candle bump was absorbed. The pair is the cleanest demonstration in the survey that the artifact
+layer discriminates within a single closure path rather than treating the path as one bit.
+
 ### 5.5 `Cargo.lock` and the workspace build inputs — a class the epic did not list
 
 81 non-merge commits touched `Cargo.lock` in 60 days — the **highest-frequency closure mover of all**,
 more than `gen-core`. Most are workspace crate-version bumps riding along with unrelated feature
 work; the sample in row C is an MLX ladder for a different family.
 
-The artifact layer absorbs these (row C), but on the free path a lockfile move alone forces a build.
-For the five providers with no artifact layer it is an unconditional demotion. This class deserves
-first-class treatment in sc-17776 because of its rate.
+The artifact layer discriminates within this path rather than treating it as one bit: row C (a
+lockfile move carrying no upstream candle bump) is **absorbed**, row H1 (a lockfile + manifest move
+that *does* bump `candle-core`/`candle-nn`) correctly **DIFFERs**. But on the free path any lockfile
+move forces a build, and for the five providers with no artifact layer it is an unconditional
+demotion. This class deserves first-class treatment in sc-17776 because of its rate.
 
 `rust-toolchain.toml` (1 commit) and `.cargo/config.toml` (2) are the same class at negligible rate.
 
 ### 5.6 New: the audit cannot run on pre-layout revisions
 
-`scripts/inference-artifact-audit.mjs` fails hard on any revision before the 2026-07-12 ownership
-layout move (`9e857956`), because `crates/contracts/gen-core` did not exist:
+`scripts/inference-artifact-audit.mjs` fails hard on any revision before **`174b5917`,
+`refactor(contracts): move gen-core to neutral ownership`, 2026-07-13**, because
+`crates/contracts/gen-core` did not exist:
 
 ```
 fatal: path 'crates/contracts/gen-core' exists on disk, but not in '3f2f6f3e…'
@@ -319,11 +430,17 @@ for deliberately.
 
 1. **A fingerprint bump inside an authorized window.** The scenario: the pin moves to a revision the
    artifact audit authorizes, but the provider bumped its own `CALIBRATION_FINGERPRINT` in between —
-   i.e. explicitly declared the calibration invalid. SceneWorks compares the record's fingerprint
-   against its **own manifest copy**, not against inference source, so gate 1 would not see it.
-   *Result:* **not a hole.** The dev constant is used in production code
-   (`memory_strategy.rs:180`, inside `provider_contract`), so it is linked into the audited binary
-   and the artifact layer fails closed. Mutation M3 is the positive control for this.
+   i.e. explicitly declared the calibration invalid. Gate 1 compares the record's fingerprint against
+   SceneWorks' **own manifest copy**, not against inference source, so gate 1 alone would not see it.
+   *Result:* **not a hole, and covered twice for `flux2_dev`.** At capture time,
+   `scripts/sc-15833-flux2-evidence.mjs:403-412` compares `record.declared_calibration` against
+   `record.observed_calibration` and requires both to equal the expected fingerprint — and
+   `observed_calibration` is read from the live provider contract via
+   `MEMORY_EXPECTED_FINGERPRINT` (`candle-gen/src/testkit.rs:127`), i.e. from inference's own
+   constant. Separately, the dev constant is used in production code
+   (`memory_strategy.rs:76` at the pin, inside the registered contract table), so it is linked into
+   the audited binary and the artifact layer also fails closed. Mutation M3 measures that second
+   path.
 
 2. **`compatibleInferenceRevision` on `turboFit.evidenceRecords`.** `krea_2_turbo` carries six
    `compatibleInferenceRevision: a4f409ae` entries in its `turboFit` evidence block
@@ -333,17 +450,25 @@ for deliberately.
    field name is identical to the load-bearing one and a reader is entitled to assume it does
    something.
 
-3. **Nothing compares the bound fingerprint against the inference source constant.** Gate 1 compares
-   `record.calibrationFingerprint` (evidence bundle, SceneWorks-authored) against
-   `cell.calibrationFingerprint` (manifest, SceneWorks-authored). **Both sides are SceneWorks
-   copies.** A fingerprint transcribed wrong into both — the manifest and the record are written
-   together — binds happily while inference's provider advertises something else, and no check in
-   either repo would notice. For `flux2_dev` the artifact layer covers this indirectly (finding 1);
-   for the other five there is no artifact layer, so nothing covers it at all.
+3. **For the five non-`flux2_dev` providers, nothing compares the bound fingerprint against the
+   inference source constant.** Gate 1 compares `record.calibrationFingerprint` (evidence bundle,
+   SceneWorks-authored) against `cell.calibrationFingerprint` (manifest, SceneWorks-authored) —
+   **both sides are SceneWorks copies**, and the manifest and the record are written together, so a
+   fingerprint transcribed wrong into both binds happily while inference's provider advertises
+   something else.
+
+   `flux2_dev` is covered, by the capture-side comparison in finding 1. The others are not. The
+   general harness takes `record.calibrationFingerprint` straight from the plan file
+   (`memory-calibration-harness.mjs:777`, `:1030`), and `scripts/sc-15823-flux1-evidence.mjs:17`
+   pins FLUX.1's fingerprint as a bare SceneWorks string constant with no observed-side comparison
+   at all. Nor is there any check at matrix-generation time, for any provider.
+
    *Result:* **no live instance** — all five bound strings resolve to a live constant at the pin
    (§3.2) — but that is a fact established by hand in this survey, not by any gate. This is the one
-   genuinely unguarded false-green surface found. It is cheap to close: assert the five bound strings
-   against `git grep` of the pinned inference source at matrix-generation time.
+   genuinely unguarded false-green surface found. It is cheap to close, and the pattern to copy
+   already exists: generalise `sc-15833-flux2-evidence.mjs:403-412`'s declared-vs-observed
+   comparison to every capture script, and/or assert the bound strings against the pinned inference
+   source at matrix-generation time.
 
 4. **Whether a crate-mate change can be silently absolved.** Not with the current audited unit — the
    whole-crate test binary made every measured crate-mate instance fail loudly (§5.1). Worth stating
@@ -369,9 +494,19 @@ Relevance of the demoting windows:
 
 | Provider | Commits in the window | …touching its own crate | …touching `gen-core` |
 | --- | ---: | ---: | ---: |
-| `flux1_dev` / `flux1_schnell` | 65 | **0** | 1 (measured inert, row B) |
-| `z_image_turbo` | 195 | 1 (`d74f96f3`, a test commit) | 6 |
-| `flux2_dev` | 41 | 2 (both Klein) | 1 |
+| `flux1_dev` / `flux1_schnell` | 40 | **0** | 1 (measured inert, row B) |
+| `z_image_turbo` | 132 | 1 (`d74f96f3`, a test commit) | 5 |
+| `flux2_dev` | 26 | 2 (both Klein) | 1 |
+
+**How often a bump costs them.** The inference commit rate is not the exposure rate — what demotes a
+calibration is a SceneWorks **pin bump**. Measured on `origin/main` over the same 60 days:
+**89 distinct inference pin values**, i.e. roughly **1.5 pin bumps per day**. Every one of them
+demotes every bound calibration not captured at that exact revision. For the 11 `current`
+calibrations that is a median survival of well under a day.
+
+```bash
+git log --since=2026-06-05 --format=%H origin/main -- Cargo.toml   | while read c; do git show $c:Cargo.toml | grep -oE '[0-9a-f]{40}' | head -1; done | uniq | wc -l
+```
 
 Cost of an artifact-layer adjudication, measured this session: **~40 s warm** for two release
 `cargo test --no-run` builds against a surviving `-target`. No GPU and no weights. That is the number
