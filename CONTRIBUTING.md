@@ -130,13 +130,23 @@ optional pre-push hook (installed by `npm run hooks:install`; skip a run with
 > hook, or the CI parity lane. This trap has bitten sc-10404 (`PhaseTimer`) and sc-8390
 > (`run_blocking_with_heartbeat`).
 
-**The "candle" build** — CI's `windows-candle` lane compiles the worker with
-`--features backend-candle` on Windows, i.e. the
-`all(not(target_os = "macos"), feature = "backend-candle")` configuration. That's where
-`vram_gate`, `krea_control_fit`, the candle-control image modules and `generate_candle_video`
-live — and **neither** `npm run rust:check` (macOS pins `target_os`, so the cfg is false
-whatever features you pass) **nor** `rust:check:neither` (candle off) compiles a line of it.
-It carries the most cfg-gated code in the repo. Reproduce it locally with:
+**The "candle" build** — the `all(not(target_os = "macos"), feature = "backend-candle")`
+configuration. That's where `vram_gate`, `krea_control_fit`, the candle-control image modules
+and `generate_candle_video` live — and **neither** `npm run rust:check` (macOS pins
+`target_os`, so the cfg is false whatever features you pass) **nor** `rust:check:neither`
+(candle off) compiles a line of it. It carries the most cfg-gated code in the repo.
+
+Two CI lanes cover it, and the split matters:
+
+- **`check.yml`'s `candle` job** typechecks it on a hosted Linux runner, on every PR *and* on
+  the merge queue's speculative merge. It runs the same `rust:check:candle` below, stub `nvcc`
+  and all, so it catches the compile class — a cfg-gated symbol gone missing, a signature
+  changed out from under a caller, dead code under `-D warnings`. This is the fast feedback,
+  and it is what stops a candle-side semantic conflict from merging.
+- **`windows-candle.yml`** is the only lane that *runs* candle tests, because `cargo test`
+  links and that needs a real libcuda. A candle `#[test]` body still executes there first.
+
+Reproduce either locally with:
 
 ```bash
 npm run rust:check:candle

@@ -1020,3 +1020,86 @@ test("the Rust toolchain is pinned to one concrete version, everywhere", async (
   }
   assert.ok(inputsSeen > 0, "no toolchain inputs found anywhere — the lockstep audit is vacuous");
 });
+
+// ---------------------------------------------------------------------------------------------
+// MERGE-QUEUE COVERAGE
+//
+// The queue merges a SPECULATIVE ref (`gh-readonly-queue/main/**`) that no PR ever built. A lane
+// with no `merge_group:` trigger is blind to it, so two individually-green PRs whose merge does not
+// compile land anyway — the shape that broke `main` in e71b932f. These guards pin which lanes see
+// that ref, and — just as important — which deliberately do not, because the scarce self-hosted
+// boxes cannot absorb it.
+// ---------------------------------------------------------------------------------------------
+
+test("every backend cfg the queue can break is compiled by a merge-group-triggered lane", async () => {
+  // Three configurations exist, and each has exactly one compiler in CI:
+  //   macOS / mlx        -> macos-mlx.yml `macos-checks`
+  //   Linux, candle OFF  -> check.yml `parity` (native on ubuntu: not(macos) + candle off)
+  //   Linux, candle ON   -> check.yml `candle`
+  // All three must therefore carry `merge_group:`, or that configuration is unvalidated at merge.
+  for (const file of [".github/workflows/check.yml", ".github/workflows/macos-mlx.yml"]) {
+    assert.match(
+      await source(file),
+      /^ {2}merge_group:$/m,
+      `${file}: the queue's speculative merge is unvalidated by this lane without a ` +
+        "`merge_group:` trigger — the required checks would gate on a ref this lane never built.",
+    );
+  }
+
+  const check = await source(".github/workflows/check.yml");
+  // The candle typecheck is the whole reason the `cuda` box can stay out of the queue. If this job
+  // or its command is dropped, `all(not(target_os = "macos"), feature = "backend-candle")` goes back
+  // to having no merge-time compiler at all.
+  assert.match(check, /^ {2}candle:$/m, "check.yml must carry the hosted candle typecheck job");
+  assert.match(
+    check,
+    /run: npm run rust:check:candle$/m,
+    "the candle job must invoke rust:check:candle — the stub-nvcc typecheck of the candle cfg",
+  );
+  // No `--allow-skip` here: on a Linux runner a "cannot run" is a real failure, not an un-opted-in
+  // dev. The pre-push hook passes it; CI must not.
+  assert.doesNotMatch(
+    check,
+    /rust:check:candle -- --allow-skip/,
+    "CI must not let the candle typecheck skip itself into a green",
+  );
+});
+
+test("merge groups never reach the scarce self-hosted boxes", async () => {
+  // windows-candle.yml is the fleet's single `cuda` box at ~28 min a run, and nax-worker is a
+  // two-Mac pool including a developer's daily driver. The queue can build several speculative
+  // groups at once, so a `merge_group:` trigger here multiplies the scarcest hardware in the fleet.
+  // Their merge-time coverage is check.yml's `candle` job and macos-mlx.yml's hosted `macos-checks`
+  // respectively — both on elastic runners.
+  assert.doesNotMatch(
+    await source(".github/workflows/windows-candle.yml"),
+    /^ {2}merge_group:$/m,
+    "windows-candle.yml must stay out of the merge queue; check.yml's `candle` job is its " +
+      "merge-time stand-in. Putting the single cuda box in the queue would wedge it.",
+  );
+  assert.match(
+    await source(".github/workflows/macos-mlx.yml"),
+    /if: \$\{\{ github\.event_name != 'merge_group' &&/,
+    "nax-worker must exclude merge_group — the hosted macos-checks job carries the queue verdict",
+  );
+});
+
+test("the merge-group path gate reads an anchor that actually exists", async () => {
+  // `merge_group` supports no `paths:` filter, so the gate job re-derives one by parsing the lane's
+  // own anchor. A typo in either argument would make the script fall back to "run the lane"
+  // (conservative, but permanently — the filter would be silently dead). Pin both against the file.
+  const { parseWorkflowPaths } = await import("./merge-group-relevance.mjs");
+  const lane = await source(".github/workflows/macos-mlx.yml");
+  const invocation =
+    /--workflow (\S+) \\?\s*--anchor (\S+)/.exec(lane) ??
+    assert.fail("macos-mlx.yml must invoke scripts/merge-group-relevance.mjs with both arguments");
+  const [, workflowArg, anchorArg] = invocation;
+  assert.equal(workflowArg, ".github/workflows/macos-mlx.yml", "the gate must read its own lane");
+  assert.ok(
+    parseWorkflowPaths(lane, anchorArg).length > 0,
+    `macos-mlx.yml has no \`paths: &${anchorArg}\` anchor for the gate to read`,
+  );
+  // The gate only makes sense if the job it feeds is actually conditioned on it.
+  assert.match(lane, /needs: changes/, "macos-checks must depend on the gate job");
+  assert.match(lane, /needs\.changes\.outputs\.relevant == 'true'/, "…and be conditioned on it");
+});
