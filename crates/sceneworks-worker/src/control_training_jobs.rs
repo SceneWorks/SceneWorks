@@ -444,19 +444,28 @@ mod imp {
         use super::*;
         use serde_json::json;
 
-        /// A unique temp path per test (process id + line) so parallel/leftover runs don't collide.
-        fn unique_temp(tag: &str, line: u32) -> std::path::PathBuf {
-            std::env::temp_dir().join(format!(
-                "sw_control_work_{tag}_{}_{line}",
-                std::process::id()
-            ))
+        /// A work-dir path that does NOT exist yet, under a guard that removes whatever is left
+        /// of it on drop.
+        ///
+        /// `WorkDirGuard` is the subject here, so the path has to start absent — hence an
+        /// uncreated CHILD of the tempdir rather than the tempdir itself. The outer guard is the
+        /// backstop: the `temp_dir()/sw_control_work_{tag}_{pid}_{line}` this replaces was cleaned
+        /// up only if the guard under test worked, so the tree survived exactly the failure the
+        /// test exists to catch, and repeated across runs on a recycled PID (sc-17707).
+        fn unique_temp(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+            let guard = tempfile::Builder::new()
+                .prefix(&format!("sw_control_work_{tag}_"))
+                .tempdir()
+                .expect("temp dir");
+            let path = guard.path().join("work");
+            (guard, path)
         }
 
         #[test]
         fn work_dir_guard_removes_populated_tree_on_drop() {
             // A rendered control dataset is a nested tree of PNG pairs + a manifest — the guard must
             // remove the WHOLE subtree, not just the top dir, on drop (sc-11186, F-015).
-            let root = unique_temp("drop", line!());
+            let (_scratch, root) = unique_temp("drop");
             let nested = root.join("images");
             std::fs::create_dir_all(&nested).expect("create nested work dir");
             std::fs::write(nested.join("0001.target.png"), b"target").expect("write target");
@@ -480,7 +489,7 @@ mod imp {
         fn work_dir_guard_drop_on_missing_dir_is_a_noop() {
             // An early bail before anything is rendered leaves no dir; Drop must treat the resulting
             // NotFound as benign (best-effort cleanup) and NOT panic.
-            let root = unique_temp("missing", line!());
+            let (_scratch, root) = unique_temp("missing");
             assert!(!root.exists(), "precondition: dir was never created");
             // Would panic here if Drop unwrapped the io::Error instead of tolerating NotFound.
             drop(WorkDirGuard::new(root.clone()));

@@ -930,6 +930,9 @@ const FLUX1_DEV_MLX_TURNKEY_REVISION: &str =
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX2_DEV_MLX_TURNKEY_REVISION: &str =
     "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION: &str =
+    "acf05e8d5103838baba6a5e32dc91d6997a56023";
 
 #[cfg(any(
     target_os = "macos",
@@ -2501,6 +2504,10 @@ fn candle_certified_artifact_path(
             ("SceneWorks/flux1-schnell-mlx", FLUX1_SCHNELL_MLX_TURNKEY_REVISION),
         "flux1_dev" => ("SceneWorks/flux1-dev-mlx", FLUX1_DEV_MLX_TURNKEY_REVISION),
         "flux2_dev" => ("SceneWorks/flux2-dev-mlx", FLUX2_DEV_MLX_TURNKEY_REVISION),
+        "flux2_klein_9b" => (
+            "SceneWorks/flux2-klein-9b-mlx",
+            FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION,
+        ),
         _ => return false,
     };
     candle_certified_hf_artifact_path(settings, repo, revision, Path::new(tier), weights_dir)
@@ -2576,11 +2583,29 @@ fn optimized_shared_memory_context(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -> &'a str {
-    if engine_id == "flux2_dev" {
+    if engine_id == "flux2_dev"
+        || (engine_id == "flux2_klein_9b"
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+    {
         "text_to_image"
     } else {
         request_mode
     }
+}
+
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn flux2_klein_reference_bearing_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        "edit_image"
+            | "reference"
+            | "image_to_image"
+            | "character_image"
+            | "style_variations"
+    )
 }
 
 /// The generation tiers (`bf16`/`q8`/`q4`) currently INSTALLED for `request`'s model, in DESCENDING
@@ -3201,14 +3226,14 @@ fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
         && spec.pid.is_none()
         && spec.identity.is_none()
         && !(spec.control.is_some() && spec.ip_adapter.is_some());
-    let flux2_dev_supported = engine_id == "flux2_dev"
+    let flux2_supported = matches!(engine_id, "flux2_dev" | "flux2_klein_9b")
         && directory
         && spec.adapters.is_empty()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.pid.is_none()
         && spec.identity.is_none();
-    if qwen_native || flux_supported || flux2_dev_supported {
+    if qwen_native || flux_supported || flux2_supported {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3239,6 +3264,7 @@ mod candle_image_load_shape_tests {
             "flux1_schnell",
             "flux1_dev",
             "flux2_dev",
+            "flux2_klein_9b",
         ] {
             assert_eq!(
                 apply_candle_image_load_shape(engine_id, fixture_spec()).load_shape,
@@ -6281,7 +6307,10 @@ fn rejects_unverified_shared_memory_fallback(
     engine_id: &str,
     optimized_strategy_selected: bool,
 ) -> bool {
-    matches!(engine_id, "z_image" | "z_image_turbo" | "flux2_dev")
+    matches!(
+        engine_id,
+        "z_image" | "z_image_turbo" | "flux2_dev" | "flux2_klein_9b"
+    )
         && !optimized_strategy_selected
 }
 
@@ -6293,6 +6322,7 @@ fn verified_only_memory_family_label(engine_id: &str) -> Option<&'static str> {
     match engine_id {
         "z_image" | "z_image_turbo" => Some("Z-Image"),
         "flux2_dev" => Some("FLUX.2-dev"),
+        "flux2_klein_9b" => Some("FLUX.2 Klein"),
         _ => None,
     }
 }
@@ -6469,11 +6499,19 @@ mod candle_request_residency_tests {
             "flux2_dev",
             false
         ));
+        assert!(rejects_unverified_shared_memory_fallback(
+            "flux2_klein_9b",
+            false
+        ));
         assert!(!rejects_unverified_shared_memory_fallback(
             "z_image", true
         ));
         assert!(!rejects_unverified_shared_memory_fallback(
             "flux2_dev",
+            true
+        ));
+        assert!(!rejects_unverified_shared_memory_fallback(
+            "flux2_klein_9b",
             true
         ));
         assert!(!rejects_unverified_shared_memory_fallback(
@@ -6484,6 +6522,10 @@ mod candle_request_residency_tests {
             verified_only_memory_family_label("flux2_dev"),
             Some("FLUX.2-dev")
         );
+        assert_eq!(
+            verified_only_memory_family_label("flux2_klein_9b"),
+            Some("FLUX.2 Klein")
+        );
     }
 
     #[test]
@@ -6492,6 +6534,20 @@ mod candle_request_residency_tests {
             candle_base_memory_request_mode("flux2_dev", "style_variations"),
             "text_to_image"
         );
+        assert_eq!(
+            candle_base_memory_request_mode("flux2_klein_9b", "image_generation"),
+            "text_to_image"
+        );
+        for mode in [
+            "edit_image",
+            "reference",
+            "image_to_image",
+            "character_image",
+            "style_variations",
+        ] {
+            assert_eq!(candle_base_memory_request_mode("flux2_klein_9b", mode), mode);
+            assert!(flux2_klein_reference_bearing_mode(mode));
+        }
         for engine in ["z_image", "qwen_image", "flux1_dev"] {
             assert_eq!(
                 candle_base_memory_request_mode(engine, "style_variations"),
@@ -6817,11 +6873,11 @@ mod krea_turbo_memory_route_tests {
 
     #[test]
     fn adapter_bytes_disable_krea_streaming_and_missing_bytes_fail_closed() {
-        let root = std::env::temp_dir().join(format!(
-            "krea-adapter-evidence-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root_guard = tempfile::Builder::new()
+            .prefix("krea-adapter-evidence-")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let adapter = root.join("adapter.safetensors");
         std::fs::write(&adapter, vec![0_u8; 321]).unwrap();
         let measured = vec![gen_core::AdapterSpec::new(
@@ -6853,7 +6909,6 @@ mod krea_turbo_memory_route_tests {
             (false, None),
             "missing byte evidence must retain the count-based fail-closed fallback"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -7149,6 +7204,16 @@ async fn generate_candle_stream(
         ))
     })?;
     let engine_id = model.engine_id();
+    // Every Klein reference-bearing request belongs to the bespoke Flux2Edit route, which resolves
+    // and counts the actual reference set. Reaching the generic registered generator means routing
+    // could not prove a usable reference/base; fail closed instead of dropping the reference and
+    // silently authorizing the request as text-to-image.
+    if engine_id == "flux2_klein_9b" && flux2_klein_reference_bearing_mode(&request.mode) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} {} requires the FLUX.2 reference route and at least one resolvable reference image",
+            request.model, request.mode
+        )));
+    }
     // Report the descriptor's tensor backend ("candle"), not the gpu-id device label
     // (`_device_backend`), on the streamed progress + inference events (sc-3678) — parity with the
     // macOS path's `model.backend()` override, so the worker log + the UI architecture pill clearly
@@ -11704,11 +11769,11 @@ mod mlx_downtier_emulation_tests {
         );
         // Sparse tier dirs: q8 ~5 GiB, q4 ~1 GiB LOGICAL (set_len ⇒ no real disk on APFS). The gate sums
         // `metadata.len()`, so these read as 5/1 GiB → predicted peaks 23/19 GiB (+18 headroom).
-        let root = std::env::temp_dir().join(format!(
-            "mlx_downtier_emu_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_downtier_emu_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let make_tier = |tier: &str, gib: u64| -> PathBuf {
             let dir = root.join(tier).join("transformer");
             std::fs::create_dir_all(&dir).expect("mk tier dir");
@@ -11736,7 +11801,6 @@ mod mlx_downtier_emulation_tests {
             "q8 default must capability-downtier to q4 under the {cap} GB emulated cap"
         );
         eprintln!("emulation knob cap={cap} GB → q8 default DOWNTIERED to q4 (sc-10733 ✓)");
-        std::fs::remove_dir_all(&root).ok();
     }
 }
 

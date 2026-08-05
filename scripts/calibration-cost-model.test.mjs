@@ -507,9 +507,12 @@ test("a complete passed overlay record unblocks only its exact matrix overlay", 
 
 test("published cost model distinguishes complete history from runtime-current evidence", async () => {
   const model = await buildCostModel();
-  assert.equal(model.completedBaseline.completeRecords, 33);
+  // sc-16915 added seventeen MLX records (qwen_image x15, krea_2_turbo_control x2) measured at the
+  // current pin, so complete goes 33 -> 50 and the eligible total 48 -> 65. `runtimeCompleteRecords`
+  // is unchanged: the new records are Full complete, not base-only runtime-complete.
+  assert.equal(model.completedBaseline.completeRecords, 50);
   assert.equal(model.completedBaseline.runtimeCompleteRecords, 15);
-  assert.equal(model.completedBaseline.activationEligibleRecords, 48);
+  assert.equal(model.completedBaseline.activationEligibleRecords, 65);
   // "Runtime-current" is measured against the shipped inference pin. SC-15833's checked-in
   // compatibility audit certifies the Candle FLUX.2 closure across an exact window — captured at
   // 5ffd, compatible through `AUDITED_LIVE_REVISION` — so those five records are current through
@@ -531,15 +534,27 @@ test("published cost model distinguishes complete history from runtime-current e
     /github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/,
   )?.[1];
   assert.ok(livePin, "could not read the pinned inference revision from the worker manifest");
-  const expectedCurrentRuns = livePin === AUDITED_LIVE_REVISION ? 5 : 0;
+  // sc-16915 measured eleven MLX runs (qwen_image, krea_2_turbo_control) directly AT this pin, so
+  // current runs no longer come only from the FLUX.2 compatibility window. The two sources are kept
+  // separate and both are derived from the live pin rather than hardcoded, so a bump makes each fall
+  // to zero on its own instead of making this test wrong:
+  //
+  //   - the audited FLUX.2 five are current only while their audited window IS the live pin;
+  //   - the sc-16915 eleven are current only while the pin they were measured at is the live pin.
+  //
+  // Neither is a permanent grant. Only a new measurement, or a re-audit, restores either count.
+  const SC_16915_MEASURED_REVISION = "fbb00d6b4147bd220fe324050534708c12fb022d";
+  const expectedCurrentRuns =
+    (livePin === AUDITED_LIVE_REVISION ? 5 : 0) +
+    (livePin === SC_16915_MEASURED_REVISION ? 11 : 0);
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
     expectedCurrentRuns,
-    "only the five explicitly compatible FLUX.2 records may authorize the later runtime, and only " +
-      "while the audited compatibility window is still the live pin",
+    "a record may authorize the live runtime only by having been measured at it, or through an " +
+      "explicit compatibility audit while that audited window is still the live pin",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
-  assert.match(model.completedBaseline.note, /33 Full complete and 15 base-only runtime-complete/);
+  assert.match(model.completedBaseline.note, /50 Full complete and 15 base-only runtime-complete/);
   assert.match(
     model.completedBaseline.note,
     new RegExp(`${expectedCurrentRuns} current calibration run\\(s\\)`),

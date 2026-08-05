@@ -3806,12 +3806,11 @@ mod tests {
     /// exists to catch.
     #[test]
     fn wan_weight_bytes_sums_exactly_the_components_the_loader_reads() {
-        let root = std::env::temp_dir().join(format!(
-            "sc12344_wan_components_{}_{}",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root_guard = tempfile::Builder::new()
+            .prefix("sc12344_wan_components_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         for (relative, len) in [
             ("transformer/model.safetensors", 1_000_u64),
             ("transformer_2/model.safetensors", 2_000),
@@ -3828,18 +3827,16 @@ mod tests {
 
         // A14B counts BOTH experts + TE + VAE, and nothing else.
         assert_eq!(
-            wan_weight_bytes("wan2_2_t2v_14b", &root),
+            wan_weight_bytes("wan2_2_t2v_14b", root),
             1_000 + 2_000 + 400 + 30
         );
         assert_eq!(
-            wan_weight_bytes("wan2_2_i2v_14b", &root),
+            wan_weight_bytes("wan2_2_i2v_14b", root),
             1_000 + 2_000 + 400 + 30
         );
         // The 5B is single-expert: `transformer_2` must NOT be counted (it would not exist on a real 5B
         // snapshot; counting it here would mean the list, not the disk, decided).
-        assert_eq!(wan_weight_bytes("wan2_2_ti2v_5b", &root), 1_000 + 400 + 30);
-
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(wan_weight_bytes("wan2_2_ti2v_5b", root), 1_000 + 400 + 30);
     }
 
     /// The EXEMPTIONS and the tier-ROOT fallback both read `0` ⇒ no signal ⇒ admit.
@@ -3851,12 +3848,11 @@ mod tests {
     /// `transformer/`, so this reads 0 and admits rather than summing two tiers at once.
     #[test]
     fn wan_weight_bytes_is_zero_for_exempt_engines_and_a_tier_root() {
-        let root = std::env::temp_dir().join(format!(
-            "sc12344_wan_exempt_{}_{}",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root_guard = tempfile::Builder::new()
+            .prefix("sc12344_wan_exempt_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         // A tier ROOT: the components live one level DOWN, under each tier.
         for tier in ["q4", "q8"] {
             for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
@@ -3871,11 +3867,11 @@ mod tests {
 
         // No top-level component dirs ⇒ no signal ⇒ admit. A blind recursive sum would read ~37 GiB
         // here — both tiers at once — and wall-reject a card that runs either one.
-        assert_eq!(wan_weight_bytes("wan2_2_t2v_14b", &root), 0);
+        assert_eq!(wan_weight_bytes("wan2_2_t2v_14b", root), 0);
         assert!(
             video_weights_fit_error(
                 "wan2_2_t2v_14b",
-                wan_weight_bytes("wan2_2_t2v_14b", &root),
+                wan_weight_bytes("wan2_2_t2v_14b", root),
                 "0",
                 rtx_5090()
             )
@@ -3892,8 +3888,6 @@ mod tests {
         // …and the wan engines DO read that same tree, so the zeros above are the exemption, not a
         // broken fixture.
         assert!(wan_weight_bytes("wan2_2_t2v_14b", &populated) > 0);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     // -----------------------------------------------------------------------------------------

@@ -179,7 +179,11 @@ mod conditioning_fit;
 use supervisor::*;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;
+// The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
+// requested against a still-downloading source is refused at the request boundary instead of failing
+// in the worker (see `convert_source_state`).
 use model_jobs::*;
+pub use model_jobs::{convert_source_state, ConvertSourceState};
 mod media_jobs;
 use media_jobs::*;
 // Image-decode backstop (sc-6143): transcodes a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/
@@ -304,6 +308,12 @@ mod smoke_support;
     )
 ))]
 mod pinned_engine_geometry;
+// sc-17607: the COMPOSITION half of the SC-15833 FLUX.2 audit — is `flux2_dev` still registered by
+// `candle-gen-flux2` in the bundle the worker links? A codegen digest cannot answer that, because
+// the measurement binary links neither `runtime-cuda` nor `candle-gen-catalog`. Test-only and
+// candle-only: the composition under test IS the CUDA bundle, so there is no neutral version.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod flux2_composition_audit;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
 // in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]

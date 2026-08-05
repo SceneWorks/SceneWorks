@@ -107,8 +107,17 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     },
     CandleImageRoute {
         lane: CandleImageLane::Flux2Edit,
-        models: ModelMatch::Any(&["flux2_klein_9b", "flux2_klein_9b_true_v2", "flux2_dev"]),
+        models: ModelMatch::Any(&[
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ]),
         shape: flux2_edit_candle_eligible,
+    },
+    CandleImageRoute {
+        lane: CandleImageLane::Flux2Edit,
+        models: ModelMatch::Any(&["flux2_dev"]),
+        shape: flux2_dev_edit_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::QwenEdit,
@@ -658,17 +667,28 @@ pub(crate) fn sdxl_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     has_nonempty_string(payload, "sourceAssetId")
 }
 
-/// FLUX.2-klein edit candle-routing conditions (sc-5487, epic 5480). The candle `Flux2Edit` provider
-/// serves `edit_image` mode with a `sourceAssetId` on the klein family — Kontext-style reference
-/// token-concat editing (no mask / inpaint / outpaint; that masked shape is the SDXL edit lane's). Same
-/// payload predicate as `sdxl_edit_candle_eligible`, gated to the klein family by the caller. Mirrors the
-/// worker's `flux2_edit_candle_available` gate (minus the local weight-resolve check) so the router and
-/// worker agree. Candle-only — macOS keeps the MLX `flux2_klein_9b_edit` registry path.
+/// FLUX.2 Klein reference-route candle conditions. Edit/reference, character, and style requests all
+/// use native token-concat conditioning and must carry a concrete source/reference id. The route table
+/// scopes this expanded predicate to the three Klein catalog entries; dev retains its edit-only gate.
+/// Mirrors the worker's `flux2_edit_candle_available` gate minus local weight resolution.
 pub(crate) fn flux2_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
+    if !matches!(
+        payload.get("mode").and_then(Value::as_str),
+        Some(
+            "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
+        )
+    ) {
         return false;
     }
-    has_nonempty_string(payload, "sourceAssetId")
+    has_nonempty_string_array(payload, "referenceAssetIds")
+        || has_nonempty_string(payload, "referenceAssetId")
+        || has_nonempty_string(payload, "sourceAssetId")
+}
+
+fn flux2_dev_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+        && (has_nonempty_string_array(payload, "referenceAssetIds")
+            || has_nonempty_string(payload, "sourceAssetId"))
 }
 
 /// Qwen-Image-Edit candle-routing conditions (sc-5487, epic 5480). The candle `QwenEdit` provider

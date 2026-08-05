@@ -850,14 +850,34 @@ async fn process_pending_terminal_progress_side_effects(
         .map(Some)
 }
 
-/// Drain one bounded batch of durable terminal handoffs. Per-job failures are
-/// isolated and remain pending for the next cadence; a DB enumeration failure
-/// is returned so the lifecycle loop can report it without exiting.
+/// Drain the batch that is due *now* — the production entry point, called on
+/// startup and on the background cadence. Resolving the instant here rather
+/// than inside the scan is what lets the drain below be driven from a fixed
+/// instant; see it for the behavior and for why.
 pub(crate) async fn recover_pending_terminal_progress_side_effects_once(
     state: &AppState,
 ) -> Result<usize, ApiError> {
+    recover_pending_terminal_progress_side_effects_as_of(state, now_unix_seconds()).await
+}
+
+/// Drain one bounded batch of durable terminal handoffs, taking those due as of
+/// `as_of` (Unix seconds) rather than at the wall clock. Per-job failures are
+/// isolated and remain pending for the next cadence; a DB enumeration failure
+/// is returned so the lifecycle loop can report it without exiting.
+///
+/// Production passes `now` via the wrapper above; tests freeze the instant so an
+/// assertion about the durable backoff cannot be decided by how long the test
+/// took (sc-17640). Only this read side honors `as_of` — a failed attempt is
+/// still deferred against real time by the store.
+pub(crate) async fn recover_pending_terminal_progress_side_effects_as_of(
+    state: &AppState,
+    as_of: i64,
+) -> Result<usize, ApiError> {
     let ids = store_call(state.clone(), move |store, _timeout| {
-        store.pending_terminal_progress_side_effect_job_ids(PROGRESS_SIDE_EFFECT_RECOVERY_BATCH)
+        store.pending_terminal_progress_side_effect_job_ids_as_of(
+            as_of,
+            PROGRESS_SIDE_EFFECT_RECOVERY_BATCH,
+        )
     })
     .await?;
     let mut recovered = 0;

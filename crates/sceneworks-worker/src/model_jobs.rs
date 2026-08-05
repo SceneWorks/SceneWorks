@@ -1801,6 +1801,42 @@ pub(crate) fn is_pinned_hf_revision(revision: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Whether a convert job's declared source file is already materialized in the HF cache — the
+/// API-side pre-flight for `POST /models/:id/convert` (see `create_model_convert_job`).
+///
+/// The worker resolves `checkpoint_dir` the same way ([`huggingface_snapshot_dir`]) and fails the job
+/// when the source weights are absent; without this the API happily queued a convert against a
+/// half-downloaded snapshot, so a shared-repo family whose sibling cards had already flipped to
+/// *downloaded* (the three Anima variants share `circlestone-labs/Anima`, and the per-variant
+/// downloads are serialized) surfaced a bare "source DiT is missing" failure while the variant's own
+/// 4 GB DiT was still streaming. HF only links `snapshots/<rev>/…` into `blobs/` once a blob
+/// completes, so file presence is the authoritative "ready to convert" signal.
+///
+/// `source_file` is the catalog-declared `mlx.convertSourceFile` (repo-relative); an unsafe path is
+/// reported [`ConvertSourceState::FileMissing`] rather than joined.
+pub fn convert_source_state(data_dir: &Path, repo: &str, source_file: &str) -> ConvertSourceState {
+    let Some(snapshot) = huggingface_snapshot_dir(data_dir, repo) else {
+        return ConvertSourceState::RepoNotCached;
+    };
+    match safe_join(&snapshot, source_file) {
+        Ok(path) if path.is_file() => ConvertSourceState::Ready,
+        _ => ConvertSourceState::FileMissing,
+    }
+}
+
+/// The outcome of [`convert_source_state`]. `RepoNotCached` and `FileMissing` are distinguished so
+/// the API can say "download it first" vs "this variant's weights have not landed yet" — on a shared
+/// repo the second is the common case and the first would be misleading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvertSourceState {
+    /// The declared source file is on disk; the worker will find it.
+    Ready,
+    /// The repo has no materialized snapshot in the HF cache at all.
+    RepoNotCached,
+    /// The snapshot exists but this variant's source file has not landed yet.
+    FileMissing,
+}
+
 /// Resolve the local HF snapshot dir for a repo PINNED to an exact commit (`snapshots/<revision>/`) —
 /// the cache-only twin of [`huggingface_snapshot_dir`] for a download that carries an immutable
 /// `revision` (F-029). Unlike [`huggingface_snapshot_dir`] (which prefers `refs/main`), this reads the
@@ -2663,6 +2699,51 @@ mod artifact_provenance_tests {
             .expect("receipt json"),
         )
         .expect("receipt");
+    }
+
+    /// The API convert pre-flight must agree with what `resolve_convert_plan` will find: a missing
+    /// snapshot, a snapshot missing THIS variant's file (the shared-repo case — the three Anima
+    /// variants live in one repo and download one at a time), and the ready case are distinguished so
+    /// the request boundary can explain itself instead of leaving the worker to fail the job.
+    #[test]
+    fn convert_source_state_separates_uncached_repo_from_a_variant_still_downloading() {
+        let data = tempfile::tempdir().expect("data dir");
+        let hub = data.path().join("hub");
+        let _env =
+            crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().expect("hub path"))]);
+
+        let repo = "owner/shared";
+        let alpha = "split_files/diffusion_models/alpha.safetensors";
+        let beta = "split_files/diffusion_models/beta.safetensors";
+        assert_eq!(
+            convert_source_state(data.path(), repo, alpha),
+            ConvertSourceState::RepoNotCached
+        );
+
+        let snapshot = huggingface_repo_cache_path(data.path(), repo)
+            .expect("cache")
+            .join("snapshots/rev-shared");
+        std::fs::create_dir_all(snapshot.join("split_files/diffusion_models")).expect("dit dir");
+        std::fs::write(snapshot.join(alpha), b"weights").expect("alpha weights");
+        assert_eq!(
+            convert_source_state(data.path(), repo, alpha),
+            ConvertSourceState::Ready
+        );
+        assert_eq!(
+            convert_source_state(data.path(), repo, beta),
+            ConvertSourceState::FileMissing,
+            "a sibling variant sharing the repo is NOT ready just because the snapshot exists"
+        );
+        // A directory is not a convertible source file, and a traversal-shaped path is refused rather
+        // than probed outside the snapshot.
+        assert_eq!(
+            convert_source_state(data.path(), repo, "split_files/diffusion_models"),
+            ConvertSourceState::FileMissing
+        );
+        assert_eq!(
+            convert_source_state(data.path(), repo, "../../../etc/passwd"),
+            ConvertSourceState::FileMissing
+        );
     }
 
     #[test]
@@ -4746,10 +4827,13 @@ mod tests {
             base.display()
         );
 
-        let out = std::env::temp_dir().join(format!("sw_true_v2_convert_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
+        let out_guard = tempfile::Builder::new()
+            .prefix("sw_true_v2_convert_")
+            .tempdir()
+            .expect("temp dir");
+        let out = out_guard.path();
 
-        convert_flux2_klein_diffusers(&source, &base, &out).expect("native true_v2 convert");
+        convert_flux2_klein_diffusers(&source, &base, out).expect("native true_v2 convert");
 
         // Transformer weights + config are written as real files (the remapped, base-validated
         // diffusers transformer); model_index.json is copied.
@@ -4767,8 +4851,6 @@ mod tests {
                 out.display()
             );
         }
-
-        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// Real-weights smoke for the native Rust/MLX LTX-2.3 converter (sc-3224 engine + sc-3240
@@ -4795,10 +4877,13 @@ mod tests {
             upscaler_dir.display()
         );
 
-        let out = std::env::temp_dir().join(format!("sw_ltx_eros_convert_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
+        let out_guard = tempfile::Builder::new()
+            .prefix("sw_ltx_eros_convert_")
+            .tempdir()
+            .expect("temp dir");
+        let out = out_guard.path();
 
-        convert_ltx_native(&source, &upscaler_dir, &out, 4).expect("native LTX-2.3 eros convert");
+        convert_ltx_native(&source, &upscaler_dir, out, 4).expect("native LTX-2.3 eros convert");
 
         for file in [
             "transformer.safetensors",
@@ -4820,8 +4905,6 @@ mod tests {
                 out.display()
             );
         }
-
-        let _ = std::fs::remove_dir_all(&out);
     }
 }
 

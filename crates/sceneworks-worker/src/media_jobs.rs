@@ -3632,8 +3632,11 @@ mod person_track_e2e_tests {
         };
 
         // Isolated scratch: a throwaway data dir (weights + frame cache resolve under it).
-        let scratch = std::env::temp_dir().join("sw-person-track-e2e");
-        let _ = std::fs::remove_dir_all(&scratch);
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-person-track-e2e-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
         // `ensure_*_weights` resolve their cache under `settings.data_dir`. Through the crate-wide
         // seam so the value is RESTORED on drop: this used to `set_var` with no restore at all, which
         // leaked the scratch dir into every later `Settings::from_env()` in the process (sc-12380).
@@ -3715,8 +3718,6 @@ mod person_track_e2e_tests {
                 "all detected frames masked → maskState=active"
             );
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// SAM3 cutover E2E (sc-4926): the same detect → track → assemble flow as the SAM2 test
@@ -3741,8 +3742,11 @@ mod person_track_e2e_tests {
             );
             return;
         };
-        let scratch = std::env::temp_dir().join("sw-person-track-e2e-sam3");
-        let _ = std::fs::remove_dir_all(&scratch);
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-person-track-e2e-sam3-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
         // Restored on drop — see the twin above (sc-12380).
         let _env = crate::test_env::EnvVars::set(&[(
             "SCENEWORKS_DATA_DIR",
@@ -3864,8 +3868,6 @@ mod person_track_e2e_tests {
                 "SAM3 vs SAM2 mean IoU {mean_iou:.3} below the parity floor (0.5)"
             );
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// Extract every `timestamps[i]` two ways for one synthetic `rate`fps × `duration`s clip and
@@ -4115,9 +4117,11 @@ mod person_track_e2e_tests {
     #[test]
     #[ignore = "needs an ffmpeg binary (SCENEWORKS_FFMPEG or ffmpeg on PATH)"]
     fn render_track_frames_honest_guarantee_across_fps_regimes() {
-        let scratch = std::env::temp_dir().join("sw-render-track-frames-verify");
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-render-track-frames-verify-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
 
         // (label, rate, duration): the non-aligned AND frame-ALIGNED high-fps single-pass cases, plus
         // the sub-cadence-fps and frame-starved fallback regimes. `aligned_30fps_8s` is the boundary
@@ -4150,7 +4154,7 @@ mod person_track_e2e_tests {
             // regime (single-pass where dense, per-frame fallback where sparse).
             for &(label, rate, duration) in gated_cases {
                 let Some((cut, reference)) =
-                    extract_both_ways(&scratch, label, rate, duration).await
+                    extract_both_ways(scratch, label, rate, duration).await
                 else {
                     return; // ffmpeg missing → skip the whole test
                 };
@@ -4171,7 +4175,7 @@ mod person_track_e2e_tests {
             // go unnoticed. 1fps@12s is 12 real frames for 24 samples; the forward-only select exhausts
             // the clip and mis-selects the large majority of samples.
             let Some((ungated, reference)) =
-                single_pass_ungated_vs_reference(&scratch, "gate_proof_1fps_12s", "1", 12.0).await
+                single_pass_ungated_vs_reference(scratch, "gate_proof_1fps_12s", "1", 12.0).await
             else {
                 return;
             };
@@ -4188,8 +4192,6 @@ mod person_track_e2e_tests {
                 reference.len()
             );
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// The single pass is an OPTIMIZATION, not a correctness dependency: if this ffmpeg build rejects
@@ -4210,9 +4212,11 @@ mod person_track_e2e_tests {
         use crate::person_track::sample_timestamps;
         use std::os::unix::fs::PermissionsExt;
 
-        let scratch = std::env::temp_dir().join("sw-render-track-frames-fallback");
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-render-track-frames-fallback-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
 
         // Resolve the real ffmpeg the wrapper should delegate to (bundled override or PATH default).
         let real_ffmpeg = std::env::var("SCENEWORKS_FFMPEG")
@@ -4318,8 +4322,6 @@ mod person_track_e2e_tests {
                 );
             }
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
 

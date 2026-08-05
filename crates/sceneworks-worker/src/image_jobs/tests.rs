@@ -2610,26 +2610,28 @@ fn candle_bernini_tier_subdir_selection() {
     assert!(candle_bernini_tier_quant("bf16").is_none());
 
     // Sentinels on a temp root: a tier subfolder with a `transformer/` tree, plus a bare root.
-    let root = std::env::temp_dir().join(format!("candle-bernini-tier-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
+    let root_guard = tempfile::Builder::new()
+        .prefix("candle-bernini-tier-")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let make_tier = |tier: &str| {
         std::fs::create_dir_all(root.join(tier).join("transformer")).unwrap();
     };
     make_tier("q8");
     make_tier("q4");
     // A tier root (has subfolders) is a usable snapshot; a bare/empty dir is not.
-    assert!(candle_bernini_snapshot_ok(&root));
+    assert!(candle_bernini_snapshot_ok(root));
     let empty = root.join("empty");
     std::fs::create_dir_all(&empty).unwrap();
     assert!(!candle_bernini_snapshot_ok(&empty));
     // `transformer/` sentinel resolves the tier tree, not a bare dir.
     assert!(candle_bernini_tree_present(&root.join("q4")));
-    assert!(!candle_bernini_tree_present(&root));
+    assert!(!candle_bernini_tree_present(root));
     // A legacy flat tree (`transformer/` AT root) is accepted as a snapshot too.
     let flat = root.join("flat");
     std::fs::create_dir_all(flat.join("transformer")).unwrap();
     assert!(candle_bernini_snapshot_ok(&flat));
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// Resolve the Bernini MLX snapshot dir for the real-weight smokes: env override → the local
@@ -8348,6 +8350,76 @@ fn flux2_edit_candle_base_is_absent_without_the_turnkey() {
         None
     );
     assert!(!flux2_edit_candle_available(&edit, &settings));
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_closed() {
+    let cases = [
+        ("edit_image", "sourceAssetId"),
+        ("reference", "referenceAssetId"),
+        ("image_to_image", "referenceAssetId"),
+        ("character_image", "referenceAssetId"),
+        ("style_variations", "referenceAssetId"),
+    ];
+    for model in [
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        assert!(is_flux2_edit_candle_model(model));
+        for (mode, reference_field) in cases {
+            let mut payload = json!({
+                "projectId": "p", "model": model, "prompt": "keep the subject",
+                "mode": mode, "count": 1
+            });
+            payload
+                .as_object_mut()
+                .expect("request object")
+                .insert(reference_field.to_owned(), json!("asset_1"));
+            let with_reference = request(payload);
+            assert!(
+                flux2_edit_candle_mode(&with_reference),
+                "model={model} mode={mode}"
+            );
+            assert_eq!(
+                flux2_edit_candle_reference_ids(&with_reference),
+                vec!["asset_1".to_owned()],
+                "model={model} mode={mode}"
+            );
+
+            let missing = request(json!({
+                "projectId": "p", "model": model, "prompt": "keep the subject",
+                "mode": mode, "count": 1
+            }));
+            assert!(
+                !flux2_edit_candle_mode(&missing),
+                "model={model} mode={mode}"
+            );
+            assert!(flux2_klein_reference_bearing_mode(mode));
+        }
+    }
+
+    let dev_edit = request(json!({
+        "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
+        "mode": "edit_image", "sourceAssetId": "asset_1", "count": 1
+    }));
+    assert!(flux2_edit_candle_mode(&dev_edit));
+    for mode in [
+        "reference",
+        "image_to_image",
+        "character_image",
+        "style_variations",
+    ] {
+        let dev_unsupported = request(json!({
+            "projectId": "p", "model": "flux2_dev", "prompt": "keep the subject",
+            "mode": mode, "referenceAssetId": "asset_1", "count": 1
+        }));
+        assert!(
+            !flux2_edit_candle_mode(&dev_unsupported),
+            "flux2_dev must remain edit_image-only; mode={mode}"
+        );
+    }
 }
 
 // sc-11171 (F-008): a strict-pose job on a WIRED candle pose family (e.g. `z_image_turbo`) whose control
