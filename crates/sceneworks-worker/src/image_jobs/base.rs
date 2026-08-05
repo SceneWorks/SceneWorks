@@ -2547,6 +2547,20 @@ pub(super) fn candle_artifact_path_matches(actual: &Path, expected: &Path) -> bo
     }
 }
 
+/// Identity of the Krea Turbo calibration this request was admitted under, built from the two
+/// constants the selector itself compares against (sc-17097).
+///
+/// It used to be a literal in two places, so a re-measurement had to remember to edit both; the
+/// tracing line and the run context would otherwise disagree about which capture was in force.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_evidence_revision() -> String {
+    format!(
+        "{}@{}",
+        crate::vram_gate::KREA_TURBO_SCENEWORKS_REVISION,
+        crate::vram_gate::KREA_TURBO_INFERENCE_REVISION
+    )
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn optimized_shared_memory_context(
     context: gen_core::MemoryRunContext,
@@ -6758,11 +6772,9 @@ mod krea_turbo_memory_route_tests {
             .expect("Krea 2 Turbo manifest entry");
         model["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
-        // Same fixture surgery as the fingerprint line above: pin the opt-in to the CURRENT
-        // calibration ABI so these historical-curve selector tests keep exercising the verified
-        // ladder. The shipped manifest stays at its measured ABI (stale until sc-16915).
-        model["candle"]["turboFit"]["calibrationAbi"] =
-            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
+        // sc-17097 removed the ABI re-stamp that used to sit here. Overwriting the shipped
+        // `calibrationAbi` with the current constant is what kept every selector test green while
+        // production rejected the same manifest: no test in the tree ever read the shipped value.
         model
             .as_object()
             .expect("Krea 2 Turbo manifest object")
@@ -6895,7 +6907,10 @@ mod krea_turbo_memory_route_tests {
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
 
         let manifest = historical_builtin_krea_turbo_manifest();
-        let available_gb = 8.95;
+        // sc-17097 re-measurement moved both streamed floors (q4 6.32 GiB, q8 7.01 GiB including the
+        // 2 GiB reserve). This budget still sits in the only window that makes the test meaningful:
+        // Q8 cannot fit at any rung while Q4 can, so a downtier is available and must NOT be taken.
+        let available_gb = 7.00;
         let budget = Some(VramBudget {
             free_gb: available_gb,
             total_gb: available_gb,
@@ -6937,7 +6952,9 @@ mod krea_turbo_memory_route_tests {
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
 
         let manifest = historical_builtin_krea_turbo_manifest();
-        let available_gb = 10.63;
+        // sc-17097: BF16's streamed floor is 10.42 GiB after the re-measurement, so this budget keeps
+        // BF16 unfittable while BOTH lower tiers fit - the case where downtiering is most tempting.
+        let available_gb = 10.41;
         let budget = Some(VramBudget {
             free_gb: available_gb,
             total_gb: available_gb,
@@ -8116,7 +8133,7 @@ async fn generate_candle_stream(
         };
         tracing::info!(
             backend = "candle",
-            evidence_revision = "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+            evidence_revision = krea_evidence_revision(),
             reclaimable_gb,
             raw_available_gb = raw_budget.map_or(0.0, |raw| raw.free_gb),
             effective_available_gb = budget.free_gb,
@@ -8125,21 +8142,10 @@ async fn generate_candle_stream(
             strategy = ?selection.strategy,
             "shared memory-strategy selection admitted"
         );
-        // The manifest turboFit block pins the calibration fingerprint but not the materialization
-        // shape; the provider's own identity is the source the safety check compares against.
-        let load_shape = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default())),
-            )
-            .ok()
-            .flatten()
-            .map(|contract| {
-                contract
-                    .calibration
-                    .as_ref()
-                    .map_or(contract.load_shape, |identity| identity.load_shape)
-            })?;
+        // sc-17097: the shape now comes from the manifest, which states what the curves were MEASURED
+        // under. Reading it back off the provider - as this did - made the safety check compare the
+        // provider against itself, so calibration ABI 2's load-shape axis could never fail here.
+        let load_shape = crate::vram_gate::krea_turbo_load_shape(turbo_fit)?;
         Some(gen_core::MemoryRunContext {
             selection,
             calibration_abi,
@@ -8169,8 +8175,7 @@ async fn generate_candle_stream(
             } else {
                 gen_core::MemoryCacheState::Cold
             },
-            evidence_revision:
-                "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".to_owned(),
+            evidence_revision: krea_evidence_revision(),
         })
     }));
     apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
