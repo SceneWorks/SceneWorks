@@ -81,6 +81,16 @@ on:
       # ADDS as well as modifications, so a restamp, a delete or a re-add of this file still
       # triggers the lane, and a rename is a delete+add that still matches.
       - "config/engine-capabilities/capabilities.candle.json"
+      # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
+      # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
+      # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
+      #
+      # sc-17665 narrowed the entry above from `config/engine-capabilities/**` to a single filename,
+      # and that landed while sc-17593 was in flight. The two are individually correct and combine
+      # badly: the audio verification was added to a step whose trigger paths had just stopped
+      # matching the audio file. Demonstrated on `97a7655a9`, an audio-only re-dump that woke neither
+      # stage-1 lane -- declared but unreachable, for exactly the edit the step exists to catch.
+      - "config/engine-capabilities/audio/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/actions/prepare-rust-runner/**"

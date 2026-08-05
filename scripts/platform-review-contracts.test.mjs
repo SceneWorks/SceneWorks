@@ -702,6 +702,37 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
       }
       return new RegExp(`^${source}$`).test(target);
     };
+    // Every file this lane's verify step actually DIFFS must be watched. Read out of the step body
+    // rather than listed here, because the failure this closes was a step growing a new file while
+    // the filter stayed as it was — a hardcoded list would have been updated by the same edit that
+    // grew the step, or not at all, so it could not have caught it.
+    //
+    // sc-17593 added an audio diff to BOTH lanes' steps; sc-17665 had just narrowed both filters
+    // from `config/engine-capabilities/**` to a single filename. Each is right on its own. Together
+    // they left the audio verification declared but unreachable, which `97a7655a9` — an audio-only
+    // re-dump — demonstrated by waking neither stage-1 lane.
+    const diffed = new Set(
+      [
+        ...lane
+          .slice(verifyAt)
+          .split("\n      - name:")[0]
+          .matchAll(/config[/\\]engine-capabilities[/\\][\w./\\-]*\.json/g),
+      ].map((match) => match[0].replaceAll("\\", "/")),
+    );
+    assert.ok(
+      diffed.size >= 2,
+      `${path}: expected the verify step to diff at least ${file} and the audio dump, found ` +
+        `${JSON.stringify([...diffed])}`,
+    );
+    for (const target of diffed) {
+      assert.ok(
+        declared.some((glob) => matches(glob, target)),
+        `${path}'s verify step diffs ${target}, but no declared path matches it — so an edit to ` +
+          "that file alone never triggers the lane, and the check is declared but unreachable. " +
+          "Add it to the paths anchor.",
+      );
+    }
+
     const own = `config/engine-capabilities/${file}`;
     assert.ok(
       declared.some((glob) => matches(glob, own)),
