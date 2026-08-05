@@ -163,8 +163,18 @@ concurrency:
 # It is a cache: if a box runs short of disk, delete the directory and the next job rebuilds
 # it. Nothing here is a test input — the calibration/reference dispatch paths below take their
 # weights from host snapshots, never from `target/`.
-env:
-  CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
+#
+# SCOPED TO `nax-worker`, NOT WORKFLOW-LEVEL. It was workflow-level when first written, which
+# silently broke the hosted job's cache: `Swatinem/rust-cache` derives its target path as
+# `<workspace>/target` from its `workspaces` input and does NOT read `CARGO_TARGET_DIR`, so it
+# cached an empty `<workspace>/target` while the build wrote to `../cargo-target`. Only
+# `~/.cargo` was stored, the artifacts were not, and the job stayed cold at 26m55s while
+# reporting a green cache step. Confirmed from the run-31010484672 log, where "Cache Paths"
+# ends in `/SceneWorks/SceneWorks/target` and the env above ends in `/../cargo-target`.
+#
+# The override only ever helped a PERSISTENT runner, where surviving `clean: true` between jobs
+# is the whole point. A hosted runner is ephemeral — nothing survives it either way — so there
+# the default `<workspace>/target` is correct precisely because it is what rust-cache stores.
 
 jobs:
   # THE HOSTED HALF. Everything on this lane that does not need Apple matrix-unit silicon.
@@ -195,10 +205,34 @@ jobs:
   # `nax_guard` on this image at 26.2 and reading the result; if it has teeth there, this
   # override can go and `nax-worker` can shrink further.
   #
-  # No cache action deliberately: the MLX-from-source build is ~13 GB, above GitHub's 10 GB
-  # cache ceiling, so `Swatinem/rust-cache` would thrash rather than help. This job pays a
-  # cold build every run. That is the trade — a slower gate that costs a developer's machine
-  # nothing, instead of a faster one that takes it away.
+  # CACHED. The first version of this job shipped without a cache action, on the claim that
+  # "the MLX-from-source build is ~13 GB, above GitHub's 10 GB cache ceiling". Both halves of
+  # that were wrong and it is worth recording why, because the reasoning is the reusable part.
+  #
+  # 13 GB was the size of the whole `target/` directory, measured on a developer box. That is
+  # not what gets cached. `Swatinem/rust-cache` prunes workspace-member artifacts, keeps
+  # dependency artifacts, and compresses with zstd — so the stored set is a subset of a subset.
+  # Re-measured 2026-08-05 on `nax-macos`, the real numbers are:
+  #
+  #   whole target dir      8.7 GB   (not 13)
+  #     debug/deps          6.9 GB
+  #     debug/build         1.4 GB
+  #       pmetal-mlx-sys    1.3 GB   <- the C++/Metal build, i.e. the slow part of this job
+  #   ~/.cargo/registry     1.4 GB
+  #
+  # The thing that actually costs the wall clock — compiling MLX's C++ and Metal kernels — is
+  # 1.3 GB, a rounding error against the ceiling. (Ignore the 11 GB in a developer's
+  # `~/.cargo/git`: that is local accumulation across many pinned revisions, where a hosted
+  # runner fetches only the two it needs.)
+  #
+  # If the stored size ever does exceed 10 GB, that limit is no longer hard — since 2025-11-20
+  # a repo can go past it pay-as-you-go on Pro/Team/Enterprise, with a budget cap that makes
+  # the cache read-only rather than failing builds. Read the size this action reports before
+  # spending anything; the measurement is one run, the estimate above is still an estimate.
+  #
+  # `cache-bin` is left at its default here, unlike the self-hosted lanes. Its post step
+  # deletes non-cargo-installed regular files from `$CARGO_HOME/bin`, which orphans `rustup`
+  # on a persistent box — harmless on an ephemeral hosted runner, which is what this is.
   macos-checks:
     name: macOS build, lint and workspace tests (hosted)
     # Same-repo only, but for a DIFFERENT reason than `nax-worker` below. Nothing here
@@ -221,6 +255,15 @@ jobs:
         with:
           toolchain: stable
           components: clippy
+      # Keyed by job + rustc version + lockfile by default, which is what we want: the MLX pin
+      # moves with `Cargo.lock`, so a pin bump invalidates the native build rather than
+      # silently reusing kernels compiled from a different MLX revision.
+      #
+      # This job deliberately leaves `CARGO_TARGET_DIR` unset so the build lands in
+      # `<workspace>/target` — the path this action derives and stores. See the block above
+      # `jobs:`; pointing the two at different directories caches nothing and says nothing,
+      # which is exactly what the first version of this step did.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
       - name: Ensure Metal compiler
         # The hosted image ships Xcode but not necessarily the Metal toolchain component,
         # and mlx-sys's build script shells out to `xcrun metal`. Same step the inference
@@ -279,6 +322,10 @@ jobs:
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     env:
       CARGO_NET_OFFLINE: "true"
+      # Survives `actions/checkout`'s `clean: true` between jobs on this persistent box. See
+      # the rationale block above `jobs:`. Job-level rather than workflow-level so it cannot
+      # reach the hosted job, whose cache action stores `<workspace>/target` instead.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
     # default (sc-10420). The nax pool is small and hand-registered — GitHub's
     # hosted images cannot run this lane at all, so capacity is exactly the Macs
