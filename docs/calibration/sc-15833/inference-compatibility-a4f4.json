@@ -1,9 +1,9 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "story": "SC-15833",
   "capturedInferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
   "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
-  "method": "compiled artifact identity for changed paths, git object identity for unchanged paths, across the complete Candle FLUX.2 runtime dependency closure and its workspace build inputs",
+  "method": "compiled artifact identity for changed paths, git object identity for unchanged paths, across the Candle FLUX.2 measurement binary's compile closure and its workspace build inputs",
   "command": "node scripts/inference-artifact-audit.mjs --repo PATH --captured SHA40 --compatible SHA40",
   "changedClosurePaths": [
     "Cargo.lock",
@@ -34,11 +34,6 @@
       "path": "crates/contracts/gen-core",
       "capturedObject": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
       "compatibleObject": "9a7e86f5893e584a8d0d656147abc4ae93af6922"
-    },
-    {
-      "path": "crates/bundles/runtime-cuda",
-      "capturedObject": "aba807f775872760e72fd98f28a5a0d2853cf00f",
-      "compatibleObject": "aba807f775872760e72fd98f28a5a0d2853cf00f"
     },
     {
       "path": "crates/media/candle-gen/candle-gen",

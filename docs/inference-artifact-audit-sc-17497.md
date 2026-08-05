@@ -6,7 +6,8 @@ proved that with **git object identity** over FLUX.2's Candle/CUDA compile closu
 that as the cheap layer and adds a **compiled-artifact** layer underneath it, so a commit that
 cannot change the compiled code no longer costs a re-capture. sc-17524 widened the closure to the
 workspace build inputs it had been missing and made the Windows build reproducible enough for the
-compiled-artifact layer to mean anything.
+compiled-artifact layer to mean anything. sc-17607 narrowed it back down by one, moving the
+composition question out of a layer that could never answer it.
 
 ## Why the source tree was the wrong unit
 
@@ -58,16 +59,17 @@ The proof is frozen in source — `FLUX2_COMPATIBILITY_AUDIT.artifactProof` in
 `crates/sceneworks-worker/src/inference_compatibility_audit.rs` — so the checked-in record cannot authorize
 itself.
 
-## The closure: six crate trees and four build inputs
+## The closure: five crate trees and four build inputs
 
 sc-15833 declared it as seven paths, all crate trees bar the root manifest. sc-17524 added three
-more build inputs that feed every one of those builds, bringing that kind to four:
+more build inputs that feed every one of those builds, bringing that kind to four; sc-17607 removed
+`crates/bundles/runtime-cuda`, leaving exactly what the measurement binary compiles plus the inputs
+to that compile:
 
 | Entry | Kind |
 | --- | --- |
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml` | workspace build inputs |
 | `crates/contracts/gen-core` | crate tree |
-| `crates/bundles/runtime-cuda` | crate tree |
 | `crates/media/candle-gen/candle-gen`, `-pid`, `-flux2` | crate trees |
 | `crates/media/candle-gen/vendor/candle-kernels` | crate tree |
 
@@ -99,7 +101,10 @@ toolchain or lockfile the shipped worker is built with.
 `runtime-cuda` depends on `candle-gen-flux2`, **not** the other way round. A commit into
 `crates/bundles/runtime-cuda` therefore leaves the measurement binary byte-identical, and reading
 that unchanged digest as proof over the whole closure would be a false green — strictly worse than
-the false positive this story set out to remove.
+the false positive this story set out to remove. (That crate has since left the closure entirely —
+see [below](#the-two-crates-above-the-provider-sc-17607) — but the rule is what made its exclusion
+from `adjudicates` mandatory while it was still audited, and it is what will catch the next path
+added to the closure that the audited target does not compile.)
 
 So the proof carries an `adjudicates` set alongside its digest, and both validators refuse a moved
 path that falls outside it. The two kinds of entry earn their place in it differently:
@@ -107,8 +112,8 @@ path that falls outside it. The two kinds of entry earn their place in it differ
 - **Crate trees** are covered when cargo reports having *compiled* a package under them. Derived
   from the `compiler-artifact` stream rather than a hand-maintained list, so it cannot drift from
   the dependency graph. For the `candle-gen-flux2` lib test binary that is gen-core, candle-gen,
-  candle-gen-pid, candle-gen-flux2 and (on the CUDA lane) candle-kernels. `runtime-cuda` is **not**
-  among them and must stay object-identical.
+  candle-gen-pid, candle-gen-flux2 and (on the CUDA lane) candle-kernels — which, since sc-17607,
+  is the whole closure.
 - **Build inputs** can never appear there — cargo's stream only ever names *package* manifests, and
   the root `Cargo.toml` is a virtual manifest. They are adjudicated anyway, and soundly: they are
   inputs to *this* build. A lockfile bump that moves a dependency the binary links, a
@@ -124,6 +129,67 @@ path that falls outside it. The two kinds of entry earn their place in it differ
   adjudications; the free path can no longer reach either case because both files are in the
   closure.
 
+### The two crates above the provider (sc-17607)
+
+`runtime-cuda` was in the closure on the argument that **the worker links it**. Follow that edge
+properly and it does not single the bundle out:
+
+```text
+runtime-cuda -> candle-gen-catalog -> candle-gen-flux2 -> candle-gen -> gen-core
+```
+
+`runtime-cuda` does not depend on `candle-gen-flux2` directly. `candle-gen-catalog` is the
+intermediate node, it is "linked by the worker" in exactly the same sense, and it was in **no**
+closure list at all. Across the certified window `5ffd7612 → a4f409ae` the catalog moved **988
+lines** (+949/−39) and the audited bundle moved **nothing**: the crate the closure watched was inert
+and the one it ignored was the one that changed.
+
+Both are above the provider, so **neither can change FLUX.2's compiled code** and the measurement
+binary links neither. The choice was between making them symmetric in the closure or symmetric out
+of it:
+
+| Option | What it buys | What it costs |
+| --- | --- | --- |
+| Add `candle-gen-catalog` | symmetry | a re-audit every time the catalog moves — which is often — adjudicating nothing, since no build of the audited target compiles it |
+| **Remove `runtime-cuda`** (taken) | every closure member is compile-covered, so every move has a remedy that is not a re-capture | the composition question needs a real answer somewhere else, and the bundle's own manifest stops being watched (see [what that trade gives up](#why-not-audit-runtime-cudas-test-binary-instead)) |
+
+The second is what the paths are actually for. A composition-root change is a *composition*
+question — which provider is registered under which id — and a codegen digest cannot answer it in
+either direction: an unchanged digest says nothing about the bundle, and a changed one would convict
+it of nothing. Keeping `runtime-cuda` audited bought no proof and guaranteed a false positive: a
+bundle edit registering some unrelated provider is unadjudicable by construction, and the only
+remedy on offer was the ~47.6 GB re-capture this epic exists to stop demanding.
+
+The catalog's exclusion was not an oversight either, which is the part worth keeping. sc-15833's v1
+record dispositioned it explicitly — `changedPathDisposition` in
+`inference-compatibility-277f.json`: *"Only SenseNova preview registration changed…"* — a considered
+judgement, in a free-text field no validator reads and that v2+ records do not carry at all. So the
+reasoning existed and evaporated. That is what this section and `COMPOSITION_ONLY_CRATES` replace:
+the same judgement, in a place that fails when someone disagrees with it silently.
+
+**Where the composition question is answered instead.**
+`crates/sceneworks-worker/src/flux2_composition_audit.rs` asks it of the bundle the worker actually
+links, on the `windows-candle` lane, with no weights and no GPU: the `flux2_dev` generator
+registered in the composed CUDA catalog must be `candle-gen-flux2`'s own registration — same
+`descriptor`, `load` and `footprint` function pointers as
+`candle_gen_flux2::register_providers` produces on its own — and so must its **memory-strategy**
+pair (`contract` + `safety_check`), which is the admission path SC-15833's rungs were actually
+measured against. Identity rather than a frozen descriptor snapshot: a snapshot re-asserts what the
+digest already covers and goes red on every innocuous field addition, while identity pins the one
+fact the digest cannot reach. If the catalog stops registering the id, registers something else
+under it, or wraps the load, that test is red — immediately, and without a re-capture.
+
+The control it compares against is reached through `runtime_cuda::providers::flux2`, which is the
+catalog's own `pub use candle_gen_flux2 as flux2` — so the crate under audit owns the alias on both
+sides. That is closed rather than hoped over: `type_name_of_val` on the registrar function renders
+its *defining* path, which no re-export can rewrite, and the test asserts it is `candle_gen_flux2`.
+What the check cannot see is a **feature** change: the same function under a different unification
+is pointer-identical, which is why the manifest gap above belongs to sc-17606 and not here.
+
+Both crates are named in `COMPOSITION_ONLY_CRATES` (`scripts/inference-artifact-audit.mjs`) and a
+test asserts they are in no closure list, so re-adding one is a deliberate act rather than a quiet
+one.
+
 ### Why not audit `runtime-cuda`'s test binary instead
 
 sc-17524 considered switching the audited artifact to one that links the *whole* closure, which
@@ -137,11 +203,23 @@ this epic exists to remove, with a far wider trigger.
 
 **What that trade gives up.** Two things, and the second is the one to remember:
 
-1. `crates/bundles/runtime-cuda` stays non-adjudicable and must remain object-identical. Cheap — it
-   has not moved since the capture, and a change there is a *composition* change (which provider is
-   registered), which a codegen digest could not answer anyway. `candle-gen-catalog` sits in the
-   same position and is in no closure list at all; that asymmetry is
-   [sc-17607](https://app.shortcut.com/trefry/story/17607).
+1. **The bundle's own manifest is no longer watched by anything** — the one thing
+   [sc-17607](https://app.shortcut.com/trefry/story/17607) genuinely cost, and it belongs to (2)
+   rather than to the composition question. The closure entry was a *tree* object, so it covered
+   `crates/bundles/runtime-cuda/Cargo.toml`, which is where the shipped feature resolution is
+   decided (`candle-gen-catalog = { features = ["cuda"] }`, `default = ["media", "audio"]`,
+   `flash-attn = [...]`). An edit there is now invisible to the digest (the measurement binary is
+   `-p candle-gen-flux2` and never links the bundle), invisible to `Cargo.lock` (feature selections
+   are not recorded there), invisible to the root `Cargo.toml` (a virtual manifest), and invisible
+   to the composition check, which compares function pointers — the same function compiled under a
+   different feature unification is pointer-identical. Until sc-17606 lands a resolved-feature-set
+   witness, a `runtime-cuda` feature edit is silent.
+
+   Worth being exact about what was lost: that coverage was accidental and one-directional. The
+   path was never in `adjudicates`, so a move in it could only ever produce a *refusal* — never an
+   authorization — and the refusal it produced was indiscriminate, firing on a provider being added
+   to the bundle just as readily as on a feature edit. What is gone is a tripwire that could only
+   say "re-capture", for a question a re-capture does not answer.
 2. **Feature unification is narrower than the shipped bundle's.** `cargo test -p candle-gen-flux2
    --features cuda` resolves a smaller feature set than `-p runtime-cuda` does. A feature enabled by
    some crate outside the closure — `candle-llm`, the audio lane, another provider — changes how a
@@ -215,10 +293,12 @@ two-link experiment on a hello-world binary settled directly:
 Dropping it does not weaken the claim — the audited binary is built `--no-run` and never executes,
 debug info is not code, and `.text` is byte-identical with and without it. Verified at real scale:
 two builds of `5ffd7612` differ in **0 of 181,235,712 bytes**, and the shipped record's digest
-`d80844f2…` came back from **eleven builds across three separate runs**: the two-build
+`d80844f2…` came back from **thirteen builds across four separate runs**: the two-build
 same-revision probe, both revisions of `5ffd7612 → 06e0c5e9` in both build orders (4), the
 unmutated build of the sensitivity check (1), both revisions again when the record was re-emitted
-for the widened closure (2), and both revisions of the shipped `5ffd7612 → a4f409ae` window (2).
+for the widened closure (2), both revisions of the shipped `5ffd7612 → a4f409ae` window (2), and
+both revisions once more when sc-17607 re-emitted that window against the narrowed nine-path
+closure (2) — a run that reproduced the record byte-for-byte, months of unrelated commits later.
 
 **Stable is not the same as blind**, and the flag that bought stability is the one most likely to
 over-normalize — so the other direction was measured too. Mutating a production constant in the
@@ -237,10 +317,14 @@ file a fresh mtime.
 
 ## Schema versions
 
-`schemaVersion: 3` is the ten-path closure. v1 (object identity only) and v2 (sc-17497's
-seven-path artifact layer) are **refused**, not re-graded: a record produced before `Cargo.lock`,
-`rust-toolchain.toml` and `.cargo/config.toml` were audited cannot be read as evidence about them. The closure-identity check
-would reject them on size regardless; the version check is the legible version of the same refusal.
+`schemaVersion: 4` is sc-17607's nine-path closure. v1 (object identity only), v2 (sc-17497's
+seven-path artifact layer) and v3 (sc-17524's ten-path one) are all **refused**, not re-graded — in
+both directions. A record produced before `Cargo.lock`, `rust-toolchain.toml` and
+`.cargo/config.toml` were audited cannot be read as evidence about them; a v3 record is not short of
+evidence but answers a question this schema stopped asking, and dropping an entry out of someone
+else's record to make it fit is the same unearned re-reading arrived at by subtraction. The
+closure-identity check would reject all three on size regardless; the version check is the legible
+version of the same refusal.
 
 Superseded record files stay on disk — `inference-compatibility-277f.json` is the v1 one, and the
 current window `5ffd7612 → a4f409ae` strictly contains the window it proved. They are history, not
@@ -278,6 +362,10 @@ Moving the live pin at all — with or without a build — also means:
 Regenerate `docs/generated/*` afterwards; never hand-edit them. `scripts/bump-inference.mjs` is the
 tool that moves the pin and does not yet know about any of this — running this audit is still a
 manual step alongside it.
+
+Nothing above touches `flux2_composition_audit.rs`: it pins an *invariant* rather than a revision,
+so a pin bump that keeps `flux2_dev` wired to `candle-gen-flux2` needs no edit there and one that
+does not is red on the `windows-candle` lane without anyone having to remember this list.
 
 The Rust half deliberately lives in its own module rather than in `candle_memory_strategy`, which
 compiles only under `all(not(target_os = "macos"), feature = "backend-candle")` and whose tests link

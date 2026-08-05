@@ -14,22 +14,33 @@ pub(crate) const FLUX2_COMPATIBLE_INFERENCE_REVISION: &str =
     "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
 pub(crate) const FLUX2_INFERENCE_COMPATIBILITY_AUDIT: &str =
     include_str!("../../../docs/calibration/sc-15833/inference-compatibility-a4f4.json");
-/// sc-17524: v3 is the ten-path closure. v1 and v2 describe sc-15833's seven-path one, which omits
+/// sc-17607: v4 is the nine-path closure — exactly what the measurement binary compiles, plus the
+/// workspace inputs to that compile. v1 and v2 describe sc-15833's seven-path one, which omits
 /// `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; accepting one would read it as
-/// evidence about build inputs it never looked at.
-pub(crate) const FLUX2_AUDIT_SCHEMA_VERSION: u64 = 3;
-pub(crate) const FLUX2_V3_AUDIT_METHOD: &str = concat!(
+/// evidence about build inputs it never looked at. v3 is sc-17524's ten-path one, which also
+/// audited `crates/bundles/runtime-cuda` — a path no build of the audited target can adjudicate,
+/// and one this schema deliberately stopped asking about.
+pub(crate) const FLUX2_AUDIT_SCHEMA_VERSION: u64 = 4;
+pub(crate) const FLUX2_V4_AUDIT_METHOD: &str = concat!(
     "compiled artifact identity for changed paths, git object identity for unchanged paths, ",
-    "across the complete Candle FLUX.2 runtime dependency closure and its workspace build inputs"
+    "across the Candle FLUX.2 measurement binary's compile closure and its workspace build inputs"
 );
 /// sc-17497: the compiled-artifact proof, frozen here so the packaged record cannot authorize
 /// itself. `None` means every closure object is byte-identical at the live pin and object identity
 /// still decides on its own; `Some((digest, adjudicates))` is required the moment one of them moves.
 ///
 /// `adjudicates` is the closure subset the audited binary can speak for, and it is load-bearing:
-/// `runtime-cuda` depends on `candle-gen-flux2`, not the reverse, so a commit into the CUDA bundle
-/// leaves the measurement binary byte-identical. Without this the unchanged digest would be read as
-/// proof over a path that was never compiled into it.
+/// without it an unchanged digest would be read as proof over a path that was never compiled into
+/// the binary. `crates/bundles/runtime-cuda` was that path — it depends on `candle-gen-flux2`, not
+/// the reverse — until sc-17607 took it out of the closure entirely.
+///
+/// Since that story this frozen list equals the whole closure, so be clear about which half is
+/// still live: it is now a CEILING AT MAXIMUM and can refuse nothing on its own, because every path
+/// a record may declare as changed is already in it. The narrowing force is the record's own
+/// `adjudicates`, read off what its build reported compiling, and the intersection below is what
+/// makes that binding. The frozen half earns its keep only against a future closure entry the
+/// audited target does not compile — which is exactly the state sc-17607 got the closure out of, so
+/// treat a need for it as a signal to re-read `COMPOSITION_ONLY_CRATES` instead.
 ///
 /// sc-17524: it also carries the four workspace build inputs, which cargo can never name because
 /// they are not packages. They belong there for a different reason than the crate trees — not
@@ -58,7 +69,15 @@ pub(crate) const FLUX2_AUDIT_ARTIFACT_PROOF: Option<(&str, &[&str])> = Some((
 /// `compiler-artifact` stream can never name them, but they feed every build in the closure — and
 /// `Cargo.lock` had already moved inside the authorized window while all seven crate trees stayed
 /// byte-identical, which is a changed build input sailing through the free path unexamined.
-pub(crate) const FLUX2_AUDITED_OBJECTS: [(&str, &str); 10] = [
+///
+/// sc-17607 removed `crates/bundles/runtime-cuda`. It is not compiled into the measurement binary,
+/// so nothing here could ever clear it; what a bundle edit actually raises is whether `flux2_dev`
+/// is still registered by `candle-gen-flux2`, which `flux2_composition_audit.rs` asks of the LINKED
+/// bundle instead. Its sibling `candle-gen-catalog` — equally "linked by the worker", and in no
+/// list at all until that story — is covered there too. (Named as a file rather than linked as an
+/// item: that module is candle-lane-only, and an intra-doc link to it breaks rustdoc everywhere
+/// else.)
+pub(crate) const FLUX2_AUDITED_OBJECTS: [(&str, &str); 9] = [
     ("Cargo.toml", "8f5af6b9d53bbfe3be5d9d79b8949364138a087c"),
     ("Cargo.lock", "8ab01e00f01607a99845d875ed60275ae033450c"),
     (
@@ -72,10 +91,6 @@ pub(crate) const FLUX2_AUDITED_OBJECTS: [(&str, &str); 10] = [
     (
         "crates/contracts/gen-core",
         "9a7e86f5893e584a8d0d656147abc4ae93af6922",
-    ),
-    (
-        "crates/bundles/runtime-cuda",
-        "aba807f775872760e72fd98f28a5a0d2853cf00f",
     ),
     (
         "crates/media/candle-gen/candle-gen",
@@ -111,7 +126,7 @@ pub(crate) fn compatibility_audit_authorizes(
         || audit.get("capturedInferenceRevision")?.as_str()? != FLUX2_CAPTURED_INFERENCE_REVISION
         || audit.get("compatibleInferenceRevision")?.as_str()?
             != FLUX2_COMPATIBLE_INFERENCE_REVISION
-        || audit.get("method")?.as_str()? != FLUX2_V3_AUDIT_METHOD
+        || audit.get("method")?.as_str()? != FLUX2_V4_AUDIT_METHOD
         // JS requires this too; a record one language accepts and the other rejects is a split brain.
         || audit.get("command")?.as_str().is_none()
     {
@@ -211,15 +226,19 @@ mod sc_17497_artifact_audit_tests {
     use serde_json::json;
 
     const CANDLE_GEN: &str = "crates/media/candle-gen/candle-gen";
-    const RUNTIME_CUDA: &str = "crates/bundles/runtime-cuda";
+    /// The two crates above the provider, in the closure no longer (sc-17607) and never in it.
+    const COMPOSITION_ONLY: [&str; 2] = [
+        "crates/bundles/runtime-cuda",
+        "crates/media/candle-gen/candle-gen-catalog",
+    ];
     const CARGO_LOCK: &str = "Cargo.lock";
     const RUST_TOOLCHAIN: &str = "rust-toolchain.toml";
     const CARGO_CONFIG: &str = ".cargo/config.toml";
     const DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     /// What the `candle-gen-flux2` lib test binary speaks for. The crate trees are the ones it
     /// COMPILES; the four workspace build inputs are there because they are inputs to that very
-    /// build, so anything they change about the measured code lands in its digest. `runtime-cuda` is
-    /// deliberately absent: it depends on the provider, not the other way round.
+    /// build, so anything they change about the measured code lands in its digest. Since sc-17607
+    /// this is the whole closure — no member is left that the binary cannot answer for.
     const ADJUDICATES: &[&str] = &[
         "Cargo.toml",
         "Cargo.lock",
@@ -233,8 +252,18 @@ mod sc_17497_artifact_audit_tests {
     ];
     const PROOF: Option<(&str, &[&str])> = Some((DIGEST, ADJUDICATES));
 
-    /// A v3 record in which `moved` closure paths carry a different compatible object.
-    fn v3(moved: &[&str], artifact: Option<Value>) -> String {
+    /// A v4 record in which `moved` closure paths carry a different compatible object.
+    ///
+    /// A `moved` entry that is not a closure path would silently do nothing here, so callers may
+    /// only name real ones — asserted rather than trusted, because a typo would otherwise turn a
+    /// rejection test green for the wrong reason.
+    fn v4(moved: &[&str], artifact: Option<Value>) -> String {
+        for path in moved {
+            assert!(
+                FLUX2_AUDITED_OBJECTS.iter().any(|(known, _)| known == path),
+                "{path} is not a closure path, so moving it in a fixture proves nothing"
+            );
+        }
         let objects = FLUX2_AUDITED_OBJECTS
             .iter()
             .map(|(path, object_id)| {
@@ -251,7 +280,7 @@ mod sc_17497_artifact_audit_tests {
             "story": "SC-15833",
             "capturedInferenceRevision": FLUX2_CAPTURED_INFERENCE_REVISION,
             "compatibleInferenceRevision": FLUX2_COMPATIBLE_INFERENCE_REVISION,
-            "method": FLUX2_V3_AUDIT_METHOD,
+            "method": FLUX2_V4_AUDIT_METHOD,
             "command": "node scripts/inference-artifact-audit.mjs",
             "changedClosurePaths": moved,
             "auditedObjects": objects,
@@ -300,14 +329,59 @@ mod sc_17497_artifact_audit_tests {
         );
     }
 
+    /// sc-17607: `crates/bundles/runtime-cuda` and `crates/media/candle-gen/candle-gen-catalog`
+    /// both sit ABOVE the provider, so the measurement binary compiles neither and its digest can
+    /// neither convict nor clear either one. The bundle was in this table anyway (on the argument
+    /// that the worker links it) and the catalog — the intermediate node on that very edge — was in
+    /// no list at all, which is one crate failing loud and its sibling failing silent for no
+    /// recorded reason. Both are out now, and the composition question they actually raise is asked
+    /// of the linked bundle by `flux2_composition_audit.rs` (named, not intra-doc-linked: that
+    /// module is candle-lane-only).
+    ///
+    /// The positive half matters as much as the negative: every remaining entry is a path the
+    /// audited binary compiles (or an input to that compile), so no closure member can move without
+    /// a digest being able to answer for it. Asserted as an EQUALITY, both directions — an audited
+    /// path missing from the frozen set has no remedy but a re-capture, and a frozen entry that is
+    /// no longer audited is a claim about a path nothing checks.
     #[test]
-    fn the_seven_path_schema_versions_are_refused_rather_than_re_graded() {
+    fn the_closure_holds_no_path_the_audited_binary_cannot_answer_for() {
+        for path in COMPOSITION_ONLY {
+            assert!(
+                !FLUX2_AUDITED_OBJECTS.iter().any(|(known, _)| *known == path),
+                "{path} is a composition crate; a digest cannot adjudicate it, so auditing it here \
+                 can only demand re-captures it will never authorize"
+            );
+        }
+        let (_, adjudicates) =
+            FLUX2_AUDIT_ARTIFACT_PROOF.expect("the shipped window moved paths, so a proof is owed");
+        for (path, _) in FLUX2_AUDITED_OBJECTS {
+            assert!(
+                adjudicates.contains(&path),
+                "{path} is audited but outside the adjudicable set, so a move in it would have no \
+                 remedy but a re-capture"
+            );
+        }
+        for path in adjudicates {
+            assert!(
+                FLUX2_AUDITED_OBJECTS.iter().any(|(known, _)| known == path),
+                "{path} is claimed as adjudicable but is not in the closure, so nothing ever \
+                 compares its objects and the claim is unfalsifiable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_superseded_schema_versions_are_refused_rather_than_re_graded() {
         // sc-17524: v1 and v2 record sc-15833's seven-path closure, which never looked at
         // `Cargo.lock`, `rust-toolchain.toml` or `.cargo/config.toml`. Accepting one would read it
         // as evidence about build inputs it did not audit, so the version itself is the refusal.
-        for stale in [1, 2] {
+        //
+        // sc-17607: v3 is refused from the other direction. It audited one path MORE than this
+        // schema does, so re-grading it means silently dropping an entry out of someone else's
+        // record — the same unearned re-reading, arrived at by subtraction instead of addition.
+        for stale in [1, 2, 3] {
             let mut audit: Value =
-                serde_json::from_str(&v3(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
+                serde_json::from_str(&v4(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
             audit["schemaVersion"] = json!(stale);
             assert!(
                 compatibility_audit_authorizes(&audit.to_string(), PROOF).is_none(),
@@ -320,12 +394,12 @@ mod sc_17497_artifact_audit_tests {
     fn a_doc_comment_move_is_authorized_by_a_matching_artifact_digest() {
         // The sc-16961 shape exactly: one crate tree moved, identical compiled code.
         assert!(
-            compatibility_audit_authorizes(&v3(&[CANDLE_GEN], Some(cuda_artifact())), PROOF)
+            compatibility_audit_authorizes(&v4(&[CANDLE_GEN], Some(cuda_artifact())), PROOF)
                 .is_some()
         );
         assert!(
-            compatibility_audit_authorizes(&v3(&[], None), None).is_some(),
-            "a v3 record over a quiet closure still takes the fast path"
+            compatibility_audit_authorizes(&v4(&[], None), None).is_some(),
+            "a v4 record over a quiet closure still takes the fast path"
         );
     }
 
@@ -336,11 +410,11 @@ mod sc_17497_artifact_audit_tests {
     fn a_moved_build_input_demands_a_digest_and_is_adjudicated_by_one() {
         for input in [CARGO_LOCK, RUST_TOOLCHAIN, CARGO_CONFIG] {
             assert!(
-                compatibility_audit_authorizes(&v3(&[input], None), None).is_none(),
+                compatibility_audit_authorizes(&v4(&[input], None), None).is_none(),
                 "{input} moving must force the artifact layer, not sail through the free path"
             );
             assert!(
-                compatibility_audit_authorizes(&v3(&[input], Some(cuda_artifact())), PROOF)
+                compatibility_audit_authorizes(&v4(&[input], Some(cuda_artifact())), PROOF)
                     .is_some(),
                 "{input} reaches the measured binary only through the build, so its digest decides"
             );
@@ -352,7 +426,7 @@ mod sc_17497_artifact_audit_tests {
         moved_digest["capturedDigest"] = json!(other);
         moved_digest["compatibleDigest"] = json!(other);
         assert!(
-            compatibility_audit_authorizes(&v3(&[CARGO_LOCK], Some(moved_digest)), PROOF).is_none(),
+            compatibility_audit_authorizes(&v4(&[CARGO_LOCK], Some(moved_digest)), PROOF).is_none(),
             "a lockfile move signed by some other build is not signed at all"
         );
         // A binary that never reported linking the closure cannot vouch for a build input either:
@@ -360,7 +434,7 @@ mod sc_17497_artifact_audit_tests {
         let mut narrowed = cuda_artifact();
         narrowed["adjudicates"] = json!([CANDLE_GEN]);
         assert!(
-            compatibility_audit_authorizes(&v3(&[CARGO_LOCK], Some(narrowed)), PROOF).is_none(),
+            compatibility_audit_authorizes(&v4(&[CARGO_LOCK], Some(narrowed)), PROOF).is_none(),
             "a record that does not claim the lockfile must not have it granted by the frozen set"
         );
     }
@@ -379,59 +453,73 @@ mod sc_17497_artifact_audit_tests {
         one_character_off["compatibleDigest"] = json!(mutated);
         reject(
             "one character of the digest must be fatal",
-            v3(&[CANDLE_GEN], Some(one_character_off)),
+            v4(&[CANDLE_GEN], Some(one_character_off)),
             PROOF,
         );
         let mut metal = cuda_artifact();
         metal["lane"] = json!("metal");
         reject(
             "a Metal build is not proof of the CUDA artifact the capture ran",
-            v3(&[CANDLE_GEN], Some(metal)),
+            v4(&[CANDLE_GEN], Some(metal)),
             PROOF,
         );
         let mut disagreeing = cuda_artifact();
         disagreeing["compatibleDigest"] = json!(format!("sha256:{}", "d".repeat(64)));
         reject(
             "digests that disagree are a re-capture, not an authorization",
-            v3(&[CANDLE_GEN], Some(disagreeing)),
+            v4(&[CANDLE_GEN], Some(disagreeing)),
             PROOF,
         );
         let mut other_crate = cuda_artifact();
         other_crate["package"] = json!("candle-gen");
         reject(
             "auditing some other crate's binary",
-            v3(&[CANDLE_GEN], Some(other_crate)),
+            v4(&[CANDLE_GEN], Some(other_crate)),
             PROOF,
         );
         let mut debug = cuda_artifact();
         debug["profile"] = json!("debug");
         reject(
             "auditing a debug build the capture never used",
-            v3(&[CANDLE_GEN], Some(debug)),
+            v4(&[CANDLE_GEN], Some(debug)),
             PROOF,
         );
         reject(
             "a moved path with no artifact block at all",
-            v3(&[CANDLE_GEN], None),
+            v4(&[CANDLE_GEN], None),
             PROOF,
         );
         reject(
             "the record may not authorize itself with no digest frozen in source",
-            v3(&[CANDLE_GEN], Some(cuda_artifact())),
+            v4(&[CANDLE_GEN], Some(cuda_artifact())),
             None,
         );
+        // sc-17607: with `crates/bundles/runtime-cuda` out of the closure there is no audited path
+        // the binary fails to link, so the "unproven move" case is driven by withdrawing a path
+        // from the adjudicable set rather than by naming one that was never in it. Same guard, and
+        // it stays exercised for the day a future closure entry is not compile-covered.
+        const WITHOUT_CANDLE_GEN: &[&str] = &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "crates/contracts/gen-core",
+            "crates/media/candle-gen/candle-gen-pid",
+            "crates/media/candle-gen/candle-gen-flux2",
+            "crates/media/candle-gen/vendor/candle-kernels",
+        ];
         reject(
-            "a move in a path the audited binary never links is unproven, not authorized",
-            v3(&[RUNTIME_CUDA], Some(cuda_artifact())),
-            PROOF,
+            "a move in a path the frozen set does not claim is unproven, not authorized",
+            v4(&[CANDLE_GEN], Some(cuda_artifact())),
+            Some((DIGEST, WITHOUT_CANDLE_GEN)),
         );
         reject(
             "and it is still unproven when it moves alongside one that IS adjudicable",
-            v3(&[CANDLE_GEN, RUNTIME_CUDA], Some(cuda_artifact())),
-            PROOF,
+            v4(&[CANDLE_GEN, CARGO_LOCK], Some(cuda_artifact())),
+            Some((DIGEST, WITHOUT_CANDLE_GEN)),
         );
         let mut understated: Value =
-            serde_json::from_str(&v3(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
+            serde_json::from_str(&v4(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
         understated["changedClosurePaths"] = json!([]);
         reject(
             "understating which paths moved hides a second, unproven change",
@@ -439,7 +527,7 @@ mod sc_17497_artifact_audit_tests {
             PROOF,
         );
         let mut captured_tampered: Value =
-            serde_json::from_str(&v3(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
+            serde_json::from_str(&v4(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
         captured_tampered["auditedObjects"][0]["capturedObject"] = json!("a".repeat(40));
         reject(
             "a captured object that does not match the code the measurements ran on",
@@ -447,7 +535,7 @@ mod sc_17497_artifact_audit_tests {
             PROOF,
         );
         let mut future: Value =
-            serde_json::from_str(&v3(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
+            serde_json::from_str(&v4(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
         future["schemaVersion"] = json!(FLUX2_AUDIT_SCHEMA_VERSION + 1);
         reject(
             "a schema version nobody has defined",
@@ -458,27 +546,32 @@ mod sc_17497_artifact_audit_tests {
         other_test["test"] = json!("tests::flux2_dev_smoke");
         reject(
             "auditing some other test than the one that produced the measurements",
-            v3(&[CANDLE_GEN], Some(other_test)),
+            v4(&[CANDLE_GEN], Some(other_test)),
             PROOF,
         );
         let mut captured_off = cuda_artifact();
         captured_off["capturedDigest"] = json!(format!("sha256:{}", "d".repeat(64)));
         reject(
             "a captured digest that does not match the frozen one",
-            v3(&[CANDLE_GEN], Some(captured_off)),
+            v4(&[CANDLE_GEN], Some(captured_off)),
             PROOF,
         );
         let mut not_a_list = cuda_artifact();
         not_a_list["adjudicates"] = json!("everything");
         reject(
             "a record whose own adjudicable set is not a list of paths",
-            v3(&[CANDLE_GEN], Some(not_a_list)),
+            v4(&[CANDLE_GEN], Some(not_a_list)),
             PROOF,
         );
         // The frozen set is a HUMAN TRANSCRIPTION and, unlike the digest, an over-wide one fails
         // OPEN. Intersecting it with what the build reported linking means both halves have to be
-        // wrong the same way before anything is authorized.
+        // wrong the same way before anything is authorized — so a frozen set claiming a crate the
+        // build never reported compiling still authorizes nothing.
         const OVER_WIDE: &[&str] = &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
             "crates/contracts/gen-core",
             "crates/media/candle-gen/candle-gen",
             "crates/media/candle-gen/candle-gen-pid",
@@ -486,23 +579,23 @@ mod sc_17497_artifact_audit_tests {
             "crates/media/candle-gen/vendor/candle-kernels",
             "crates/bundles/runtime-cuda",
         ];
+        let mut narrow_record = cuda_artifact();
+        narrow_record["adjudicates"] = json!(WITHOUT_CANDLE_GEN);
         reject(
             "an over-wide frozen set is still checked against what the build reported linking",
-            v3(&[RUNTIME_CUDA], Some(cuda_artifact())),
+            v4(&[CANDLE_GEN], Some(narrow_record)),
             Some((DIGEST, OVER_WIDE)),
         );
-        let mut links_the_bundle = cuda_artifact();
-        links_the_bundle["adjudicates"] = json!(OVER_WIDE);
         assert!(
             compatibility_audit_authorizes(
-                &v3(&[RUNTIME_CUDA], Some(links_the_bundle)),
+                &v4(&[CANDLE_GEN], Some(cuda_artifact())),
                 Some((DIGEST, OVER_WIDE))
             )
             .is_some(),
-            "an artifact that DOES link it may adjudicate it — the rule is coverage, not a blocklist"
+            "a path BOTH halves claim is still adjudicated — the rule is coverage, not a blocklist"
         );
         let mut no_command: Value =
-            serde_json::from_str(&v3(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
+            serde_json::from_str(&v4(&[CANDLE_GEN], Some(cuda_artifact()))).unwrap();
         no_command.as_object_mut().unwrap().remove("command");
         reject(
             "a record with no command is not a record either language accepts",

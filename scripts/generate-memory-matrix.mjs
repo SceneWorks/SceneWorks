@@ -48,10 +48,12 @@ const RUNGS = [
 // digest is frozen HERE, in source, so the checked-in record cannot authorize itself.
 //
 // `adjudicates` is the other half, and it is not optional. A digest speaks only for the paths the
-// audited binary can answer for: `runtime-cuda` depends on `candle-gen-flux2`, not the reverse, so
-// a commit into the CUDA bundle leaves the measurement binary byte-identical. Pinning the
-// adjudicable set here keeps an unchanged digest from being read as proof over a path it never
-// compiled.
+// audited binary can answer for, and pinning that set here keeps an unchanged digest from being
+// read as proof over a path it never compiled. Since sc-17607 every closure path IS one the binary
+// compiles — `crates/bundles/runtime-cuda` was the exception and it left the closure, because a
+// crate that sits ABOVE the provider raises a composition question (which provider is registered
+// under `flux2_dev`) that no digest can answer in either direction. That question is asked of the
+// linked bundle instead, in `crates/sceneworks-worker/src/flux2_composition_audit.rs`.
 //
 // sc-17524: the set also carries the four workspace build inputs (`Cargo.toml`, `Cargo.lock`,
 // `rust-toolchain.toml`, `.cargo/config.toml`), which earn their place differently — not "compiled into the binary" but
@@ -85,18 +87,23 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
       "crates/media/candle-gen/vendor/candle-kernels",
     ]),
   }),
-  // sc-17524: `Cargo.lock` and `rust-toolchain.toml` join the seven crate trees. They are build
-  // INPUTS rather than packages — cargo's `compiler-artifact` stream can never name them — but they
-  // feed every one of those builds, and the lockfile had already moved inside the authorized window
-  // while all seven trees stayed byte-identical. Leaving them out meant the free path could report
+  // sc-17524: `Cargo.lock` and `rust-toolchain.toml` join the crate trees. They are build INPUTS
+  // rather than packages — cargo's `compiler-artifact` stream can never name them — but they feed
+  // every one of those builds, and the lockfile had already moved inside the authorized window
+  // while every tree stayed byte-identical. Leaving them out meant the free path could report
   // "no build needed" over a `cargo update` that moved a dependency the measured binary links.
+  //
+  // sc-17607: `crates/bundles/runtime-cuda` left. Every entry below is now a path the measurement
+  // binary actually compiles (or an input to that compile), so a move here always has an answer
+  // that is not a re-capture. The two crates above the provider — the bundle and
+  // `candle-gen-catalog` between it and `candle-gen-flux2` — are named in `COMPOSITION_ONLY_CRATES`
+  // (`scripts/inference-artifact-audit.mjs`) and checked as composition, not as codegen.
   auditedObjects: Object.freeze({
     "Cargo.toml": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
     "Cargo.lock": "8ab01e00f01607a99845d875ed60275ae033450c",
     "rust-toolchain.toml": "ae829f875c68c03c367ce92cc05e041036a92d0a",
     ".cargo/config.toml": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
     "crates/contracts/gen-core": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
-    "crates/bundles/runtime-cuda": "aba807f775872760e72fd98f28a5a0d2853cf00f",
     "crates/media/candle-gen/candle-gen": "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
     "crates/media/candle-gen/candle-gen-pid": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
     "crates/media/candle-gen/candle-gen-flux2": "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
@@ -1280,10 +1287,10 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-const AUDIT_SCHEMA_VERSION = 3;
-const V3_AUDIT_METHOD =
+const AUDIT_SCHEMA_VERSION = 4;
+const V4_AUDIT_METHOD =
   "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
-  "the complete Candle FLUX.2 runtime dependency closure and its workspace build inputs";
+  "the Candle FLUX.2 measurement binary's compile closure and its workspace build inputs";
 
 /**
  * sc-17497: object identity is the cheap layer; the compiled-artifact layer is required exactly when
@@ -1291,10 +1298,13 @@ const V3_AUDIT_METHOD =
  * closure path moves, and it must agree with the digest frozen in `FLUX2_COMPATIBILITY_AUDIT`.
  * Freezing it in source is what stops the checked-in record from authorizing itself.
  *
- * sc-17524: only v3 is accepted. v1 and v2 describe sc-15833's SEVEN-path closure, which omits
- * `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; re-grading it against the ten-path
- * expectations would read it as evidence about two inputs it never looked at. The closure-identity
- * check below would reject them on size anyway — this is the loud version of the same refusal.
+ * sc-17607: only v4 is accepted. v1/v2 describe sc-15833's SEVEN-path closure, which omits
+ * `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; re-grading one against today's
+ * expectations would read it as evidence about inputs it never looked at. v3 is sc-17524's
+ * TEN-path closure, which additionally audited `crates/bundles/runtime-cuda` — not evidence this
+ * schema is short of, but an answer to a question it stopped asking, and dropping an entry out of
+ * someone else's record to make it fit is the same silent re-grade from the other side. The
+ * closure-identity check below would reject all three on size anyway — this is the loud version.
  *
  * Only the PROOF is injectable, and only so the tests can exercise the ACCEPTING side of the artifact
  * layer while the shipped constant still carries `artifactProof: null` — a validator exercised solely
@@ -1310,7 +1320,7 @@ export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMP
     audit.story !== expected.story ||
     audit.capturedInferenceRevision !== expected.capturedInferenceRevision ||
     audit.compatibleInferenceRevision !== expected.compatibleInferenceRevision ||
-    audit.method !== V3_AUDIT_METHOD ||
+    audit.method !== V4_AUDIT_METHOD ||
     typeof audit.command !== "string" ||
     !Array.isArray(audit.auditedObjects)
   ) {
@@ -1345,7 +1355,7 @@ export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMP
 }
 
 /**
- * The compiled-artifact half of a v2 record.
+ * The compiled-artifact half of a v4 record.
  *
  * Only a `cuda` build can authorize a FLUX.2 calibration: the measurements come from an RTX capture,
  * and `scripts/inference-artifact-audit.mjs` can also build the same closure on Metal, which must
