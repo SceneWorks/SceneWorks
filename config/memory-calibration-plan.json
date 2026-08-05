@@ -360,6 +360,891 @@
       ]
     },
     {
+      "name": "candle-krea-q4-768-fresh-reference-resident",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q4-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q4-768-fresh-reference-staged",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q4-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q4-768-fresh-reference-bounded-decode",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q4-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q4-768-fresh-reference-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q4-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q4-768-fresh-reference-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q4-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-1024-fresh-reference-resident",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-1024-fresh-reference-staged",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-1024-fresh-reference-bounded-decode",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-1024-fresh-reference-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-1024-fresh-reference-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-768-fresh-reference-resident",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-768-fresh-reference-staged",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-768-fresh-reference-bounded-decode",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-768-fresh-reference-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-q8-768-fresh-reference-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-q8-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-1024-fresh-reference-resident",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-1024-fresh-reference-staged",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-1024-fresh-reference-bounded-decode",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-1024-fresh-reference-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-1024-fresh-reference-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-1024-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-768-fresh-reference-resident",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-768-fresh-reference-staged",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-768-fresh-reference-bounded-decode",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-768-fresh-reference-bounded-attention",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_attention",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-bf16-768-fresh-reference-bounded-transformer",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "fresh-five-rung-krea-bf16-768-seed16402-step2",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
       "name": "mlx-qwen-bf16-resident",
       "evidenceScope": "authoritative",
       "backend": "mlx",
@@ -828,6 +1713,126 @@
       ],
       "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
       "fixture": "krea-q4-1024-seed42",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-production-current-q8-v1",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "krea-q8-1024-seed42",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-production-current-bf16-v1",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "krea-bf16-1024-seed42",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 134217728,
+            "transformerWindowSize": 1
+          },
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-krea-production-current-q4-768-v1",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "deferred_materialization",
+      "target": {
+        "provider": "krea_2_turbo",
+        "modelId": "krea_2_turbo",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "bounded_transformer_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+      "fixture": "krea-q4-768-seed42",
       "cases": [
         {
           "parameters": {

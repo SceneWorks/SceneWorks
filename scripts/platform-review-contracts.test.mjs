@@ -30,6 +30,50 @@ test("Windows runner prep falls back when its optional rustc wrapper is missing"
   );
 });
 
+test("Windows runner prep resolves rustup outside the job's CARGO_HOME", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  // rustup lives in the profile that installed it. The runner services pin CARGO_HOME
+  // to a per-runner dependency cache (D:\cargo-home-N) that has no bin\ at all, and
+  // windows-candle.yml repoints it again at $RUNNER_TEMP\cargo-home — so deriving
+  // rustup.exe from CARGO_HOME alone finds nothing and skips the authoritative
+  // `rustup which cargo` resolution on every run (sc-13166).
+  assert.match(action, /\$userCargoBin = Join-Path \(Join-Path \$env:USERPROFILE '\.cargo'\) 'bin'/);
+  assert.match(action, /Get-Command rustup\.exe -CommandType Application/);
+  assert.match(action, /\$cargoPath = \(& \$rustupExe which cargo \| Out-String\)\.Trim\(\)/);
+  assert.doesNotMatch(action, /\$rustupExe = Join-Path \$cargoHome/);
+});
+
+test("Windows runner prep only warns about a genuinely dangling .cargo\\bin", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  // A 0-byte reparse point is rustup's NORMAL Windows proxy shape and dispatches fine;
+  // the only state worth reporting is rustup.exe itself being gone. The old check
+  // warned on both the healthy shape and on a bin-less CARGO_HOME ("rustup was
+  // deleted"), so it fired on 100% of runs and became invisible (sc-13166).
+  // Scoped to the emitted ::warning lines — the header comment still narrates the old
+  // wording as history, and that prose must not trip this guard.
+  assert.doesNotMatch(action, /::warning[^\n]*rustup was deleted/);
+  assert.doesNotMatch(action, /::warning[^\n]*byte reparse point/);
+  assert.match(action, /\$profileRustup = Join-Path \$userCargoBin 'rustup\.exe'/);
+  assert.match(action, /if \(-not \$rustupIntact\)/);
+  // Still non-fatal: the lane is immune via the PATH prepend.
+  assert.match(action, /::warning title=Dangling \.cargo\\bin proxies on candle runner::/);
+});
+
+test("Windows runner prep emits only ASCII inside its PowerShell strings", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  // The step body is handed to powershell.exe as a file. If it is ever decoded as
+  // CP1252 rather than UTF-8, an em dash (E2 80 94) becomes "â€" + U+201D, and
+  // PowerShell honors U+201D as a STRING DELIMITER — the whole step dies on a parse
+  // error before it can resolve a toolchain. Comments tolerate the mangling (the rest
+  // of the line is ignored); quoted strings do not. So: non-ASCII stays in comments.
+  const offenders = [];
+  for (const [i, line] of action.split("\n").entries()) {
+    if (/^\s*#/.test(line)) continue; // YAML/PowerShell comment lines are safe
+    if (!/^[\x09\x20-\x7e]*$/.test(line)) offenders.push(`${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const prepare = workflow.indexOf("uses: ./.github/actions/prepare-rust-runner");
