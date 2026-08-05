@@ -371,11 +371,27 @@ async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
             .is_none(),
         "an un-dumped backend must be absent (unknown), never served as false"
     );
-    // Purely additive: a model the generated table does not know keeps its exact previous shape.
-    assert!(
-        entry("kokoro_82m").get("preview").is_none(),
-        "an audio model has no engine-backed preview answer and must get no `preview` key at all"
+    // sc-17593. This assertion used to read "an audio model has no engine-backed preview answer" —
+    // true at the time, and the bug: the audio registry is a SEPARATE `ProviderRegistry` that
+    // nothing dumped, so every audio route served `unknown`, which the card renders exactly like
+    // "wired and does not preview". It is dumped now, and answers.
+    assert_eq!(
+        entry("kokoro_82m")["preview"]["byBackend"]["candle"],
+        Value::Bool(false),
+        "kokoro_82m is a wired candle audio route that does not emit PreviewSink frames — served \
+         as false, not omitted"
     );
+    // Still purely additive, on a case that stays unknown BY CONSTRUCTION rather than by omission:
+    // `supports_preview` lives on `Capabilities`, which only Generators carry. `openvoice_v2` is an
+    // `AudioTransform` and `chatterbox_ve` a `VoiceEmbedder` — descriptor types with no such field —
+    // so the registry has no opinion and the catalog must not manufacture one.
+    for non_generator in ["openvoice_v2", "chatterbox_ve"] {
+        assert!(
+            entry(non_generator).get("preview").is_none(),
+            "{non_generator} is not a Generator, so it has no supports_preview to serve and must \
+             get no `preview` key at all"
+        );
+    }
 }
 
 #[tokio::test]

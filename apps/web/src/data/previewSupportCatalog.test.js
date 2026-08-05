@@ -5,6 +5,7 @@ import {
   catalogToWebPreviewSupport,
   derivePreviewSupport,
   parseEngineModelTable,
+  parseSceneworksAudioBackends,
   parseSceneworksBackends,
   PREVIEW_SUPPORT_GENERATOR,
 } from "./previewSupportDerivation.js";
@@ -40,8 +41,25 @@ const factsEntries = Object.entries(factsModules)
   .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
 const factsFiles = factsEntries.map((entry) => entry.facts);
 
+// The AUDIO registry's dumps (sc-17593), one directory down. The glob above is single-level, so the
+// two sets cannot bleed into each other — which matters because they share backend names ("candle"
+// is the audio backend on every platform) while their engine-id namespaces are independent.
+const audioFactsModules = import.meta.glob(
+  "../../../../config/engine-capabilities/audio/capabilities.*.json",
+  { eager: true, query: "?raw", import: "default" },
+);
+const audioFactsEntries = Object.entries(audioFactsModules)
+  .map(([path, raw]) => ({ name: path.slice(path.lastIndexOf("/") + 1), facts: JSON.parse(raw) }))
+  .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+const audioFactsFiles = audioFactsEntries.map((entry) => entry.facts);
+
 const rows = parseEngineModelTable(enginesSource);
-const derived = derivePreviewSupport(rows, factsFiles);
+const derived = derivePreviewSupport(rows, factsFiles, audioFactsFiles);
+
+/** Every audio engine id, which for audio IS the SceneWorks model id it answers for. */
+const audioEngineIds = new Set(
+  audioFactsFiles.flatMap((facts) => facts.engines.map((engine) => engine.id)),
+);
 
 /** The single inference revision every Cargo manifest in the worker pins, read from the pin itself. */
 const inferencePin = (() => {
@@ -101,7 +119,16 @@ describe("preview-support catalog: the artifacts are derived, not authored", () 
   });
 
   it("covers every backend on disk — the artifacts list exactly the dumped facts files", () => {
-    const onDisk = factsEntries.map((entry) => entry.facts.backend).sort();
+    // The UNION over both registries (sc-17593). `backends` is what a consumer iterates to find a
+    // key, so a backend that only the audio lane dumps must still appear — asserting the media set
+    // alone would make that branch of the derivation permanently unreachable. The two sets coincide
+    // today (audio is `candle`, which media also dumps); the union is what must hold when they stop
+    // coinciding.
+    const onDisk = [
+      ...new Set(
+        [...factsEntries, ...audioFactsEntries].map((entry) => entry.facts.backend),
+      ),
+    ].sort();
     expect(JSON.parse(previewSupportManifestRaw).backends).toEqual(onDisk);
     expect(previewSupport.backends).toEqual(onDisk);
   });
@@ -188,9 +215,14 @@ describe("preview-support catalog: every backend SceneWorks can run is dumped", 
 
   it("the served catalog advertises every declared backend, not just the dumped ones", () => {
     // The `backends` array is what a consumer iterates. If it were ever a strict subset of the
-    // declared set, the UI would have no key at all for the missing engine's routes.
-    expect(JSON.parse(previewSupportManifestRaw).backends).toEqual(declared);
-    expect(previewSupport.backends).toEqual(declared);
+    // declared set, the UI would have no key at all for the missing engine's routes. Declared over
+    // BOTH registries, for the same reason the on-disk assertion above takes the union: an
+    // audio-only backend is still a backend a consumer must find a key for.
+    const declaredEverywhere = [
+      ...new Set([...declared, ...parseSceneworksAudioBackends(factsDeclarationSource)]),
+    ].sort();
+    expect(JSON.parse(previewSupportManifestRaw).backends).toEqual(declaredEverywhere);
+    expect(previewSupport.backends).toEqual(declaredEverywhere);
   });
 
   // Mutation-shaped: this is what the guard is FOR, so assert it actually fires. Deleting
@@ -272,6 +304,176 @@ describe("preview-support catalog: every backend SceneWorks can run is dumped", 
   });
 });
 
+// sc-17593. The audio registry (`crate::inference_runtime::audio`) is a SEPARATE ProviderRegistry
+// that nothing dumped until this story, so `supports_preview` was unknown for every audio route on
+// every platform — reported exactly like "not wired".
+//
+// sc-17119's `SCENEWORKS_BACKENDS` guard could not see it, and that is the point of this block:
+// `AUDIO_BACKEND` is `"candle"` on all three runtime bundles, and `candle` is already dumped from the
+// MEDIA registry, so backend-level coverage was satisfied coincidentally while the audio engines were
+// missing entirely. Coverage has to be asserted per registry, against its own declared const.
+describe("preview-support catalog: the audio registry is dumped too", () => {
+  const declaredAudio = parseSceneworksAudioBackends(factsDeclarationSource);
+  const audioOnDisk = audioFactsEntries.map((entry) => entry.facts.backend).sort();
+
+  /** A minimal well-formed dump of each kind, for assertions about the DERIVATION rather than about
+   *  what happens to be checked in — a fixture built from the on-disk files goes empty, and takes
+   *  its assertion with it, in precisely the never-dumped state this block guards against. */
+  const syntheticAudioFacts = ({ id = "kokoro_82m", inferenceRevision = inferencePin } = {}) => ({
+    registry: "audio",
+    backend: "candle",
+    generatedFrom: { inferenceRevision, dumper: "test" },
+    engines: [{ id, modality: "audio", supportsPreview: false }],
+  });
+  const syntheticMediaFacts = () => ({
+    backend: "candle",
+    generatedFrom: { inferenceRevision: inferencePin, dumper: "test" },
+    engines: [{ id: "krea_2_turbo", modality: "image", supportsPreview: true }],
+  });
+
+  it("parses SCENEWORKS_AUDIO_BACKENDS as its own const, not as SCENEWORKS_BACKENDS", () => {
+    expect(declaredAudio).toEqual(["candle"]);
+    // The two anchors must not match each other's declaration — `SCENEWORKS_AUDIO_BACKENDS` contains
+    // the string `BACKENDS`, and a loose anchor would read one const as the other and quietly
+    // require the wrong set.
+    expect(parseSceneworksBackends(factsDeclarationSource)).not.toEqual(declaredAudio);
+  });
+
+  it("every declared audio backend has a checked-in dump", () => {
+    expect(audioFactsEntries.length).toBeGreaterThan(0);
+    expect(() => assertBackendCoverage(declaredAudio, audioOnDisk, "audio")).not.toThrow();
+    for (const backend of declaredAudio) {
+      expect(audioOnDisk, `audio/capabilities.${backend}.json was never dumped`).toContain(backend);
+    }
+  });
+
+  // Mutation-shaped, and the one that matters most: this is the exact state the repo was in before
+  // this story, and every other assertion in this file was green in it.
+  it("a declared audio backend with no dump is a loud failure naming the audio lane", () => {
+    expect(() => assertBackendCoverage(["candle"], [], "audio")).toThrow(/candle/);
+    expect(() => assertBackendCoverage(["candle"], [], "audio")).toThrow(/audio/);
+    expect(() => assertBackendCoverage(["candle"], [], "audio")).toThrow(
+      /dump-engine-capabilities/,
+    );
+  });
+
+  it("the media coverage check cannot stand in for it", () => {
+    // Precisely the coincidence that hid this: the media dumps alone satisfy SCENEWORKS_BACKENDS,
+    // audio dumped or not. If this ever starts throwing, the two checks have been conflated.
+    expect(() =>
+      assertBackendCoverage(parseSceneworksBackends(factsDeclarationSource), ["candle", "mlx"]),
+    ).not.toThrow();
+  });
+
+  it.each(audioFactsEntries.map((entry) => [entry.name, entry.facts]))(
+    "audio/%s is a real dump: discriminated, non-vacuous, at the current pin",
+    (name, facts) => {
+      expect(`capabilities.${facts.backend}.json`).toBe(name);
+      // The discriminator is what stops a file in the wrong directory being read as the other kind:
+      // a media and an audio dump can carry the SAME `backend`, so the name cannot separate them.
+      expect(facts.registry).toBe("audio");
+      // 14 generators at the current pin — 12 provider crates ride the audio lane, but four of them
+      // register no generator at all (Chatterbox VE, OpenVoice, Whisper, CLAP) while Stable Audio 3
+      // registers six and MMAudio two. The floor is set off the GENERATOR count, not the crate
+      // count, so a dump in single digits is truncated rather than merely small.
+      expect(facts.engines.length).toBeGreaterThan(10);
+      expect(facts.engines.every((engine) => engine.modality === "audio")).toBe(true);
+      expect(facts.generatedFrom.inferenceRevision).toBe(inferencePin);
+    },
+  );
+
+  it("reads an audio dump as media (or vice versa) only over a loud failure", () => {
+    // Both directions, because a copy into the wrong directory is the realistic mistake and the
+    // silent outcome would be a whole registry answering for the other's routes.
+    //
+    // Synthetic fixtures, not slices of what is on disk: a fixture derived from `audioFactsFiles`
+    // becomes an empty array — and this assertion a no-op — in exactly the state this whole block
+    // exists to catch, the one where nothing dumped the audio registry.
+    expect(() => derivePreviewSupport(rows, [syntheticAudioFacts()], [syntheticAudioFacts()])).toThrow(
+      /"audio" dump but it was read as "media"/,
+    );
+    expect(() => derivePreviewSupport(rows, [syntheticMediaFacts()], [syntheticMediaFacts()])).toThrow(
+      /"media" dump but it was read as "audio"/,
+    );
+  });
+
+  it("answers false — not unknown — for every audio route the registry declares", () => {
+    // The whole user-visible content of this story. Before it, every one of these was absent from
+    // the table, which the catalog reports as `unknown` and the UI renders identically to "wired and
+    // does not preview". These are the SceneWorks ids the audio jobs actually route on.
+    for (const shipped of [
+      "kokoro_82m",
+      "chatterbox_tts",
+      "acestep_v15_turbo",
+      "moss_sfx_v2",
+      "moss_tts_realtime",
+      "moss_ttsd_v05",
+    ]) {
+      expect(audioEngineIds, `${shipped} is not in the audio dump`).toContain(shipped);
+      expect(previewSupport.models[shipped], shipped).toEqual({ candle: false });
+    }
+  });
+
+  it("no audio route advertises live preview at this pin", () => {
+    // The measurement sc-17593 required before choosing a shape, asserted where CI can see it. The
+    // Rust twin (`no_audio_generator_advertises_live_preview_at_this_pin`) checks the registry; this
+    // checks what actually shipped in the artifact. If a pin lights one up, both go red — and
+    // `previewSupport.js`'s PREVIEW_JOB_TYPES still gates the placeholder to image jobs, so the UI
+    // question has to be answered before the flag means anything to a user.
+    const advertising = [...audioEngineIds].filter((id) =>
+      Object.values(previewSupport.models[id] ?? {}).some((supported) => supported === true),
+    );
+    expect(advertising).toEqual([]);
+  });
+
+  it("leaves the lane's non-generator providers unknown rather than inventing false", () => {
+    // `supports_preview` lives on `Capabilities`, which only GENERATORS carry. openvoice_v2 is an
+    // AudioTransform and chatterbox_ve a VoiceEmbedder — different descriptor types with no such
+    // field — so the registry genuinely has no opinion and the catalog must not manufacture one.
+    for (const nonGenerator of ["openvoice_v2", "chatterbox_ve"]) {
+      expect(audioEngineIds, nonGenerator).not.toContain(nonGenerator);
+      expect(previewSupport.models[nonGenerator], nonGenerator).toBeUndefined();
+    }
+  });
+
+  it("refuses an id claimed by both registries instead of letting one win", () => {
+    // Any MODEL_TABLE id collides, including one whose engine no facts file answers for: the clash
+    // is between the two NAMESPACES, not between two answers. Assert both, so narrowing the check
+    // to "ids that happen to be in the artifact" cannot pass.
+    const answered = Object.keys(derived.models).find((id) =>
+      rows.some((row) => row.sceneworksId === id),
+    );
+    const unanswered = rows.find((row) => !(row.sceneworksId in derived.models))?.sceneworksId;
+    expect(answered).toBeTruthy();
+    for (const collidingId of [answered, unanswered].filter(Boolean)) {
+      expect(() =>
+        derivePreviewSupport(rows, factsFiles, [syntheticAudioFacts({ id: collidingId })]),
+      ).toThrow(/both a MODEL_TABLE model id and an audio engine id/);
+    }
+  });
+
+  it("refuses a media and audio dump of one backend at different revisions", () => {
+    // `candle` is dumped twice — once per registry — and the two must describe one checkout, or
+    // `generatedFrom` claims a state that never existed.
+    expect(() =>
+      derivePreviewSupport(rows, factsFiles, [
+        syntheticAudioFacts({ inferenceRevision: "0".repeat(40) }),
+      ]),
+    ).toThrow(/two different inference revisions/);
+  });
+
+  it("still derives when no audio dump is supplied, so the argument stays optional", () => {
+    // The generator, the bump script and this guard all pass audio facts; the coverage assertion is
+    // what makes their absence fail, NOT a crash inside the derivation. Keeping this total means the
+    // failure the operator sees is the one with the remediation text.
+    const withoutAudio = derivePreviewSupport(rows, factsFiles);
+    expect(Object.keys(withoutAudio.models).length).toBeLessThan(
+      Object.keys(derived.models).length,
+    );
+    for (const id of audioEngineIds) expect(withoutAudio.models[id], id).toBeUndefined();
+  });
+});
+
 describe("preview-support catalog: the MODEL_TABLE join", () => {
   it("parses the full engines.rs model table", () => {
     expect(rows.length).toBeGreaterThan(40);
@@ -292,8 +494,16 @@ describe("preview-support catalog: the MODEL_TABLE join", () => {
     // see. Every emitted entry is backed by a real facts row, on every backend on disk.
     for (const { facts } of factsEntries) {
       const factsIds = new Set(facts.engines.map((engine) => engine.id));
+      const audioIds = new Set(
+        audioFactsFiles
+          .filter((audio) => audio.backend === facts.backend)
+          .flatMap((audio) => audio.engines.map((engine) => engine.id)),
+      );
       for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
         if (!(facts.backend in byBackend)) continue;
+        // Two namespaces answer under one backend key: MODEL_TABLE ids through the media facts, and
+        // audio engine ids through the identity join. An entry backed by NEITHER would be invented.
+        if (audioIds.has(modelId)) continue;
         const engineId = rows.find((row) => row.sceneworksId === modelId)?.engineId;
         expect(factsIds.has(engineId), `${modelId} → ${engineId} @ ${facts.backend}`).toBe(true);
       }
@@ -370,6 +580,16 @@ describe("preview-support catalog: the shipped answers match the dumped facts", 
       const expected = rows
         .filter((row) => advertisingEngines.has(row.engineId))
         .map((row) => row.sceneworksId)
+        // The audio registry answers under the same backend key by the identity join, so its
+        // advertising engines belong in the expected set too — otherwise the day an audio provider
+        // gains preview this test fails as a phantom over-claim rather than reporting the change.
+        .concat(
+          audioFactsFiles
+            .filter((audio) => audio.backend === backend)
+            .flatMap((audio) =>
+              audio.engines.filter((engine) => engine.supportsPreview).map((engine) => engine.id),
+            ),
+        )
         .sort();
       const actual = Object.entries(previewSupport.models)
         .filter(([, byBackend]) => byBackend[backend] === true)
