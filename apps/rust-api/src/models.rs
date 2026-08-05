@@ -983,6 +983,56 @@ pub(crate) async fn create_model_convert_job(
             "Model does not require MLX conversion",
         ));
     };
+    // Pre-flight the source weights (sc-14708 follow-up). The worker resolves the same HF snapshot and
+    // fails the job when the checkpoint is absent, which reads as a defect to the user: the three Anima
+    // variants share `circlestone-labs/Anima`, their per-variant downloads are serialized, and the
+    // sibling cards flip to *downloaded* the moment THEIR files land — so converting the variant whose
+    // 4 GB DiT is still streaming produced a bare "Anima source DiT is missing." Refuse it here, while
+    // the request can still carry an explanation. Only `requiresConversion` reads a native checkpoint;
+    // the legacy quantize-only path has its own worker-side rejection.
+    if requires_conversion {
+        if let Some(download) = store_call(state.clone(), {
+            let model_id = model_id.clone();
+            move |store, _timeout| store.find_active_model_download_job(&model_id)
+        })
+        .await?
+        {
+            let model_name = model
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(model_id.as_str());
+            return Err(ApiError::conflict(format!(
+                "{model_name} is still downloading ({percent}%). Wait for the download to finish \
+                 before converting it.",
+                percent = (download.progress.as_f64().unwrap_or(0.0) * 100.0).round() as i64,
+            )));
+        }
+        if let Some(source_file) = mlx
+            .get("convertSourceFile")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            match sceneworks_worker::convert_source_state(
+                &state.settings.data_dir,
+                &source_repo,
+                source_file,
+            ) {
+                sceneworks_worker::ConvertSourceState::Ready => {}
+                sceneworks_worker::ConvertSourceState::RepoNotCached => {
+                    return Err(ApiError::conflict(format!(
+                        "{source_repo} is not downloaded yet. Download it before converting."
+                    )));
+                }
+                sceneworks_worker::ConvertSourceState::FileMissing => {
+                    return Err(ApiError::conflict(format!(
+                        "{source_file} has not finished downloading from {source_repo}. Wait for \
+                         the download to complete, then convert."
+                    )));
+                }
+            }
+        }
+    }
+
     let job_payload = build_model_convert_job_payload(ModelConvertJobPayload {
         model: &model,
         model_id: &model_id,
