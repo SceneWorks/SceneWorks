@@ -2,6 +2,11 @@ name: Check
 
 on:
   pull_request:
+  # The merge queue gates on this workflow's `web` + `parity` jobs, so they must
+  # run against the queue's speculative merge ref too. Without this trigger no
+  # run is ever created for `gh-readonly-queue/main/**`, the required checks stay
+  # pending forever, and every queued PR is evicted on timeout.
+  merge_group:
   push:
     branches:
       - main
