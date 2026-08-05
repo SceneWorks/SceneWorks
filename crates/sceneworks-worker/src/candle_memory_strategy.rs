@@ -101,8 +101,14 @@ fn strategy(rung: StrategyRung) -> MemoryStrategy {
     }
 }
 
+/// Read one binding's exact strategy parameters against the composition it ENGAGES (sc-17728).
+///
+/// The Candle sibling of `mlx_fit_gate::parse_evidence_parameters`, with the same rule and the same
+/// shared derivation: a rung the composition engages must name its parameters, and a rung it does
+/// not engage must not. Keying this on the selected rung's ordinal made a provider that implements
+/// rung 4 with rungs 2 and 3 `Missing` unable to bind evidence at all.
 fn parse_parameters(
-    rung: StrategyRung,
+    engaged: &[StrategyRung],
     parameters: &JsonObject<String, Value>,
 ) -> Option<gen_core::MemoryStrategyParameters> {
     const KEYS: [&str; 5] = [
@@ -122,21 +128,7 @@ fn parse_parameters(
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value >= minimum)
     };
-    let required: &[(&str, u32)] = match rung {
-        StrategyRung::Resident | StrategyRung::StagedResidency => &[],
-        StrategyRung::BoundedDecode => &[("decodeTileEdge", 1), ("decodeOverlap", 0)],
-        StrategyRung::BoundedAttention => &[
-            ("decodeTileEdge", 1),
-            ("decodeOverlap", 0),
-            ("attentionChunkSize", 1),
-        ],
-        StrategyRung::BoundedTransformerResidency => &[
-            ("decodeTileEdge", 1),
-            ("decodeOverlap", 0),
-            ("attentionChunkSize", 1),
-            ("transformerWindowSize", 1),
-        ],
-    };
+    let required = crate::memory_strategy::required_numeric_parameters(engaged);
     if required
         .iter()
         .any(|(key, minimum)| integer(key, *minimum).is_none())
@@ -150,16 +142,15 @@ fn parse_parameters(
     {
         return None;
     }
+    let engages_transformer = engaged.contains(&StrategyRung::BoundedTransformerResidency);
     let transformer_window_component = match parameters.get("transformerWindowComponent") {
         None => None,
-        Some(Value::String(value)) if rung == StrategyRung::BoundedTransformerResidency => {
-            Some(match value.as_str() {
-                "dit" => gen_core::TransformerComponent::Dit,
-                "text_encoder" => gen_core::TransformerComponent::TextEncoder,
-                "both" => gen_core::TransformerComponent::Both,
-                _ => return None,
-            })
-        }
+        Some(Value::String(value)) if engages_transformer => Some(match value.as_str() {
+            "dit" => gen_core::TransformerComponent::Dit,
+            "text_encoder" => gen_core::TransformerComponent::TextEncoder,
+            "both" => gen_core::TransformerComponent::Both,
+            _ => return None,
+        }),
         Some(_) => return None,
     };
     Some(gen_core::MemoryStrategyParameters {
@@ -332,7 +323,30 @@ fn verified_candidates(
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let Some(selection_parameters) = parse_parameters(rung, &parameters) else {
+        let declared_engaged = match item.get("engagedRungs") {
+            None => None,
+            Some(Value::Array(values)) => {
+                let Some(declared) = values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .and_then(crate::memory_strategy::rung_from_key)
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                Some(declared)
+            }
+            Some(_) => continue,
+        };
+        let Ok(engaged_rungs) =
+            crate::memory_strategy::engaged_composition(rung, declared_engaged.as_deref())
+        else {
+            continue;
+        };
+        let Some(selection_parameters) = parse_parameters(&engaged_rungs, &parameters) else {
             continue;
         };
         let Some(calibration) = binding(item) else {
@@ -782,6 +796,62 @@ mod tests {
     use gen_core::WeightsSource;
     use serde_json::json;
     use std::path::PathBuf;
+
+    /// sc-17728, the Candle sibling of the MLX fit gate's coverage. The required parameter set
+    /// follows the ENGAGED composition, so a provider that implements rung 4 with rungs 2 and 3
+    /// `Missing` reads cleanly, while an engaged rung must still name every parameter it owns and a
+    /// withheld rung's parameters stay unnameable.
+    #[test]
+    fn candle_parameters_follow_the_engaged_composition_not_the_rung_ordinal() {
+        let withheld = [
+            StrategyRung::Resident,
+            StrategyRung::StagedResidency,
+            StrategyRung::BoundedTransformerResidency,
+        ];
+        let cumulative = crate::memory_strategy::default_engaged_composition(
+            StrategyRung::BoundedTransformerResidency,
+        );
+        let object = |value: Value| value.as_object().expect("parameter object").clone();
+
+        let parsed = parse_parameters(
+            &withheld,
+            &object(json!({ "transformerWindowSize": 1, "transformerWindowComponent": "both" })),
+        )
+        .expect("a rung-4 composition that withholds rungs 2 and 3 must read");
+        assert_eq!(parsed.transformer_window_size, Some(1));
+        assert_eq!(parsed.decode_tile_edge, None);
+        assert_eq!(parsed.attention_chunk_size, None);
+
+        // Naming a withheld rung's parameter, and omitting an engaged rung's, both fail closed.
+        assert!(parse_parameters(
+            &withheld,
+            &object(
+                json!({ "transformerWindowSize": 1, "decodeTileEdge": 512, "decodeOverlap": 64 })
+            ),
+        )
+        .is_none());
+        assert!(parse_parameters(
+            &withheld,
+            &object(json!({ "transformerWindowComponent": "dit" }))
+        )
+        .is_none());
+
+        // The cumulative default is unchanged for a provider with the whole ladder implemented.
+        assert!(
+            parse_parameters(&cumulative, &object(json!({ "transformerWindowSize": 1 })),)
+                .is_none()
+        );
+        assert!(parse_parameters(
+            &cumulative,
+            &object(json!({
+                "decodeTileEdge": 512,
+                "decodeOverlap": 64,
+                "attentionChunkSize": 256,
+                "transformerWindowSize": 1,
+            })),
+        )
+        .is_some());
+    }
 
     #[test]
     fn strict_control_uses_the_advertised_base_provider_evidence_cell() {

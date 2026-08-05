@@ -288,6 +288,9 @@ struct MlxCalibrationBinding {
     overlay: String,
     geometry: CalibrationGeometry,
     rung: StrategyRung,
+    /// The rungs this binding's measured request actually engaged, in canonical ladder order. It is
+    /// the shared cost-order default unless the binding published a cheaper verified composition.
+    engaged_rungs: Vec<StrategyRung>,
     parameters: JsonObject<String, Value>,
     selection_parameters: gen_core::MemoryStrategyParameters,
 }
@@ -339,7 +342,7 @@ impl MlxCalibrationBinding {
     }
 
     fn parse(calibration: &Value, index: usize) -> Result<Self, String> {
-        const CALIBRATION_FIELDS: [&str; 17] = [
+        const CALIBRATION_FIELDS: [&str; 18] = [
             "abi",
             "loadShape",
             "fingerprint",
@@ -356,6 +359,7 @@ impl MlxCalibrationBinding {
             "artifactVariant",
             "resolvedPathFingerprint",
             "rung",
+            "engagedRungs",
             "parameters",
         ];
         let calibration = calibration
@@ -396,7 +400,32 @@ impl MlxCalibrationBinding {
             .and_then(Value::as_object)
             .cloned()
             .ok_or_else(|| format!("mlx.calibrations[{index}].parameters must be an object"))?;
-        let selection_parameters = parse_evidence_parameters(rung, &parameters)?;
+        let declared_engaged = match calibration.get("engagedRungs") {
+            None => None,
+            Some(Value::Array(values)) => Some(
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .and_then(crate::memory_strategy::rung_from_key)
+                            .ok_or_else(|| {
+                                format!(
+                                    "mlx.calibrations[{index}].engagedRungs contains an unsupported rung {value}"
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Some(_) => {
+                return Err(format!(
+                    "mlx.calibrations[{index}].engagedRungs must be an array"
+                ))
+            }
+        };
+        let engaged_rungs =
+            crate::memory_strategy::engaged_composition(rung, declared_engaged.as_deref())
+                .map_err(|reason| format!("mlx.calibrations[{index}]: {reason}"))?;
         let geometry = calibration
             .get("geometry")
             .and_then(Value::as_object)
@@ -443,6 +472,16 @@ impl MlxCalibrationBinding {
             }
             None => LoadShapeKey::EagerMaterialization,
         };
+        // The selected rung's DECLARED prerequisite graph is deliberately not re-checked here. At
+        // the pinned contract revision rung 4's shared prerequisite is
+        // `LoadShape::DeferredMaterialization`, and that axis is already owned by
+        // `EvidenceBundle::evidence_for`, which degrades a load-shape mismatch to
+        // `StaleEvidenceReason::LoadShape` and the legacy selector rather than rejecting the opt-in.
+        // The rung-1 edge some providers add for rung 4 is realization-specific
+        // (`MemoryProviderContract::additional_prerequisites`) and is enforced by
+        // `validate_selection` against the provider contract, which no manifest reader holds.
+        let selection_parameters = parse_evidence_parameters(rung, &engaged_rungs, &parameters)
+            .map_err(|reason| format!("mlx.calibrations[{index}]: {reason}"))?;
         Ok(Self {
             query: CalibrationBinding {
                 abi,
@@ -467,6 +506,7 @@ impl MlxCalibrationBinding {
                 frames: geometry_value("frames")?,
             },
             rung,
+            engaged_rungs,
             parameters,
             selection_parameters,
         })
@@ -794,8 +834,16 @@ fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
     }
 }
 
+/// Read one binding's exact strategy parameters against the composition it ENGAGES (sc-17728).
+///
+/// The required set is derived from `engaged`, never from the selected rung's ordinal. Keying it on
+/// the ordinal assumed the ladder is always cumulative, which made a provider that implements rung 4
+/// while declaring rungs 2 and 3 `Missing` structurally unable to record evidence: it has no honest
+/// decode or attention parameter to name. Strictness is unchanged in both directions — an engaged
+/// rung must name its parameters, and a rung the composition does not engage must not.
 fn parse_evidence_parameters(
     rung: StrategyRung,
+    engaged: &[StrategyRung],
     parameters: &JsonObject<String, Value>,
 ) -> Result<gen_core::MemoryStrategyParameters, String> {
     const KEYS: [&str; 5] = [
@@ -816,24 +864,15 @@ fn parse_evidence_parameters(
             .filter(|value| *value >= minimum)
             .ok_or_else(|| format!("{key} must be an integer >= {minimum}"))
     };
-    let expected_numeric: &[(&str, u32)] = match rung {
-        StrategyRung::Resident | StrategyRung::StagedResidency => &[],
-        StrategyRung::BoundedDecode => &[("decodeTileEdge", 1), ("decodeOverlap", 0)],
-        StrategyRung::BoundedAttention => &[
-            ("decodeTileEdge", 1),
-            ("decodeOverlap", 0),
-            ("attentionChunkSize", 1),
-        ],
-        StrategyRung::BoundedTransformerResidency => &[
-            ("decodeTileEdge", 1),
-            ("decodeOverlap", 0),
-            ("attentionChunkSize", 1),
-            ("transformerWindowSize", 1),
-        ],
-    };
-    for (key, _) in expected_numeric {
+    let expected_numeric = crate::memory_strategy::required_numeric_parameters(engaged);
+    let composition = engaged
+        .iter()
+        .map(|rung| crate::memory_strategy::rung_key(*rung))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (key, _) in &expected_numeric {
         if !parameters.contains_key(*key) {
-            return Err(format!("{rung:?} requires {key}"));
+            return Err(format!("{rung:?} engaging [{composition}] requires {key}"));
         }
     }
     for key in KEYS[..4].iter().filter(|key| {
@@ -842,21 +881,26 @@ fn parse_evidence_parameters(
             .any(|(expected, _)| expected == *key)
     }) {
         if parameters.contains_key(*key) {
-            return Err(format!("{rung:?} forbids {key}"));
+            return Err(format!("{rung:?} engaging [{composition}] forbids {key}"));
         }
     }
+    let engages_transformer = engaged.contains(&StrategyRung::BoundedTransformerResidency);
+    // The component scope is validated separately from the numeric parameters: unlike a tile edge or
+    // a window size it carries a meaningful DEFAULT (DiT-only), so an engaged rung 4 may leave it
+    // unnamed and only an explicitly declared scope is checked. Naming it without engaging its
+    // owning rung stays an error. This mirrors gen-core's `validate_selected_parameters`.
     let transformer_window_component = match parameters.get("transformerWindowComponent") {
         None => None,
-        Some(Value::String(value)) if rung == StrategyRung::BoundedTransformerResidency => {
-            Some(match value.as_str() {
-                "dit" => TransformerComponent::Dit,
-                "text_encoder" => TransformerComponent::TextEncoder,
-                "both" => TransformerComponent::Both,
-                other => return Err(format!("unsupported transformerWindowComponent {other:?}")),
-            })
-        }
-        Some(_) if rung != StrategyRung::BoundedTransformerResidency => {
-            return Err(format!("{rung:?} forbids transformerWindowComponent"))
+        Some(Value::String(value)) if engages_transformer => Some(match value.as_str() {
+            "dit" => TransformerComponent::Dit,
+            "text_encoder" => TransformerComponent::TextEncoder,
+            "both" => TransformerComponent::Both,
+            other => return Err(format!("unsupported transformerWindowComponent {other:?}")),
+        }),
+        Some(_) if !engages_transformer => {
+            return Err(format!(
+                "{rung:?} engaging [{composition}] forbids transformerWindowComponent"
+            ))
         }
         Some(_) => {
             return Err("transformerWindowComponent must be dit, text_encoder, or both".to_owned())
@@ -1048,6 +1092,13 @@ fn evidence_admission_route(
         };
         match bundle.evidence_for(&query) {
             EvidenceVerdict::Verified(record) => {
+                // The engaged composition is NOT re-checked against the receipt here, and does not
+                // need to be: `EvidenceBundle::evidence_for` already requires the binding's exact
+                // parameter map to equal a passed sweep case's, so any composition difference among
+                // the rungs that OWN parameters (2, 3 and 4) forces a parameter mismatch and never
+                // reaches this arm. Rungs 0 and 1 own none, so a difference confined to them cannot
+                // change which parameters the binding was obliged to name. The receipt stays
+                // authoritative for the composition recorded on the evidence key below.
                 let envelope = record.mlx_admission_envelope().ok_or_else(|| {
                     WorkerError::InvalidPayload(format!(
                     "{} has a verified MLX evidence cell without a complete MLX admission envelope",
@@ -3894,8 +3945,13 @@ mod tests {
                 frames: 1,
             },
             rung,
-            selection_parameters: parse_evidence_parameters(rung, &parameters)
-                .expect("fixture parameters"),
+            selection_parameters: parse_evidence_parameters(
+                rung,
+                &crate::memory_strategy::default_engaged_composition(rung),
+                &parameters,
+            )
+            .expect("fixture parameters"),
+            engaged_rungs: crate::memory_strategy::default_engaged_composition(rung),
             parameters,
         }
     }
@@ -4067,9 +4123,11 @@ mod tests {
                 rung: record.strategy.rung,
                 selection_parameters: parse_evidence_parameters(
                     record.strategy.rung,
+                    &record.strategy.engaged_rungs,
                     &record.strategy.parameters,
                 )
                 .expect("packaged Krea strategy parameters"),
+                engaged_rungs: record.strategy.engaged_rungs.clone(),
                 parameters: record.strategy.parameters.clone(),
             })
             .collect();
@@ -4668,6 +4726,9 @@ mod tests {
 
     #[test]
     fn parameter_reader_is_closed_and_preserves_transformer_component() {
+        let cumulative = crate::memory_strategy::default_engaged_composition(
+            StrategyRung::BoundedTransformerResidency,
+        );
         let parameters = JsonObject::from_iter([
             ("decodeTileEdge".to_owned(), serde_json::json!(512)),
             ("decodeOverlap".to_owned(), serde_json::json!(128)),
@@ -4678,9 +4739,12 @@ mod tests {
                 serde_json::json!("both"),
             ),
         ]);
-        let parsed =
-            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &parameters)
-                .expect("the complete exact parameter set is valid");
+        let parsed = parse_evidence_parameters(
+            StrategyRung::BoundedTransformerResidency,
+            &cumulative,
+            &parameters,
+        )
+        .expect("the complete exact parameter set is valid");
         assert_eq!(parsed.decode_tile_edge, Some(512));
         assert_eq!(parsed.decode_overlap, Some(128));
         assert_eq!(parsed.attention_chunk_size, Some(256));
@@ -4692,33 +4756,370 @@ mod tests {
 
         let mut unknown = parameters.clone();
         unknown.insert("unrecognized".to_owned(), serde_json::json!(1));
-        assert!(
-            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &unknown)
-                .expect_err("unknown parameters fail closed")
-                .contains("unknown")
-        );
+        assert!(parse_evidence_parameters(
+            StrategyRung::BoundedTransformerResidency,
+            &cumulative,
+            &unknown,
+        )
+        .expect_err("unknown parameters fail closed")
+        .contains("unknown"));
 
         let mut malformed = parameters.clone();
         malformed.insert(
             "transformerWindowComponent".to_owned(),
             serde_json::json!(12),
         );
-        assert!(
-            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &malformed)
-                .expect_err("a non-string transformer component fails closed")
-                .contains("transformerWindowComponent")
-        );
+        assert!(parse_evidence_parameters(
+            StrategyRung::BoundedTransformerResidency,
+            &cumulative,
+            &malformed,
+        )
+        .expect_err("a non-string transformer component fails closed")
+        .contains("transformerWindowComponent"));
 
         let mut unsupported = parameters;
         unsupported.insert(
             "transformerWindowComponent".to_owned(),
             serde_json::json!("vae"),
         );
+        assert!(parse_evidence_parameters(
+            StrategyRung::BoundedTransformerResidency,
+            &cumulative,
+            &unsupported,
+        )
+        .expect_err("an unknown transformer component fails closed")
+        .contains("unsupported"));
+    }
+
+    /// One calibration opt-in shaped like a real published binding, with the rung, declared
+    /// composition, parameters and materialization shape under test.
+    fn calibration_json_for(
+        rung: &str,
+        engaged: Option<&[&str]>,
+        parameters: Value,
+        load_shape: &str,
+    ) -> Value {
+        let mut value = fixture_calibration_json("q4", "packed-q4");
+        let object = value.as_object_mut().expect("calibration object");
+        object.insert("rung".to_owned(), serde_json::json!(rung));
+        object.insert("parameters".to_owned(), parameters);
+        object.insert("loadShape".to_owned(), serde_json::json!(load_shape));
+        if let Some(engaged) = engaged {
+            object.insert("engagedRungs".to_owned(), serde_json::json!(engaged));
+        }
+        value
+    }
+
+    const SDXL_SHAPED_COMPOSITION: [&str; 3] = [
+        "resident",
+        "staged_residency",
+        "bounded_transformer_residency",
+    ];
+
+    /// sc-17728. SDXL (sc-15525) and Kolors (sc-15521) both land rungs 0/1/4 `Implemented` with
+    /// rungs 2 and 3 `Missing` — measured and withheld, not unattempted. Their published rung-4
+    /// composition is `[resident, staged_residency, bounded_transformer_residency]`, and there is no
+    /// honest `decodeTileEdge` or `attentionChunkSize` to name because no selectable strategy on
+    /// those providers sets one. Keying the required set on the rung ORDINAL made that shape
+    /// structurally unrepresentable, so neither family could ever record authoritative evidence.
+    #[test]
+    fn a_rung_four_binding_records_evidence_without_the_rungs_its_provider_withholds() {
+        for component in ["dit", "text_encoder", "both"] {
+            let binding = MlxCalibrationBinding::parse(
+                &calibration_json_for(
+                    "bounded_transformer_residency",
+                    Some(&SDXL_SHAPED_COMPOSITION),
+                    serde_json::json!({
+                        "transformerWindowSize": 1,
+                        "transformerWindowComponent": component,
+                    }),
+                    "deferred_materialization",
+                ),
+                0,
+            )
+            .unwrap_or_else(|error| {
+                panic!("the published SDXL/Kolors rung-4 shape must bind evidence: {error}")
+            });
+            assert_eq!(
+                binding.engaged_rungs,
+                vec![
+                    StrategyRung::Resident,
+                    StrategyRung::StagedResidency,
+                    StrategyRung::BoundedTransformerResidency,
+                ]
+            );
+            assert_eq!(
+                binding.selection_parameters.transformer_window_size,
+                Some(1)
+            );
+            assert!(binding
+                .selection_parameters
+                .transformer_window_component
+                .is_some());
+            // The withheld rungs contribute nothing rather than a fabricated default.
+            assert_eq!(binding.selection_parameters.decode_tile_edge, None);
+            assert_eq!(binding.selection_parameters.decode_overlap, None);
+            assert_eq!(binding.selection_parameters.attention_chunk_size, None);
+        }
+    }
+
+    /// The Z-Image/Qwen shape: rung 4 over a cumulative scratch composition that never engages
+    /// staged residency. At the pinned contract revision rung 4's SHARED prerequisite is
+    /// `LoadShape::DeferredMaterialization`, and `MemoryStrategy::engages` states outright that rung
+    /// 4 does not engage rung 1; a rung-1 edge is provider-specific (mlx-gen-anima declares one,
+    /// mlx-gen-z-image does not). So the rung-1-free composition must keep binding.
+    #[test]
+    fn a_rung_four_binding_without_rung_one_is_legitimate_when_the_contract_says_so() {
+        let binding = MlxCalibrationBinding::parse(
+            &calibration_json_for(
+                "bounded_transformer_residency",
+                Some(&[
+                    "resident",
+                    "bounded_decode",
+                    "bounded_attention",
+                    "bounded_transformer_residency",
+                ]),
+                serde_json::json!({
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 64,
+                    "attentionChunkSize": 67_108_864_u64,
+                    "transformerWindowSize": 1,
+                }),
+                "deferred_materialization",
+            ),
+            0,
+        )
+        .expect("the checked-in Z-Image rung-4 plan composition must bind");
+        assert!(!binding
+            .engaged_rungs
+            .contains(&StrategyRung::StagedResidency));
+    }
+
+    /// Fail-closed in the other direction: the fix derives the required set, it does not make fields
+    /// optional. A rung the composition does not engage owns no parameter, so naming one is an
+    /// error rather than harmless noise.
+    #[test]
+    fn naming_a_withheld_rungs_parameters_is_an_error() {
+        for (parameters, needle) in [
+            (
+                serde_json::json!({
+                    "transformerWindowSize": 1,
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 64,
+                }),
+                "forbids decodeTileEdge",
+            ),
+            (
+                serde_json::json!({
+                    "transformerWindowSize": 1,
+                    "attentionChunkSize": 67_108_864_u64,
+                }),
+                "forbids attentionChunkSize",
+            ),
+        ] {
+            let error = MlxCalibrationBinding::parse(
+                &calibration_json_for(
+                    "bounded_transformer_residency",
+                    Some(&SDXL_SHAPED_COMPOSITION),
+                    parameters,
+                    "deferred_materialization",
+                ),
+                0,
+            )
+            .expect_err("a withheld rung's parameters must not be nameable");
+            assert!(error.contains(needle), "{error}");
+        }
+        // The same rule the other way round: a rung-2 binding cannot name the transformer scope.
+        let error = MlxCalibrationBinding::parse(
+            &calibration_json_for(
+                "bounded_decode",
+                None,
+                serde_json::json!({
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 64,
+                    "transformerWindowComponent": "dit",
+                }),
+                "deferred_materialization",
+            ),
+            0,
+        )
+        .expect_err("a rung-2 binding does not engage rung 4");
         assert!(
-            parse_evidence_parameters(StrategyRung::BoundedTransformerResidency, &unsupported)
-                .expect_err("an unknown transformer component fails closed")
-                .contains("unsupported")
+            error.contains("forbids transformerWindowComponent"),
+            "{error}"
         );
+    }
+
+    /// An ENGAGED rung must still name every parameter it owns. This is the guard the fix had to
+    /// keep: derived, not relaxed.
+    #[test]
+    fn an_engaged_rung_must_still_name_every_parameter_it_owns() {
+        for (engaged, parameters, needle) in [
+            (
+                SDXL_SHAPED_COMPOSITION.to_vec(),
+                serde_json::json!({ "transformerWindowComponent": "dit" }),
+                "requires transformerWindowSize",
+            ),
+            (
+                vec![
+                    "resident",
+                    "bounded_decode",
+                    "bounded_transformer_residency",
+                ],
+                serde_json::json!({ "decodeOverlap": 64, "transformerWindowSize": 1 }),
+                "requires decodeTileEdge",
+            ),
+            (
+                vec![
+                    "resident",
+                    "bounded_attention",
+                    "bounded_transformer_residency",
+                ],
+                serde_json::json!({ "transformerWindowSize": 1 }),
+                "requires attentionChunkSize",
+            ),
+        ] {
+            let error = MlxCalibrationBinding::parse(
+                &calibration_json_for(
+                    "bounded_transformer_residency",
+                    Some(&engaged),
+                    parameters,
+                    "deferred_materialization",
+                ),
+                0,
+            )
+            .expect_err("an engaged rung must name its own parameters");
+            assert!(error.contains(needle), "{error}");
+        }
+    }
+
+    /// The declaration itself is closed. A binding cannot dodge a required parameter by publishing
+    /// an incoherent composition.
+    #[test]
+    fn a_declared_composition_is_itself_closed() {
+        for (engaged, needle) in [
+            (
+                vec!["staged_residency", "bounded_transformer_residency"],
+                "must contain resident",
+            ),
+            (
+                vec!["resident", "staged_residency"],
+                "must contain resident and the selected rung",
+            ),
+            (
+                vec![
+                    "resident",
+                    "bounded_transformer_residency",
+                    "staged_residency",
+                ],
+                "canonical ladder order",
+            ),
+            (
+                vec!["resident", "resident", "bounded_transformer_residency"],
+                "unique set",
+            ),
+        ] {
+            let error = MlxCalibrationBinding::parse(
+                &calibration_json_for(
+                    "bounded_transformer_residency",
+                    Some(&engaged),
+                    serde_json::json!({ "transformerWindowSize": 1 }),
+                    "deferred_materialization",
+                ),
+                0,
+            )
+            .expect_err("an incoherent composition must fail closed");
+            assert!(error.contains(needle), "{error}");
+        }
+        // A cheaper selection cannot claim to have engaged a costlier rung's mechanism.
+        let error = MlxCalibrationBinding::parse(
+            &calibration_json_for(
+                "bounded_decode",
+                Some(&[
+                    "resident",
+                    "bounded_decode",
+                    "bounded_transformer_residency",
+                ]),
+                serde_json::json!({ "decodeTileEdge": 512, "decodeOverlap": 64 }),
+                "deferred_materialization",
+            ),
+            0,
+        )
+        .expect_err("a rung-2 selection cannot engage rung 4");
+        assert!(error.contains("costlier than the selected rung"), "{error}");
+    }
+
+    /// Regression guard for the shape that already worked. A provider with the whole ladder
+    /// implemented (Anima) publishes the cumulative composition, and a binding that declares no
+    /// composition at all still gets exactly the pre-sc-17728 fixed required set.
+    #[test]
+    fn the_full_ladder_shape_still_validates_unchanged() {
+        let cumulative = serde_json::json!({
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 256,
+            "transformerWindowSize": 4,
+            "transformerWindowComponent": "both",
+        });
+        for engaged in [
+            None,
+            Some(
+                [
+                    "resident",
+                    "bounded_decode",
+                    "bounded_attention",
+                    "bounded_transformer_residency",
+                ]
+                .as_slice(),
+            ),
+            // Anima's MLX provider appends a rung-1 edge to the shared graph, so its rung-4
+            // composition additionally engages staged residency.
+            Some(
+                [
+                    "resident",
+                    "staged_residency",
+                    "bounded_decode",
+                    "bounded_attention",
+                    "bounded_transformer_residency",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            let binding = MlxCalibrationBinding::parse(
+                &calibration_json_for(
+                    "bounded_transformer_residency",
+                    engaged,
+                    cumulative.clone(),
+                    "deferred_materialization",
+                ),
+                0,
+            )
+            .expect("the full-ladder shape must keep binding");
+            assert_eq!(binding.selection_parameters.decode_tile_edge, Some(512));
+            assert_eq!(binding.selection_parameters.decode_overlap, Some(128));
+            assert_eq!(binding.selection_parameters.attention_chunk_size, Some(256));
+            assert_eq!(
+                binding.selection_parameters.transformer_window_size,
+                Some(4)
+            );
+            assert_eq!(
+                binding.selection_parameters.transformer_window_component,
+                Some(TransformerComponent::Both)
+            );
+        }
+        // Omitting the composition keeps the cumulative default, so an omitted lower-rung parameter
+        // is still rejected exactly as before.
+        let error = MlxCalibrationBinding::parse(
+            &calibration_json_for(
+                "bounded_transformer_residency",
+                None,
+                serde_json::json!({ "transformerWindowSize": 4 }),
+                "deferred_materialization",
+            ),
+            0,
+        )
+        .expect_err("the cumulative default still requires the lower rungs' parameters");
+        assert!(error.contains("requires decodeTileEdge"), "{error}");
     }
 
     #[test]
