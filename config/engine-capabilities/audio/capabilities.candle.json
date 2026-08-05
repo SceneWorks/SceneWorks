@@ -1,0 +1,80 @@
+{
+  "registry": "audio",
+  "backend": "candle",
+  "generatedFrom": {
+    "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+    "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities [--no-default-features --features backend-candle]"
+  },
+  "engines": [
+    {
+      "id": "acestep_v15_turbo",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "chatterbox_tts",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "kokoro_82m",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "mmaudio_large_44k",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "mmaudio_small_16k",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "moss_sfx_v2",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "moss_tts_realtime",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "moss_ttsd_v05",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "stable_audio_3_medium",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "stable_audio_3_medium_base",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "stable_audio_3_small_music",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "stable_audio_3_small_music_base",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "stable_audio_3_small_sfx",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "stable_audio_3_small_sfx_base",
+      "modality": "audio",
+      "supportsPreview": false
+    }
+  ]
+}
