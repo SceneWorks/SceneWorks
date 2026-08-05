@@ -704,6 +704,37 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
         .slice(anchorAt, lane.indexOf("pull_request:"))
         .matchAll(/^ {6}- "([^"]+)"$/gm),
     ].map((match) => match[1]);
+    // Every file this lane's verify step actually DIFFS must be watched. Read out of the step body
+    // rather than listed here, because the failure this closes was a step growing a new file while
+    // the filter stayed as it was — a hardcoded list would have been updated by the same edit that
+    // grew the step, or not at all, so it could not have caught it.
+    //
+    // sc-17593 added an audio diff to BOTH lanes' steps; sc-17665 had just narrowed both filters
+    // from `config/engine-capabilities/**` to a single filename. Each is right on its own. Together
+    // they left the audio verification declared but unreachable, which `97a7655a9` — an audio-only
+    // re-dump — demonstrated by waking neither stage-1 lane.
+    const diffed = new Set(
+      [
+        ...lane
+          .slice(verifyAt)
+          .split("\n      - name:")[0]
+          .matchAll(/config[/\\]engine-capabilities[/\\][\w./\\-]*\.json/g),
+      ].map((match) => match[0].replaceAll("\\", "/")),
+    );
+    assert.ok(
+      diffed.size >= 2,
+      `${path}: expected the verify step to diff at least ${file} and the audio dump, found ` +
+        `${JSON.stringify([...diffed])}`,
+    );
+    for (const target of diffed) {
+      assert.ok(
+        declared.some((glob) => matches(glob, target)),
+        `${path}'s verify step diffs ${target}, but no declared path matches it — so an edit to ` +
+          "that file alone never triggers the lane, and the check is declared but unreachable. " +
+          "Add it to the paths anchor.",
+      );
+    }
+
     const own = `config/engine-capabilities/${file}`;
     assert.ok(
       declared.some((glob) => matches(glob, own)),
@@ -802,6 +833,11 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.candle.json", // the restamp-verify step diffs it
+        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
+        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
+        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
+        // and not symmetry for its own sake.
+        "config/engine-capabilities/audio/capabilities.candle.json",
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
@@ -815,6 +851,11 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.mlx.json", // the restamp-verify step diffs it
+        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
+        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
+        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
+        // and not symmetry for its own sake.
+        "config/engine-capabilities/audio/capabilities.candle.json",
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the MLX revision the whole lane compiles
         "rust-toolchain.toml", // governs the toolchain cargo resolves under the dtolnay install
