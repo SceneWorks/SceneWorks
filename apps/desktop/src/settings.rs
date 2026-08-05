@@ -1473,7 +1473,8 @@ mod tests {
     fn the_desktop_export_write_preserves_an_embedded_workflow_chunk() {
         use sceneworks_core::workflow_png::workflow_chunk_spans;
 
-        let root = scratch_dir("export");
+        let root_guard = scratch_dir("export");
+        let root = root_guard.path();
         let destination = root.join("shot.png");
         let bytes = png_with_workflow_chunk();
 
@@ -1491,8 +1492,6 @@ mod tests {
             1,
             "the embedded workflow chunk must survive the desktop save path"
         );
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-15954: the editor's mirror of [`MAX_EXPORT_BYTES`] is the same number.
@@ -1522,20 +1521,17 @@ mod tests {
         );
     }
 
-    /// A unique scratch directory under the system temp dir, so the path-resolution
-    /// tests below don't need a `tempfile` dependency. Cleaned up by the caller.
-    fn scratch_dir(tag: &str) -> PathBuf {
-        let unique = format!(
-            "sceneworks-desktop-test-{tag}-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let dir = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        dir
+    /// A unique scratch directory that removes itself when the guard drops.
+    ///
+    /// This used to be hand-rolled off `temp_dir()` to avoid a `tempfile` dependency and
+    /// was cleaned up by a trailing line in each test — which a panicking test skips,
+    /// leaving exactly the failure's evidence behind forever (sc-17707). Callers hold the
+    /// guard and read `.path()`.
+    fn scratch_dir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("sceneworks-desktop-test-{tag}-"))
+            .tempdir()
+            .expect("create scratch dir")
     }
 
     /// sc-8726: the source-path guard's containment core accepts a file inside an
@@ -1544,7 +1540,8 @@ mod tests {
     /// around it), so a save/reveal can never be pointed at an arbitrary file.
     #[test]
     fn path_within_roots_accepts_inside_and_rejects_outside() {
-        let root = scratch_dir("guard");
+        let root_guard = scratch_dir("guard");
+        let root = root_guard.path();
         let data_root = root.join("data");
         std::fs::create_dir_all(data_root.join("projects")).expect("data root");
         // Canonicalize both sides exactly as the guard does.
@@ -1562,8 +1559,6 @@ mod tests {
         assert!(!path_within_roots(&outside, &roots));
         // A root the target is not under is not sufficient.
         assert!(!path_within_roots(&inside, &[]));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-8726: `resolve_asset_path` turns a (projectId, project-relative file.path)
@@ -1575,7 +1570,8 @@ mod tests {
     fn project_store_resolves_relative_asset_to_absolute_disk_path() {
         use sceneworks_core::project_store::ProjectStore;
 
-        let root = scratch_dir("resolve");
+        let root_guard = scratch_dir("resolve");
+        let root = root_guard.path();
         let data_dir = root.join("data");
         let store = ProjectStore::new(&data_dir, "test-version");
         let project = store.create_project("Resolver").expect("project creates");
@@ -1599,8 +1595,6 @@ mod tests {
             .expect("resolve asset");
         let expected = std::fs::canonicalize(&asset_path).expect("canonical asset");
         assert_eq!(resolved.path, expected);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-8753: the asset Save As / Reveal commands are invoked from the API-served UI
@@ -1672,7 +1666,8 @@ mod tests {
         assert_eq!(sanitized_start_dir(Some("")), None);
         assert_eq!(sanitized_start_dir(Some("   ")), None);
 
-        let root = scratch_dir("startdir");
+        let root_guard = scratch_dir("startdir");
+        let root = root_guard.path();
         // A path that doesn't exist → skipped.
         let missing = root.join("does-not-exist");
         assert_eq!(sanitized_start_dir(Some(&missing.to_string_lossy())), None);
@@ -1687,8 +1682,6 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create dir");
         let padded = format!("  {}  ", dir.to_string_lossy());
         assert_eq!(sanitized_start_dir(Some(&padded)), Some(dir.clone()));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1706,7 +1699,8 @@ mod tests {
     /// and no `.json.tmp` scratch file is left behind on success.
     #[test]
     fn atomic_write_replaces_file_and_leaves_no_temp() {
-        let root = scratch_dir("atomic");
+        let root_guard = scratch_dir("atomic");
+        let root = root_guard.path();
         let path = root.join("settings.json");
 
         // Seed an existing file so we prove replace-in-place (not append/truncate).
@@ -1731,8 +1725,6 @@ mod tests {
         let back: AppSettings =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).expect("parse back");
         assert_eq!(back.data_dir.as_deref(), Some("/tmp/data"));
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
