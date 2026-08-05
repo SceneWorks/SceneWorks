@@ -632,22 +632,39 @@ impl JobsStore {
 
     /// Remove terminal queue history older than `retention_days`.
     ///
-    /// Zero disables retention. Job-owned metrics are materialized into the
-    /// independent Generation Stats history and then deleted in the same
-    /// immediate transaction as their owning jobs. Legacy orphan metrics are
-    /// also removed.
+    /// Zero disables retention. The cutoff is resolved to a fixed timestamp
+    /// here, in Rust, rather than being left as a `datetime('now', ...)`
+    /// modifier for SQLite to evaluate: `now` is constant only within a single
+    /// `sqlite3_step`, so a modifier re-evaluated by each of the four statements
+    /// below would let the cutoff ADVANCE mid-transaction. A job whose
+    /// `completed_at` fell between two of those evaluations was then deleted
+    /// from `jobs` and `generation_metrics` without ever being materialized
+    /// into the history table — a silent, permanent loss of the run from
+    /// Generation Stats, re-rolled on every API start (sc-17597).
     pub fn purge_terminal_jobs_older_than(&self, retention_days: u32) -> JobsStoreResult<usize> {
         if retention_days == 0 {
             return Ok(0);
         }
+        let cutoff = format_unix_seconds(now_unix_seconds() - i64::from(retention_days) * 86_400);
+        self.purge_terminal_jobs_completed_before(&cutoff)
+    }
+
+    /// Remove terminal queue history completed strictly before `cutoff` (a
+    /// `YYYY-MM-DDTHH:MM:SSZ` UTC timestamp, the shape [`utc_now`] emits).
+    ///
+    /// Job-owned metrics are materialized into the independent Generation Stats
+    /// history and then deleted in the same immediate transaction as their
+    /// owning jobs. Legacy orphan metrics are also removed. Every statement
+    /// shares the one caller-supplied cutoff, so the window cannot move
+    /// underneath the sweep; a job completed exactly ON the cutoff is retained.
+    pub fn purge_terminal_jobs_completed_before(&self, cutoff: &str) -> JobsStoreResult<usize> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let modifier = format!("-{retention_days} days");
         let terminal = terminal_statuses_sql();
         let predicate = format!(
             "status in ({terminal}) and completed_at is not null \
-             and datetime(completed_at) < datetime('now', ?1)"
+             and datetime(completed_at) < datetime(?1)"
         );
         transaction.execute(
             &format!(
@@ -656,14 +673,14 @@ impl JobsStore {
                    from generation_metrics m join jobs j on j.id = m.job_id
                   where j.{predicate}"
             ),
-            params![modifier],
+            params![cutoff],
         )?;
         transaction.execute(
             &format!(
                 "delete from generation_metrics where job_id in \
                  (select id from jobs where {predicate})"
             ),
-            params![modifier],
+            params![cutoff],
         )?;
         transaction.execute(
             "delete from generation_metrics
@@ -672,7 +689,7 @@ impl JobsStore {
         )?;
         let deleted = transaction.execute(
             &format!("delete from jobs where {predicate}"),
-            params![modifier],
+            params![cutoff],
         )?;
         transaction.commit()?;
         Ok(deleted)

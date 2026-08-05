@@ -87,31 +87,51 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
             )
             .expect("metrics seed");
     }
+    // Straddle the 90-day cutoff by half a day each way rather than sitting exactly on it: this
+    // test reads the wall clock twice (once to seed, once inside the purge), so a row seeded ON
+    // the cutoff lands on whichever side the clock reached by the time the sweep runs — it was
+    // asserting the elapsed time between two statements, not the retention window (sc-17597).
+    // Twelve hours of slack is ~40k× the observed jitter and still resolves a one-day error in
+    // either direction. The exact-tie semantics are pinned separately, and deterministically, by
+    // `retention_retains_a_job_completed_exactly_on_the_cutoff`. `strftime` rather than
+    // `datetime` so the fixtures carry the same `...THH:MM:SSZ` shape production writes.
+    for (id, days, hours) in [
+        ("boundary", "-89 days", "-12 hours"),
+        ("just-expired", "-90 days", "-12 hours"),
+    ] {
+        connection
+            .execute(
+                "insert into jobs (
+                   id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+                   attempts,cancel_requested,created_at,updated_at,completed_at
+                 ) values (?1,'image_generate','completed','{}','{}','auto',1,'completed','',1,0,
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3),
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3),
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3))",
+                params![id, days, hours],
+            )
+            .expect("cutoff-adjacent job seeds");
+        connection
+            .execute(
+                "insert into generation_metrics(job_id,updated_at)
+                 values (?1,strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3))",
+                params![id, days, hours],
+            )
+            .expect("cutoff-adjacent metrics seed");
+    }
     connection
         .execute(
-            "insert into jobs (
-               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
-               attempts,cancel_requested,created_at,updated_at,completed_at
-             ) values ('boundary','image_generate','completed','{}','{}','auto',1,'completed','',
-                       1,0,datetime('now','-90 days'),datetime('now','-90 days'),
-                       datetime('now','-90 days'))",
+            "insert into generation_metrics(job_id,updated_at) values ('orphan','2020-01-01T00:00:00Z')",
             [],
         )
-        .expect("boundary job seeds");
-    connection
-        .execute(
-            "insert into generation_metrics(job_id,updated_at) values
-             ('boundary',datetime('now','-90 days')),('orphan','2020-01-01T00:00:00Z')",
-            [],
-        )
-        .expect("boundary and orphan metrics seed");
+        .expect("orphan metrics seed");
     drop(connection);
 
     assert_eq!(
         store
             .purge_terminal_jobs_older_than(90)
             .expect("retention succeeds"),
-        4
+        5
     );
     let connection = Connection::open(&path).expect("db reopens");
     assert_eq!(
@@ -123,6 +143,48 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
             )
             .unwrap(),
         0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from jobs where id='just-expired'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "a terminal job an hour past the cutoff is purged"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics where job_id='just-expired'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "the purged job's owned metrics go with it"
+    );
+    assert_eq!(
+        connection
+            .query_row("select count(*) from jobs where id='boundary'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1,
+        "a terminal job an hour inside the cutoff is retained"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics where job_id='boundary'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1,
+        "the retained job keeps its owned metrics"
     );
     assert_eq!(
         connection
@@ -151,6 +213,17 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
         0,
         "legacy orphan metrics are job-owned garbage"
     );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics_history",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        5,
+        "only the purged jobs materialize — retained ones would double-count in the stats union"
+    );
     drop(connection);
     let historical = store
         .list_generation_metrics(None, None, None, 100)
@@ -165,7 +238,11 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
     );
     assert!(
         historical.iter().any(|row| row.job_id == "boundary"),
-        "the exact cutoff boundary is retained"
+        "the job inside the cutoff is still live in Generation Stats"
+    );
+    assert!(
+        historical.iter().any(|row| row.job_id == "just-expired"),
+        "a job purged from just past the cutoff is materialized into Generation Stats"
     );
     let connection = Connection::open(&path).expect("db reopens");
     assert!(connection
@@ -175,6 +252,66 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
             |_| Ok(())
         )
         .is_ok());
+}
+
+#[test]
+fn retention_retains_a_job_completed_exactly_on_the_cutoff() {
+    // "Older than 90 days" excludes a job that is exactly 90 days old, so the sweep compares with
+    // `<`, not `<=`. That tie is only observable if the caller owns the cutoff — while it was a
+    // `datetime('now','-90 days')` modifier that SQLite re-evaluated per statement, no test could
+    // seed a row onto it without racing the clock (sc-17597). Going through the cutoff-taking
+    // entry point pins the comparison exactly, with no wall-clock dependence at all.
+    let path = temp_db("retention-exact-tie");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    let cutoff = "2026-05-07T00:00:00Z";
+    let connection = Connection::open(&path).expect("db opens");
+    for (id, completed_at) in [
+        ("one-second-before", "2026-05-06T23:59:59Z"),
+        ("exactly-on-cutoff", cutoff),
+        ("one-second-after", "2026-05-07T00:00:01Z"),
+    ] {
+        connection
+            .execute(
+                "insert into jobs (
+                   id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+                   attempts,cancel_requested,created_at,updated_at,completed_at
+                 ) values (?1,'image_generate','completed','{}','{}','auto',1,'completed','',
+                           1,0,?2,?2,?2)",
+                params![id, completed_at],
+            )
+            .expect("tie job seeds");
+    }
+    drop(connection);
+
+    assert_eq!(
+        store
+            .purge_terminal_jobs_completed_before(cutoff)
+            .expect("retention succeeds"),
+        1,
+        "only the job completed strictly before the cutoff is purged"
+    );
+    let connection = Connection::open(&path).expect("db reopens");
+    let surviving = |id: &str| {
+        connection
+            .query_row(
+                "select count(*) from jobs where id=?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(surviving("one-second-before"), 0, "a second past is purged");
+    assert_eq!(
+        surviving("exactly-on-cutoff"),
+        1,
+        "a job exactly 90 days old is not OLDER than 90 days, so it is retained"
+    );
+    assert_eq!(
+        surviving("one-second-after"),
+        1,
+        "a second short is retained"
+    );
 }
 
 #[test]

@@ -18,10 +18,15 @@
 //   node scripts/bump-inference.mjs                 # bump to latest inference main, update lock, verify
 //   node scripts/bump-inference.mjs --dry-run       # show the target SHA, write nothing
 //   node scripts/bump-inference.mjs --sha <sha40>   # pin a specific inference revision
-//   node scripts/bump-inference.mjs --self-test     # exercise the pin rewrite on canned input
+//   node scripts/bump-inference.mjs --self-test     # exercise the pin rewrite + the facts checks
+//
+// `--self-test` runs in `npm run check`. It used to be a manual npm script only, which made it a
+// place to add an assertion and never learn whether it fired; sc-17593 wired it in when it grew the
+// engine-capability-facts coverage checks, whose whole subject is a guard that was never exercised.
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +35,7 @@ import { fileURLToPath } from "node:url";
 // shape as scripts/check-scaffold.mjs).
 import {
   assertBackendCoverage,
+  parseSceneworksAudioBackends,
   parseSceneworksBackends,
 } from "../apps/web/src/data/previewSupportDerivation.js";
 
@@ -275,14 +281,25 @@ function regenerateCalibrationCostModel() {
 // makes `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
 // stale, and `apps/web/src/data/previewSupportCatalog.test.js` (web vitest, every PR) fails until
 // `npm run gen:preview-support` is re-run.
-function verifyEngineCapabilityFacts(sha) {
-  const dir = join(repoRoot, "config/engine-capabilities");
-  let names;
-  try {
-    names = readdirSync(dir).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
-  } catch {
-    names = [];
-  }
+// `root` is a parameter purely so `--self-test` can drive this against fixture trees. It is the one
+// check in this script with real branching over the FILESYSTEM rather than over text, and its
+// audio half (sc-17593) guards a hole that stayed invisible for four pins, so "it is wired" is not
+// the same as "it fires".
+function verifyEngineCapabilityFacts(sha, root = repoRoot) {
+  const dir = join(root, "config/engine-capabilities");
+  // The audio registry's dumps live one level down (sc-17593), so `readdirSync` — not recursive —
+  // keeps the two sets apart on its own. They are validated for staleness together and for coverage
+  // separately, because their declared backend sets are different consts.
+  const audioDir = join(dir, "audio");
+  const factsFileNames = (from) => {
+    try {
+      return readdirSync(from).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
+    } catch {
+      return [];
+    }
+  };
+  const names = factsFileNames(dir);
+  const audioNames = factsFileNames(audioDir);
   if (names.length === 0) {
     throw new Error(
       `no engine-capability facts under ${dir}. Dump them on a lane that links engines: ` +
@@ -296,30 +313,60 @@ function verifyEngineCapabilityFacts(sha) {
   // forever. `capabilities.mlx.json` was absent for four consecutive pins beginning with the one
   // sc-16965 itself shipped on, and nothing in this function could have objected -- it validates
   // only the files that are there.
-  const dumpedBackends = names.map((name) => {
-    const backend = JSON.parse(readFileSync(join(dir, name), "utf8"))?.backend;
-    if (typeof backend !== "string" || backend.length === 0) {
-      // Named here rather than left to `assertBackendCoverage`, which sees only the values: a
-      // nameless backend reads there as an unidentifiable entry, and the operator needs the file.
-      throw new Error(
-        `${name} carries no \`backend\` field, so it cannot be matched against SCENEWORKS_BACKENDS. ` +
-          "Re-dump it on the lane that owns it rather than hand-editing it.",
-      );
-    }
-    return backend;
-  });
+  const dumpedBackendsIn = (from, fileNames, constName, lane) =>
+    fileNames.map((name) => {
+      const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
+      const backend = facts?.backend;
+      if (typeof backend !== "string" || backend.length === 0) {
+        // Named here rather than left to `assertBackendCoverage`, which sees only the values: a
+        // nameless backend reads there as an unidentifiable entry, and the operator needs the file.
+        throw new Error(
+          `${name} carries no \`backend\` field, so it cannot be matched against ${constName}. ` +
+            "Re-dump it on the lane that owns it rather than hand-editing it.",
+        );
+      }
+      // The `registry` discriminator (sc-17593). Checking it here and not only in the stage-2
+      // derivation matters because a media and an audio dump can carry the SAME `backend` —
+      // `candle` on every platform for audio — so `backend` alone cannot tell a file that landed in
+      // the wrong directory from a correct one, and this check would happily count it as coverage.
+      const registry = facts?.registry ?? "media";
+      if (registry !== lane) {
+        throw new Error(
+          `${name} is a ${JSON.stringify(registry)} dump but sits in the ${JSON.stringify(lane)} ` +
+            "facts directory. Media dumps belong in config/engine-capabilities/, audio dumps in " +
+            "config/engine-capabilities/audio/ — counting this one would report coverage for a " +
+            "registry that was never dumped.",
+        );
+      }
+      return backend;
+    });
+  const factsDeclarationSource = readFileSync(
+    join(root, "crates/sceneworks-worker/src/engine_capability_facts.rs"),
+    "utf8",
+  );
   assertBackendCoverage(
-    parseSceneworksBackends(
-      readFileSync(join(repoRoot, "crates/sceneworks-worker/src/engine_capability_facts.rs"), "utf8"),
-    ),
-    dumpedBackends,
+    parseSceneworksBackends(factsDeclarationSource),
+    dumpedBackendsIn(dir, names, "SCENEWORKS_BACKENDS", "media"),
+  );
+  // sc-17593. The audio registry is dumped separately and its coverage must be asserted separately:
+  // `candle` in SCENEWORKS_BACKENDS is satisfied by the media dump alone, so an undumped audio
+  // registry cleared the check above every time — which is how it stayed invisible.
+  assertBackendCoverage(
+    parseSceneworksAudioBackends(factsDeclarationSource),
+    dumpedBackendsIn(audioDir, audioNames, "SCENEWORKS_AUDIO_BACKENDS", "audio"),
+    "audio",
   );
 
   const stale = [];
-  for (const name of names) {
-    const facts = JSON.parse(readFileSync(join(dir, name), "utf8"));
-    const revision = facts?.generatedFrom?.inferenceRevision;
-    if (revision !== sha) stale.push(`${name} (dumped at ${revision ?? "unknown"})`);
+  for (const [from, fileNames, label] of [
+    [dir, names, ""],
+    [audioDir, audioNames, "audio/"],
+  ]) {
+    for (const name of fileNames) {
+      const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
+      const revision = facts?.generatedFrom?.inferenceRevision;
+      if (revision !== sha) stale.push(`${label}${name} (dumped at ${revision ?? "unknown"})`);
+    }
   }
   if (stale.length) {
     throw new Error(
@@ -329,11 +376,20 @@ function verifyEngineCapabilityFacts(sha) {
         "  macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
         "  off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
         "--no-default-features --features backend-candle\n" +
+        "Either command also rewrites audio/ — the audio registry is candle-native on both lanes.\n" +
         "then regenerate the derived catalog: (cd apps/web && npm run gen:preview-support). " +
         "The pin itself is already written.",
     );
   }
-  console.log(`OK: ${names.length} engine-capability facts file(s) dumped at ${sha}`);
+  // Silent when driven from `--self-test`, which runs in `npm run check`: the fixture tree is a
+  // temp dir at a fake SHA, and an "OK: … dumped at aaaa…" line there reads exactly like a real
+  // verification of the repo's own facts files.
+  if (root === repoRoot) {
+    console.log(
+      `OK: ${names.length} engine-capability facts file(s) + ${audioNames.length} audio file(s) ` +
+        `dumped at ${sha}`,
+    );
+  }
 }
 
 function verifyNoSkew() {
@@ -461,6 +517,91 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     stampThrew = true;
   }
   check("throws when the semantic provenance stamp is missing", stampThrew);
+
+  // --- engine-capability facts, over a real fixture tree (sc-17593) --------------------------
+  //
+  // Everything above is text in, text out. This check is here because the facts verification is the
+  // one part of the script that branches on FILES — including files that are not there, which is the
+  // failure mode that hid an undumped registry for four consecutive pins. Driven over a temp tree so
+  // it exercises the same code the bump runs, rather than a paraphrase of it.
+  const factsDeclaration = [
+    "/// doc comment naming candle and mlx in prose, which the parser must not anchor on.",
+    'pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "mlx"];',
+    'pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];',
+    "",
+  ].join("\n");
+  const factsFile = (backend, revision, extra = {}) =>
+    JSON.stringify({
+      ...extra,
+      backend,
+      generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
+      engines: [{ id: "x", modality: "image", supportsPreview: false }],
+    });
+  const fixture = ({ audio = true, revision = SHA, swapped = false } = {}) => {
+    const root = mkdtempSync(join(tmpdir(), "bump-inference-facts-"));
+    mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
+    writeFileSync(
+      join(root, "crates/sceneworks-worker/src/engine_capability_facts.rs"),
+      factsDeclaration,
+    );
+    const dir = join(root, "config/engine-capabilities");
+    mkdirSync(dir, { recursive: true });
+    for (const backend of ["candle", "mlx"]) {
+      writeFileSync(
+        join(dir, `capabilities.${backend}.json`),
+        // `swapped` puts an AUDIO dump where a media one belongs — the realistic mistake, and the
+        // one `backend` alone cannot detect, since both registries are `candle`.
+        factsFile(backend, SHA, swapped && backend === "candle" ? { registry: "audio" } : {}),
+      );
+    }
+    if (audio) {
+      mkdirSync(join(dir, "audio"), { recursive: true });
+      writeFileSync(
+        join(dir, "audio/capabilities.candle.json"),
+        factsFile("candle", revision, swapped ? {} : { registry: "audio" }),
+      );
+    }
+    return root;
+  };
+  const verifyFacts = (options) => {
+    const root = fixture(options);
+    try {
+      verifyEngineCapabilityFacts(SHA, root);
+      return null;
+    } catch (error) {
+      return error?.message ?? String(error);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  check("a complete facts tree verifies", verifyFacts() === null);
+  // THE regression this exists for. Before sc-17593 this exact tree — every media backend dumped,
+  // the audio registry dumped nowhere — passed, because `candle` in SCENEWORKS_BACKENDS is satisfied
+  // by the MEDIA dump alone. The check must name the audio lane, not merely fail.
+  const missingAudio = verifyFacts({ audio: false });
+  check("a missing audio dump fails", missingAudio !== null);
+  check(
+    "the missing-audio failure names the audio lane and how to dump it",
+    !!missingAudio &&
+      /audio engine-capability facts are missing/.test(missingAudio) &&
+      /dump-engine-capabilities/.test(missingAudio),
+  );
+  // Staleness must reach into the subdirectory too: an audio dump left at the previous pin describes
+  // descriptors that may have moved, exactly as a stale media dump does.
+  const staleAudio = verifyFacts({ revision: "b".repeat(40) });
+  check(
+    "a stale audio dump is reported, named by its subdirectory path",
+    !!staleAudio && /audio\/capabilities\.candle\.json/.test(staleAudio),
+  );
+  // Both dumps carry `backend: "candle"`, so swapping the two directories is invisible to a check
+  // that reads `backend` alone — it would count an audio file as media coverage and vice versa, and
+  // report full coverage with one registry dumped twice and the other not at all.
+  const swapped = verifyFacts({ swapped: true });
+  check(
+    "a dump sitting in the other registry's directory is refused",
+    !!swapped && /sits in the/.test(swapped),
+  );
 
   console.log(rc === 0 ? "self-test: PASS" : "self-test: FAIL");
   process.exit(rc);
