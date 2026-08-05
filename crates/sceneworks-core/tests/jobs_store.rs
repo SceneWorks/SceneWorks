@@ -1,4 +1,4 @@
-use std::fs;
+use std::ops::Deref;
 use std::path::PathBuf;
 
 use rusqlite::{params, Connection};
@@ -13,21 +13,70 @@ use sceneworks_core::jobs_store::{
 };
 use serde_json::{json, Map, Value};
 
-fn temp_db(name: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("sceneworks-core-{name}-{}.db", std::process::id()));
-    let _ = fs::remove_file(&path);
-    path
+/// A test database that owns the directory it lives in and takes the whole
+/// directory with it when it drops.
+///
+/// The shape this replaces — `temp_dir()/sceneworks-core-{name}-{pid}.db`,
+/// unlinked at the *start* of a run — was wrong twice over (sc-17641). Nothing
+/// ever removed the file, so every test in every run left its database behind:
+/// 46,773 of them had piled up in this box's `%TEMP%`, roughly a third of
+/// everything in it. And because the uniqueness key was the PID while only the
+/// `.db` was unlinked, a run that landed on a recycled PID opened a fresh, empty
+/// database next to a stale `-wal` left by an unrelated earlier run — a silent
+/// and very hard to trace flake source.
+///
+/// Owning a directory fixes both halves: `tempfile` names it uniquely per *call*
+/// rather than per process, and the `-wal`/`-shm` siblings leave with their
+/// parent. Cleanup rides on `Drop` rather than a line at the end of each test,
+/// because a test that panics is exactly the one whose leftovers matter.
+struct TempDb {
+    dir: tempfile::TempDir,
+}
+
+impl TempDb {
+    /// Path to the database file inside the guarded directory.
+    fn path(&self) -> PathBuf {
+        self.dir.path().join("jobs.db")
+    }
+}
+
+fn temp_db(name: &str) -> TempDb {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("sceneworks-core-{name}-"))
+        .tempdir()
+        .expect("temp dir for the test database");
+    TempDb { dir }
 }
 
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().expect("test value is an object").clone()
 }
 
-fn store(name: &str) -> JobsStore {
-    let store = JobsStore::new(temp_db(name));
+/// A [`JobsStore`] bundled with the temp directory it lives in, so callers keep
+/// writing `let store = store("name");` and still get cleanup for free.
+///
+/// Field order is load-bearing: `store` drops first, closing the long-lived write
+/// connection, and only then does `_db` remove the directory. Windows refuses to
+/// delete a file that still has an open handle, so the reverse order would leave
+/// the database behind — the very leak this replaces.
+struct TestStore {
+    store: JobsStore,
+    _db: TempDb,
+}
+
+impl Deref for TestStore {
+    type Target = JobsStore;
+
+    fn deref(&self) -> &JobsStore {
+        &self.store
+    }
+}
+
+fn store(name: &str) -> TestStore {
+    let db = temp_db(name);
+    let store = JobsStore::new(db.path());
     store.initialize().expect("store initializes");
-    store
+    TestStore { store, _db: db }
 }
 
 fn image_job(payload: Map<String, Value>) -> CreateJob {
@@ -58,8 +107,85 @@ fn register_image_worker(store: &JobsStore) {
 }
 
 #[test]
+fn temp_db_paths_are_unique_per_call_not_per_process() {
+    // The old scheme keyed uniqueness on `std::process::id()`, so a run that landed
+    // on a recycled PID reopened an earlier run's path — inheriting whatever `-wal`
+    // that run had stranded there. Uniqueness has to come from the call site.
+    let first = temp_db("uniqueness");
+    let second = temp_db("uniqueness");
+    assert_ne!(
+        first.path(),
+        second.path(),
+        "two temp_db calls with the same name must not share a path"
+    );
+}
+
+#[test]
+fn temp_db_guard_removes_the_database_and_its_wal_siblings() {
+    let directory;
+    {
+        let db = temp_db("guard-cleanup");
+        let path = db.path();
+        directory = path
+            .parent()
+            .expect("database sits in its own directory")
+            .to_path_buf();
+
+        let store = JobsStore::new(path.clone());
+        store.initialize().expect("store initializes");
+        register_image_worker(&store);
+        store
+            .create_job(image_job(object(
+                json!({ "prompt": "leaves a wal behind" }),
+            )))
+            .expect("job creates");
+
+        // WAL mode parks `-wal`/`-shm` next to the database while a connection is
+        // open. The old cleanup unlinked only the `.db`, stranding exactly these.
+        assert!(
+            path.with_extension("db-wal").exists(),
+            "expected a -wal sibling while the write connection is open"
+        );
+    }
+
+    assert!(
+        !directory.exists(),
+        "temp database directory outlived its guard: {}",
+        directory.display()
+    );
+}
+
+#[test]
+fn store_helper_removes_its_directory_after_closing_the_connection() {
+    let directory = {
+        let store = store("guard-store-cleanup");
+        register_image_worker(&store);
+        store
+            .create_job(image_job(object(
+                json!({ "prompt": "opens the long-lived write connection" }),
+            )))
+            .expect("job creates");
+        store
+            .db_path()
+            .parent()
+            .expect("database sits in its own directory")
+            .to_path_buf()
+    };
+
+    // Windows refuses to unlink a file that still has an open handle, so a
+    // directory that is gone here also proves the store's long-lived write
+    // connection was closed before the guard removed it.
+    assert!(
+        !directory.exists(),
+        "store() directory outlived its guard: {}",
+        directory.display()
+    );
+}
+
+#[test]
 fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
-    let path = temp_db("retention");
+    let db = temp_db("retention");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     let connection = Connection::open(&path).expect("db opens");
@@ -261,7 +387,8 @@ fn retention_retains_a_job_completed_exactly_on_the_cutoff() {
     // `datetime('now','-90 days')` modifier that SQLite re-evaluated per statement, no test could
     // seed a row onto it without racing the clock (sc-17597). Going through the cutoff-taking
     // entry point pins the comparison exactly, with no wall-clock dependence at all.
-    let path = temp_db("retention-exact-tie");
+    let db = temp_db("retention-exact-tie");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     let cutoff = "2026-05-07T00:00:00Z";
@@ -316,7 +443,8 @@ fn retention_retains_a_job_completed_exactly_on_the_cutoff() {
 
 #[test]
 fn retention_is_atomic_when_job_deletion_fails() {
-    let path = temp_db("retention-rollback");
+    let db = temp_db("retention-rollback");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     let connection = Connection::open(&path).expect("db opens");
@@ -362,7 +490,8 @@ fn retention_is_atomic_when_job_deletion_fails() {
 
 #[test]
 fn zero_retention_preserves_terminal_history() {
-    let path = temp_db("retention-disabled");
+    let db = temp_db("retention-disabled");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     let connection = Connection::open(&path).expect("db opens");
@@ -6621,7 +6750,8 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     const WORKERS: usize = 4;
     const JOBS: usize = 60;
 
-    let path = temp_db("concurrent-claim");
+    let db = temp_db("concurrent-claim");
+    let path = db.path();
     let primary = JobsStore::new(path.clone());
     primary.initialize().expect("store initializes");
 
@@ -6714,7 +6844,8 @@ fn reads_proceed_while_a_writer_holds_the_write_lock() {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    let path = temp_db("read-during-write");
+    let db = temp_db("read-during-write");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     register_image_worker(&store);
@@ -7226,7 +7357,8 @@ fn mlx_worker_refuses_anima_edit_image_jobs() {
 /// connection preserves the concurrency contract the per-op opener guaranteed.
 #[test]
 fn long_lived_connection_survives_many_sequential_ops() {
-    let path = temp_db("long-lived-sequential");
+    let db = temp_db("long-lived-sequential");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     register_image_worker(&store);
