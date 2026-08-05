@@ -1638,7 +1638,7 @@
         "resident",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
+      "calibrationFingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
       "fixture": "krea-pose-control-q4-seed16099",
       "cases": [
         {
@@ -1673,7 +1673,7 @@
         "resident",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
+      "calibrationFingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
       "fixture": "krea-pose-control-q4-seed16099",
       "cases": [
         {
