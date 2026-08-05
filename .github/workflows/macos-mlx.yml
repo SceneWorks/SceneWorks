@@ -128,6 +128,29 @@ concurrency:
   group: macos-mlx-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# BUILD ARTIFACTS OUTSIDE THE DIRECTORY `actions/checkout` CLEANS.
+#
+# This lane had no cache of any kind, and `actions/checkout` defaults to `clean: true` —
+# `git clean -ffdx` in the repo directory, which deletes gitignored `target/`. So every PR
+# rebuilt the whole MLX-from-source graph from nothing on a self-hosted Mac. Measured on
+# `nax-macos` 2026-08-04: `target/debug/deps` carried one job's timestamps end to end
+# (CACHEDIR.TAG 21:58, newest artifact 22:16) across 13 GB, i.e. the entire tree was cold.
+#
+# `github.workspace` is `_work/<repo>/<repo>`; its parent is the runner's per-repo work
+# directory, which checkout does not touch and the runner does not recreate between jobs
+# (only `_temp` is). `../cargo-target` therefore survives the clean, stays scoped per repo
+# and per box, and needs no cache action, no upload, and no network round trip. Workflow-level
+# because the `runner` context is step-level only, while `github` is available here.
+#
+# This is the PR merge gate, so its wall clock is queue pressure for every other job on the
+# same two boxes (sc-14708). Reclaiming the cold build is the cheapest reduction available.
+#
+# It is a cache: if a box runs short of disk, delete the directory and the next job rebuilds
+# it. Nothing here is a test input — the calibration/reference dispatch paths below take their
+# weights from host snapshots, never from `target/`.
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
+
 jobs:
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
@@ -541,7 +564,7 @@ jobs:
             --backend mlx \
             --fixture "qwen-image-${QWEN_TIER}-seed${QWEN_SEED}-step2" \
             --fresh-per-case \
-            --provider-command '["target/release/memory-mlx-adapter"]' \
+            --provider-command "[\"$CARGO_TARGET_DIR/release/memory-mlx-adapter\"]" \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
             --output "$RUNNER_TEMP/memory-mlx-evidence.json"
@@ -567,7 +590,7 @@ jobs:
             --config config/memory-calibration-plan.json \
             --backend mlx \
             --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
-            --provider-command '["target/release/memory-mlx-adapter"]' \
+            --provider-command "[\"$CARGO_TARGET_DIR/release/memory-mlx-adapter\"]" \
             --output "$RUNNER_TEMP/sc-16059-mlx-reuse-assessment.json"
           node -e 'const a=require(process.argv[1]); if(a.verdict!=="unable_to_amortize") throw new Error(`unexpected MLX reuse verdict: ${a.verdict}`)' \
             "$RUNNER_TEMP/sc-16059-mlx-reuse-assessment.json"
@@ -576,7 +599,7 @@ jobs:
             --backend mlx \
             --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
             --fresh-per-case \
-            --provider-command '["target/release/memory-mlx-adapter"]' \
+            --provider-command "[\"$CARGO_TARGET_DIR/release/memory-mlx-adapter\"]" \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
             --output "$RUNNER_TEMP/sc-16059-mlx-fresh.json"
