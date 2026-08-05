@@ -1782,23 +1782,32 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
 /// chatterbox's `ve.safetensors` @ 5bb1f6ee living alongside the primary `refs/main` snapshot) resolves
 /// to the right snapshot — mirroring the inference-side `hf_get_pinned`. Returns `None` when that
 /// pinned snapshot is not cached.
+/// Whether `revision` is an immutable pin (F-029) rather than a mutable branch name like `main`.
+///
+/// A pinned revision is exactly one lowercase 40-hex commit component. This is BOTH a shape check
+/// and a confinement precondition: `revision` reaches the snapshot resolvers straight from the job
+/// payload's `modelManifestEntry`, which is unvalidated over the LAN jobs API (epic 4484), and a
+/// `..`/absolute revision would otherwise join OUTSIDE `snapshots/` — a dir that passes `is_dir()`
+/// and, on Windows, gets its symlinks rewritten to hardlinks by `materialize_snapshot_hardlinks`.
+/// The manifest schema is not authoritative for the copy embedded in an untrusted job payload
+/// (sc-13842 / sc-13583), so the runtime contract is enforced here.
+///
+/// Defined ONCE (sc-17626) because two resolvers now branch on it — [`huggingface_pinned_snapshot_dir`]
+/// and [`crate::downloads::resolve_hf_component_file`] — and a drift between them would mean one of
+/// them silently accepting `refs/main` where the other demands the pin.
+pub(crate) fn is_pinned_hf_revision(revision: &str) -> bool {
+    revision.len() == 40
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub(crate) fn huggingface_pinned_snapshot_dir(
     data_dir: &Path,
     repo: &str,
     revision: &str,
 ) -> Option<PathBuf> {
-    // `revision` reaches here straight from the job payload's `modelManifestEntry` (the co-requisite
-    // seam, `resolve_co_requisites` / `resolve_optional_component`), which is unvalidated over the LAN
-    // jobs API (epic 4484). A `..`/absolute revision would otherwise join OUTSIDE `snapshots/` — a dir
-    // that passes `is_dir()` and, on Windows, gets its symlinks rewritten to hardlinks by
-    // `materialize_snapshot_hardlinks`. A pinned revision is exactly one lowercase 40-hex commit
-    // component. Enforce that runtime contract before confinement because the manifest schema is not
-    // authoritative for the copy embedded in an untrusted job payload (sc-13842 / sc-13583).
-    if revision.len() != 40
-        || !revision
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !is_pinned_hf_revision(revision) {
         return None;
     }
     let dir = safe_join(
