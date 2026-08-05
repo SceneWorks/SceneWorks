@@ -51,7 +51,22 @@ on:
     branches: [main]
     paths: &candle_paths
       - "crates/**"
-      - "apps/rust-worker/**"
+      # NO apps/rust-worker/** here, deliberately — do not re-symmetrise with
+      # macos-mlx.yml's anchor (sc-17703). That package (`sceneworks-rust-worker`)
+      # is a 4-line binary wrapper over sceneworks-worker with no [features] block
+      # and no candle-gated code, nothing in the workspace depends on it, and
+      # nothing this job runs builds it: every cargo invocation below is
+      # -p sceneworks-worker, -p sceneworks-rust-api or
+      # -p sceneworks-memory-adapter. Watching it woke this whole job — the
+      # fleet's single cuda box — for zero coverage. The two lanes legitimately
+      # differ: macos-mlx.yml's HOSTED macos-checks job runs the bare
+      # workspace-wide `cargo test` / `cargo clippy --all-targets` over every
+      # default member, which DOES compile the wrapper, so the entry earns its
+      # keep there. The contract test in scripts/platform-review-contracts.test.mjs
+      # derives all of this from each workflow's own cargo invocations and the
+      # Cargo.toml dependency graph, so re-adding the entry here (or narrowing
+      # what a lane builds out from under one of its path entries) goes red
+      # instead of quietly rotting.
       - "apps/rust-api/**"
       # The builtin model catalog is include_str!'d into the worker and read by the
       # `manifest_menu_is_subset_of_descriptor` drift guard, so a manifest edit can
@@ -93,6 +108,23 @@ on:
       - "config/engine-capabilities/audio/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
+      # The toolchain and cargo-config seams (sc-17703, Michael's call — these are
+      # UNDER-trigger fixes that deliberately spend box time on two rare-edit,
+      # high-blast-radius files whose breakage would otherwise merge green and red
+      # main misattributed). This lane runs no rust-toolchain action: cargo in-repo
+      # auto-selects the toolchain rust-toolchain.toml pins (see the step comment
+      # below), so a bump changes what this entire job compiles with. And
+      # .cargo/config.toml carries `git-fetch-with-cli = true`, without which
+      # cargo's built-in fetch ignores the GIT_CONFIG_* token injection in "Fetch
+      # the private inference release" and the lane cannot fetch at all. The
+      # channel is a concrete version, never floating `stable` (sc-17717): a
+      # toolchain change is therefore always an edit to that file, which this
+      # entry turns into a run of this lane — and the contract test keeps every
+      # workflow's dtolnay `toolchain:` input in lockstep with the pin. When
+      # bumping, pre-install the new version on this box first; see the bump
+      # recipe in rust-toolchain.toml.
+      - "rust-toolchain.toml"
+      - ".cargo/config.toml"
       - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/windows-candle.yml"
   pull_request:

@@ -2440,13 +2440,30 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
 }
 
 /// A fixed oldest-first batch must not let persistent failures monopolize the
-/// recovery queue. The first pass poisons a full production-sized batch; the
-/// durable retry schedule must rotate all of them out so the newer healthy row
-/// completes on the next pass, without retrying the poison rows every second.
+/// recovery queue. The fixture creates one more row than fits in a batch and
+/// poisons the full batch, leaving exactly one healthy row that the first pass
+/// never reaches. The durable retry schedule must rotate the poison rows out so
+/// that healthy row completes on the next pass, without retrying the poison
+/// rows every second — and must then bring them back once that backoff expires,
+/// rather than deferring them out of the queue for good.
+///
+/// (All 129 rows go terminal within the same second, and `updated_at` has
+/// second granularity, so the row left out is the largest-`id` one rather than
+/// the newest. Which row it is does not matter — only that it is healthy and
+/// that both enumerations agree on it, which the shared ordering guarantees.)
+///
+/// Every *scan* below is driven at an explicit instant rather than at the wall
+/// clock, so the schedule decides the outcome and machine speed cannot. The
+/// deferrals themselves still stamp real time; the assertions are written to
+/// hold for any instant those stamps can land on (sc-17640). The exact length
+/// of the backoff is pinned separately, next to the schedule that computes it,
+/// by `terminal_side_effect_retry_backoff_doubles_and_survives_restart` in
+/// `sceneworks-core`.
 #[tokio::test]
 async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation() {
     use sceneworks_core::contracts::{JobStatus, JobType, ProgressStage};
     use sceneworks_core::jobs_store::{CreateJob, ProgressUpdate, RegisterWorker};
+    use sceneworks_core::time::now_unix_seconds;
 
     const BATCH: usize = crate::jobs::PROGRESS_SIDE_EFFECT_RECOVERY_BATCH;
 
@@ -2520,8 +2537,18 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         .lock()
         .extend(poison_ids.iter().cloned());
 
+    // Freeze the instant every scan below evaluates dueness against, captured
+    // BEFORE the first pass runs. Each poison row is deferred to
+    // `(its own deferral instant) + backoff`, and every deferral happens at or
+    // after `scan_at`, so relative to `scan_at` the whole batch is durably in
+    // the future no matter how slow this machine is. Scanning at the real wall
+    // clock instead made the final assertion a race against the 5-second
+    // first-failure backoff: a pass slow enough to outlast it (ordinary load, a
+    // busy CI runner) let correctly-deferred rows come back due, and the test
+    // reddened unrelated PRs through the shared `rust:test` gate (sc-17640).
+    let scan_at = now_unix_seconds();
     assert_eq!(
-        crate::jobs::recover_pending_terminal_progress_side_effects_once(&state)
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(&state, scan_at)
             .await
             .expect("poison batch recovery returns"),
         0
@@ -2533,6 +2560,10 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
             .all(|job_id| first_attempts.get(job_id) == Some(&1)),
         "every poison row must be attempted exactly once in the first pass"
     );
+    // Every deferral above committed at or after `scan_at`, so no row's durable
+    // deadline can have landed on or before it — the assertions below are
+    // decided by the retry schedule, never by elapsed real time.
+    let deferred_by = now_unix_seconds();
 
     drop(state);
     let (_, restarted_state) =
@@ -2540,24 +2571,65 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
     restarted_state
         .progress_side_effects_fail_job_ids
         .lock()
-        .extend(poison_ids);
+        .extend(poison_ids.iter().cloned());
     assert_eq!(
-        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
-            .await
-            .expect("healthy recovery returns"),
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(
+            &restarted_state,
+            scan_at
+        )
+        .await
+        .expect("healthy recovery returns"),
         1,
         "durably deferred poison rows must not starve the newer healthy handoff after restart"
     );
     assert_eq!(
-        crate::jobs::recover_pending_terminal_progress_side_effects_once(&restarted_state)
-            .await
-            .expect("bounded retry scan returns"),
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(
+            &restarted_state,
+            scan_at
+        )
+        .await
+        .expect("bounded retry scan returns"),
         0
     );
     assert_eq!(
         *restarted_state.progress_side_effects_attempts.lock(),
         std::collections::HashMap::new(),
         "poison rows must stay out of the due set across restart until durable backoff expires"
+    );
+
+    // ...and the deferral is a bounded backoff, not a silent drop. Without this
+    // the assertion above passes just as happily if a row is deferred forever,
+    // which would strand its side effects instead of retrying them.
+    //
+    // `deferred_by` was read after every deferral committed, so no deadline can
+    // exceed it by more than one delay, and one delay is capped at
+    // `PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS` (5 minutes, in `sceneworks-core`).
+    // A day past `deferred_by` is therefore beyond every deadline the schedule
+    // can emit, by three orders of magnitude — so this scan too is decided by
+    // the schedule, not by the clock. Raising that cap past a day would fail
+    // this test loudly, on the `expired_attempts` assertion below.
+    //
+    // That assertion is the one with teeth: the `== 0` here is also what an
+    // empty batch returns, so the two must stay together.
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_as_of(
+            &restarted_state,
+            deferred_by.saturating_add(24 * 60 * 60),
+        )
+        .await
+        .expect("expired backoff scan returns"),
+        0,
+        "the poison rows still fail, so none of them recovers"
+    );
+    let expired_attempts = restarted_state
+        .progress_side_effects_attempts
+        .lock()
+        .clone();
+    assert!(
+        poison_ids
+            .iter()
+            .all(|job_id| expired_attempts.get(job_id) == Some(&1)),
+        "once the durable backoff expires every poison row must be retried again"
     );
 }
 

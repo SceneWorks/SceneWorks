@@ -1580,7 +1580,12 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
     let id = created["id"].as_str().unwrap();
 
     let mut paused_response = None;
-    for _ in 0..500 {
+    // Deadline-based waits throughout this test, not fixed iteration counts: the old
+    // budgets were calibrated on the fast self-hosted M5 and flaked once the suite moved
+    // to the slower hosted macos-26 runners (sc-17723). These are completion waits, not
+    // boundary assertions, so generous ceilings delete no coverage.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline && paused_response.is_none() {
         let (_, status_body) = request(
             app.clone(),
             "GET",
@@ -1613,7 +1618,8 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
     );
 
     let mut paused = None;
-    for _ in 0..500 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         let (_, status_body) = request(
             app.clone(),
             "GET",
@@ -1649,7 +1655,10 @@ async fn parquet_create_pause_resume_and_completion_run_through_public_api_sched
     assert_eq!(resumed["processingControl"]["desiredState"], "running");
 
     let mut completed = None;
-    for _ in 0..2_000 {
+    // 120s: resuming the 50k-record scan is the long pole of this test on a loaded
+    // hosted runner (the old 2000 x 5ms budget was the M5-calibrated one).
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while std::time::Instant::now() < deadline {
         let (_, status_body) = request(
             app.clone(),
             "GET",
@@ -2660,7 +2669,10 @@ async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint(
     let id = created["id"].as_str().expect("catalog id").to_owned();
 
     let mut running = None;
-    for _ in 0..500 {
+    // Deadline-based, not a fixed iteration count — M5-calibrated budgets flake on the
+    // slower hosted macos-26 runners (sc-17723).
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         let (_, status_body) = request(
             app.clone(),
             "GET",
@@ -2728,7 +2740,14 @@ async fn graceful_catalog_shutdown_drains_and_public_restart_resumes_checkpoint(
     .await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
     let mut completed = None;
-    for _ in 0..2_000 {
+    // Deadline-based, not a fixed iteration count: 2000 x 3ms (~6s) was calibrated on
+    // the fast self-hosted M5 and flaked once the suite moved to the slower hosted
+    // macos-26 runners, where resuming a 50k-record scan can outlast that budget under
+    // load (sc-17723). This is a completion wait, not a boundary assertion, so a
+    // generous ceiling deletes no coverage — the assert below still demands the full
+    // record count.
+    let resume_deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while std::time::Instant::now() < resume_deadline {
         let (_, status_body) = request(
             restarted_app.clone(),
             "GET",

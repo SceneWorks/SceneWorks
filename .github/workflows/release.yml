@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
       - name: Fetch the private inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -259,7 +259,7 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
       - name: Fetch the private inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -405,7 +405,7 @@ jobs:
             apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
 
       # Match the manual Linux packaging lane. gstreamer1.0-libav supplies H.264

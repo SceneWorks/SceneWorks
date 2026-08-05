@@ -883,6 +883,37 @@ impl JobsStore {
         }))
     }
 
+    /// Find an in-flight (non-terminal) `model_download` job for `model_id`, so the convert request
+    /// boundary can refuse a convert whose source weights are still streaming instead of queueing a
+    /// job that fails the moment a worker claims it. Returns the newest such job, or `None`.
+    ///
+    /// Keyed on the payload `modelId`, not the repo: a shared source repo backs several catalog cards
+    /// (the three Anima variants live in `circlestone-labs/Anima`), and converting variant A while
+    /// variant B downloads is legitimate — A's own weights are already on disk. The file-presence
+    /// half of the gate (`convert_source_state`) covers the rest.
+    ///
+    /// Read-only single-SELECT: no write mutex, relies on WAL reader isolation like `list_jobs`
+    /// (sc-8950 / F-148).
+    pub fn find_active_model_download_job(
+        &self,
+        model_id: &str,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(&format!(
+            "
+            select * from jobs
+             where type = 'model_download'
+               and status not in ({terminal})
+             order by created_at desc
+            ",
+            terminal = terminal_statuses_sql()
+        ))?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        Ok(candidates
+            .into_iter()
+            .find(|job| job.payload.get("modelId").and_then(Value::as_str) == Some(model_id)))
+    }
+
     pub fn list_jobs(
         &self,
         project_id: Option<&str>,
@@ -2356,13 +2387,35 @@ impl JobsStore {
         }
     }
 
-    /// Return a bounded batch of terminal jobs whose API-owned side effects
-    /// still need recovery. The API drains this durable queue at startup and on
-    /// a background cadence, so recovery does not depend on a worker repeating
-    /// a terminal progress report after it already observed the committed
-    /// terminal state.
+    /// The batch that is due *now* — the shape production recovery wants.
+    /// Resolving the instant here, rather than inside the query, is what lets
+    /// [`Self::pending_terminal_progress_side_effect_job_ids_as_of`] be driven
+    /// from a fixed instant; see it for the behavior and for why.
     pub fn pending_terminal_progress_side_effect_job_ids(
         &self,
+        limit: usize,
+    ) -> JobsStoreResult<Vec<String>> {
+        self.pending_terminal_progress_side_effect_job_ids_as_of(now_unix_seconds(), limit)
+    }
+
+    /// Return a bounded batch of terminal jobs whose API-owned side effects
+    /// still need recovery, judging dueness as of `as_of` (Unix seconds)
+    /// instead of the wall clock. The API drains this durable queue at startup
+    /// and on a background cadence, so recovery does not depend on a worker
+    /// repeating a terminal progress report after it already observed the
+    /// committed terminal state. A row is due once its deadline has *arrived*,
+    /// so a row whose `progress_side_effects_retry_at` equals `as_of` is
+    /// included.
+    ///
+    /// Production always passes `now`. Tests pass a *frozen* instant so that an
+    /// assertion about which rows are due describes the durable retry schedule
+    /// rather than how long the test itself took to run: with the wall clock,
+    /// a slow pass could let the 5-second first-failure backoff expire between
+    /// deferring a row and scanning for it, and rows that were correctly
+    /// deferred would legitimately come back due (sc-17640).
+    pub fn pending_terminal_progress_side_effect_job_ids_as_of(
+        &self,
+        as_of: i64,
         limit: usize,
     ) -> JobsStoreResult<Vec<String>> {
         let connection = self.open_connection()?;
@@ -2377,7 +2430,7 @@ impl JobsStore {
         )?;
         let ids = statement
             .query_map(
-                params![now_unix_seconds(), i64::try_from(limit).unwrap_or(i64::MAX)],
+                params![as_of, i64::try_from(limit).unwrap_or(i64::MAX)],
                 |row| row.get(0),
             )?
             .collect::<Result<Vec<_>, _>>()?;
