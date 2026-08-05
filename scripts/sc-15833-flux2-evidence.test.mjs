@@ -14,6 +14,7 @@ import {
   AUDIT_CLOSURE_PATHS,
   AUDIT_METHOD,
   COMPOSITION_ONLY_CRATES,
+  FEATURE_WITNESS_RESOLUTION,
   SCHEMA_VERSION,
 } from "./inference-artifact-audit.mjs";
 import { validateRecord } from "./memory-calibration-harness.mjs";
@@ -609,6 +610,21 @@ test("SC-15833 admits five Q4 base cells only through the exact audited 5ffd-to-
   assert.equal(proof.auditedArtifact.lane, "cuda");
   assert.equal(proof.auditedArtifact.capturedDigest, proof.auditedArtifact.compatibleDigest);
   assert.equal(proof.auditedArtifact.capturedDigest, FLUX2_COMPATIBILITY_AUDIT.artifactProof.digest);
+  // sc-17606: the shipped record's feature witness is unconditional — it is present here even
+  // though this window's paths moved, and it would be present on a quiet window too.
+  assert.equal(proof.featureWitness.capturedDigest, proof.featureWitness.compatibleDigest);
+  assert.equal(proof.featureWitness.capturedDigest, FLUX2_COMPATIBILITY_AUDIT.featureWitness.digest);
+  assert.ok(
+    Number.isInteger(proof.featureWitness.packages) && proof.featureWitness.packages > 0,
+    "a witness over an empty resolution hashes the same at every revision",
+  );
+  // The measured binary's resolution differs from the shipped one only by test-only surface. This
+  // is the static half of sc-17606, recorded as a measured number rather than as prose that rots:
+  // if a dev-dependency ever widens a SHIPPED package's features, this list is where it shows up.
+  assert.deepEqual(proof.featureWitness.measurementDelta.map((entry) => entry.split(" v")[0]).sort(), [
+    "candle-gen",
+    "sceneworks-gen-core-testkit",
+  ]);
   assert.equal(
     matrix.generatedFrom.sources.inferenceCompatibility.path,
     RECORD_PATH,
@@ -938,9 +954,10 @@ test("SC-15833 committed bundle and plan preserve all unrelated evidence structu
 // produce a compiled-artifact digest that matches the one frozen in source.
 // ---------------------------------------------------------------------------------------------
 
-const V4_METHOD =
-  "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
-  "the Candle FLUX.2 measurement binary's compile closure and its workspace build inputs";
+const V5_METHOD =
+  "compiled artifact identity for changed paths, git object identity for unchanged paths, and " +
+  "shipped-bundle resolved-feature identity, across the Candle FLUX.2 measurement binary's " +
+  "compile closure and its workspace build inputs";
 const ARTIFACT_DIGEST = `sha256:${"c".repeat(64)}`;
 const CANDLE_GEN = "crates/media/candle-gen/candle-gen";
 const CANDLE_GEN_PID = "crates/media/candle-gen/candle-gen-pid";
@@ -974,8 +991,12 @@ async function shippedAudit() {
  * `moved` must name real closure paths: an entry that is not one silently changes no object, so a
  * rejection test built on it would pass because the record misdeclares `changedClosurePaths`
  * rather than for the reason it claims to be testing.
+ *
+ * The witness is built from the FROZEN expectation so these fixtures exercise the artifact layer
+ * without the feature layer rejecting them first; the witness layer gets its own test below, where
+ * the two halves are driven apart on purpose.
  */
-function v4Record(audit, { moved = [], artifact = undefined } = {}) {
+function v5Record(audit, { moved = [], artifact = undefined, featureWitness = shippedWitness() } = {}) {
   for (const objectPath of moved) {
     assert.ok(
       audit.auditedObjects.some(({ path }) => path === objectPath),
@@ -983,11 +1004,11 @@ function v4Record(audit, { moved = [], artifact = undefined } = {}) {
     );
   }
   const record = {
-    schemaVersion: 4,
+    schemaVersion: 5,
     story: "SC-15833",
     capturedInferenceRevision: INFERENCE_REVISION,
     compatibleInferenceRevision: LIVE_INFERENCE_REVISION,
-    method: V4_METHOD,
+    method: V5_METHOD,
     command: "node scripts/inference-artifact-audit.mjs --repo PATH --captured SHA40 --compatible SHA40",
     changedClosurePaths: [...moved],
     auditedObjects: audit.auditedObjects.map(({ path, capturedObject }) => ({
@@ -995,6 +1016,7 @@ function v4Record(audit, { moved = [], artifact = undefined } = {}) {
       capturedObject,
       compatibleObject: moved.includes(path) ? "e".repeat(40) : capturedObject,
     })),
+    featureWitness,
   };
   if (artifact !== undefined) record.auditedArtifact = artifact;
   return record;
@@ -1016,23 +1038,40 @@ function cudaArtifact(overrides = {}) {
   };
 }
 
-const accepts = (record, proof) => validatedInferenceCompatibility(JSON.stringify(record), proof);
-const rejects = (record, proof, pattern, label) =>
-  assert.throws(() => validatedInferenceCompatibility(JSON.stringify(record), proof), pattern, label);
+/** A witness block that agrees with what is frozen — the shape the emitting script produces. */
+function shippedWitness(overrides = {}) {
+  return {
+    ...FEATURE_WITNESS_RESOLUTION,
+    packages: 173,
+    measurementDelta: [],
+    capturedDigest: FLUX2_COMPATIBILITY_AUDIT.featureWitness.digest,
+    compatibleDigest: FLUX2_COMPATIBILITY_AUDIT.featureWitness.digest,
+    ...overrides,
+  };
+}
+
+const accepts = (record, proof, witness) =>
+  validatedInferenceCompatibility(JSON.stringify(record), proof, witness);
+const rejects = (record, proof, pattern, label, witness) =>
+  assert.throws(() => validatedInferenceCompatibility(JSON.stringify(record), proof, witness), pattern, label);
 
 test("SC-17497 the audit script and both validators agree on the strings they all hardcode", async () => {
   // The method string is duplicated across the emitting script, the JS validator and the Rust
   // validator; the closure set across all three. Only the script<->JS pair was pinned, so Rust could
   // drift into refusing records the matrix had already published as `Runtime verified`.
-  assert.equal(AUDIT_METHOD, V4_METHOD, "a drift here would reject every record the script emits");
+  assert.equal(AUDIT_METHOD, V5_METHOD, "a drift here would reject every record the script emits");
   const rust = await readFile(
     new URL("../crates/sceneworks-worker/src/inference_compatibility_audit.rs", import.meta.url),
     "utf8",
   );
-  const rustMethod = /FLUX2_V4_AUDIT_METHOD: &str = concat!\(\s*"([^"]*)",\s*"([^"]*)"/.exec(rust);
-  assert.ok(rustMethod, "the Rust v4 method constant must stay machine-readable from this test");
-  assert.equal(`${rustMethod[1]}${rustMethod[2]}`, V4_METHOD);
-  assert.equal(SCHEMA_VERSION, 4);
+  const rustMethod = /FLUX2_V5_AUDIT_METHOD: &str = concat!\(([\s\S]*?)\);/.exec(rust);
+  assert.ok(rustMethod, "the Rust v5 method constant must stay machine-readable from this test");
+  assert.equal(
+    [...rustMethod[1].matchAll(/"([^"]*)"/g)].map(([, part]) => part).join(""),
+    V5_METHOD,
+    "the concat! arity is not pinned, so the parts are joined rather than counted",
+  );
+  assert.equal(SCHEMA_VERSION, 5);
   assert.match(rust, new RegExp(`FLUX2_AUDIT_SCHEMA_VERSION: u64 = ${SCHEMA_VERSION};`));
   // sc-17524: the build inputs are FILES, not crate directories, and one of them (`.cargo/config.toml`)
   // is not even at the repo root. The old `Cargo\.toml|crates/…` alternation silently stopped
@@ -1079,6 +1118,116 @@ test("SC-17497 the audit script and both validators agree on the strings they al
     [...FLUX2_COMPATIBILITY_AUDIT.artifactProof.adjudicates],
     "an adjudicable set that is wider in one language than the other fails OPEN in that language",
   );
+
+  // sc-17606: the feature witness is frozen in THREE places — the emitting script's resolution, the
+  // JS validator and the Rust validator. Its digest is only meaningful next to the resolution it was
+  // taken over, so both are pinned. Fields are matched individually rather than as one block,
+  // because a struct-literal regex would break on `cargo fmt` and be repaired by relaxing it.
+  const witness = FLUX2_COMPATIBILITY_AUDIT.featureWitness;
+  // Scoped to the constant's own initializer, not first-match over the file. A bare
+  // /digest: "…"/ grades whatever literal appears first, so an earlier `digest:` or `target:`
+  // anywhere above — including in the test module's own fixture — would silently re-point every
+  // assertion below and this test would keep passing.
+  const rustWitness = /FLUX2_FEATURE_WITNESS: FeatureWitnessExpectation<'static> =([\s\S]*?)\n\s*\};/.exec(rust);
+  assert.ok(rustWitness, "the Rust feature witness must stay machine-readable from this test");
+  for (const [jsKey, rustKey] of [
+    ["shippedPackage", "shipped_package"],
+    ["scopeRoot", "scope_root"],
+    ["scopeFeatures", "scope_features"],
+    ["target", "target"],
+    ["edges", "edges"],
+  ]) {
+    assert.equal(
+      witness[jsKey],
+      FEATURE_WITNESS_RESOLUTION[jsKey],
+      `the JS validator grades ${jsKey} against a resolution the script does not emit`,
+    );
+    const rustValue = new RegExp(`\\b${rustKey}: "([^"]+)"`).exec(rustWitness[1]);
+    assert.ok(rustValue, `the Rust witness ${rustKey} must stay machine-readable from this test`);
+    assert.equal(rustValue[1], witness[jsKey], `${jsKey} differs between the two validators`);
+  }
+  const rustWitnessDigest = /\bdigest: "(sha256:[0-9a-f]{64})"/.exec(rustWitness[1]);
+  assert.ok(rustWitnessDigest, "the Rust witness digest must stay machine-readable from this test");
+  assert.equal(rustWitnessDigest[1], witness.digest, "one frozen feature witness, two languages");
+});
+
+test("SC-17606 the shipped feature witness is required on every record, including a quiet one", async () => {
+  // The gap this closes moves no closure object and no lockfile entry — features are not recorded
+  // there — so it arrives EXCLUSIVELY on records whose closure is quiet. Every case here is
+  // therefore driven over the quiet record, the one both other layers wave straight through.
+  const audit = await shippedAudit();
+  const quiet = (overrides) => v5Record(audit, { featureWitness: shippedWitness(overrides) });
+  assert.ok(accepts(quiet(), null), "a quiet closure with a matching witness still takes the fast path");
+
+  const without = v5Record(audit);
+  delete without.featureWitness;
+  rejects(without, null, /resolved-feature witness is invalid/, "a record with no witness is a v3 in disguise");
+
+  // The load-bearing negative: graded against what is FROZEN, or the record certifies its own
+  // feature resolution and the layer is decorative. Flip the first nibble to a value the real
+  // digest demonstrably is not — a fixed letter silently becomes a no-op the day it matches.
+  const { digest } = FLUX2_COMPATIBILITY_AUDIT.featureWitness;
+  const flipped = `sha256:${digest[7] === "0" ? "1" : "0"}${digest.slice(8)}`;
+  assert.notEqual(flipped, digest, "the mutation must actually mutate");
+  rejects(
+    quiet({ capturedDigest: flipped, compatibleDigest: flipped }),
+    null,
+    /resolved-feature witness is invalid/,
+    "a witness signed by some other resolution is not signed at all",
+  );
+  rejects(
+    quiet(),
+    null,
+    /resolved-feature witness is invalid/,
+    "…and the expectation half is load-bearing too, not just the record half",
+    { ...FLUX2_COMPATIBILITY_AUDIT.featureWitness, digest: flipped },
+  );
+
+  // Two different digests IS the finding: something outside FLUX.2's closure changed how the bundle
+  // compiles code FLUX.2 links, and the packaged calibration describes the old resolution.
+  rejects(
+    quiet({ compatibleDigest: `sha256:${"d".repeat(64)}` }),
+    null,
+    /resolved-feature witness is invalid/,
+    "witness digests that disagree are a re-capture, not an authorization",
+  );
+  // The mirror. In the Rust validator, where the two sides are graded independently rather than
+  // compared, dropping the CAPTURED comparison survived every other assertion in its suite — so it
+  // is pinned explicitly here too rather than left to the equality check that happens to cover it.
+  rejects(
+    quiet({ capturedDigest: `sha256:${"d".repeat(64)}` }),
+    null,
+    /resolved-feature witness is invalid/,
+    "the captured side is graded against the frozen digest, not inferred from the other one",
+  );
+
+  // The resolution IS the question, and a witness over the provider rather than the shipped bundle
+  // is exactly the narrower unification this story exists to escape — with an equally valid digest.
+  for (const [key, wrong] of [
+    ["shippedPackage", "candle-gen-flux2"],
+    ["scopeRoot", "runtime-cuda"],
+    ["scopeFeatures", "metal"],
+    ["target", "aarch64-apple-darwin"],
+    ["edges", "normal,build,dev"],
+  ]) {
+    rejects(
+      quiet({ [key]: wrong }),
+      null,
+      /resolved-feature witness is invalid/,
+      `a witness with ${key} = ${wrong} answers a different question`,
+    );
+  }
+
+  // A witness over an EMPTY resolution hashes to a stable digest identical at every revision — the
+  // one false green this layer could manufacture on its own. The script refuses to produce it.
+  for (const packages of [0, -1, 1.5, "173", null]) {
+    rejects(
+      quiet({ packages }),
+      null,
+      /resolved-feature witness is invalid/,
+      `packages = ${packages} cannot describe a resolution that was actually walked`,
+    );
+  }
 });
 
 test("SC-17524 the shipped record validates only against the proof frozen in source", async () => {
@@ -1101,11 +1250,13 @@ test("SC-17524 the shipped record validates only against the proof frozen in sou
 
 test("SC-17607 the superseded schema versions are refused rather than re-graded", async () => {
   // v1 and v2 record sc-15833's seven-path closure, which never looked at `Cargo.lock`,
-  // `rust-toolchain.toml` or `.cargo/config.toml` — evidence about inputs it did not audit. v3 is
-  // sc-17524's ten-path one and is refused from the OTHER direction: it audited one path more than
-  // this schema does, so re-grading it means dropping an entry out of someone else's record.
+  // `rust-toolchain.toml` or `.cargo/config.toml`; v3 has the ten-path closure but never looked at
+  // how the shipped bundle resolves features. Either way: evidence about inputs it did not audit.
+  // v4 is refused from the OTHER direction — it audited one path MORE than this schema does, so
+  // re-grading it means dropping an entry out of someone else's record, which is the same unearned
+  // re-reading arrived at by subtraction.
   const audit = await shippedAudit();
-  for (const stale of [1, 2, 3]) {
+  for (const stale of [1, 2, 3, 4]) {
     rejects(
       { ...audit, schemaVersion: stale },
       FLUX2_COMPATIBILITY_AUDIT.artifactProof,
@@ -1121,20 +1272,20 @@ test("SC-17524 a moved build input demands a digest, and is adjudicated by one",
   // transcription most likely to break; exercised rather than assumed to match its siblings.
   for (const input of [CARGO_LOCK, "rust-toolchain.toml", ".cargo/config.toml"]) {
     rejects(
-      v4Record(audit, { moved: [input] }),
+      v5Record(audit, { moved: [input] }),
       PROOF,
       /compiled-artifact proof is invalid/,
       `${input} moving must force the artifact layer, not sail through the free path`,
     );
     assert.ok(
-      accepts(v4Record(audit, { moved: [input], artifact: cudaArtifact() }), PROOF),
+      accepts(v5Record(audit, { moved: [input], artifact: cudaArtifact() }), PROOF),
       `${input} reaches the measured binary only through the build, so its digest decides`,
     );
   }
   // ...and only a binary whose own report claims the input may adjudicate it. The frozen set alone
   // must not be able to grant it, because the frozen set is a human transcription.
   rejects(
-    v4Record(audit, { moved: [CARGO_LOCK], artifact: cudaArtifact({ adjudicates: [CANDLE_GEN] }) }),
+    v5Record(audit, { moved: [CARGO_LOCK], artifact: cudaArtifact({ adjudicates: [CANDLE_GEN] }) }),
     PROOF,
     /cannot adjudicate Cargo\.lock/,
     "a record that does not claim the lockfile must not have it granted by the frozen set",
@@ -1143,9 +1294,9 @@ test("SC-17524 a moved build input demands a digest, and is adjudicated by one",
 
 test("SC-17497 a v4 record with an unmoved closure needs no build and no artifact block", async () => {
   const audit = await shippedAudit();
-  assert.ok(accepts(v4Record(audit), null));
+  assert.ok(accepts(v5Record(audit), null));
   rejects(
-    v4Record(audit),
+    v5Record(audit),
     PROOF,
     /missing its expected artifact proof/,
     "a proof left frozen after the closure went quiet demands a build that is not due",
@@ -1155,12 +1306,12 @@ test("SC-17497 a v4 record with an unmoved closure needs no build and no artifac
 test("SC-17497 a doc-comment move is authorized by a matching compiled-artifact digest", async () => {
   // The sc-16961 shape exactly: one crate tree moved, identical compiled code.
   const audit = await shippedAudit();
-  assert.ok(accepts(v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), PROOF));
+  assert.ok(accepts(v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), PROOF));
 
   // Mutation check: the digest is the whole proof, so one character must be fatal.
   const off = `sha256:d${"c".repeat(63)}`;
   rejects(
-    v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact({ capturedDigest: off, compatibleDigest: off }) }),
+    v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact({ capturedDigest: off, compatibleDigest: off }) }),
     PROOF,
     /compiled-artifact proof is invalid/,
   );
@@ -1169,7 +1320,7 @@ test("SC-17497 a doc-comment move is authorized by a matching compiled-artifact 
 test("SC-17497 every way of faking the artifact proof is refused", async () => {
   const audit = await shippedAudit();
   const bad = (label, overrides, pattern = /compiled-artifact proof is invalid/) =>
-    rejects(v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact(overrides) }), PROOF, pattern, label);
+    rejects(v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact(overrides) }), PROOF, pattern, label);
 
   bad("a Metal build is not proof of the CUDA artifact the capture ran", { lane: "metal", features: ["metal"] });
   bad("digests that disagree are a re-capture, not an authorization", {
@@ -1184,18 +1335,18 @@ test("SC-17497 every way of faking the artifact proof is refused", async () => {
   bad("a record whose own adjudicable set is not a list of paths", { adjudicates: "everything" });
 
   rejects(
-    v4Record(audit, { moved: [CANDLE_GEN] }),
+    v5Record(audit, { moved: [CANDLE_GEN] }),
     PROOF,
     /compiled-artifact proof is invalid/,
     "a moved path with no artifact block at all",
   );
   rejects(
-    { ...v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), changedClosurePaths: [] },
+    { ...v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), changedClosurePaths: [] },
     PROOF,
     /misdeclares which closure paths changed/,
     "understating which paths moved hides a second, unproven change",
   );
-  const tamperedCapture = v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() });
+  const tamperedCapture = v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() });
   tamperedCapture.auditedObjects[0].capturedObject = "a".repeat(40);
   rejects(
     tamperedCapture,
@@ -1204,21 +1355,21 @@ test("SC-17497 every way of faking the artifact proof is refused", async () => {
     "a captured object that does not match the code the measurements ran on",
   );
   rejects(
-    { ...v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), schemaVersion: 5 },
+    { ...v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), schemaVersion: 6 },
     PROOF,
     /identity is invalid/,
-    "a v5 nobody has defined",
+    "a v6 nobody has defined",
   );
-  // v3 does not pin `command` to a literal, so this is the only thing standing between the record
+  // v4 does not pin `command` to a literal, so this is the only thing standing between the record
   // and a non-string in the field both languages read.
   rejects(
-    { ...v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), command: 7 },
+    { ...v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }), command: 7 },
     PROOF,
     /identity is invalid/,
-    "a v3 command that is not a string",
+    "a v4 command that is not a string",
   );
   rejects(
-    v4Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }),
+    v5Record(audit, { moved: [CANDLE_GEN], artifact: cudaArtifact() }),
     null,
     /compiled-artifact proof is invalid/,
     "the record may not authorize itself: with no proof frozen in source there is no proof",
@@ -1237,12 +1388,12 @@ test("SC-17497 a digest cannot speak for a closure path the audited binary never
   const audit = await shippedAudit();
   const withoutPid = ADJUDICATES.filter((objectPath) => objectPath !== CANDLE_GEN_PID);
   rejects(
-    v4Record(audit, { moved: [CANDLE_GEN_PID], artifact: cudaArtifact({ adjudicates: withoutPid }) }),
+    v5Record(audit, { moved: [CANDLE_GEN_PID], artifact: cudaArtifact({ adjudicates: withoutPid }) }),
     PROOF,
     /cannot adjudicate crates\/media\/candle-gen\/candle-gen-pid/,
   );
   rejects(
-    v4Record(audit, {
+    v5Record(audit, {
       moved: [CANDLE_GEN, CANDLE_GEN_PID],
       artifact: cudaArtifact({ adjudicates: withoutPid }),
     }),
@@ -1255,13 +1406,13 @@ test("SC-17497 a digest cannot speak for a closure path the audited binary never
   // Intersecting it with the record's own set means both halves must be wrong the same way — a
   // frozen set that still claims a path the build did not report compiling grants nothing.
   rejects(
-    v4Record(audit, { moved: [CANDLE_GEN_PID], artifact: cudaArtifact({ adjudicates: withoutPid }) }),
+    v5Record(audit, { moved: [CANDLE_GEN_PID], artifact: cudaArtifact({ adjudicates: withoutPid }) }),
     { digest: ARTIFACT_DIGEST, adjudicates: [...ADJUDICATES, "crates/bundles/runtime-cuda"] },
     /cannot adjudicate crates\/media\/candle-gen\/candle-gen-pid/,
     "an over-wide frozen set is still checked against what the build reported linking",
   );
   assert.ok(
-    accepts(v4Record(audit, { moved: [CANDLE_GEN_PID], artifact: cudaArtifact() }), PROOF),
+    accepts(v5Record(audit, { moved: [CANDLE_GEN_PID], artifact: cudaArtifact() }), PROOF),
     "a path BOTH halves claim is adjudicated — the rule is coverage, not a blocklist",
   );
 });

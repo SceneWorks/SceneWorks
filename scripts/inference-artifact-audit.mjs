@@ -81,12 +81,36 @@
 // compile, and the composition question is asked where it can actually be answered — against the
 // linked bundle, in `crates/sceneworks-worker/src/flux2_composition_audit.rs`. See
 // `COMPOSITION_ONLY_CRATES` and `docs/inference-artifact-audit-sc-17497.md`.
+// ## What the closure could NOT see, and the witness that closes it (sc-17606)
+//
+// The audited binary is built `-p candle-gen-flux2 --features cuda`. That resolves a strictly
+// SMALLER feature set than the shipped bundle does under `-p runtime-cuda`, because cargo unifies
+// features across whatever is being built. A crate outside FLUX.2's closure — `candle-llm`, the
+// audio lane, another provider — can therefore enable a feature on a dependency FLUX.2 SHARES
+// (`candle-core`, `serde_json`, …) and change what FLUX.2 actually executes in the shipped runtime.
+//
+// Nothing above sees that. Feature flags are not recorded in `Cargo.lock`, so widening the closure
+// to the lockfile does not catch it: every closure object stays byte-identical, the measurement
+// binary's digest stays byte-identical, and the free path certifies the calibration. It is realized
+// precedent in this codebase rather than a hypothesis — `core-llm` unifying `serde_json`'s
+// `preserve_order` flipped map ordering under CI, and `preserve_order` is on in this very bundle.
+//
+// So the record also carries a RESOLVED-FEATURE WITNESS: the feature set the shipped bundle gives
+// every package FLUX.2 links, hashed at both revisions and required identical. It is derived from
+// `cargo tree`, which resolves without compiling anything, so unlike the artifact layer it runs on
+// EVERY audit — including the free path, which is the only path the gap could ever have reached.
+//
+// Switching the audited artifact to `runtime-cuda`'s own test binary would also have closed this,
+// and was measured and rejected in sc-17524: its digest moves on a commit to any of ~50 unrelated
+// crates. The witness closes the same hole without that trigger, because it is scoped to the
+// packages FLUX.2 links rather than to everything the bundle contains.
 //
 // ## The fast path is the point
 //
 // When all nine objects are byte-identical there is nothing to compile and the script says so
 // without building anything, exactly as before. The build only happens when a path actually moved —
-// "cheap and automatic when nothing compiled changed, loud only when something did".
+// "cheap and automatic when nothing compiled changed, loud only when something did". The witness is
+// seconds of dependency resolution, not a build, so the free path stays free.
 //
 // ## Build discipline (why the two builds share one directory)
 //
@@ -184,17 +208,19 @@ export const AUDIT_CLOSURE_PATHS = Object.freeze([
   ...AUDIT_CLOSURE_CRATES,
 ]);
 
-// v4 is sc-17607's nine-path closure. v3 is sc-17524's ten-path one, v1/v2 sc-15833's seven-path
-// one, and all three are refused outright rather than re-graded — in BOTH directions. A record that
-// never looked at `Cargo.lock` cannot be re-read as evidence about it; a v3 record that audited
-// `crates/bundles/runtime-cuda` is not wrong so much as answering a question this schema no longer
-// asks, and quietly dropping an entry from someone else's record is the same silent re-grade seen
-// from the other side.
-export const SCHEMA_VERSION = 4;
+// v5 is sc-17607's nine-path closure carrying sc-17606's resolved-feature witness. Every older
+// version is refused outright rather than re-graded, and the refusals run in both directions. A
+// record that never looked at `Cargo.lock` (v1/v2) or at the shipped feature resolution (v3) cannot
+// be re-read as evidence about them. A v4 record is not short of evidence at all — it audited
+// `crates/bundles/runtime-cuda`, a path this schema deliberately stopped asking about — and
+// quietly dropping an entry out of someone else's record to make it fit is the same unearned
+// re-reading, arrived at by subtraction instead of addition.
+export const SCHEMA_VERSION = 5;
 export const AUDIT_STORY = "SC-15833";
 export const AUDIT_METHOD =
-  "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
-  "the Candle FLUX.2 measurement binary's compile closure and its workspace build inputs";
+  "compiled artifact identity for changed paths, git object identity for unchanged paths, and " +
+  "shipped-bundle resolved-feature identity, across the Candle FLUX.2 measurement binary's " +
+  "compile closure and its workspace build inputs";
 
 /**
  * The measurement target. `tests::` is a lib-inline module, so this is the `--lib` test binary.
@@ -209,6 +235,36 @@ export const AUDIT_ARTIFACT_TARGET = Object.freeze({
   test: "tests::flux2_dev_probed_generate_for_offload_ab",
   profile: "release",
   closurePath: "crates/media/candle-gen/candle-gen-flux2",
+});
+
+/**
+ * The resolution the resolved-feature witness describes (sc-17606).
+ *
+ * `shippedPackage` is the bundle SceneWorks actually consumes — `sceneworks-worker` and
+ * `sceneworks-memory-adapter` both take `runtime-cuda` with default features (`media` + `audio`),
+ * so the default resolution is the shipping one and is deliberately not overridden here.
+ *
+ * `scopeRoot` is what keeps this from becoming the ~50-crate false-positive trigger sc-17524
+ * measured and rejected. The witness covers the bundle-resolved features of the packages FLUX.2
+ * LINKS, not of everything the bundle contains: a feature change on `candle-gen-sdxl` that never
+ * reaches a shared dependency moves nothing here, while one on `candle-core` or `serde_json` does.
+ *
+ * `target` is pinned rather than taken from the host because the calibration is a Windows/CUDA one
+ * (`docs/calibration/sc-15833/capture.json` — RTX PRO 6000, `x86_64-pc-windows-msvc`), and because
+ * `cargo tree --target` only needs rustc's cfg for that triple, never the toolchain or the
+ * platform. The witness is therefore reproducible from any host, which is what lets the Metal lane
+ * exercise this code path honestly instead of computing a different, incomparable thing.
+ *
+ * `edges` is `normal,build`: everything that is compiled into the shipped runtime or generates code
+ * for it. Dev-dependencies are excluded because they do not ship — the one place they matter is
+ * `measurementDelta`, which reports how the MEASURED binary's resolution differs from this one.
+ */
+export const FEATURE_WITNESS_RESOLUTION = Object.freeze({
+  shippedPackage: "runtime-cuda",
+  scopeRoot: "candle-gen-flux2",
+  scopeFeatures: "cuda",
+  target: "x86_64-pc-windows-msvc",
+  edges: "normal,build",
 });
 
 /** `cuda` is the only lane that can authorize a FLUX.2 calibration; `metal` exists so this script
@@ -506,6 +562,261 @@ export function closureRelativePath(root, manifestPath, platformPath = path) {
 }
 
 /**
+ * A `cargo tree` `{p}` rendering with its LOCATION stripped out (sc-17606).
+ *
+ * Path dependencies render as an absolute native path — `candle-gen v0.0.0
+ * (D:\repos\inference-audit\wt-17606\crates\media\candle-gen\candle-gen)` — so hashing the raw
+ * output would produce a witness that describes the worktree it was computed in, not the code. Two
+ * runs at the same revision in two directories would disagree, which is the same defect
+ * `--remap-path-prefix` removes from the artifact layer.
+ *
+ * Remote sources (`https://…`, `git+…`, `registry+…`) are already location-independent and carry the
+ * git rev, so they are kept verbatim. Everything else is a filesystem path and is rewritten
+ * repo-relative in POSIX form. A local path OUTSIDE the worktree — a `[patch]` pointing at a
+ * checkout on the operator's disk — cannot be normalized at all, and is refused rather than hashed:
+ * it would make the witness a property of that machine.
+ *
+ * `platformPath` is injectable for the reason `closureRelativePath`'s is (sc-17587): on Linux and
+ * macOS `path.sep` is already `/` and the Windows drive-letter case cannot arise, so a test using
+ * the host's implementation would pass with the normalisation removed.
+ */
+export function normalizePackageSource(rendering, root, platformPath = path) {
+  // cargo appends a KIND marker AFTER the source — `paste v1.0.15 (proc-macro)`, and
+  // `dyn-stack-macros v0.1.3 (D:\w\crates\x) (proc-macro)` when it is also a path dependency. Peel
+  // it off first or the marker is read as the source: found by running this against the real
+  // bundle, where it turned every registry proc-macro into a package "outside the worktree".
+  const kind = rendering.endsWith(" (proc-macro)") ? " (proc-macro)" : "";
+  const body = kind ? rendering.slice(0, -kind.length) : rendering;
+  const open = body.lastIndexOf(" (");
+  if (open === -1 || !body.endsWith(")")) return rendering;
+  const source = body.slice(open + 2, -1);
+  // `://` alone is not the test: on Windows a path source starts `D:\`, which any `scheme:` regex
+  // happily accepts as a URL — and it would then be hashed verbatim, worktree path and all.
+  if (/^(?:[a-z][a-z0-9+.-]*\+)?(?:https?|ssh|git|sparse):\/\//i.test(source)) return rendering;
+  const relative = closureRelativePath(root, source, platformPath);
+  if (relative === null) {
+    throw new Error(
+      `cargo tree reported a local package outside the worktree (${source}). The feature witness ` +
+        "would then describe this machine rather than the revision; resolve the path dependency or " +
+        "patch inside the workspace before auditing.",
+    );
+  }
+  return `${body.slice(0, open)} (${relative})${kind}`;
+}
+
+/**
+ * `cargo tree --prefix none --format "{p}|{f}"` output as `Map<package, Set<feature list>>`.
+ *
+ * A package can legitimately appear with TWO different feature lists under one resolution: cargo's
+ * v2 resolver unifies host units (build scripts, proc-macro deps) separately from target ones, so
+ * `serde_json` shows up here both as `alloc,default,indexmap,preserve_order,std` (the target graph,
+ * via `core-llm`) and as `default,std` (some build script's). Collapsing the two would silently drop
+ * the distinction, so both are kept and both are hashed.
+ *
+ * An EMPTY parse is a hard error, not an empty map. A witness over nothing hashes to a perfectly
+ * respectable digest that is identical at every revision — the exact false green this layer exists
+ * to prevent, and the one this implementation produced first time out when `--format` was omitted.
+ */
+export function parseFeatureTree(lines, root, platformPath = path) {
+  const tree = new Map();
+  for (const raw of lines) {
+    // The trailing ` (*)` is cargo's "subtree already shown" marker, appended AFTER the format
+    // string; left on, it becomes part of the feature list and the same package hashes two ways.
+    const line = raw.trim().replace(/ \(\*\)$/, "");
+    if (!line) continue;
+    const bar = line.lastIndexOf("|");
+    // `--format "{p}|{f}"` puts a separator on every package line, and `--prefix none` suppresses
+    // the `[build-dependencies]` group headers, so a non-blank line without one is output this
+    // parser does not understand. Skipping it would quietly shrink the hashed set by one package.
+    if (bar === -1) {
+      throw new Error(`cargo tree emitted a line this parser does not recognize: ${line.slice(0, 120)}`);
+    }
+    const id = normalizePackageSource(line.slice(0, bar), root, platformPath);
+    const features = line
+      .slice(bar + 1)
+      .split(",")
+      .filter(Boolean)
+      .sort()
+      .join(",");
+    if (!tree.has(id)) tree.set(id, new Set());
+    tree.get(id).add(features);
+  }
+  if (tree.size === 0) {
+    throw new Error(
+      "cargo tree reported no packages. A feature witness over an empty resolution is identical at " +
+        "every revision, so it is refused rather than hashed.",
+    );
+  }
+  return tree;
+}
+
+/**
+ * The canonical witness text: one sorted `package|features` line per distinct resolution, over the
+ * packages FLUX.2 links, with the features the SHIPPED bundle gives them.
+ *
+ * The header is part of the hash on purpose. Two witnesses computed under different resolutions
+ * (another target triple, another bundle, dev edges included) answer different questions, and a bare
+ * digest comparison could not tell them apart.
+ *
+ * A member the bundle does not contain is refused. It would mean FLUX.2 is no longer reachable from
+ * the package that ships it, so the witness would be quietly answering about a subset — and the
+ * lines for the missing package would just be absent, which reads exactly like "nothing changed".
+ */
+export function featureWitnessText({ shipped, members, resolution = FEATURE_WITNESS_RESOLUTION }) {
+  const missing = [...members.keys()].filter((id) => !shipped.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `${missing.join(", ")} is linked by ${resolution.scopeRoot} but absent from ` +
+        `${resolution.shippedPackage}'s resolution, so the witness cannot describe what ships.`,
+    );
+  }
+  const lines = [
+    ...new Set(
+      [...members.keys()].flatMap((id) => [...shipped.get(id)].map((features) => `${id}|${features}`)),
+    ),
+  ].sort();
+  const header = [
+    "# sceneworks flux2 shipped-feature witness v1",
+    `# shipped-package: ${resolution.shippedPackage}`,
+    `# scope-root: ${resolution.scopeRoot} --features ${resolution.scopeFeatures}`,
+    `# target: ${resolution.target}`,
+    `# edges: ${resolution.edges}`,
+  ];
+  return `${[...header, ...lines].join("\n")}\n`;
+}
+
+/**
+ * How the MEASURED binary's feature resolution differs from the shipped one, per package.
+ *
+ * This is the static half of sc-17606, and it is reported rather than closed: closing it means
+ * re-taking the measurements under the bundle's resolution, which is a capture session. Recording
+ * it means the doc's claim about how far the measured code sits from the shipped code is a measured
+ * number instead of prose that rots. Today it is exactly the test-only surface —
+ * `candle-gen/testkit` and the testkit crate itself — which is the same "it is a test binary"
+ * caveat the digest already carries, now quantified.
+ */
+export function measurementFeatureDelta(measured, shipped) {
+  const delta = [];
+  for (const id of [...measured.keys()].sort()) {
+    const measuredFeatures = [...measured.get(id)].sort().join(" ");
+    const shippedFeatures = shipped.has(id) ? [...shipped.get(id)].sort().join(" ") : null;
+    if (shippedFeatures === null) {
+      delta.push(`${id}: measured only`);
+    } else if (measuredFeatures !== shippedFeatures) {
+      delta.push(`${id}: measured [${measuredFeatures}] shipped [${shippedFeatures}]`);
+    }
+  }
+  return delta;
+}
+
+/**
+ * The witness for one revision: check it out, resolve three trees, hash the canonical text.
+ *
+ * `--locked` on every invocation for the same reason the build carries it — an unlocked resolve
+ * could move a dependency between the two revisions and the witness would describe a graph that was
+ * never committed. No compiler and no CUDA toolkit are involved: this is dependency resolution, so
+ * it costs seconds and runs on the free path too.
+ */
+export function resolveFeatureWitness({
+  workdir,
+  revision,
+  runGit = git,
+  runCargoTree = defaultCargoTreeRunner,
+  resolution = FEATURE_WITNESS_RESOLUTION,
+  platformPath = path,
+}) {
+  runGit(workdir, ["checkout", "--detach", revision]);
+  const root = resolvedPath(workdir);
+  const tree = (args) =>
+    parseFeatureTree(
+      runCargoTree({
+        cwd: workdir,
+        args: [
+          "tree",
+          ...args,
+          "--target",
+          resolution.target,
+          "--prefix",
+          "none",
+          // Without this cargo prints a bare dependency tree and every line fails the `|` test, so
+          // the parse comes back empty. `parseFeatureTree` refuses that rather than hashing it.
+          "--format",
+          "{p}|{f}",
+          "--locked",
+        ],
+      }),
+      root,
+      platformPath,
+    );
+  const shipped = tree(["-p", resolution.shippedPackage, "-e", resolution.edges]);
+  const members = tree(["-p", resolution.scopeRoot, "--features", resolution.scopeFeatures, "-e", resolution.edges]);
+  // Dev edges included: this models the MEASUREMENT build (`cargo test -p candle-gen-flux2`), which
+  // is the one whose binary the artifact layer hashes.
+  const measured = tree([
+    "-p",
+    resolution.scopeRoot,
+    "--features",
+    resolution.scopeFeatures,
+    "-e",
+    `${resolution.edges},dev`,
+  ]);
+  return {
+    digest: digestBytes(Buffer.from(featureWitnessText({ shipped, members, resolution }), "utf8")),
+    packages: members.size,
+    measurementDelta: measurementFeatureDelta(measured, shipped),
+  };
+}
+
+function defaultCargoTreeRunner({ cwd, args }) {
+  const result = spawnSync("cargo", args, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`cargo ${args.slice(0, 4).join(" ")} failed in ${cwd} (see the output above)`);
+  }
+  return result.stdout.split("\n");
+}
+
+/**
+ * A measured-vs-shipped gap that WIDENED across the window with nothing on the shipped side to
+ * explain it — `null` when there is nothing to report (sc-17606).
+ *
+ * `shippedWitnessMoved` is the whole subtlety, and running this end to end is what found it. The
+ * delta is `measured − shipped`, so widening the SHIPPED side widens the delta too: the very change
+ * this layer exists to catch would otherwise be reported here first, under the wrong name, and the
+ * report would be a hard stop that suppressed the record. When the witness moved, a changed delta is
+ * an arithmetic consequence and is not reported twice.
+ *
+ * What is left over is a real finding: the binary being hashed represents the shipped code
+ * differently at the two ends with no shipped-side change behind it. In practice the artifact layer
+ * also catches it — a measured-resolution change means `candle-gen-flux2`'s or `candle-gen`'s tree
+ * moved, which forces a build — so this is a second, more legible witness to it, not the only one.
+ */
+export function unexplainedMeasurementDrift({
+  captured,
+  compatible,
+  capturedDelta,
+  compatibleDelta,
+  shippedWitnessMoved,
+}) {
+  if (shippedWitnessMoved) return null;
+  const same =
+    capturedDelta.length === compatibleDelta.length &&
+    capturedDelta.every((entry, index) => entry === compatibleDelta[index]);
+  if (same) return null;
+  return (
+    "the measured build's feature resolution drifted relative to the shipped bundle's, with no " +
+    "change in the shipped resolution to explain it:\n" +
+    `  ${captured}:\n    ${capturedDelta.join("\n    ") || "(none)"}\n` +
+    `  ${compatible}:\n    ${compatibleDelta.join("\n    ") || "(none)"}`
+  );
+}
+
+/**
  * The closure paths the built binary can speak for — the only ones its digest may adjudicate.
  *
  * Two kinds of entry, adjudicated two different ways:
@@ -690,11 +1001,19 @@ export function assertComparableToolchains({ captured, compatible, capturedRustc
 /**
  * Assemble the record. `auditedArtifact` is present exactly when a path moved: on the fast path
  * there is no artifact to name, and inventing one would claim a build that never ran.
+ *
+ * `featureWitness` is present ALWAYS (sc-17606), and that asymmetry is the whole point of it. The
+ * change it exists to catch — a crate outside the closure enabling a feature on a dependency FLUX.2
+ * shares — moves no closure object at all, so it arrives exclusively on the free path. A witness
+ * that only appeared alongside a build would never once have run when it mattered.
  */
-export function auditRecord({ captured, compatible, pairs, artifact = null }) {
+export function auditRecord({ captured, compatible, pairs, artifact = null, featureWitness }) {
   const changed = changedClosurePaths(pairs);
   if (changed.length > 0 && !artifact) {
     throw new Error(`closure paths moved (${changed.join(", ")}) but no compiled-artifact proof was supplied`);
+  }
+  if (!featureWitness) {
+    throw new Error("no resolved-feature witness was supplied; a v4 record cannot be emitted without one");
   }
   const unadjudicable = changed.filter((objectPath) => !(artifact?.adjudicates ?? []).includes(objectPath));
   if (unadjudicable.length > 0) {
@@ -712,6 +1031,7 @@ export function auditRecord({ captured, compatible, pairs, artifact = null }) {
     command: "node scripts/inference-artifact-audit.mjs --repo PATH --captured SHA40 --compatible SHA40",
     changedClosurePaths: changed,
     auditedObjects: pairs,
+    featureWitness,
   };
   if (artifact) record.auditedArtifact = artifact;
   return record;
@@ -727,11 +1047,33 @@ function usage() {
     "                 every consumer requires lane \"cuda\". For exercising this script, not for proof.\n" +
     "  --workdir PATH build here instead of a throwaway temp directory, and KEEP the derived\n" +
     "                 `<PATH>-target` afterwards. A cold CUDA build is hours and the remapped paths\n" +
-    "                 make the fingerprints path-specific, so this is what makes a re-run warm.\n"
+    "                 make the fingerprints path-specific, so this is what makes a re-run warm.\n" +
+    "\n" +
+    "Both revisions are checked out into a worktree on EVERY run, including the free path, because\n" +
+    "the resolved-feature witness has to resolve each one's dependency graph. That is `cargo tree`,\n" +
+    "not a build: no compiler, no CUDA toolkit and no target directory are involved.\n"
   );
 }
 
-export async function main(argv) {
+/**
+ * `runGit` and friends are injectable for the reason `assertComparableToolchains` was extracted from
+ * here (sc-17497): a rule that only ever runs behind two real CUDA builds is indistinguishable from
+ * a rule that is not there. sc-17606 put the load-bearing half of the witness layer INTO this
+ * function — which revision each witness resolves at, whose digest lands on which side of the
+ * record, what the exit code is — and none of it is reachable from a unit test of the pure
+ * functions. Swapping `compatibleWitness.digest` for `capturedWitness.digest` below would make the
+ * layer permanently green, and no test of those functions would notice.
+ */
+export async function main(
+  argv,
+  {
+    runGit = git,
+    runCargoTree = defaultCargoTreeRunner,
+    runCargo = defaultCargoRunner,
+    readArtifact = (file) => readFileSync(file),
+    readToolchain = defaultToolchain,
+  } = {},
+) {
   const value = (flag) => {
     const index = argv.indexOf(flag);
     return index === -1 ? undefined : argv[index + 1];
@@ -746,43 +1088,96 @@ export async function main(argv) {
     return 2;
   }
 
-  const captured = resolveRevision(repo, capturedArg);
-  const compatible = resolveRevision(repo, compatibleArg);
-  const pairs = closureObjectPairs({ repo, captured, compatible });
+  const captured = resolveRevision(repo, capturedArg, { runGit });
+  const compatible = resolveRevision(repo, compatibleArg, { runGit });
+  const pairs = closureObjectPairs({ repo, captured, compatible, runGit });
   const changed = changedClosurePaths(pairs);
 
   let artifact = null;
-  if (changed.length === 0) {
-    process.stderr.write(
-      `[audit] all ${AUDIT_CLOSURE_PATHS.length} closure objects are byte-identical; no build needed.\n`,
+  let featureWitness = null;
+  let measurementDrift = null;
+  process.stderr.write(
+    changed.length === 0
+      ? `[audit] all ${AUDIT_CLOSURE_PATHS.length} closure objects are byte-identical; no build needed.\n`
+      : `[audit] closure paths moved: ${changed.join(", ")}\n`,
+  );
+  // The nvcc probe gates the BUILD, so it is only asked for when there is one. The witness needs no
+  // compiler at all — it is dependency resolution — which is exactly why it can run on the free path.
+  const cudaRelease = changed.length > 0 && lane === "cuda" ? assertRealCudaCompiler() : null;
+  // An operator-supplied `--workdir` is theirs, and so is the target directory derived from it.
+  // A cold CUDA build of this closure is hours (candle-kernels alone is an nvcc pass over the
+  // vendored `.cu` set), and `--remap-path-prefix` bakes the worktree path into every rustc
+  // fingerprint — so the ONLY way a second run reuses the first one's work is to build at the
+  // same path with the same target directory. Deleting it unconditionally, as this did, made
+  // every re-run cold and effectively made the tool single-shot on the one box that can run it.
+  const requestedWorkdir = value("--workdir");
+  // The failure path below `rmSync`s the workdir when `git worktree add` fails, which is fine for
+  // a directory this script made and NOT fine for one an operator handed it. Now that the usage
+  // text actively recommends a persistent path, refuse to adopt a non-empty one at all.
+  if (requestedWorkdir && existsSync(requestedWorkdir) && !isEmptyDirectory(requestedWorkdir)) {
+    throw new Error(
+      `--workdir ${requestedWorkdir} already exists and is not an empty directory. This script ` +
+        "checks revisions out into it and removes it afterwards; point it somewhere it owns.",
     );
-  } else {
-    process.stderr.write(`[audit] closure paths moved: ${changed.join(", ")}\n`);
-    const cudaRelease = lane === "cuda" ? assertRealCudaCompiler() : null;
-    // An operator-supplied `--workdir` is theirs, and so is the target directory derived from it.
-    // A cold CUDA build of this closure is hours (candle-kernels alone is an nvcc pass over the
-    // vendored `.cu` set), and `--remap-path-prefix` bakes the worktree path into every rustc
-    // fingerprint — so the ONLY way a second run reuses the first one's work is to build at the
-    // same path with the same target directory. Deleting it unconditionally, as this did, made
-    // every re-run cold and effectively made the tool single-shot on the one box that can run it.
-    const requestedWorkdir = value("--workdir");
-    // The failure path below `rmSync`s the workdir when `git worktree add` fails, which is fine for
-    // a directory this script made and NOT fine for one an operator handed it. Now that the usage
-    // text actively recommends a persistent path, refuse to adopt a non-empty one at all.
-    if (requestedWorkdir && existsSync(requestedWorkdir) && !isEmptyDirectory(requestedWorkdir)) {
-      throw new Error(
-        `--workdir ${requestedWorkdir} already exists and is not an empty directory. This script ` +
-          "checks revisions out into it and removes it afterwards; point it somewhere it owns.",
-      );
-    }
-    const workdir = requestedWorkdir ?? mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-build-"));
-    const cargoTargetDir = path.join(workdir, "..", `${path.basename(workdir)}-target`);
+  }
+  // sc-17606: a worktree is now needed on BOTH paths, because the feature witness has to resolve
+  // each revision's dependency graph. That is `cargo tree`, not a build: seconds, no toolchain, no
+  // target directory. The free path stays free of compilation, which was always the promise.
+  const workdir = requestedWorkdir ?? mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-build-"));
+  const cargoTargetDir = path.join(workdir, "..", `${path.basename(workdir)}-target`);
+  // `finally` does not run on a signal, and sc-17606 made the worktree happen on EVERY run rather
+  // than only behind a build — so a Ctrl-C now leaves a registration behind routinely instead of
+  // rarely. That matters more than it sounds: `--workdir` refuses a non-empty directory, so the
+  // leftover blocks the same path on the retry, which is the run the operator is most likely to
+  // attempt next.
+  const abandonWorktree = () => {
     try {
-      git(repo, ["worktree", "add", "--detach", workdir, captured]);
+      runGit(repo, ["worktree", "remove", "--force", workdir]);
+    } catch {
+      /* nothing to remove, which is the same outcome */
+    }
+    process.exit(130);
+  };
+  process.once("SIGINT", abandonWorktree);
+  process.once("SIGTERM", abandonWorktree);
+  try {
+    runGit(repo, ["worktree", "add", "--detach", workdir, captured]);
+    process.stderr.write(`[audit] resolving the shipped feature set at ${captured}\n`);
+    const capturedWitness = resolveFeatureWitness({ workdir, revision: captured, runGit, runCargoTree });
+    process.stderr.write(`[audit] resolving the shipped feature set at ${compatible}\n`);
+    const compatibleWitness = resolveFeatureWitness({ workdir, revision: compatible, runGit, runCargoTree });
+    featureWitness = {
+      ...FEATURE_WITNESS_RESOLUTION,
+      packages: compatibleWitness.packages,
+      // The COMPATIBLE revision's: the record describes what the live pin ships. A divergence from
+      // the captured side is reported below rather than folded in silently.
+      measurementDelta: compatibleWitness.measurementDelta,
+      capturedDigest: capturedWitness.digest,
+      compatibleDigest: compatibleWitness.digest,
+    };
+    measurementDrift = unexplainedMeasurementDrift({
+      captured,
+      compatible,
+      capturedDelta: capturedWitness.measurementDelta,
+      compatibleDelta: compatibleWitness.measurementDelta,
+      shippedWitnessMoved: capturedWitness.digest !== compatibleWitness.digest,
+    });
+    if (changed.length > 0) {
       process.stderr.write(`[audit] building ${captured} (${lane})\n`);
-      const capturedBuild = buildMeasurementBinary({ workdir, revision: captured, lane, cargoTargetDir });
+      const build = (revision) =>
+        buildMeasurementBinary({
+          workdir,
+          revision,
+          lane,
+          cargoTargetDir,
+          runGit,
+          runCargo,
+          readArtifact,
+          readToolchain,
+        });
+      const capturedBuild = build(captured);
       process.stderr.write(`[audit] building ${compatible} (${lane})\n`);
-      const compatibleBuild = buildMeasurementBinary({ workdir, revision: compatible, lane, cargoTargetDir });
+      const compatibleBuild = build(compatible);
       assertComparableToolchains({
         captured,
         compatible,
@@ -801,34 +1196,45 @@ export async function main(argv) {
         capturedDigest: capturedBuild.digest,
         compatibleDigest: compatibleBuild.digest,
       };
-    } finally {
-      // `|| true`-style tolerance: if `worktree add` was what failed there is nothing to remove, and
-      // masking that error with a second one would hide the real cause.
-      try {
-        git(repo, ["worktree", "remove", "--force", workdir]);
-      } catch {
-        rmSync(workdir, { recursive: true, force: true });
-      }
-      if (requestedWorkdir) {
-        // Say so. This is tens of gigabytes of release artifacts, and an operator who does not know
-        // it survived will neither reuse it nor delete it.
-        process.stderr.write(
-          `[audit] kept ${cargoTargetDir} so a re-run at --workdir ${requestedWorkdir} is warm; delete it when done.\n`,
-        );
-      } else {
-        rmSync(cargoTargetDir, { recursive: true, force: true });
-      }
     }
-    if (artifact.capturedDigest !== artifact.compatibleDigest) {
+  } finally {
+    process.off("SIGINT", abandonWorktree);
+    process.off("SIGTERM", abandonWorktree);
+    // `|| true`-style tolerance: if `worktree add` was what failed there is nothing to remove, and
+    // masking that error with a second one would hide the real cause.
+    try {
+      runGit(repo, ["worktree", "remove", "--force", workdir]);
+    } catch {
+      rmSync(workdir, { recursive: true, force: true });
+    }
+    if (requestedWorkdir && changed.length > 0) {
+      // Say so. This is tens of gigabytes of release artifacts, and an operator who does not know
+      // it survived will neither reuse it nor delete it.
       process.stderr.write(
-        `[audit] ARTIFACTS DIFFER\n  ${captured}: ${artifact.capturedDigest}\n` +
-          `  ${compatible}: ${artifact.compatibleDigest}\n` +
-          "  The compiled code changed. The calibration must be re-captured; it cannot be extended.\n",
+        `[audit] kept ${cargoTargetDir} so a re-run at --workdir ${requestedWorkdir} is warm; delete it when done.\n`,
       );
+    } else if (!requestedWorkdir) {
+      rmSync(cargoTargetDir, { recursive: true, force: true });
     }
   }
+  if (artifact && artifact.capturedDigest !== artifact.compatibleDigest) {
+    process.stderr.write(
+      `[audit] ARTIFACTS DIFFER\n  ${captured}: ${artifact.capturedDigest}\n` +
+        `  ${compatible}: ${artifact.compatibleDigest}\n` +
+        "  The compiled code changed. The calibration must be re-captured; it cannot be extended.\n",
+    );
+  }
+  if (featureWitness.capturedDigest !== featureWitness.compatibleDigest) {
+    process.stderr.write(
+      `[audit] SHIPPED FEATURE SETS DIFFER\n  ${captured}: ${featureWitness.capturedDigest}\n` +
+        `  ${compatible}: ${featureWitness.compatibleDigest}\n` +
+        `  Something outside FLUX.2's closure changed how ${FEATURE_WITNESS_RESOLUTION.shippedPackage} ` +
+        "compiles code FLUX.2 links. The calibration describes the old resolution.\n",
+    );
+  }
+  if (measurementDrift) process.stderr.write(`[audit] MEASUREMENT DRIFT\n  ${measurementDrift}\n`);
 
-  const record = auditRecord({ captured, compatible, pairs, artifact });
+  const record = auditRecord({ captured, compatible, pairs, artifact, featureWitness });
   const body = `${JSON.stringify(record, null, 2)}\n`;
   if (out) {
     writeFileSync(out, body);
@@ -836,7 +1242,12 @@ export async function main(argv) {
   } else {
     process.stdout.write(body);
   }
-  return artifact && artifact.capturedDigest !== artifact.compatibleDigest ? 1 : 0;
+  // Every failure path still emits the record above, for the reason ARTIFACTS DIFFER always did:
+  // the record is the thing an operator diffs to see WHAT moved, and suppressing it on failure
+  // leaves them with a message and no evidence.
+  const artifactsDiffer = artifact !== null && artifact.capturedDigest !== artifact.compatibleDigest;
+  const featuresDiffer = featureWitness.capturedDigest !== featureWitness.compatibleDigest;
+  return artifactsDiffer || featuresDiffer || measurementDrift ? 1 : 0;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
