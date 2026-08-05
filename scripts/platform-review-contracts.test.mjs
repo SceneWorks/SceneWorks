@@ -642,6 +642,68 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
     // Reachability. A restamp touches ONLY the facts file, so without this path entry the lane does
     // not run at all on the one PR the step exists to catch — declared but unreachable, the same
     // trap sc-17026 was about.
-    assert.match(lane, /^ {6}- "config\/engine-capabilities\/\*\*"$/m, path);
+    //
+    // Pinned to THIS lane's own file, not `config/engine-capabilities/**` (sc-17665). The directory
+    // glob satisfied reachability too, but it also woke each lane for the OTHER backend's dump — a
+    // whole self-hosted job, on the fleet's most constrained resource, for a file the woken lane
+    // never opens.
+    //
+    // Asserted by MATCHING the declared globs against both filenames, not by forbidding particular
+    // spellings. A spelling blocklist only catches a straight revert: keeping the narrow entry and
+    // *adding* `config/engine-capabilities/*.json`, `config/engine-capabilities/**/*` or `config/**`
+    // restores the cross-wake in full, and every one of those passes a `**`/`*` blocklist. Matching
+    // is spelling-independent and closes all of them at once.
+    const anchorAt = lane.indexOf("paths: &");
+    assert.ok(anchorAt > 0, `${path} must declare a paths anchor`);
+    const declared = [
+      ...lane
+        .slice(anchorAt, lane.indexOf("pull_request:"))
+        .matchAll(/^ {6}- "([^"]+)"$/gm),
+    ].map((match) => match[1]);
+    // GitHub filter-pattern syntax: `*` matches any run of characters except `/`, `**` matches any
+    // run including `/`. `**/` is treated as "zero or more directories", matching the convention
+    // GitHub's own `**/README.md` example implies. That reading is also the SAFE one here: it makes
+    // `config/engine-capabilities/**/*` count as matching a file directly in that directory, so an
+    // ambiguous pattern is rejected rather than quietly permitted. Nobody needs to spell it that way.
+    const matches = (glob, target) => {
+      let source = "";
+      for (let i = 0; i < glob.length; i += 1) {
+        const char = glob[i];
+        if (char === "*") {
+          if (glob[i + 1] === "*") {
+            if (glob[i + 2] === "/") {
+              source += "(?:.*/)?";
+              i += 2;
+            } else {
+              source += ".*";
+              i += 1;
+            }
+          } else {
+            source += "[^/]*";
+          }
+        } else {
+          source += "\\^$+?.()|[]{}".includes(char) ? `\\${char}` : char;
+        }
+      }
+      return new RegExp(`^${source}$`).test(target);
+    };
+    const own = `config/engine-capabilities/${file}`;
+    assert.ok(
+      declared.some((glob) => matches(glob, own)),
+      `${path} must watch ${own}, or a restamp of it — which touches nothing else — never ` +
+        "triggers the lane and the verification step is declared but unreachable.",
+    );
+    for (const [, otherFile] of lanes) {
+      if (otherFile === file) continue;
+      const foreign = `config/engine-capabilities/${otherFile}`;
+      const culprits = declared.filter((glob) => matches(glob, foreign));
+      assert.deepEqual(
+        culprits,
+        [],
+        `${path} triggers on ${foreign} via ${JSON.stringify(culprits)}, but has no step that ` +
+          "reads it. That wakes an entire self-hosted job — the fleet's most constrained " +
+          "resource — for a file this lane cannot check. Narrow the pattern to this lane's own dump.",
+      );
+    }
   }
 });
