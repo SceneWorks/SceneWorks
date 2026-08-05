@@ -5,7 +5,6 @@ use mlx_gen::gen_core::{
     MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode,
     MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
     MemorySelection, MemoryStrategy, MemoryStrategyParameters, TransformerComponent,
-    MEMORY_CALIBRATION_ABI,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig};
 use mlx_gen::{
@@ -47,14 +46,9 @@ const Z_IMAGE_MEAN_THRESHOLD: f64 = 4.0 / 255.0;
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
-const KREA_FINGERPRINT: &str = "krea-control-mlx-v4-q4-pose-bounded-decode-512-64";
 const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
 const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
-/// This harness loads the pose-control provider with a default-shaped spec, and the MLX providers
-/// mint their calibration identity from `spec.load_shape` — so the handshake and the emitted
-/// receipt state eager materialization from this one declaration.
-const KREA_CONTROL_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
 /// The gated VAE probe reaches `load_vae` directly, with no `LoadSpec` and therefore no deferred
 /// block schedule: it bulk-materializes the VAE, which is eager materialization.
 const QWEN_VAE_PROBE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
@@ -624,6 +618,7 @@ fn krea_context(
     height: u32,
     tile_edge: u32,
     predicted_peak_bytes: u64,
+    calibration: &MemoryCalibrationIdentity,
     fingerprint: &str,
 ) -> MemoryRunContext {
     MemoryRunContext {
@@ -640,11 +635,22 @@ fn krea_context(
                 component_precision_floors: &[],
             },
         },
-        calibration_abi: MEMORY_CALIBRATION_ABI,
+        // From the LOADED provider's own identity, never a local copy. A hardcoded fingerprint
+        // silently goes stale the moment the provider re-fingerprints — which is exactly what
+        // happened here: `krea-control-mlx-v4-q4-pose-bounded-decode-512-64` outlived the
+        // provider's move to the full-ladder identity and failed the handshake on every case.
+        // `fingerprint` stays a parameter only so the negative probe can pass a deliberate
+        // mismatch; the real call sites pass `calibration.fingerprint`.
+        calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
-        load_shape: KREA_CONTROL_LOAD_SHAPE,
+        load_shape: calibration.load_shape,
         mode: MemoryMode::TextToImage,
-        has_reference: false,
+        // `krea_request` carries exactly one `Conditioning::Control`, and `image_reference_count()`
+        // counts Control alongside Reference/Depth/Mask — so the admitted geometry must declare one
+        // reference or `configure_request` refuses the render it just admitted. `has_reference` is
+        // the compatibility summary of the same fact and gen-core requires it to equal
+        // `reference_count > 0`, so the two move together.
+        has_reference: true,
         use_pid: false,
         has_phases: false,
         geometry: MemoryGeometry {
@@ -652,7 +658,7 @@ fn krea_context(
             height,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: 1,
         },
         overlay: Some("control:1".to_owned()),
         budget: MemoryBudget {
@@ -1669,15 +1675,48 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
         .map_err(|error| format!("build Krea registry: {error}"))?
         .load(KREA_PROVIDER, &spec)
         .map_err(|error| format!("load real Krea q4 control provider: {error}"))?;
+    let contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded krea_2_turbo_control has no memory-strategy contract".to_owned())?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Krea control provider has no calibration identity".to_owned())?;
+    // Fail closed when the plan and the pinned provider disagree, rather than measuring against
+    // one identity and stamping the receipt with the other.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
 
-    let stale_context = krea_context(width, height, tile_edge, 1, "stale-fingerprint");
+    let stale_context = krea_context(
+        width,
+        height,
+        tile_edge,
+        1,
+        calibration,
+        "stale-fingerprint",
+    );
     if !matches!(
         generator.memory_strategy_safety_check(&stale_context),
         MemorySafetyDecision::Reject { .. }
     ) {
         return Err("provider accepted a stale calibration fingerprint".to_owned());
     }
-    let mut unknown_context = krea_context(width, height, tile_edge, 1, KREA_FINGERPRINT);
+    let mut unknown_context = krea_context(
+        width,
+        height,
+        tile_edge,
+        1,
+        calibration,
+        &calibration.fingerprint,
+    );
     unknown_context.budget.total_bytes = 0;
     if !matches!(
         generator.memory_strategy_safety_check(&unknown_context),
@@ -1686,7 +1725,14 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
         return Err("provider accepted an unknown/zero memory budget".to_owned());
     }
 
-    let context = krea_context(width, height, tile_edge, 1, KREA_FINGERPRINT);
+    let context = krea_context(
+        width,
+        height,
+        tile_edge,
+        1,
+        calibration,
+        &calibration.fingerprint,
+    );
     let conditioning = Cell::new(PhaseMemory {
         active: 0,
         cache: 0,
@@ -1884,7 +1930,9 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
     Ok(json!({
         "status": "complete",
         "strategy": strategy,
-        "loadShape": load_shape_key(KREA_CONTROL_LOAD_SHAPE),
+        // The receipt attests what THIS run loaded under, read from the provider that ran it
+        // (sc-16482): the plan's declaration is cross-checked, never copied onto the fragment.
+        "loadShape": load_shape_key(calibration.load_shape),
         "artifact": {
             "repository": repository,
             "resolvedRevision": revision,

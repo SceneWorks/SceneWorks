@@ -101,7 +101,7 @@ function runDocker() {
     RUST_IMAGE,
     "bash",
     "-euc",
-    // rust-toolchain.toml pins `stable`; add clippy to it (no-op if already present) then lint.
+    // rust-toolchain.toml pins a concrete version; add clippy to it (no-op if already present) then lint.
     `rustup component add clippy && exec cargo ${CLIPPY_ARGS.join(" ")}`,
   ];
   console.log(

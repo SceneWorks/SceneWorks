@@ -73,7 +73,7 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
 
       # Do the cheap repository invariants before spending runner time on nvcc.
       # The Dockerfile itself performs the web + embed-web/backend-candle release

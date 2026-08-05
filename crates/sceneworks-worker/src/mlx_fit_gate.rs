@@ -3051,8 +3051,16 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
+    /// SC-16915 recaptured these measurements, so this test now pins the opposite of what it used
+    /// to: it asserted `inference_revision == 7fbcb4a2` and `!= INFERENCE_RUNTIME_REVISION` with
+    /// the note "must remain historical until they are recaptured on the new runtime". They have
+    /// been. Every shipped Qwen binding is now at the running pin.
+    ///
+    /// The assertion is inverted, not weakened. It still requires the full five-rung bf16 ladder —
+    /// checked as a rung SET on the bf16 subset rather than as a total count, so adding the q8/q4
+    /// tiers cannot mask a dropped bf16 rung the way a bare `bindings.len()` would.
     #[test]
-    fn shipped_qwen_manifest_preserves_all_five_exact_historical_mlx_ladder_rungs() {
+    fn shipped_qwen_manifest_carries_every_tier_ladder_at_the_running_pin() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3066,10 +3074,14 @@ mod tests {
             .expect("Qwen calibration bindings are valid")
             .expect("Qwen declares exact MLX calibration bindings");
 
-        assert_eq!(bindings.len(), 5);
+        assert_eq!(
+            bindings.len(),
+            9,
+            "bf16 five-rung ladder plus q8 and q4 pairs"
+        );
         assert!(bindings.iter().all(|binding| {
-            binding.provider == "qwen_image"
-                && binding.tier == "bf16"
+            binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
+                && binding.provider == "qwen_image"
                 && binding.mode == "text_to_image"
                 && binding.overlay == "none"
                 && binding.geometry
@@ -3079,20 +3091,32 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                && binding.query.inference_revision == "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+                && binding.query.inference_revision
+                    == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
         }));
-        assert_ne!(
-            bindings[0].query.inference_revision,
-            crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
-            "the Qwen measurements must remain historical until they are recaptured on the new runtime",
-        );
-        let mut rungs = bindings
-            .iter()
-            .map(|binding| format!("{:?}", binding.rung))
-            .collect::<Vec<_>>();
-        rungs.sort();
+        // The load shape is a receipt axis, not a naming convention: rung 4 goes deferred and every
+        // other rung is eager, on every tier. A bundle where one shape covers all rows is the tell
+        // that the axis was derived from a fingerprint suffix instead of measured.
+        assert!(bindings.iter().all(|binding| {
+            binding.query.load_shape
+                == if binding.rung == StrategyRung::BoundedTransformerResidency {
+                    LoadShapeKey::DeferredMaterialization
+                } else {
+                    LoadShapeKey::EagerMaterialization
+                }
+        }));
+
+        let rungs_for = |tier: &str| {
+            let mut rungs = bindings
+                .iter()
+                .filter(|binding| binding.tier == tier)
+                .map(|binding| format!("{:?}", binding.rung))
+                .collect::<Vec<_>>();
+            rungs.sort();
+            rungs
+        };
         assert_eq!(
-            rungs,
+            rungs_for("bf16"),
             [
                 "BoundedAttention",
                 "BoundedDecode",
@@ -3100,6 +3124,464 @@ mod tests {
                 "Resident",
                 "StagedResidency",
             ]
+        );
+        // `mlx.quantize` for qwen_image is 4, so the default install lands on q4. Before sc-16915
+        // the shipped opt-in was bf16-only and that install always reached the legacy estimator.
+        for tier in ["q8", "q4"] {
+            assert_eq!(
+                rungs_for(tier),
+                ["BoundedAttention", "BoundedTransformerResidency"],
+                "{tier} carries the two rungs the plan declares"
+            );
+        }
+    }
+
+    /// SC-16915 acceptance: the SHIPPED manifest opt-in and the SHIPPED evidence bundle must agree
+    /// well enough for a covered cell to take the calibrated path. Every other test in this module
+    /// builds its own fixture manifest and fixture bundle, so all of them stay green even when the
+    /// two real artefacts have drifted apart — which is exactly the state this story had to repair.
+    /// This one reads both real files and nothing else.
+    ///
+    /// Driven over EVERY shipped tier, not just bf16. `packaged_admission_route` filters candidates
+    /// by `binding.tier == plan_tier_key(plan.tier)`, so a bf16-only spec never even considers the
+    /// q8/q4 bindings — asserting `path == Evidence` on bf16 alone would leave 8 of the 9 qwen
+    /// bindings free to lose their backing record with the test still green. `mlx.quantize` for
+    /// qwen_image is 4, so q4 is the tier a default install actually reaches.
+    ///
+    /// The count assertion is what makes a dropped record fail: `path == Evidence` only needs the
+    /// candidate list to be non-empty, so one surviving rung would mask the loss of every other.
+    #[test]
+    fn shipped_qwen_manifest_and_packaged_evidence_select_the_calibrated_path() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        let entry = manifest
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("models array")
+            .iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some("qwen_image"))
+            .and_then(Value::as_object)
+            .expect("qwen_image manifest entry");
+        let calibrations = entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("calibrations"))
+            .and_then(Value::as_array)
+            .expect("qwen_image declares mlx.calibrations");
+
+        for (tier, quant, expected_rungs) in [
+            ("bf16", None, 5_usize),
+            ("q8", Some(gen_core::Quant::Q8), 2),
+            ("q4", Some(gen_core::Quant::Q4), 2),
+        ] {
+            // Take the request identity from the opt-in itself rather than restating it, so the
+            // test cannot drift from the manifest it is checking.
+            let binding = calibrations
+                .iter()
+                .find(|item| item.get("tier").and_then(Value::as_str) == Some(tier))
+                .unwrap_or_else(|| panic!("{tier} is part of the shipped opt-in"));
+            let text = |key: &str| {
+                binding
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{tier} binding is missing {key}"))
+                    .to_owned()
+            };
+            let geometry = binding.get("geometry").expect("binding geometry");
+            let dimension = |key: &str| {
+                u32::try_from(
+                    geometry
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .unwrap_or_else(|| panic!("geometry is missing {key}")),
+                )
+                .expect("geometry fits u32")
+            };
+
+            let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(format!(
+                "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/{tier}"
+            ))));
+            if let Some(quant) = quant {
+                spec = spec.with_quant(quant);
+            }
+            let plan = MlxRequestPlan::for_spec_and_manifest(
+                "qwen_image",
+                "qwen_image",
+                &spec,
+                Some(entry),
+                Some(ResolvedArtifactProvenance {
+                    identity: crate::model_jobs::ResolvedArtifactIdentity {
+                        repository: text("artifactRepository"),
+                        revision: text("artifactResolvedRevision"),
+                        variant: text("artifactVariant"),
+                        fingerprint: text("resolvedPathFingerprint"),
+                    },
+                    fixed_artifact_tier: Some(tier.to_owned()),
+                }),
+            );
+            assert!(
+                matches!(plan.calibration, MlxCalibrationConfig::Valid(_)),
+                "{tier}: the shipped opt-in must parse as a valid binding set"
+            );
+
+            let mut inputs = fixture_inputs(dimension("width"), dimension("height"));
+            inputs.overlay = None;
+            let route =
+                packaged_admission_route(&plan, &inputs, &text("mode"), fixture_budget(128.0))
+                    .expect("a covered cell must not error");
+            assert_eq!(
+                route.path,
+                AdmissionPath::Evidence,
+                "{tier}: shipped manifest + shipped evidence must reach calibrated admission; \
+                 got fallback {:?}",
+                route.fallback_reason
+            );
+            assert_eq!(
+                route.evidence.len(),
+                expected_rungs,
+                "{tier}: every declared rung must resolve to a promoted record, not just one"
+            );
+            assert!(
+                route
+                    .evidence
+                    .iter()
+                    .all(|candidate| !candidate.record_id.is_empty()),
+                "{tier}: each candidate names the exact record backing it"
+            );
+        }
+
+        // Mutation check for the axis this story exists to restore. Asserting only the route above
+        // is a FALSE GREEN for `loadShape`: the route matches whichever binding fits the request,
+        // so corrupting one cell's shape just selects a different cell and still reaches Evidence.
+        // Flip EVERY declared shape and the whole opt-in must stop matching — the receipts say
+        // which cells were measured eager and which deferred, and the two are not interchangeable.
+        let bf16 = calibrations
+            .iter()
+            .find(|item| item.get("tier").and_then(Value::as_str) == Some("bf16"))
+            .expect("bf16 binding");
+        let text = |key: &str| {
+            bf16.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("binding is missing {key}"))
+                .to_owned()
+        };
+        let mut mutated = entry.clone();
+        for calibration in mutated
+            .get_mut("mlx")
+            .and_then(|mlx| mlx.get_mut("calibrations"))
+            .and_then(Value::as_array_mut)
+            .expect("calibrations array")
+        {
+            let shape = calibration
+                .get("loadShape")
+                .and_then(Value::as_str)
+                .expect("every binding declares a loadShape");
+            calibration["loadShape"] = Value::from(match shape {
+                "eager_materialization" => "deferred_materialization",
+                _ => "eager_materialization",
+            });
+        }
+        let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/bf16",
+        )));
+        let mut inputs = fixture_inputs(1024, 1024);
+        inputs.overlay = None;
+        let mutated_route = packaged_admission_route(
+            &MlxRequestPlan::for_spec_and_manifest(
+                "qwen_image",
+                "qwen_image",
+                &spec,
+                Some(&mutated),
+                Some(ResolvedArtifactProvenance {
+                    identity: crate::model_jobs::ResolvedArtifactIdentity {
+                        repository: text("artifactRepository"),
+                        revision: text("artifactResolvedRevision"),
+                        variant: text("artifactVariant"),
+                        fingerprint: text("resolvedPathFingerprint"),
+                    },
+                    fixed_artifact_tier: Some("bf16".to_owned()),
+                }),
+            ),
+            &inputs,
+            "text_to_image",
+            fixture_budget(128.0),
+        )
+        .expect("a load-shape mismatch degrades, never errors");
+        assert_eq!(
+            mutated_route.path,
+            AdmissionPath::Legacy,
+            "an opt-in claiming the wrong materialization shape must NOT reach calibrated admission"
+        );
+        // The REASON matters as much as the path: `Legacy` alone would also be satisfied by the
+        // mutated manifest failing to parse into bindings at all (`NoBinding`), which would make
+        // this a test of malformed JSON rather than of the load-shape axis.
+        assert_eq!(
+            mutated_route.fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity),
+            "the bindings must PARSE and then go stale on the shape, not fail to parse"
+        );
+    }
+
+    /// The krea half of the same guarantee. `packaged_krea_plan` synthesizes its bindings FROM the
+    /// evidence records, so it is current-by-construction and structurally cannot notice the
+    /// shipped krea manifest disagreeing with the shipped bundle. krea_2_turbo_control is a covered
+    /// provider of sc-16915, so it gets the same real-manifest × real-evidence route check qwen has.
+    #[test]
+    fn shipped_krea_manifest_and_packaged_evidence_select_the_calibrated_path() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        let entry = manifest
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("models array")
+            .iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some("krea_2_turbo"))
+            .and_then(Value::as_object)
+            .expect("krea_2_turbo manifest entry");
+        let calibrations = entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("calibrations"))
+            .and_then(Value::as_array)
+            .expect("krea_2_turbo declares mlx.calibrations");
+        assert_eq!(
+            calibrations.len(),
+            2,
+            "the shipped krea opt-in is the 768² and 896² pose-control pair"
+        );
+
+        for binding in calibrations {
+            let text = |key: &str| {
+                binding
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("krea binding is missing {key}"))
+                    .to_owned()
+            };
+            let geometry = binding.get("geometry").expect("binding geometry");
+            let dimension = |key: &str| {
+                u32::try_from(
+                    geometry
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .expect("dimension"),
+                )
+                .expect("geometry fits u32")
+            };
+            let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+                "/cache/models--SceneWorks--krea-2-turbo-mlx/snapshots/x/q4",
+            )))
+            .with_quant(gen_core::Quant::Q4);
+            // `packaged_admission_route` filters on `binding.provider == plan.engine_id`, so the
+            // engine id is the PROVIDER (`krea_2_turbo_control`) and the model id is the catalog
+            // entry (`krea_2_turbo`) — the order production uses in `image_jobs/krea_control.rs`,
+            // which passes `KREA_CONTROL_ENGINE_ID` then `&request.model`. Swapping them yields
+            // `StaleIdentity` and a silent legacy fallback.
+            let plan = MlxRequestPlan::for_spec_and_manifest(
+                "krea_2_turbo_control",
+                "krea_2_turbo",
+                &spec,
+                Some(entry),
+                Some(ResolvedArtifactProvenance {
+                    identity: crate::model_jobs::ResolvedArtifactIdentity {
+                        repository: text("artifactRepository"),
+                        revision: text("artifactResolvedRevision"),
+                        variant: text("artifactVariant"),
+                        fingerprint: text("resolvedPathFingerprint"),
+                    },
+                    fixed_artifact_tier: Some(text("tier")),
+                }),
+            );
+            assert!(
+                matches!(plan.calibration, MlxCalibrationConfig::Valid(_)),
+                "the shipped krea opt-in must parse as a valid binding set"
+            );
+
+            let mut inputs = fixture_inputs(dimension("width"), dimension("height"));
+            inputs.overlay = Some(text("overlay"));
+            inputs.has_reference = true;
+            inputs.reference_count = 1;
+            let route =
+                packaged_admission_route(&plan, &inputs, &text("mode"), fixture_budget(128.0))
+                    .expect("a covered krea cell must not error");
+            assert_eq!(
+                route.path,
+                AdmissionPath::Evidence,
+                "{}x{}: shipped krea manifest + evidence must reach calibrated admission; \
+                 got fallback {:?}",
+                dimension("width"),
+                dimension("height"),
+                route.fallback_reason
+            );
+        }
+    }
+
+    /// SC-16915 acceptance, end to end on real weights (ignored — needs the qwen-image-mlx bf16
+    /// turnkey, ~57 GB, and peaks around 59 GiB active).
+    ///
+    /// The non-gated `shipped_qwen_manifest_and_packaged_evidence_select_the_calibrated_path`
+    /// proves the shipped manifest and bundle agree. This closes the story's remaining acceptance
+    /// line — "calibrated admission selects verified rungs again on a real MLX render" — by driving
+    /// the production seam `image_jobs/base.rs` calls per generation, against a LIVE loaded
+    /// provider, and then rendering.
+    ///
+    /// The load-bearing assertion is `process_limit_bytes.is_some()`. That ceiling is derived only
+    /// from an exact verified cell; a legacy admission leaves it `None` and falls back to the
+    /// process-global limit. So it distinguishes "the request was admitted" — which the legacy
+    /// estimator also does — from "an exact verified rung was selected", which is what regressed.
+    ///
+    ///   cargo test -p sceneworks-worker --lib -- --ignored --nocapture \
+    ///     qwen_real_install_selects_a_verified_rung
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real-weight MLX render; needs the qwen-image-mlx bf16 turnkey (~57 GB)"]
+    fn qwen_real_install_selects_a_verified_rung_and_renders() {
+        let hub = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
+            .join(".cache/huggingface/hub");
+        let snapshots = hub.join("models--SceneWorks--qwen-image-mlx/snapshots");
+        let Some(bf16) = std::fs::read_dir(&snapshots).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path().join("bf16"))
+                .find(|path| path.join("model_index.json").is_file())
+        }) else {
+            eprintln!(
+                "SKIP: no qwen-image-mlx bf16 turnkey under {}",
+                snapshots.display()
+            );
+            return;
+        };
+
+        // The SHIPPED manifest entry, not a fixture: the opt-in under test is the one that ships.
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        let entry = manifest
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("models array")
+            .iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some("qwen_image"))
+            .and_then(Value::as_object)
+            .expect("qwen_image manifest entry")
+            .clone();
+
+        // Provenance is derived from the snapshot actually being loaded, NOT copied from the app's
+        // install receipt — that receipt can name a different variant than the one under test.
+        // Reading the revision out of the resolved snapshot path and asserting it against the
+        // manifest's declared identity is the stronger check anyway: it proves the bytes on disk
+        // are the ones the opt-in names, which is the whole job of provenance.
+        let revision = bf16
+            .parent()
+            .and_then(|snapshot| snapshot.file_name())
+            .and_then(|name| name.to_str())
+            .expect("snapshot directory is <hub>/models--.../snapshots/<revision>/bf16")
+            .to_owned();
+        let binding = entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("calibrations"))
+            .and_then(Value::as_array)
+            .expect("qwen_image declares mlx.calibrations")
+            .iter()
+            .find(|item| item.get("tier").and_then(Value::as_str) == Some("bf16"))
+            .expect("a bf16 binding");
+        let declared = |key: &str| {
+            binding
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("binding is missing {key}"))
+                .to_owned()
+        };
+        assert_eq!(
+            revision,
+            declared("artifactResolvedRevision"),
+            "the on-disk snapshot must be the exact artifact the shipped opt-in names"
+        );
+        let provenance = ResolvedArtifactProvenance {
+            identity: crate::model_jobs::ResolvedArtifactIdentity {
+                repository: declared("artifactRepository"),
+                revision,
+                variant: declared("artifactVariant"),
+                fingerprint: declared("resolvedPathFingerprint"),
+            },
+            fixed_artifact_tier: Some(declared("tier")),
+        };
+
+        let spec = LoadSpec::new(WeightsSource::Dir(bf16.clone()));
+        let plan = MlxRequestPlan::for_spec_and_manifest(
+            "qwen_image",
+            "qwen_image",
+            &spec,
+            Some(&entry),
+            Some(provenance),
+        );
+        let inputs = fixture_inputs(1024, 1024);
+
+        // Cheap pre-load check, so a routing regression fails before a 57 GB load.
+        let route =
+            packaged_admission_route(&plan, &inputs, "text_to_image", fixture_budget(128.0))
+                .expect("covered cell must not error");
+        assert_eq!(
+            route.path,
+            AdmissionPath::Evidence,
+            "shipped opt-in must route to calibrated admission; got fallback {:?}",
+            route.fallback_reason
+        );
+
+        eprintln!(
+            "[acceptance] loading qwen_image bf16 from {}",
+            bf16.display()
+        );
+        let generator =
+            crate::inference_runtime::load("qwen_image", &spec).expect("load qwen_image");
+
+        // THE production call: exactly what base.rs runs per generation, on a live generator.
+        let evaluation = evaluate_request(
+            &*generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            0,
+        )
+        .expect("a covered qwen cell must be admitted");
+        eprintln!("[acceptance] gate admitted: {evaluation:?}");
+        assert!(
+            evaluation.process_limit_bytes.is_some(),
+            "a verified rung supplies a request-scoped ceiling; `None` means this degraded to the \
+             legacy estimator, which is exactly the regression this story repaired"
+        );
+
+        let request = gen_core::GenerationRequest {
+            prompt: "a red fox resting beside a blue ceramic vase, studio photograph".to_owned(),
+            width: 1024,
+            height: 1024,
+            count: 1,
+            seed: Some(15511),
+            steps: Some(2),
+            memory: Some(evaluation.memory),
+            ..Default::default()
+        };
+        let image = match generator
+            .generate(&request, &mut |_| {})
+            .expect("real qwen render must succeed under the calibrated ceiling")
+        {
+            gen_core::GenerationOutput::Images(mut images) => {
+                assert_eq!(images.len(), 1, "one requested image");
+                images.pop().expect("one image")
+            }
+            other => panic!("qwen_image must return images, got {other:?}"),
+        };
+        assert!(
+            image.width == 1024 && image.height == 1024,
+            "rendered geometry must match the verified cell"
+        );
+        eprintln!(
+            "[acceptance] rendered {}x{} under a verified rung",
+            image.width, image.height
         );
     }
 
@@ -3504,7 +3986,16 @@ mod tests {
     }
 
     fn packaged_krea_plan() -> MlxRequestPlan {
-        let bundle = packaged_bundle_migrated_to_v4_for_tests();
+        let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
+            .expect("packaged bundle must parse")
+        {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
+        };
+        // Select the records that ARE current instead of rewriting stale ones into looking current,
+        // which is what the deleted `packaged_bundle_migrated_to_v4_for_tests` shim did. The bundle
+        // still carries the superseded 96b13b66 Krea cells as history, so without this revision
+        // predicate the filter matches four records and the count assertion below fails.
         let records = bundle
             .records
             .iter()
@@ -3515,12 +4006,14 @@ mod tests {
                     && record.target.tier == "q4"
                     && record.target.mode == "text_to_image"
                     && record.target.overlay == "control:1"
+                    && record.repositories.inference.revision
+                        == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
             })
             .collect::<Vec<_>>();
         assert_eq!(
             records.len(),
             2,
-            "the packaged Krea contract has two exact cells"
+            "the packaged Krea contract has two exact cells at the current pin"
         );
         let first = records[0];
         let resolved_path_fingerprint =
@@ -3604,9 +4097,28 @@ mod tests {
         generator.descriptor.id = "krea_2_turbo_control";
         let contract = generator.contract.as_mut().expect("fixture contract");
         contract.provider_id = "krea_2_turbo_control".to_owned();
+        // Taken from the packaged record this fixture stands in for, never restated as a literal.
+        // The previous literal `krea-control-mlx-v4-q4-pose-bounded-decode-512-64` outlived the
+        // provider's move to the full-ladder identity, and a stale copy here fails the handshake
+        // and reports the cell as `Missing` — which is how it presented before this was fixed.
+        let record = packaged_bundle()
+            .records
+            .into_iter()
+            .find(|record| {
+                matches!(record.backend, CalibrationBackend::Mlx)
+                    && record.target.provider == "krea_2_turbo_control"
+                    && record.repositories.inference.revision
+                        == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+            })
+            .expect("the packaged bundle carries a current Krea control record");
         contract.calibration = Some(MemoryCalibrationIdentity::new(
-            "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            gen_core::LoadShape::EagerMaterialization,
+            record.calibration_fingerprint,
+            match record.load_shape {
+                LoadShapeKey::DeferredMaterialization => {
+                    gen_core::LoadShape::DeferredMaterialization
+                }
+                LoadShapeKey::EagerMaterialization => gen_core::LoadShape::EagerMaterialization,
+            },
         ));
         let bounded_decode = contract
             .strategies
@@ -3707,31 +4219,19 @@ mod tests {
         }
     }
 
-    /// TEST-ONLY schema shim: the packaged bundle is still the schema-v3 / ABI-1 collection, which
-    /// v4 deliberately classifies stale in production. Its rows WERE measured eager (their
-    /// fingerprints say so); migrating them in fixture space keeps the selector-behavior coverage
-    /// alive. DELETE when the bundle is re-collected under the v4 harness; the sceneworks-core
-    /// `real_packaged_bundle...` test pins the production staleness.
-    fn packaged_bundle_migrated_to_v4_for_tests() -> EvidenceBundle {
-        let mut raw: Value = serde_json::from_str(
-            sceneworks_core::memory_calibration::PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
-        )
-        .unwrap();
-        raw["schemaVersion"] = serde_json::json!(4);
-        for record in raw["records"].as_array_mut().unwrap() {
-            record["loadShape"] = serde_json::json!("eager_materialization");
-        }
-        match sceneworks_core::memory_calibration::load_bundle(&raw.to_string()).unwrap() {
-            BundleLoad::Ready(mut bundle) => {
-                for record in &mut bundle.records {
-                    record.repositories.inference.revision =
-                        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned();
-                }
-                bundle
-            }
-            BundleLoad::Stale(reason) => {
-                panic!("test-migrated packaged bundle is stale: {reason:?}")
-            }
+    /// The real packaged bundle, as production loads it. sc-16915 re-collected the MLX evidence at
+    /// the current pin, so the tests below no longer need the deleted
+    /// `packaged_bundle_migrated_to_v4_for_tests` shim, which forced `schemaVersion` to 4, stamped
+    /// every row `eager_materialization`, and rewrote every inference revision to the running one.
+    /// That shim could not distinguish a genuinely current bundle from a stale one — its whole job
+    /// was to erase the difference — so a regression that re-staled the evidence would not have
+    /// failed a single test that used it.
+    fn packaged_bundle() -> EvidenceBundle {
+        match sceneworks_core::memory_calibration::load_packaged_bundle()
+            .expect("packaged bundle must parse")
+        {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
         }
     }
 
@@ -3993,7 +4493,7 @@ mod tests {
                 gib_to_bytes(130.0),
                 0,
                 &[],
-                Some(&packaged_bundle_migrated_to_v4_for_tests()),
+                Some(&packaged_bundle()),
             )
             .expect_err("the independent legacy estimate must refuse before provider render");
             let message = error.to_string();
@@ -4016,7 +4516,7 @@ mod tests {
             gib_to_bytes(130.0),
             0,
             &[],
-            Some(&packaged_bundle_migrated_to_v4_for_tests()),
+            Some(&packaged_bundle()),
         )
         .expect_err("the exact 896 cell exceeds 83 GiB including its captured foreign reserve")
         .to_string();
@@ -4044,7 +4544,7 @@ mod tests {
             gib_to_bytes(130.0),
             0,
             &[],
-            Some(&packaged_bundle_migrated_to_v4_for_tests()),
+            Some(&packaged_bundle()),
         )
         .expect_err("the mismatched loaded provider still refuses on the independent estimate")
         .to_string();
@@ -4073,7 +4573,7 @@ mod tests {
             gib_to_bytes(130.0),
             0,
             &[],
-            Some(&packaged_bundle_migrated_to_v4_for_tests()),
+            Some(&packaged_bundle()),
         )
         .expect_err("the composition-mismatched provider still refuses on the independent estimate")
         .to_string();
