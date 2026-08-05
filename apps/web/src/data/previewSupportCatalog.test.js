@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertBackendCoverage,
   catalogToWebPreviewSupport,
   derivePreviewSupport,
   parseEngineModelTable,
+  parseSceneworksBackends,
   PREVIEW_SUPPORT_GENERATOR,
 } from "./previewSupportDerivation.js";
 import previewSupport from "./previewSupport.json";
@@ -19,6 +21,10 @@ import previewSupportManifestRaw from "../../../../config/manifests/builtin.prev
 // `audit.inferenceRevision` to the live pin set AND runs in the parity lane); this is the same
 // assertion for the same class of artifact, on a guard that runs on every PR.
 import workerCargoToml from "../../../../crates/sceneworks-worker/Cargo.toml?raw";
+// The DECLARED backend set (sc-17119). Every other input below is discovered from the facts
+// directory, and a directory listing cannot see a file that was never written — which is why
+// `capabilities.mlx.json` was absent for four consecutive pins with the whole suite green.
+import factsDeclarationSource from "../../../../crates/sceneworks-worker/src/engine_capability_facts.rs?raw";
 import { fallbackModels } from "../constants.js";
 
 // DISCOVERED, never listed. The generator globs this directory so a newly dumped backend is picked
@@ -143,6 +149,120 @@ describe("preview-support catalog: the stage-1 facts files are non-vacuous", () 
 
   it("deriving with no facts files at all is refused", () => {
     expect(() => derivePreviewSupport(rows, [])).toThrow(/no stage-1 facts files/);
+  });
+});
+
+// sc-17119. The one assertion in this pipeline that can see a file which is NOT there.
+//
+// Everything above is scoped to what the facts directory contains — the generator globs it, this
+// guard globs it, and `verifyEngineCapabilityFacts` validates only the files that exist. So a
+// backend that was never dumped is not a failure anywhere: it is simply absent, and absence derives
+// as "unknown", which renders exactly as it did before the feature shipped. `capabilities.mlx.json`
+// was absent for four consecutive pins beginning with the one sc-16965 itself shipped on, with
+// every one of those guards green.
+//
+// The required set comes from the Rust const, parsed — not from a JS copy, whose stale-failure mode
+// is to stop requiring a backend, i.e. to silently re-open this hole.
+describe("preview-support catalog: every backend SceneWorks can run is dumped", () => {
+  const declared = parseSceneworksBackends(factsDeclarationSource);
+  const onDisk = factsEntries.map((entry) => entry.facts.backend).sort();
+
+  it("parses SCENEWORKS_BACKENDS out of engine_capability_facts.rs", () => {
+    expect(declared.length).toBeGreaterThan(0);
+    // Both shipped lanes, named: macOS links mlx, `--features backend-candle` links candle.
+    expect(declared).toEqual(expect.arrayContaining(["candle", "mlx"]));
+  });
+
+  it("every declared backend has a checked-in facts file", () => {
+    expect(() => assertBackendCoverage(declared, onDisk)).not.toThrow();
+    for (const backend of declared) {
+      expect(onDisk, `capabilities.${backend}.json was never dumped`).toContain(backend);
+    }
+  });
+
+  it("the served catalog advertises every declared backend, not just the dumped ones", () => {
+    // The `backends` array is what a consumer iterates. If it were ever a strict subset of the
+    // declared set, the UI would have no key at all for the missing engine's routes.
+    expect(JSON.parse(previewSupportManifestRaw).backends).toEqual(declared);
+    expect(previewSupport.backends).toEqual(declared);
+  });
+
+  // Mutation-shaped: this is what the guard is FOR, so assert it actually fires. Deleting
+  // capabilities.mlx.json reduces the on-disk set to ["candle"] and nothing else in this file
+  // notices — every other assertion iterates `factsEntries` and would simply do one less round.
+  it("a declared backend with no dump is a loud failure, naming it and how to dump it", () => {
+    expect(() => assertBackendCoverage(["candle", "mlx"], ["candle"])).toThrow(/mlx/);
+    expect(() => assertBackendCoverage(["candle", "mlx"], ["candle"])).toThrow(
+      /dump-engine-capabilities/,
+    );
+    // ...and the reverse, so the failure cannot be "fixed" by dumping the wrong lane twice.
+    expect(() => assertBackendCoverage(["candle", "mlx"], ["mlx"])).toThrow(/candle/);
+  });
+
+  it("a dump for a backend the Rust const does not declare is also a failure", () => {
+    // A stale const requires nothing for the new backend, so deleting its file again would pass.
+    expect(() => assertBackendCoverage(["candle"], ["candle", "mlx"])).toThrow(/mlx/);
+  });
+
+  it("refuses a renamed or restructured const rather than requiring nothing", () => {
+    const renamed = factsDeclarationSource.replace(
+      "const SCENEWORKS_BACKENDS: &[&str] = &[",
+      "const SCENEWORKS_ENGINE_BACKENDS: &[&str] = &[",
+    );
+    expect(renamed).not.toBe(factsDeclarationSource);
+    expect(() => parseSceneworksBackends(renamed)).toThrow(/SCENEWORKS_BACKENDS/);
+  });
+
+  it("refuses an entry it cannot read rather than dropping it", () => {
+    // Dropping an entry SHRINKS the required set — the one failure direction that is invisible,
+    // because a guard that asks for less always passes.
+    //
+    // Built synthetically rather than by `.replace()`-ing today's exact two-element literal: that
+    // fixture would silently become a no-op the moment a third backend is declared, which is the
+    // very change this list exists to accommodate.
+    expect(() =>
+      parseSceneworksBackends('pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "MLX2"];'),
+    ).toThrow(/only 1 parsed/);
+  });
+
+  it("does not anchor on the const's own doc comment", () => {
+    // The doc comment names both backends and `capabilities.mlx.json` in prose; a comment-blind
+    // parse could match there and read an empty or wrong list.
+    expect(parseSceneworksBackends(factsDeclarationSource)).toEqual(declared);
+    expect(() =>
+      parseSceneworksBackends("// const SCENEWORKS_BACKENDS: &[&str] = &[\"ghost\"];\n"),
+    ).toThrow(/SCENEWORKS_BACKENDS/);
+  });
+
+  it("refuses a duplicated entry", () => {
+    expect(() =>
+      parseSceneworksBackends('pub const SCENEWORKS_BACKENDS: &[&str] = &["mlx", "mlx"];'),
+    ).toThrow(/twice/);
+  });
+
+  it("refuses an empty list rather than requiring nothing", () => {
+    expect(() => parseSceneworksBackends("pub const SCENEWORKS_BACKENDS: &[&str] = &[];")).toThrow(
+      /empty/,
+    );
+  });
+
+  it("refuses an empty DECLARED set, not just an empty parse", () => {
+    // assertBackendCoverage is exported and called from three places, and not all of them get
+    // their list from parseSceneworksBackends. With an empty declared set every check below it is
+    // vacuously true — it would pass for any set of dumped files, including none at all.
+    expect(() => assertBackendCoverage([], ["candle", "mlx"])).toThrow(/empty/);
+    expect(() => assertBackendCoverage([], [])).toThrow(/empty/);
+  });
+
+  it("refuses a facts file with no readable backend rather than reporting a nameless one", () => {
+    // Without this, `undefined` flows through and the operator is told that backend(s) `[]` are
+    // undeclared — an empty bracket list that names neither the backend nor the file.
+    expect(() => assertBackendCoverage(["candle", "mlx"], ["candle", undefined])).toThrow(
+      /no readable `backend`/,
+    );
+    expect(() => assertBackendCoverage(["candle", "mlx"], ["candle", ""])).toThrow(
+      /no readable `backend`/,
+    );
   });
 });
 

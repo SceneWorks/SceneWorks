@@ -68,7 +68,7 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
   provider: "flux2_dev",
   capturedInferenceRevision: "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
   compatibleInferenceRevision: "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
-  // sc-17524: measured on the RTX PRO 6000 box (rustc 1.96.0, nvcc 12.9, `--features cuda`). Three
+  // sc-17524: measured on the RTX PRO 6000 box (rustc 1.96.0, nvcc 12.9, `--features cuda`). Two
   // closure paths moved across this window — `Cargo.lock` and `candle-gen` — and the
   // `candle-gen-flux2` lib test binary is byte-identical at both ends, so the compiled code the
   // measurements ran did not change. `adjudicates` is what that binary speaks for: the crate trees
