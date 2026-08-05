@@ -58,7 +58,7 @@ const MIN_EXPECTED_MODEL_ROWS = 50;
  * String literals are copied verbatim (escapes honoured) so a `//` inside a repo URL — every
  * `default_repo` is one — can never be mistaken for a comment.
  */
-function stripRustComments(source) {
+function stripRustComments(source, sourceLabel = "engines.rs") {
   let out = "";
   let index = 0;
   let blockDepth = 0; // Rust block comments nest.
@@ -108,7 +108,7 @@ function stripRustComments(source) {
     index += 1;
   }
   if (blockDepth > 0) {
-    throw new Error("parseEngineModelTable: engines.rs has an unterminated `/*` block comment");
+    throw new Error(`${sourceLabel} has an unterminated \`/*\` block comment`);
   }
   return out;
 }
@@ -175,7 +175,7 @@ export function parseEngineModelTable(rustSource) {
   }
   // Comments first, then locate the table: a `];` or a `ModelRow` mention inside a comment must not
   // be able to end the table or be counted as a row.
-  const body = sliceModelTableBody(stripRustComments(rustSource));
+  const body = sliceModelTableBody(stripRustComments(rustSource, "parseEngineModelTable: engines.rs"));
 
   // Rows carry only scalar/string fields today — no nested braces — so a brace-free match is exact.
   // The moment that stops being true this regex silently SKIPS the row, so the count below is what
@@ -225,6 +225,141 @@ export function parseEngineModelTable(rustSource) {
     seen.add(row.sceneworksId);
   }
   return rows;
+}
+
+// The `SCENEWORKS_BACKENDS` const in engine_capability_facts.rs. Anchored on the full declaration
+// so a rename or a type change is a loud parse failure rather than a silently empty required set.
+const SCENEWORKS_BACKENDS_OPEN = "const SCENEWORKS_BACKENDS: &[&str] = &[";
+
+/**
+ * Parse the declared backend list out of `crates/sceneworks-worker/src/engine_capability_facts.rs`.
+ *
+ * Parsed rather than mirrored, for the same reason `MODEL_TABLE` is: a JS-side copy of the list
+ * would have to be kept in step by hand, and the failure mode of a stale copy is that it stops
+ * requiring a backend — i.e. it re-opens the hole rather than closing it.
+ *
+ * Throws on anything it cannot read in full. A partial parse here is the DANGEROUS direction: a
+ * dropped entry shrinks the required set, so {@link assertBackendCoverage} stops asking for a
+ * backend and a never-dumped file passes again, silently.
+ */
+export function parseSceneworksBackends(rustSource) {
+  if (typeof rustSource !== "string" || rustSource.length === 0) {
+    throw new Error(
+      "parseSceneworksBackends: expected the engine_capability_facts.rs source text",
+    );
+  }
+  // Comments first: the doc comment above the const names the two backends in prose, and a
+  // `SCENEWORKS_BACKENDS` mention inside a comment must not be able to anchor the parse.
+  const source = stripRustComments(
+    rustSource,
+    "parseSceneworksBackends: engine_capability_facts.rs",
+  );
+  const open = source.indexOf(SCENEWORKS_BACKENDS_OPEN);
+  if (open === -1) {
+    throw new Error(
+      `parseSceneworksBackends: no ${JSON.stringify(SCENEWORKS_BACKENDS_OPEN)} in ` +
+        "engine_capability_facts.rs — the backend list was renamed or restructured; update this " +
+        "parser, or the stage-2 coverage guard silently stops requiring any backend at all",
+    );
+  }
+  const bodyStart = open + SCENEWORKS_BACKENDS_OPEN.length;
+  const bodyEnd = source.indexOf("]", bodyStart);
+  if (bodyEnd === -1) {
+    throw new Error("parseSceneworksBackends: SCENEWORKS_BACKENDS' opening `&[` is never closed");
+  }
+  const body = source.slice(bodyStart, bodyEnd);
+
+  const backends = [...body.matchAll(/"([a-z0-9_-]+)"/g)].map((match) => match[1]);
+  // Every string literal in the body must have been read. An entry the matcher cannot parse (an
+  // escape, an unexpected character class, a `concat!`) would otherwise be dropped — and dropping
+  // one WEAKENS the guard, which is invisible by construction.
+  const quotes = (body.match(/"/g) ?? []).length;
+  if (quotes !== backends.length * 2) {
+    throw new Error(
+      `parseSceneworksBackends: SCENEWORKS_BACKENDS holds ${quotes / 2} string literal(s) but only ` +
+        `${backends.length} parsed (${JSON.stringify(backends)}). A dropped entry would stop this ` +
+        "guard requiring that backend's dump. Teach this parser the new shape.",
+    );
+  }
+  if (backends.length === 0) {
+    throw new Error(
+      "parseSceneworksBackends: SCENEWORKS_BACKENDS is empty, which would make the coverage " +
+        "assertion vacuous — the exact class of hole it exists to close",
+    );
+  }
+  const seen = new Set();
+  for (const backend of backends) {
+    if (seen.has(backend)) {
+      throw new Error(`parseSceneworksBackends: SCENEWORKS_BACKENDS declares ${backend} twice`);
+    }
+    seen.add(backend);
+  }
+  return backends;
+}
+
+/**
+ * Assert the dumped facts files cover exactly the backends SceneWorks can run (sc-17119).
+ *
+ * Every other check in this pipeline is scoped to *what is on disk* — the generator globs the
+ * directory, the drift guard globs it, and `verifyEngineCapabilityFacts` validates only files that
+ * exist. So a backend that was NEVER dumped is not a failure anywhere; it is simply absent, and
+ * absence derives as "unknown", which renders exactly as it did before the feature shipped. This is
+ * the one assertion that can see a file that is not there.
+ *
+ * Both directions are errors:
+ * - **missing** — a declared backend has no dump; the catalog is silently blind to it.
+ * - **undeclared** — a dump exists for a backend the Rust list does not know about, so the list is
+ *   stale and cannot be trusted to require anything.
+ *
+ * @param {string[]} declaredBackends from {@link parseSceneworksBackends}
+ * @param {string[]} dumpedBackends the `backend` field of each checked-in facts file
+ */
+export function assertBackendCoverage(declaredBackends, dumpedBackends) {
+  // An empty declared set makes every check below vacuously true — the same hole
+  // `parseSceneworksBackends` refuses, refused again here because this function is exported and
+  // called from three places, not all of which get their list from that parser.
+  if (!Array.isArray(declaredBackends) || declaredBackends.length === 0) {
+    throw new Error(
+      "assertBackendCoverage: the declared backend set is empty, so this assertion would pass for " +
+        "ANY set of dumped files — including none. Read it from SCENEWORKS_BACKENDS in " +
+        "crates/sceneworks-worker/src/engine_capability_facts.rs.",
+    );
+  }
+  // A facts file with no readable `backend` would otherwise flow through as `undefined` and be
+  // reported as an unnamed entry — "facts exist for backend(s) []" — which tells the operator
+  // nothing about which file is wrong.
+  const nameless = dumpedBackends.filter(
+    (backend) => typeof backend !== "string" || backend.length === 0,
+  );
+  if (nameless.length > 0) {
+    throw new Error(
+      `assertBackendCoverage: ${nameless.length} facts file(s) carry no readable \`backend\` ` +
+        "field, so they cannot be matched against SCENEWORKS_BACKENDS. A facts file names the " +
+        "backend it belongs to; re-dump the offending file rather than hand-editing it.",
+    );
+  }
+  const dumped = new Set(dumpedBackends);
+  const missing = declaredBackends.filter((backend) => !dumped.has(backend));
+  if (missing.length > 0) {
+    throw new Error(
+      `engine-capability facts are missing for backend(s) [${missing.join(", ")}]. SceneWorks can ` +
+        "run them, so the served catalog reports \"unknown\" for every route they own — " +
+        "indistinguishable from \"not wired\". Dump each on the lane that owns it:\n" +
+        "  mlx    (macOS) : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
+        "  candle (off-Mac): cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
+        "--no-default-features --features backend-candle\n" +
+        "then re-run `npm run gen:preview-support` from apps/web.",
+    );
+  }
+  const undeclared = [...dumped].filter((backend) => !declaredBackends.includes(backend));
+  if (undeclared.length > 0) {
+    throw new Error(
+      `engine-capability facts exist for backend(s) [${undeclared.join(", ")}] that ` +
+        `SCENEWORKS_BACKENDS (${JSON.stringify(declaredBackends)}) does not declare. Add them to ` +
+        "the const in crates/sceneworks-worker/src/engine_capability_facts.rs — until then nothing " +
+        "requires their dump, so deleting the file again would go unnoticed.",
+    );
+  }
 }
 
 /**

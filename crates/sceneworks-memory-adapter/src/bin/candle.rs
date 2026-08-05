@@ -206,16 +206,16 @@ fn sweep(request: &Value, parameters: &Map<String, Value>, result: &str) -> Resu
     }))
 }
 
-fn artifact(repository: &str, revision: &str) -> Value {
+fn artifact(repository: &str, revision: &str, tier: &str) -> Value {
     json!({
         "repository": repository,
         "resolvedRevision": revision,
-        "variant": "q4",
+        "variant": tier,
     })
 }
 
-fn loadability_fingerprint(repository: &str, revision: &str) -> String {
-    format!("{repository}@{revision}:q4")
+fn loadability_fingerprint(repository: &str, revision: &str, tier: &str) -> String {
+    format!("{repository}@{revision}:{tier}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -478,7 +478,7 @@ fn preflight_fragment(
         request,
         KREA_PLAIN_EXECUTION_PATH,
         protocol::PlainGatedFragment {
-            artifact: artifact(repository, revision),
+            artifact: artifact(repository, revision, planned_tier(request)?),
             sweep: sweep(request, protocol::strategy_parameters(request)?, "failed")?,
             blocker: &blocker,
             quality: json!({ "result": "not_run" }),
@@ -547,6 +547,75 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
     }
 }
 
+/// The numeric tier this case plans to measure, read from the plan rather than assumed.
+///
+/// sc-17097: this used to be hardcoded `q4`, which silently capped the Candle lane at one tier — the
+/// `krea_2_turbo` turbo fit ships `q4`, `q8` and `bf16` phase curves, so two thirds of it could not be
+/// re-measured at all. The MLX adapter has always derived its tier from `/target/tier`; this mirrors
+/// that, and [`planned_tier_variant`] keeps the on-disk artifact bound to the same token so a q8 plan
+/// can never be satisfied by q4 weights.
+fn planned_tier(request: &Value) -> Result<&str, String> {
+    match protocol::planned(request)?
+        .pointer("/target/tier")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.tier must be a string".to_owned())?
+    {
+        tier @ ("bf16" | "q4" | "q8") => Ok(tier),
+        tier => Err(format!("unsupported Candle numeric tier {tier:?}")),
+    }
+}
+
+/// The fixture must name the tier and geometry it measured, so a bf16 record can never be emitted
+/// against a q4 capture that merely reused the fixture string.
+///
+/// Scoped to `krea_2_turbo` DELIBERATELY. Krea is the only provider here whose plan spans several
+/// (tier, geometry) legs through one adapter path — six of them, which is exactly how a mislabelled
+/// capture would arise. The Qwen legs declare a single tier and geometry each and their fixture names
+/// (`qwen-image-candle-q4-seed15817-step2`) predate this convention: applying the geometry token
+/// requirement to them would reject five plan rows that measure correctly today. Widen this when
+/// those fixtures are renamed, not before.
+fn validate_fixture_binds_tier_and_geometry(request: &Value) -> Result<(), String> {
+    if planned_provider(request)? != KREA_ID {
+        return Ok(());
+    }
+    let planned = protocol::planned(request)?;
+    let fixture = planned
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let tier = planned_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    if width != height {
+        return Err(format!(
+            "Candle Krea calibration fixtures are square; planned geometry is {width}x{height}"
+        ));
+    }
+    for token in [format!("-{tier}-"), format!("-{width}-")] {
+        if !fixture.contains(&token) {
+            return Err(format!(
+                "planned.fixture {fixture:?} must contain {token:?} so the capture cannot be \
+                 attributed to another tier or geometry"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn numeric_tier(tier: &str) -> Result<MemoryNumericTier, String> {
+    // Matches the worker's `tier_to_quant`: bf16 is the dense base, q4/q8 are the packed tiers.
+    let quant = match tier {
+        "bf16" => None,
+        "q4" => Some(Quant::Q4),
+        "q8" => Some(Quant::Q8),
+        other => return Err(format!("unsupported Candle numeric tier {other:?}")),
+    };
+    Ok(MemoryNumericTier {
+        precision: Precision::Bf16,
+        quant,
+        component_precision_floors: &[],
+    })
+}
+
 fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
     let strategy = planned_memory_strategy(request)?;
     let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
@@ -560,11 +629,7 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
             transformer_window_component: transformer_window_size
                 .map(|_| TransformerComponent::Dit),
         },
-        tier: MemoryNumericTier {
-            precision: Precision::Bf16,
-            quant: Some(Quant::Q4),
-            component_precision_floors: &[],
-        },
+        tier: numeric_tier(planned_tier(request)?)?,
     })
 }
 
@@ -605,19 +670,19 @@ fn measured_strategy(
     Ok(measured)
 }
 
-fn load_five_rung_generator(
-    request: &Value,
-) -> Result<
-    (
-        &'static str,
-        &'static str,
-        String,
-        String,
-        Box<dyn runtime_cuda::gen_core::Generator>,
-        VramProbe,
-    ),
+/// Everything one five-rung capture needs after the artifact identity is validated and the real
+/// generator is resident: `(provider id, plain execution path, repository, resolved revision,
+/// generator, VRAM probe already holding the load sample)`.
+type LoadedFiveRungGenerator = (
+    &'static str,
+    &'static str,
     String,
-> {
+    String,
+    Box<dyn runtime_cuda::gen_core::Generator>,
+    VramProbe,
+);
+
+fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, String> {
     let (provider_id, execution_path, repository_env, revision_env, root_env, expected_repository) =
         match planned_provider(request)? {
             "qwen_image" => (
@@ -642,28 +707,34 @@ fn load_five_rung_generator(
                 ))
             }
         };
+    let tier = planned_tier(request)?;
+    validate_fixture_binds_tier_and_geometry(request)?;
     let repository = protocol::required_env(repository_env)?;
     let revision = protocol::required_env(revision_env)?;
     protocol::validate_artifact_identity(&repository, &revision, expected_repository)?;
     let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(root_env)?))
         .map_err(|error| format!("canonicalize {root_env}: {error}"))?;
+    // The root must end in the PLANNED tier's directory, so a stale `…/q4` export cannot satisfy a
+    // q8 or bf16 plan and quietly re-label another tier's peaks.
     protocol::validate_huggingface_snapshot_root(
         &root,
         &repository,
         &revision,
-        "q4",
+        tier,
         expected_repository,
     )?;
     let spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(OffloadPolicy::Sequential)
         .with_load_shape(LoadShape::DeferredMaterialization);
-    let spec = if provider_id == KREA_ID {
-        spec.with_quant(Quant::Q4)
-    } else {
+    let spec = match (provider_id, numeric_tier(tier)?.quant) {
+        // Krea's loader takes the packed tier's quant explicitly; bf16 is the dense base and must
+        // carry no quant at all (`Quant::None` — the same shape the worker's `tier_to_quant` uses).
+        (KREA_ID, Some(quant)) => spec.with_quant(quant),
+        (KREA_ID, None) => spec,
         // Qwen packed Diffusers snapshots declare their device-format quantization in
         // transformer/config.json. Passing LoadSpec.quant would request a second, unsupported
-        // runtime quantization pass instead of loading the q4 artifact as authored.
-        spec
+        // runtime quantization pass instead of loading the packed artifact as authored.
+        _ => spec,
     };
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
@@ -672,7 +743,7 @@ fn load_five_rung_generator(
     let generator = catalog
         .media()
         .load(provider_id, &spec)
-        .map_err(|error| format!("load real {provider_id} q4 generator: {error}"))?;
+        .map_err(|error| format!("load real {provider_id} {tier} generator: {error}"))?;
     vram.end_load(load_sample);
     Ok((
         provider_id,
@@ -926,14 +997,18 @@ fn run_five_rung_reference_loaded(
         request,
         execution_path,
         protocol::PlainGatedFragment {
-            artifact: artifact(repository, revision),
+            artifact: artifact(repository, revision, planned_tier(request)?),
             sweep: protocol::reference_sweep(request, "passed")?,
             blocker,
             quality: json!({ "result": "not_run" }),
             negative_mutation: Value::Null,
             loadability: json!({
                 "result": "passed",
-                "resolvedPathFingerprint": loadability_fingerprint(repository, revision),
+                "resolvedPathFingerprint": loadability_fingerprint(
+                    repository,
+                    revision,
+                    planned_tier(request)?,
+                ),
             }),
             diagnostics: protocol::diagnostics(
                 &format!("memory-candle-adapter:{provider_id}-five-rung-reference"),
@@ -1092,6 +1167,8 @@ fn run(request: &Value) -> Result<Value, String> {
         ));
     }
     let parameters = protocol::strategy_parameters(request)?;
+    let tier = planned_tier(request)?;
+    validate_fixture_binds_tier_and_geometry(request)?;
     let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
     let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
     protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
@@ -1105,7 +1182,7 @@ fn run(request: &Value) -> Result<Value, String> {
             &canonical,
             &repository,
             &revision,
-            "q4",
+            tier,
             protocol::KREA_REPOSITORY,
         )?;
         canonical
@@ -1113,8 +1190,11 @@ fn run(request: &Value) -> Result<Value, String> {
         root
     };
     let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
-        .with_quant(Quant::Q4)
         .with_offload_policy(OffloadPolicy::Sequential);
+    let spec = match numeric_tier(tier)?.quant {
+        Some(quant) => spec.with_quant(quant),
+        None => spec,
+    };
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
     let contract = catalog
@@ -1141,11 +1221,7 @@ fn run(request: &Value) -> Result<Value, String> {
     let selection = MemorySelection {
         strategy: MemoryStrategy::BoundedTransformerResidency,
         parameters: selected,
-        tier: MemoryNumericTier {
-            precision: Precision::Bf16,
-            quant: Some(Quant::Q4),
-            component_precision_floors: &[],
-        },
+        tier: numeric_tier(tier)?,
     };
     let strategy = measured_strategy(
         request,
@@ -1194,7 +1270,9 @@ fn run(request: &Value) -> Result<Value, String> {
             request,
             &strategy,
             actual_calibration.load_shape,
-            "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to the validated q4 snapshot".to_owned(),
+            format!(
+                "supported provider tuple requires real weights; set SCENEWORKS_KREA_ROOT to                  the validated {tier} snapshot"
+            ),
             "missingWeights",
             &repository,
             &revision,
@@ -1243,7 +1321,7 @@ fn run(request: &Value) -> Result<Value, String> {
     let generator = catalog
         .media()
         .load(KREA_ID, &spec)
-        .map_err(|error| format!("load real {KREA_ID} q4 generator: {error}"))?;
+        .map_err(|error| format!("load real {KREA_ID} {tier} generator: {error}"))?;
     vram.end_load(load_sample);
     let mut scope = generator
         .begin_memory_strategy_request(&context)
@@ -1319,7 +1397,7 @@ fn run(request: &Value) -> Result<Value, String> {
             let _ = scope.finish(MemoryRunOutcome::Error {
                 message: message.clone(),
             });
-            return Err(format!("real Krea q4 generation failed: {message}"));
+            return Err(format!("real Krea {tier} generation failed: {message}"));
         }
     };
     scope
@@ -1456,14 +1534,14 @@ fn run(request: &Value) -> Result<Value, String> {
         request,
         KREA_PLAIN_EXECUTION_PATH,
         protocol::PlainGatedFragment {
-            artifact: artifact(&repository, &revision),
+            artifact: artifact(&repository, &revision, tier),
             sweep: sweep(request, parameters, "passed")?,
             blocker,
             quality: json!({ "result": "not_run" }),
             negative_mutation: Value::Null,
             loadability: json!({
                 "result": "passed",
-                "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision),
+                "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision, tier),
             }),
             diagnostics: protocol::diagnostics(
                 "memory-candle-adapter",
