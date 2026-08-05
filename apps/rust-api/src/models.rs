@@ -4343,8 +4343,16 @@ mod model_size_concurrency_tests {
         // macOS gains one over windows/linux for each mac-only entry; sc-8444 added
         // `krea_realtime_14b` (macOS-only — there is no candle Krea Realtime engine), taking it
         // from 81 to 82.
+        //
+        // sc-17627 then declared the three person-vision utilities that were previously job-time
+        // auto-downloads with no catalog entry at all: `sam3_person_segment` (both platforms),
+        // `sam2_person_segment` (macOS-only — `mod person_segment` is `#[cfg(target_os = "macos")]`)
+        // and `person_detector` (one platform-scoped row each, so exactly one survives
+        // `retain_downloads_for_os` per OS). macOS +3 → 85, windows/linux +2 → 82. `real_esrgan`
+        // swapped its repo rather than adding one, so it does not move these counts.
+        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 82_usize), ("windows", 80), ("linux", 80)]
+            [("macos", 85_usize), ("windows", 82), ("linux", 82)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
