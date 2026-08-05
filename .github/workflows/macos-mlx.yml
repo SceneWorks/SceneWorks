@@ -152,6 +152,94 @@ env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
 
 jobs:
+  # THE HOSTED HALF. Everything on this lane that does not need Apple matrix-unit silicon.
+  #
+  # This job did not exist because it could not: the workspace `/.cargo/config.toml` pins
+  # MACOSX_DEPLOYMENT_TARGET=26.2 for MLX's NAX kernels, and GitHub's hosted macOS images
+  # topped out at macos-15 / SDK 15, so the whole lane had to be self-hosted. That is no
+  # longer true — `macos-26` went GA 2026-02-26 and the image is macOS 26.5.2 with SDKs
+  # 26.0 through 26.5 and Xcode 26.2 through 26.6 installed.
+  #
+  # The split is by HARDWARE, not by cost. Exactly one thing on this lane needs an M5: the
+  # `nax_guard` test, which exercises a 16-bit fused SDPA against an f32 reference and is
+  # meaningful only where the matrix-unit kernels actually dispatch. Build, both clippy
+  # steps, the rest of the workspace test suite, and the capability dump are all ordinary
+  # macOS work. Keeping them on a hand-registered pool of two Macs — one of which is a
+  # developer's daily driver — is what made every PR compete with real-weight jobs for
+  # unified memory, up to and including jetsam kills (six on 2026-08-04).
+  #
+  # WHY 15.0 HERE, for now. At the workspace's 26.2 pin this job would compile the NAX
+  # kernels in, and the hosted image's host OS (26.5.2) is above the 26.2 floor that
+  # `is_nax_available()` checks — so on hosted silicon that is probably not M5 it may claim
+  # NAX and dispatch matrix-unit kernels onto hardware without matrix units. That is an
+  # open question, not a known failure: the MLX C++ is fetched at build time and is not in
+  # the fork checkout, so whether the gate is OS-version-only or also device-capability
+  # gated could not be read. Until a trial run answers it, this job builds the same
+  # non-NAX configuration the inference repo's hosted `macos-metal` lane has always built,
+  # and the 26.2 verdict stays entirely with `nax-worker` below. Settle it by running just
+  # `nax_guard` on this image at 26.2 and reading the result; if it has teeth there, this
+  # override can go and `nax-worker` can shrink further.
+  #
+  # No cache action deliberately: the MLX-from-source build is ~13 GB, above GitHub's 10 GB
+  # cache ceiling, so `Swatinem/rust-cache` would thrash rather than help. This job pays a
+  # cold build every run. That is the trade — a slower gate that costs a developer's machine
+  # nothing, instead of a faster one that takes it away.
+  macos-checks:
+    name: macOS build, lint and workspace tests (hosted)
+    # Same-repo only, but for a DIFFERENT reason than `nax-worker` below. Nothing here
+    # touches a self-hosted box, so untrusted code is not the concern; the "Fetch the
+    # pinned inference release" step reads the private SceneWorks/inference repo, and a
+    # fork PR has neither the secret nor a `github.token` that can see it. Without this
+    # guard such a PR would fail at `cargo fetch` with an authentication error that looks
+    # nothing like its actual cause.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: macos-26
+    env:
+      # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    # Well above the observed warm 6-14 min, sized for a cold MLX-from-source build on a
+    # hosted image rather than on an M5 Max. Re-size from the first ten runs.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Ensure Metal compiler
+        # The hosted image ships Xcode but not necessarily the Metal toolchain component,
+        # and mlx-sys's build script shells out to `xcrun metal`. Same step the inference
+        # repo's hosted macOS lane carries, for the same reason.
+        run: |
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            sudo xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun metal --version || true
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
+      - name: Build the MLX GPU worker (mlx-gen linked)
+        run: cargo build -p sceneworks-worker
+      # LINT BEFORE TEST, and the same widened package scope sc-17026 established: every
+      # default member, not just the worker. A step failure aborts the job, so tests first
+      # would mean an unrelated red test skips the lint entirely.
+      - name: Clippy (macOS default feature set, every default member)
+        run: cargo clippy --all-targets -- -D warnings
+      # sceneworks-memory-adapter is NOT a workspace default member, so the step above
+      # cannot reach it. Its Candle twin is guarded on windows-candle.yml.
+      - name: Clippy the MLX memory adapter (memory-mlx-adapter)
+        run: cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings
+      # The whole workspace suite MINUS the one test that needs matrix-unit silicon.
+      # `nax_16bit_sdpa_is_correct` runs on `nax-worker` below and nowhere else; the
+      # contract test in scripts/platform-review-contracts.test.mjs pins both halves so
+      # this skip cannot quietly become a hole.
+      - name: Workspace tests (excluding the NAX guard, which needs M5)
+        run: cargo test -- --skip nax_16bit_sdpa_is_correct
+
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -181,10 +269,17 @@ jobs:
     # hosted images cannot run this lane at all, so capacity is exactly the Macs
     # somebody provisioned (scripts/setup-nax-runner.sh, docs/rust-mlx-build.md).
     # A wedge therefore removes a whole box from a pool of a couple, and the
-    # remaining boxes absorb every queued PR/main run (sc-13603). Well above the
-    # healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source rebuild
-    # still fits. Only an explicit calibration+provisioning dispatch gets four
-    # hours for the approximately 57 GiB public snapshot.
+    # remaining boxes absorb every queued PR/main run (sc-13603). Only an explicit
+    # calibration+provisioning dispatch gets four hours for the approximately 57 GiB
+    # public snapshot.
+    #
+    # The 45 is now LOOSE and deliberately left alone. It was sized against a
+    # ~6-14 min warm build+test+clippy, and both clippy steps plus the workspace suite
+    # have since moved to `macos-checks`; the PR path here is a build, one test target
+    # and the capability dump. A cold MLX-from-source rebuild still has to fit, which is
+    # what the headroom is really for. Re-size it from measured runs after the split has
+    # a few weeks of data rather than guessing it down now — guessing budgets down from
+    # an estimate instead of a measurement is the sc-16981 defect.
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && ((inputs.run_memory_calibration && inputs.provision_qwen_snapshot) || (inputs.run_five_rung_reference && inputs.provision_z_image_snapshot)) && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -203,58 +298,30 @@ jobs:
       # 26.2, so the NAX kernels compile in and the fast path is actually built.
       - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)
         run: cargo build -p sceneworks-worker
-      # Lint EVERY default member on macOS, not just the worker (sc-17026).
+      # THE ONLY REASON THIS JOB IS SELF-HOSTED.
       #
-      # LINT BEFORE TEST, deliberately. A step failure aborts the job, so with the tests
-      # first an unrelated red test means the lint below never executes — which is
-      # exactly what happened on the first run of this PR: an inherited `mlx_fit_gate`
-      # failure from main (sc-17037) aborted the job and the widened lint, the whole
-      # point of this change, never ran. Lint coverage that only runs when every test
-      # already passes is not coverage. Clippy is also the cheaper, faster signal.
+      # `nax_guard` exercises a 16-bit fused SDPA against an f32 reference and goes red
+      # when the kernels were compiled below the 26.2 floor — the tripwire for a
+      # miscompile that produces right-scale, uncorrelated garbage. It is meaningful only
+      # where the matrix-unit kernels actually dispatch, which is Apple M5 silicon that no
+      # cloud sells and no hosted image provides. Everything else this lane used to do —
+      # the widened sc-17026 clippy over every default member, the memory-adapter lint,
+      # and the rest of the workspace test suite — now runs on `macos-checks` above,
+      # because none of it needs matrix units and all of it was competing with
+      # real-weight jobs for unified memory on a two-Mac pool.
       #
-      # `npm run rust:lint` — what a Mac developer runs before pushing, and what the
-      # Linux `parity` lane runs — covers every default member. This step was scoped to
-      # `-p sceneworks-worker`, so macOS-conditional code outside the worker was linted
-      # by NO lane in the configuration it actually ships in — `parity` lints these
-      # crates on Linux, and nothing linted them on a Mac. Lines naming
-      # `target_os = "macos"` today: sceneworks-core 15, apps/rust-api 22,
-      # sceneworks-image-quality 1. apps/rust-worker and sceneworks-mcp have none yet —
-      # covering them now is what stops the first one from arriving unlinted. A
-      # macOS-only unused import or dead symbol in any of them lands on a developer's
-      # `rust:check` instead of in review — the sc-17007 failure class, one crate over.
+      # `--test nax_guard` rather than a bare `cargo test`: the workspace suite is the
+      # hosted job's responsibility now, and running it twice would put the whole point of
+      # the split back on the scarce hardware. The two halves are pinned against each
+      # other in scripts/platform-review-contracts.test.mjs — the hosted job must run the
+      # workspace suite skipping exactly this test, and this job must run exactly this
+      # test — so neither can drift into a hole without failing that contract.
       #
-      # Cheap: the two steps above already built the heavy mlx-gen/MLX graph, so the
-      # marginal cost is the small non-worker crates. Deliberately NOT `--workspace` —
-      # default-members excludes apps/desktop (it needs the Tauri stack and staged
-      # sidecar placeholders), which desktop-macos-check.yml owns instead.
-      - name: Clippy (macOS default feature set, every default member)
-        run: cargo clippy --all-targets -- -D warnings
-      # sceneworks-memory-adapter is NOT a workspace default member, so the step above
-      # cannot reach it — and this lane otherwise compiles it only inside the
-      # `workflow_dispatch` calibration path below. Its Candle twin is guarded on a real
-      # PR lane (windows-candle.yml:200-201, `cargo check` + `cargo test`); the MLX twin
-      # was guarded on none, so a break in the authoritative MLX calibration adapter
-      # surfaced only when someone dispatched a calibration run. (server-candle-linux.yml
-      # also checks the Candle bin, but it is `workflow_dispatch`-only, so it is not a
-      # PR guard.)
-      #
-      # `clippy --all-targets -- -D warnings`, not `cargo check`: the defect class this
-      # story is about — a symbol left behind when its cfg'd call sites compile out — is
-      # a WARNING, so a bare `check` cannot see it. This is the only place `-D warnings`
-      # is ever applied to this crate on any platform or feature set. `--all-targets`
-      # rather than `--bin`, so its tests are linted too; the Candle bin is skipped
-      # automatically here via its `required-features`. sc-17026.
-      - name: Clippy the MLX memory adapter (memory-mlx-adapter)
-        run: cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings
-      # Every default member, not just the worker — the same widening as the clippy
-      # steps above and for the same reason: `npm run rust:check` runs a bare
-      # `cargo test` (whole default-member set), so macOS-conditional test code in
-      # sceneworks-core / rust-api / image-quality ran on NO lane. Measured on an
-      # M-series Mac with the graph already built for `-p sceneworks-worker`: the added
-      # members are 24 suites in ~26 s of actual test time. Still runs the NAX 16-bit
-      # SDPA guard, which is this lane's original reason to exist. sc-17026.
-      - name: Workspace tests incl. the NAX 16-bit SDPA guard
-        run: cargo test
+      # Deliberately NOT `-p sceneworks-worker` for anything but this test target. The
+      # narrow spelling is what sc-17026 removed, and re-introducing it for the suite
+      # would re-dark every non-worker crate.
+      - name: NAX 16-bit SDPA guard (needs M5 matrix units)
+        run: cargo test -p sceneworks-worker --test nax_guard
       # sc-17119. THE ONLY LANE THAT CAN PRODUCE capabilities.mlx.json, so it is the only place the
       # checked-in file can be checked against a real registry rather than taken on trust.
       #
