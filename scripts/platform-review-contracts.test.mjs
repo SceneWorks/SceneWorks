@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 async function source(path) {
@@ -916,4 +916,66 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       }
     }
   }
+});
+
+test("the Rust toolchain is pinned to one concrete version, everywhere", async () => {
+  // sc-17717. `channel = "stable"` let the effective toolchain move with NO file changing:
+  // hosted lanes' dtolnay steps installed whatever stable was current at run time while the
+  // self-hosted boxes used whatever was on disk — so lanes could compile the same commit
+  // with DIFFERENT rustcs, and a new stable's clippy lints could red `-D warnings` lanes on
+  // unrelated PRs. Three properties pinned here:
+  //
+  //   1. rust-toolchain.toml's channel is a concrete x.y.z, never a floating channel.
+  //   2. Every workflow's dtolnay `toolchain:` input equals that exact version — a
+  //      straggler left at `stable` double-installs on every hosted job and re-floats the
+  //      persistent Macs. Deriving the expectation from rust-toolchain.toml means a bump
+  //      only has to edit files, never this test.
+  //   3. Every dtolnay step HAS a `toolchain:` input. Omitting it makes the action fall
+  //      back to its tag (the pinned SHA tracks dtolnay's `stable` branch), which
+  //      reintroduces the float without the word "stable" appearing anywhere.
+  //
+  // The rustfmt/clippy components ride along: the self-hosted boxes pre-install the pin
+  // with both (see the bump recipe in rust-toolchain.toml), and clippy lanes assume them.
+  const toolchainFile = await source("rust-toolchain.toml");
+  const channelMatch = toolchainFile.match(/^channel = "([^"]+)"$/m);
+  assert.ok(channelMatch, "rust-toolchain.toml must declare a channel");
+  const pin = channelMatch[1];
+  assert.match(
+    pin,
+    /^\d+\.\d+\.\d+$/,
+    "rust-toolchain.toml must pin a concrete x.y.z version. 'stable' floats: the effective " +
+      "toolchain then changes with no file changing, which no CI trigger can catch (sc-17717).",
+  );
+  assert.match(
+    toolchainFile,
+    /^components = \["rustfmt", "clippy"\]$/m,
+    "the pin must carry rustfmt and clippy — the fmt gate and every -D warnings lane assume them",
+  );
+
+  const workflowFiles = (await readdir(new URL("../.github/workflows/", import.meta.url)))
+    .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"))
+    .sort();
+  assert.ok(workflowFiles.length > 0, "no workflows found — the audit would be vacuous");
+  let inputsSeen = 0;
+  for (const file of workflowFiles) {
+    const workflow = await source(`.github/workflows/${file}`);
+    const dtolnaySteps = [...workflow.matchAll(/uses: dtolnay\/rust-toolchain@/g)].length;
+    const inputs = [...workflow.matchAll(/^\s+toolchain: (.+)$/gm)].map((entry) => entry[1]);
+    assert.equal(
+      inputs.length,
+      dtolnaySteps,
+      `${file}: every dtolnay/rust-toolchain step needs an explicit toolchain: input — ` +
+        "omitting it falls back to the action tag's floating stable.",
+    );
+    for (const value of inputs) {
+      inputsSeen += 1;
+      assert.equal(
+        value,
+        `"${pin}"`,
+        `${file}: toolchain input ${value} must be "${pin}" (quoted), the version ` +
+          "rust-toolchain.toml pins — one version everywhere, bumped together.",
+      );
+    }
+  }
+  assert.ok(inputsSeen > 0, "no toolchain inputs found anywhere — the lockstep audit is vacuous");
 });

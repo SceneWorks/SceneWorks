@@ -69,11 +69,11 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       # sc-17703 (Michael's call — a deliberate under-trigger fix): rust-toolchain.toml
-      # governs which toolchain cargo resolves even under the dtolnay stable install
-      # both jobs run, so a bump changes what this lane compiles with — and nothing
-      # else here would trigger on it. Floating-channel drift (the pinned `stable`
-      # moving with no file change) remains uncatchable by any paths: entry; that
-      # residual gap is tracked as its own story.
+      # governs which toolchain cargo resolves, so a bump changes what this lane
+      # compiles with — and nothing else here would trigger on it. The channel is a
+      # concrete version, never floating `stable` (sc-17717), and both jobs' dtolnay
+      # `toolchain:` inputs carry the same version (contract-test enforced), so a
+      # toolchain change is always an edit that wakes this lane.
       - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/workflows/macos-mlx.yml"
@@ -260,7 +260,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       # Keyed by job + rustc version + lockfile by default, which is what we want: the MLX pin
       # moves with `Cargo.lock`, so a pin bump invalidates the native build rather than
@@ -354,7 +354,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       - name: Fetch the pinned inference release
         env:

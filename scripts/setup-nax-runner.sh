@@ -252,7 +252,7 @@ preflight() {
       note "(not on this shell's PATH; it is written into the runner's .path so the service still finds it)"
     fi
   else
-    bad "no cargo/rustc found on PATH or in ~/.cargo/bin. Install rustup (https://rustup.rs); rust-toolchain.toml pins stable."
+    bad "no cargo/rustc found on PATH or in ~/.cargo/bin. Install rustup (https://rustup.rs); rust-toolchain.toml pins a concrete version that rustup auto-installs on the first in-repo cargo run."
   fi
 
   # MLX is a CMake project, and `pmetal-mlx-sys`'s build.rs shells out to `cmake` by name.

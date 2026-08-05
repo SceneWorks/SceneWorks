@@ -106,10 +106,13 @@ on:
       # below), so a bump changes what this entire job compiles with. And
       # .cargo/config.toml carries `git-fetch-with-cli = true`, without which
       # cargo's built-in fetch ignores the GIT_CONFIG_* token injection in "Fetch
-      # the private inference release" and the lane cannot fetch at all. NB
-      # `channel = "stable"` is a floating channel — the effective toolchain can
-      # move with NO file changing, which no paths: entry can catch; that residual
-      # gap is tracked as its own story.
+      # the private inference release" and the lane cannot fetch at all. The
+      # channel is a concrete version, never floating `stable` (sc-17717): a
+      # toolchain change is therefore always an edit to that file, which this
+      # entry turns into a run of this lane — and the contract test keeps every
+      # workflow's dtolnay `toolchain:` input in lockstep with the pin. When
+      # bumping, pre-install the new version on this box first; see the bump
+      # recipe in rust-toolchain.toml.
       - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/actions/prepare-rust-runner/**"
