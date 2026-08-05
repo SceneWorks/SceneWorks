@@ -811,7 +811,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     ].join("\n");
   // `warned` captures console.warn so the "already outside" branch can be asserted on its OUTPUT
   // rather than merely on "it did not throw" — which a no-op would also satisfy.
-  const auditFixture = (source, previousSha, options, record) => {
+  const auditFixture = (source, previousSha, record) => {
     const root = mkdtempSync(join(tmpdir(), "bump-inference-flux2-"));
     mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
     writeFileSync(
@@ -827,7 +827,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     const warnings = [];
     console.warn = (...parts) => warnings.push(parts.join(" "));
     try {
-      verifyFlux2AuditWindow(SHA, previousSha, root, options);
+      verifyFlux2AuditWindow(SHA, previousSha, root);
       return { threw: null, warned: warnings.join("\n") };
     } catch (error) {
       return { threw: error?.message ?? String(error), warned: warnings.join("\n") };
@@ -918,7 +918,6 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   const alreadyProbed = auditFixture(
     auditSource(AUDITED_END),
     "d".repeat(40),
-    undefined,
     probeRecord("sha256:b"),
   );
   check(
@@ -931,7 +930,6 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   const witnessProbed = auditFixture(
     auditSource(AUDITED_END),
     "d".repeat(40),
-    undefined,
     probeRecord("sha256:a", "sha256:x"),
   );
   // Both verdict strings also occur in the GENERIC remedy, so matching one proves nothing on its
@@ -948,7 +946,6 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   const unfinished = auditFixture(
     auditSource(AUDITED_END),
     "d".repeat(40),
-    undefined,
     probeRecord("sha256:a"),
   );
   check(
@@ -959,7 +956,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   // directory with no digests at all; without the schema/completeness gate it computes "nothing
   // moved" and advises going and moving the frozen constants — an authorization derived from a
   // record both validators refuse outright.
-  const staleSchema = auditFixture(auditSource(AUDITED_END), "d".repeat(40), undefined, {
+  const staleSchema = auditFixture(auditSource(AUDITED_END), "d".repeat(40), {
     schemaVersion: 1,
     compatibleInferenceRevision: SHA,
     capturedInferenceRevision: "c".repeat(40),
@@ -972,7 +969,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   );
   // Same gate from the other side: the accepted schema but a missing digest pair is still not a
   // verdict about anything.
-  const halfRecord = auditFixture(auditSource(AUDITED_END), "d".repeat(40), undefined, {
+  const halfRecord = auditFixture(auditSource(AUDITED_END), "d".repeat(40), {
     ...probeRecord("sha256:a"),
     featureWitness: {},
   });
@@ -981,7 +978,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     !/DOES extend/.test(halfRecord.warned) && /inference-artifact-audit\.mjs/.test(halfRecord.warned),
   );
   // A record for a DIFFERENT revision must not be read as evidence about this pin.
-  const otherRecord = auditFixture(auditSource(AUDITED_END), "d".repeat(40), undefined, {
+  const otherRecord = auditFixture(auditSource(AUDITED_END), "d".repeat(40), {
     ...probeRecord("sha256:b"),
     compatibleInferenceRevision: "f".repeat(40),
   });
