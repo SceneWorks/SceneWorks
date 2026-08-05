@@ -1180,8 +1180,13 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
     [
+      // SC-15524 (Anima), SC-15525 (SDXL + derivatives) and SC-15521 (Kolors) join the measured set
+      // with their MLX ladders: Anima moves the request peak 5.229 -> 4.151 GiB at window 1; the SDXL
+      // family moves it -6.97% (q4) to -21.40% (bf16) per entry per tier; Kolors moves it -7.21% /
+      // -12.72% / -21.37% by tier, and its `TextEncoder`/`Both` scopes move it a further -22.22% /
+      // -60.02% at bf16/512 where conditioning carries the peak.
       "15510:candle", "15510:mlx", "15511:mlx", "15512:candle", "15512:mlx", "15517:candle", "15517:mlx",
-      "15519:candle",
+      "15519:candle", "15521:mlx", "15524:mlx", "15525:mlx",
     ],
   );
   assert.equal(

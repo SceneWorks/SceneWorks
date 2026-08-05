@@ -735,6 +735,14 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         (15517, "candle"),
         (15517, "mlx"),
         (15519, "candle"),
+        # SC-15521 Kolors, SC-15524 Anima and SC-15525 SDXL + derivatives land their MLX ladders
+        # with measured request peaks: Anima 5.229 -> 4.151 GiB at window 1; SDXL -6.97% (q4) to
+        # -21.40% (bf16) per entry per tier; Kolors -7.21% / -12.72% / -21.37% by tier, plus the
+        # ladder's first three-valued scope axis (`Dit` / `TextEncoder` / `Both`) reading
+        # 11.3644 / 8.8396 / 4.5436 GiB at bf16/512.
+        (15521, "mlx"),
+        (15524, "mlx"),
+        (15525, "mlx"),
     ]
     assert next(
         row
@@ -759,8 +767,11 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
     matrix = load_matrix()
 
     # The story's named trap: a U-Net is not automatically Structurally N/A. SDXL's lowest level is
-    # a genuine 10-deep transformer stack, so the verdict is `partial` and the cell is Missing —
-    # applicable but unimplemented — rather than exempt from the ladder.
+    # a genuine 10-deep transformer stack, so the verdict is `partial` — applicable, and now
+    # partially IMPLEMENTED (SC-15525 / SC-16355 shipped the per-Transformer2D stream) rather than
+    # exempt from the ladder. `partial` survives implementation: it describes the ARCHITECTURE (a
+    # non-windowable conv/resnet trunk around eleven windowable Transformer2D sub-stacks), not the
+    # delivery state, so it must not collapse to `full` just because the rung now ships.
     sdxl = [
         cell
         for cell in matrix["cells"]
@@ -769,7 +780,23 @@ def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidenc
     ]
     assert sdxl
     assert {cell["rung4Survey"]["structuralApplicability"] for cell in sdxl} == {"partial"}
-    assert {cell["state"] for cell in sdxl} == {"Missing"}
+    # Coverage is per entry per tier per overlay, never family-wide: the base `sdxl` entry publishes
+    # rung 4 on bf16/overlay-none only, so both states must be present on this entry's cells.
+    assert {cell["state"] for cell in sdxl} == {"Missing", "Implemented/unverified"}
+    assert {
+        (cell["tier"], cell["overlay"])
+        for cell in sdxl
+        if cell["state"] == "Implemented/unverified"
+    } == {("bf16", "none")}
+    # Rung 4 is Missing OUTRIGHT on both Illustrious entries: q8 is their only advertised tier and
+    # its snapshot omits the `quantization` marker, so `streamable` refuses (inference sc-17522).
+    # A partially-implemented family must not carry its siblings' coverage onto them.
+    assert {
+        cell["state"]
+        for cell in matrix["cells"]
+        if cell["rung"] == "bounded_transformer_residency"
+        and cell["modelId"] in {"illustrious_xl_v1", "illustrious_xl_v2"}
+    } == {"Missing"}
     stacks = sdxl[0]["rung4Survey"]["blockStacks"]
     assert any(stack["windowable"] for stack in stacks)
     assert any(not stack["windowable"] for stack in stacks)
