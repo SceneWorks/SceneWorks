@@ -239,11 +239,10 @@ jobs:
       # exists, names a backend SCENEWORKS_BACKENDS declares, and carries the current
       # `inferenceRevision` -- nothing about the engine list -- and the vitest drift guard re-derives
       # the catalog from its contents. Both are satisfied by editing one line. That is not
-      # hypothetical -- the file was
-      # RESTAMPED (revision line rewritten, 334 lines of content untouched) through two consecutive
-      # pin bumps, 35251a88 and 06e0c5e9, because no Mac was available to re-dump it and nothing
-      # could tell the difference. The restamps happened to be correct; nothing proved it until this
-      # step existed.
+      # hypothetical -- the file was RESTAMPED (revision line rewritten, 334 lines of content
+      # untouched) through two consecutive pin bumps, 35251a88 and 06e0c5e9, because no Mac was
+      # available to re-dump it and nothing could tell the difference. The restamps happened to be
+      # correct; nothing proved it until this step existed.
       #
       # Cheap: the build and test steps above already built the mlx-gen graph, so this is a link plus
       # a weights-free registry walk. Dumps to a scratch dir, never over the checked-in file, so a
