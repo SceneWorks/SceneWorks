@@ -4116,7 +4116,26 @@ static TEST_CATALOG_PROBES_PEAK: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 pub(crate) fn test_reset_catalog_probe_concurrency() {
     use std::sync::atomic::Ordering;
-    TEST_CATALOG_PROBES_ACTIVE.store(0, Ordering::SeqCst);
+    // DRAIN, do not clobber. Delayed probes run via spawn_blocking on pool OS threads
+    // that cannot be cancelled mid-sleep, and the probe tests run concurrently in one
+    // binary against these process-global atomics (their sleeps are bounded: <=250ms).
+    // Storing 0 into ACTIVE while a concurrent test's probe was mid-sleep made that
+    // probe's later decrement wrap to usize::MAX, and the next probe's `+ 1` panicked
+    // with "attempt to add with overflow" — a cross-test 500 that only surfaced on the
+    // slower hosted macos-26 runners once the workspace suite moved there (sc-17723).
+    // Waiting live probes out keeps ACTIVE's +1/-1 pairing intact, so it can never go
+    // below zero; only PEAK is forced. The probe tests additionally serialize behind
+    // catalog_probe_test_lock() in tests/catalog.rs, which also keeps a neighbor's
+    // probes from clobbering a PEAK measurement — this drain is the belt-and-braces
+    // for any future probe user outside that lock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while TEST_CATALOG_PROBES_ACTIVE.load(Ordering::SeqCst) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "catalog probe stragglers did not drain within 10s — a probe thread is leaking"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
     TEST_CATALOG_PROBES_PEAK.store(0, Ordering::SeqCst);
 }
 
@@ -4140,10 +4159,18 @@ fn test_delay_catalog_probe(model: &Value) {
     else {
         return;
     };
-    let active = TEST_CATALOG_PROBES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+    // saturating_add / checked_sub: with the draining reset above, ACTIVE can no longer
+    // underflow — but these keep any future reset-style edit from reintroducing the
+    // wrap-then-panic class (a straggler now parks at 0 instead of poisoning every later
+    // sample with usize::MAX).
+    let active = TEST_CATALOG_PROBES_ACTIVE
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
     TEST_CATALOG_PROBES_PEAK.fetch_max(active, Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(delay_ms));
-    TEST_CATALOG_PROBES_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    let _ = TEST_CATALOG_PROBES_ACTIVE.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+        count.checked_sub(1)
+    });
 }
 
 fn apply_model_catalog_size_fields(
