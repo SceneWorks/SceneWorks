@@ -288,9 +288,6 @@ struct MlxCalibrationBinding {
     overlay: String,
     geometry: CalibrationGeometry,
     rung: StrategyRung,
-    /// The rungs this binding's measured request actually engaged, in canonical ladder order. It is
-    /// the shared cost-order default unless the binding published a cheaper verified composition.
-    engaged_rungs: Vec<StrategyRung>,
     parameters: JsonObject<String, Value>,
     selection_parameters: gen_core::MemoryStrategyParameters,
 }
@@ -506,7 +503,6 @@ impl MlxCalibrationBinding {
                 frames: geometry_value("frames")?,
             },
             rung,
-            engaged_rungs,
             parameters,
             selection_parameters,
         })
@@ -3951,7 +3947,6 @@ mod tests {
                 &parameters,
             )
             .expect("fixture parameters"),
-            engaged_rungs: crate::memory_strategy::default_engaged_composition(rung),
             parameters,
         }
     }
@@ -4127,7 +4122,6 @@ mod tests {
                     &record.strategy.parameters,
                 )
                 .expect("packaged Krea strategy parameters"),
-                engaged_rungs: record.strategy.engaged_rungs.clone(),
                 parameters: record.strategy.parameters.clone(),
             })
             .collect();
@@ -4841,14 +4835,6 @@ mod tests {
                 panic!("the published SDXL/Kolors rung-4 shape must bind evidence: {error}")
             });
             assert_eq!(
-                binding.engaged_rungs,
-                vec![
-                    StrategyRung::Resident,
-                    StrategyRung::StagedResidency,
-                    StrategyRung::BoundedTransformerResidency,
-                ]
-            );
-            assert_eq!(
                 binding.selection_parameters.transformer_window_size,
                 Some(1)
             );
@@ -4890,9 +4876,18 @@ mod tests {
             0,
         )
         .expect("the checked-in Z-Image rung-4 plan composition must bind");
-        assert!(!binding
-            .engaged_rungs
-            .contains(&StrategyRung::StagedResidency));
+        assert_eq!(binding.selection_parameters.decode_tile_edge, Some(512));
+        assert_eq!(
+            binding.selection_parameters.transformer_window_size,
+            Some(1)
+        );
+        // The shared cost-order default is the same composition, so the shape also binds with no
+        // declaration at all — the rung-1-free reading is not an artefact of declaring it.
+        assert!(crate::memory_strategy::default_engaged_composition(
+            StrategyRung::BoundedTransformerResidency
+        )
+        .iter()
+        .all(|rung| *rung != StrategyRung::StagedResidency));
     }
 
     /// Fail-closed in the other direction: the fix derives the required set, it does not make fields
