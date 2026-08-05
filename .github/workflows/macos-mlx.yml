@@ -262,7 +262,15 @@ jobs:
       # mirror does NOT belong here: it needs the CUDA box, and windows-candle.yml runs every step
       # under `shell: cmd`/`powershell` -- its own header records that `bash` there resolves to the
       # box's WSL stub, and `cmd` has no `diff`. Tracked as sc-17592 rather than written blind.
-      - name: Verify capabilities.mlx.json is a real dump, not a restamp
+      #
+      # The AUDIO dump is verified here too (sc-17593), and this lane is the right place for it even
+      # though the audio registry is candle-native: it is the file BOTH lanes write, so it is the one
+      # most exposed to a restamp, and the same `dump-engine-capabilities` run already produces it at
+      # no extra cost. Its bytes are lane-independent by construction -- `candle-audio-catalog` gates
+      # no registration on the platform, and the audio provenance stamps a neutral invocation rather
+      # than this build's own -- so a Mac and the CUDA box must agree byte for byte. If this half
+      # ever fails while the mlx half passes, that assumption is what broke, not the dump.
+      - name: Verify the engine-capability dumps are real, not restamps
         run: |
           set -euo pipefail
           scratch="$(mktemp -d)"
@@ -273,6 +281,15 @@ jobs:
             echo "::error::config/engine-capabilities/capabilities.mlx.json does not match a fresh"\
                  "dump at this pin. Re-dump it on a Mac:"\
                  "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
+                 "then (cd apps/web && npm run gen:preview-support)."
+            exit 1
+          fi
+          if ! diff -u config/engine-capabilities/audio/capabilities.candle.json \
+                     "$scratch/audio/capabilities.candle.json"; then
+            echo "::error::config/engine-capabilities/audio/capabilities.candle.json does not"\
+                 "match a fresh dump at this pin. Either box re-dumps it --"\
+                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities"\
+                 "[--no-default-features --features backend-candle] --"\
                  "then (cd apps/web && npm run gen:preview-support)."
             exit 1
           fi
