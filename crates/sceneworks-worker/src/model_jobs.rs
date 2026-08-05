@@ -4731,10 +4731,13 @@ mod tests {
             base.display()
         );
 
-        let out = std::env::temp_dir().join(format!("sw_true_v2_convert_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
+        let out_guard = tempfile::Builder::new()
+            .prefix("sw_true_v2_convert_")
+            .tempdir()
+            .expect("temp dir");
+        let out = out_guard.path();
 
-        convert_flux2_klein_diffusers(&source, &base, &out).expect("native true_v2 convert");
+        convert_flux2_klein_diffusers(&source, &base, out).expect("native true_v2 convert");
 
         // Transformer weights + config are written as real files (the remapped, base-validated
         // diffusers transformer); model_index.json is copied.
@@ -4752,8 +4755,6 @@ mod tests {
                 out.display()
             );
         }
-
-        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// Real-weights smoke for the native Rust/MLX LTX-2.3 converter (sc-3224 engine + sc-3240
@@ -4780,10 +4781,13 @@ mod tests {
             upscaler_dir.display()
         );
 
-        let out = std::env::temp_dir().join(format!("sw_ltx_eros_convert_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&out);
+        let out_guard = tempfile::Builder::new()
+            .prefix("sw_ltx_eros_convert_")
+            .tempdir()
+            .expect("temp dir");
+        let out = out_guard.path();
 
-        convert_ltx_native(&source, &upscaler_dir, &out, 4).expect("native LTX-2.3 eros convert");
+        convert_ltx_native(&source, &upscaler_dir, out, 4).expect("native LTX-2.3 eros convert");
 
         for file in [
             "transformer.safetensors",
@@ -4805,8 +4809,6 @@ mod tests {
                 out.display()
             );
         }
-
-        let _ = std::fs::remove_dir_all(&out);
     }
 }
 

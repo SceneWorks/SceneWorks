@@ -626,9 +626,11 @@ fn yolo11_downloads_and_detects_from_huggingface() {
         eprintln!("skipping: people.jpg not staged");
         return;
     };
-    let dir = std::env::temp_dir().join("sceneworks-person-detect-dl-test");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sceneworks-person-detect-dl-test-")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let target = dir.join("yolo11m_fused_mlx.safetensors");
 
     let rt = tokio::runtime::Runtime::new().unwrap();

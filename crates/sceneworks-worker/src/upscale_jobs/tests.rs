@@ -631,10 +631,12 @@ fn resolve_env_file_pin_errors_on_missing_path() {
         "a set-but-missing pin must error, got {missing:?}"
     );
 
-    let existing = std::env::temp_dir().join(format!(
-        "sw-realesrgan-pin-test-{}.onnx",
-        std::process::id()
-    ));
+    // The pin names a FILE, so the guard is the directory around it (sc-17707).
+    let pin_guard = tempfile::Builder::new()
+        .prefix("sw-realesrgan-pin-test-")
+        .tempdir()
+        .expect("temp dir");
+    let existing = pin_guard.path().join("realesrgan_x4.onnx");
     std::fs::write(&existing, b"onnx").expect("write temp onnx");
     let resolved = resolve_env_file_pin(
         "SCENEWORKS_REALESRGAN_ONNX",
@@ -643,7 +645,6 @@ fn resolve_env_file_pin_errors_on_missing_path() {
     )
     .expect("existing pin ok");
     assert_eq!(resolved.as_deref(), Some(existing.as_path()));
-    let _ = std::fs::remove_file(&existing);
 }
 
 /// sc-8911: a set `SCENEWORKS_SEEDVR2_CHECKPOINT` that is missing either checkpoint file
@@ -659,8 +660,11 @@ fn resolve_seedvr2_dir_pin_errors_on_incomplete_dir() {
     );
 
     // A temp dir missing both files → error.
-    let empty = std::env::temp_dir().join(format!("sw-seedvr2-pin-test-{}", std::process::id()));
-    std::fs::create_dir_all(&empty).expect("mkdir temp");
+    let empty_guard = tempfile::Builder::new()
+        .prefix("sw-seedvr2-pin-test-")
+        .tempdir()
+        .expect("temp dir");
+    let empty = empty_guard.path();
     let incomplete = resolve_seedvr2_dir_pin(Some(OsString::from(empty.as_os_str())));
     assert!(
         matches!(incomplete, Err(WorkerError::InvalidPayload(ref m)) if m.contains("SCENEWORKS_SEEDVR2_CHECKPOINT") && m.contains("missing")),
@@ -672,8 +676,7 @@ fn resolve_seedvr2_dir_pin_errors_on_incomplete_dir() {
     std::fs::write(empty.join(SEEDVR2_VAE_FILE), b"vae").expect("write vae");
     let resolved =
         resolve_seedvr2_dir_pin(Some(OsString::from(empty.as_os_str()))).expect("complete dir ok");
-    assert_eq!(resolved.as_deref(), Some(empty.as_path()));
-    let _ = std::fs::remove_dir_all(&empty);
+    assert_eq!(resolved.as_deref(), Some(empty));
 }
 
 /// sc-8879: the default third-party SeedVR2 mirror is fetched at a pinned commit, never

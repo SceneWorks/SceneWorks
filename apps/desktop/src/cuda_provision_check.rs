@@ -84,17 +84,17 @@ pub(crate) fn component_provisioned(
 mod tests {
     use super::*;
 
-    /// A fresh, unique temp dir for a test (offline; cleaned by the caller). Rolled by
-    /// hand (as the sibling `cuda_provision` tests do) so no `tempfile` dev-dep is added.
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sw-provcheck-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id(),
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create scratch");
-        dir
+    /// A fresh, unique temp dir for a test (offline), removed when the guard drops.
+    ///
+    /// This used to be rolled by hand off `temp_dir()` to avoid a `tempfile` dev-dep, and
+    /// paid for it twice: the cleanup was a trailing line each test skipped on panic, and
+    /// the pid+thread-id key repeated across runs, so a recycled PID inherited an earlier
+    /// run's leftovers (sc-17707). Callers hold the guard and read `.path()`.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("sw-provcheck-{tag}-"))
+            .tempdir()
+            .expect("create scratch")
     }
 
     fn touch(dir: &Path, names: &[&str]) {
@@ -108,22 +108,21 @@ mod tests {
     /// case-insensitive prefix (so a CUDA point-release still resolves).
     #[test]
     fn dir_has_dll_exact_and_prefix() {
-        let dir = scratch("has-dll");
-        touch(&dir, &["cudart64_13.dll", "onnxruntime.dll", "notes.txt"]);
+        let scratch_dir = scratch("has-dll");
+        let dir = scratch_dir.path();
+        touch(dir, &["cudart64_13.dll", "onnxruntime.dll", "notes.txt"]);
 
         // Exact name (ends in .dll).
-        assert!(dir_has_dll(&dir, "onnxruntime.dll"));
-        assert!(!dir_has_dll(&dir, "onnxruntime_providers_cuda.dll"));
+        assert!(dir_has_dll(dir, "onnxruntime.dll"));
+        assert!(!dir_has_dll(dir, "onnxruntime_providers_cuda.dll"));
         // Version-agnostic prefix: a 13.x cudart still satisfies the `cudart64_` sentinel.
-        assert!(dir_has_dll(&dir, "cudart64_"));
+        assert!(dir_has_dll(dir, "cudart64_"));
         // Case-insensitive.
-        assert!(dir_has_dll(&dir, "CUDART64_"));
+        assert!(dir_has_dll(dir, "CUDART64_"));
         // Absent component.
-        assert!(!dir_has_dll(&dir, "cudnn64_"));
+        assert!(!dir_has_dll(dir, "cudnn64_"));
         // A non-DLL file with a matching prefix does NOT count.
-        assert!(!dir_has_dll(&dir, "notes"));
-
-        let _ = fs::remove_dir_all(&dir);
+        assert!(!dir_has_dll(dir, "notes"));
     }
 
     /// `component_provisioned` discriminates a genuinely-complete component from every
@@ -135,49 +134,48 @@ mod tests {
         const VERSION: &str = "cuda12.9-test-1";
         const SENTINELS: &[&str] = &["cublas64_", "cublasLt64_"];
 
-        let root = scratch("provisioned");
+        let root_guard = scratch("provisioned");
+        let root = root_guard.path();
         let dest = root.join("cuda");
         fs::create_dir_all(&dest).expect("create dest");
 
         // Nothing yet: no marker, no DLLs.
         assert!(!component_provisioned(
-            &root, &dest, "cublas", VERSION, SENTINELS
+            root, &dest, "cublas", VERSION, SENTINELS
         ));
 
         // DLLs present but no marker — the exact "partial/interrupted extract" shape a
         // mid-unzip crash leaves (files on disk, completion never recorded). Must NOT skip.
         touch(&dest, &["cublas64_12.dll", "cublasLt64_12.dll"]);
         assert!(!component_provisioned(
-            &root, &dest, "cublas", VERSION, SENTINELS
+            root, &dest, "cublas", VERSION, SENTINELS
         ));
 
         // Marker written last, after a verified full extraction → now complete → skip.
-        write_component_marker(&root, "cublas", VERSION).expect("write marker");
+        write_component_marker(root, "cublas", VERSION).expect("write marker");
         assert!(component_provisioned(
-            &root, &dest, "cublas", VERSION, SENTINELS
+            root, &dest, "cublas", VERSION, SENTINELS
         ));
 
         // A sentinel DLL deleted after the marker was written → no longer complete
         // (self-heals by re-downloading rather than trusting a stale marker).
         fs::remove_file(dest.join("cublasLt64_12.dll")).expect("rm dll");
         assert!(!component_provisioned(
-            &root, &dest, "cublas", VERSION, SENTINELS
+            root, &dest, "cublas", VERSION, SENTINELS
         ));
 
         // Restore the DLL but bump the version → the old-version marker no longer counts
         // (a REDIST_VERSION bump must re-provision every component).
         touch(&dest, &["cublasLt64_12.dll"]);
         assert!(component_provisioned(
-            &root, &dest, "cublas", VERSION, SENTINELS
+            root, &dest, "cublas", VERSION, SENTINELS
         ));
         assert!(!component_provisioned(
-            &root,
+            root,
             &dest,
             "cublas",
             "cuda12.9-test-2",
             SENTINELS
         ));
-
-        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -292,13 +292,11 @@ fn seedvr2_probe_uses_effective_output_geometry_after_rotation() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
-    let root = std::env::temp_dir().join(format!(
-        "sc13621_comfy_wan_gate_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root_guard = tempfile::Builder::new()
+        .prefix("sc13621_comfy_wan_gate_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let high = root.join("high.safetensors");
     let low = root.join("low.safetensors");
     std::fs::File::create(&high)
@@ -310,7 +308,7 @@ fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
         .set_len(20 * 1024 * 1024 * 1024)
         .unwrap();
     let make_paths =
-        || ComfyuiWanPaths::test_fixture(high.clone(), low.clone(), None, None, root.clone());
+        || ComfyuiWanPaths::test_fixture(high.clone(), low.clone(), None, None, root.to_path_buf());
     assert!(
         comfyui_wan_vram_preflight(
             make_paths(),
@@ -339,7 +337,6 @@ fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
         candle_video_offload_policy(WAN_COMFYUI_T2V_ENGINE),
         OffloadPolicy::Sequential
     );
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// sc-13585: on Windows the free-space probe was inert — the old code matched an `fsutil` output
@@ -549,12 +546,12 @@ fn video_preflight_refuses_an_fps_the_model_does_not_advertise() {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "mochi_root_{tag}_{}_{}",
-        std::process::id(),
-        line!()
-    ));
+fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> tempfile::TempDir {
+    let root_guard = tempfile::Builder::new()
+        .prefix(&format!("mochi_root_{tag}_"))
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     for tier in tiers {
         let transformer = root.join(tier).join("transformer");
         std::fs::create_dir_all(&transformer).unwrap();
@@ -580,7 +577,7 @@ fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> PathBuf {
             std::fs::create_dir_all(root.join(component)).unwrap();
         }
     }
-    root
+    root_guard
 }
 
 #[cfg(any(
@@ -706,7 +703,8 @@ fn mochi_tier_order_maps_mlx_quantize_to_a_tier_dir() {
 ))]
 #[test]
 fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
-    let root = mochi_root("resolve", &["q4", "q8", "bf16"], true);
+    let root_guard = mochi_root("resolve", &["q4", "q8", "bf16"], true);
+    let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
         ..Settings::from_env()
@@ -731,7 +729,7 @@ fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
             assert_eq!(dir.parent().unwrap(), root);
         }
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// A complete tier with NO shared co-requisite must NOT resolve. The T5/tokenizer/VAE are a
@@ -744,14 +742,15 @@ fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
 ))]
 #[test]
 fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
-    let root = mochi_root("noshared", &["q4"], false);
+    let root_guard = mochi_root("noshared", &["q4"], false);
+    let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
         ..Settings::from_env()
     };
     temp_env_var(MOCHI_DIR_ENV, root.to_str().unwrap(), || {
         assert!(
-            mochi_tier_subdir(&root, &["q4"]).is_none(),
+            mochi_tier_subdir(root, &["q4"]).is_none(),
             "a tier without the shared T5/VAE siblings is not loadable"
         );
         assert!(
@@ -759,7 +758,7 @@ fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
             "must error rather than resolve an unloadable tier"
         );
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// A half-downloaded tier (manifest without weights, or weights without the manifest) must fall
@@ -770,18 +769,19 @@ fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
 ))]
 #[test]
 fn mochi_tier_subdir_skips_an_incomplete_tier() {
-    let root = mochi_root("partial", &["q4"], true);
+    let root_guard = mochi_root("partial", &["q4"], true);
+    let root = root_guard.path();
     // A `q8/` that carries only the manifest — the shape a mid-flight download leaves on disk.
     std::fs::create_dir_all(root.join("q8")).unwrap();
     std::fs::write(root.join("q8").join("split_model.json"), b"{}").unwrap();
 
     assert!(!mochi_tier_dir_is_complete(&root.join("q8")));
     assert_eq!(
-        mochi_tier_subdir(&root, &["q8", "q4"]),
+        mochi_tier_subdir(root, &["q8", "q4"]),
         Some(root.join("q4")),
         "a torn q8 must fall through to the complete q4, never half-load"
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// The quant marker rides the RESOLVED tier's own `split_model.json` — the same manifest the
@@ -793,14 +793,15 @@ fn mochi_tier_subdir_skips_an_incomplete_tier() {
 ))]
 #[test]
 fn mochi_tier_quant_reads_the_tier_manifest() {
-    let root = mochi_root("quant", &["q4", "q8", "bf16"], true);
+    let root_guard = mochi_root("quant", &["q4", "q8", "bf16"], true);
+    let root = root_guard.path();
     assert_eq!(mochi_tier_quant(&root.join("q4")), Some(Quant::Q4));
     assert_eq!(mochi_tier_quant(&root.join("q8")), Some(Quant::Q8));
     // Dense tier ⇒ no quant assertion (the provider loads it dense).
     assert_eq!(mochi_tier_quant(&root.join("bf16")), None);
     // A manifest-less dir is dense-by-absence, never a guess.
     assert_eq!(mochi_tier_quant(&root.join("nope")), None);
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// `mochi_1` is the engine id on BOTH backends — no `_distilled`-style split, unlike LTX. (The
@@ -1165,12 +1166,12 @@ const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn mochi_root_real_sized(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "mochi_preflight_{tag}_{}_{}",
-        std::process::id(),
-        line!()
-    ));
+fn mochi_root_real_sized(tag: &str) -> tempfile::TempDir {
+    let root_guard = tempfile::Builder::new()
+        .prefix(&format!("mochi_preflight_{tag}_"))
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     for (relative, len) in [
         ("q4/transformer/model.safetensors", MOCHI_Q4_DIT_BYTES),
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
@@ -1189,7 +1190,7 @@ fn mochi_root_real_sized(tag: &str) -> PathBuf {
         .unwrap(),
     )
     .unwrap();
-    root
+    root_guard
 }
 
 /// sc-11992 review: pin the frame lattice AT THE SEAM THE GENERATION ARM CALLS, not just as a free
@@ -1203,12 +1204,13 @@ fn mochi_root_real_sized(tag: &str) -> PathBuf {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_preflight_coerces_the_frame_count_on_mochis_lattice_by_model_id() {
-    let root = mochi_root_real_sized("lattice");
+    let root_guard = mochi_root_real_sized("lattice");
+    let root = root_guard.path();
     // A budget no clip can overflow, so ONLY the lattice is under test here.
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "512", || {
         mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let preflight = out.expect("a 151-frame clip fits a 512 GB budget");
     assert_eq!(
@@ -1245,12 +1247,13 @@ fn mochi_preflight_coerces_the_frame_count_on_mochis_lattice_by_model_id() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_preflight_rejects_the_5s_default_on_a_64gb_mac() {
-    let root = mochi_root_real_sized("reject");
+    let root_guard = mochi_root_real_sized("reject");
+    let root = root_guard.path();
     // A 64 GB Mac — the machine the epic's crash report names.
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let message = out
             .expect_err(
@@ -1275,11 +1278,12 @@ fn mochi_preflight_rejects_the_5s_default_on_a_64gb_mac() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_preflight_admits_a_short_clip_on_the_same_64gb_mac() {
-    let root = mochi_root_real_sized("admit");
+    let root_guard = mochi_root_real_sized("admit");
+    let root = root_guard.path();
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 19, 848, 480)
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let preflight = out.expect(
         "19 frames (the engine's own DEFAULT_FRAMES) needs 18.73 + 9.32 + 2 = 30.1 GiB, which \
@@ -1321,7 +1325,8 @@ fn rtx_5090() -> Option<crate::vram_gate::VramBudget> {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn mochi_vram_preflight_rejects_the_5s_default_on_an_rtx_5090() {
-    let root = mochi_root_real_sized("candle_reject");
+    let root_guard = mochi_root_real_sized("candle_reject");
+    let root = root_guard.path();
     let out = mochi_vram_preflight(
         "mochi_1",
         &root.join("q4"),
@@ -1331,7 +1336,7 @@ fn mochi_vram_preflight_rejects_the_5s_default_on_an_rtx_5090() {
         "0",
         rtx_5090(),
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .expect_err(
@@ -1366,10 +1371,11 @@ fn mochi_vram_preflight_rejects_the_5s_default_on_an_rtx_5090() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn mochi_vram_preflight_admits_a_short_clip_on_the_same_rtx_5090() {
-    let root = mochi_root_real_sized("candle_admit");
+    let root_guard = mochi_root_real_sized("candle_admit");
+    let root = root_guard.path();
     // 7 frames: 18.73 weights + 4.66 decode + 2 headroom ≈ 25.4 GB, which fits 32 GB.
     let out = mochi_vram_preflight("mochi_1", &root.join("q4"), 7, 848, 480, "0", rtx_5090());
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let preflight = out.expect(
         "a 7-frame clip needs ~25 GB and FITS a 32 GB card — a gate that refuses this has \
@@ -1392,7 +1398,8 @@ fn mochi_vram_preflight_admits_a_short_clip_on_the_same_rtx_5090() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane() {
-    let root = mochi_root_real_sized("candle_lattice");
+    let root_guard = mochi_root_real_sized("candle_lattice");
+    let root = root_guard.path();
     let tier = root.join("q4");
     // A budget nothing overflows, so ONLY the frame arithmetic is under test.
     let huge = crate::vram_gate::apply_vram_cap(None, Some(512.0));
@@ -1424,7 +1431,7 @@ fn mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane() {
         mochi_vram_preflight("mochi_1", &tier, frames, 848, 480, "0", card_48).is_err(),
         "the 5 s default does not fit the SAME 48 GB card — the gate must see the frame count"
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// sc-12344: the Wan weights-floor gate is keyed on the ENGINE id, and [`wan_vram_preflight`] is
@@ -1439,12 +1446,11 @@ fn mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
-    let root = std::env::temp_dir().join(format!(
-        "sc12344_engine_ids_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_dir_all(&root);
+    let root_guard = tempfile::Builder::new()
+        .prefix("sc12344_engine_ids_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     // A populated Wan component tree, so a 0 read can only mean "not keyed to this engine".
     for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
         let path = root.join(component).join("model.safetensors");
@@ -1459,13 +1465,13 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
     for model in ["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"] {
         let engine_id = candle_video_engine_id(model).expect("a candle video engine");
         assert!(
-            crate::vram_gate::wan_weight_bytes(engine_id, &root) > 0,
+            crate::vram_gate::wan_weight_bytes(engine_id, root) > 0,
             "{model} → {engine_id} must be gated; a 0 read means the component map and the engine \
                  id disagree, and the gate is INERT for this model"
         );
         // …and the sceneworks id is NOT the key. This is the slip above, made concrete.
         assert_eq!(
-            crate::vram_gate::wan_weight_bytes(model, &root),
+            crate::vram_gate::wan_weight_bytes(model, root),
             0,
             "{model} is the sceneworks id, not the engine id — passing it reads no bytes"
         );
@@ -1476,7 +1482,7 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
     for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
         let engine_id = candle_video_engine_id(model).expect("a candle video engine");
         assert_eq!(
-            crate::vram_gate::wan_weight_bytes(engine_id, &root),
+            crate::vram_gate::wan_weight_bytes(engine_id, root),
             0,
             "{model} → {engine_id} is exempt by decision; gating it on a dir sum would over-count"
         );
@@ -1486,12 +1492,10 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
     assert_eq!(
         crate::vram_gate::wan_weight_bytes(
             candle_video_engine_id("mochi_1").expect("a candle video engine"),
-            &root
+            root
         ),
         0
     );
-
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// The gate NO-OPS without a budget signal (the story's explicit AC) and without a weight signal.
@@ -1501,7 +1505,8 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn mochi_vram_preflight_no_ops_without_a_budget_or_weight_signal() {
-    let root = mochi_root_real_sized("candle_nosignal");
+    let root_guard = mochi_root_real_sized("candle_nosignal");
+    let root = root_guard.path();
 
     // No budget: `nvidia_vram_budget_gb` → None (non-NVIDIA / unreadable) and no cap set.
     assert!(
@@ -1520,11 +1525,11 @@ fn mochi_vram_preflight_no_ops_without_a_budget_or_weight_signal() {
     // under `root` above would still scan ~9.7 GiB and be REJECTED — testing the exact opposite of
     // the intent — and (b) hanging it directly off `temp_dir()` would make the parent scan read
     // /tmp, so an unrelated `/tmp/text_encoder` would flake it. A private root has neither problem.
-    let bare_root = std::env::temp_dir().join(format!(
-        "mochi_candle_nosignal_bare_{}_{}",
-        std::process::id(),
-        line!()
-    ));
+    let bare_root_guard = tempfile::Builder::new()
+        .prefix("mochi_candle_nosignal_bare_")
+        .tempdir()
+        .expect("temp dir");
+    let bare_root = bare_root_guard.path();
     let bare = bare_root.join("q4");
     std::fs::create_dir_all(&bare).unwrap();
     assert_eq!(
@@ -1541,8 +1546,7 @@ fn mochi_vram_preflight_no_ops_without_a_budget_or_weight_signal() {
         "0",
         crate::vram_gate::apply_vram_cap(None, Some(4.0)),
     );
-    std::fs::remove_dir_all(&bare_root).ok();
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
     assert!(out.is_ok(), "unmeasurable weights ⇒ no signal ⇒ admit");
 }
 
@@ -1555,7 +1559,8 @@ fn mochi_vram_preflight_no_ops_without_a_budget_or_weight_signal() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn mochi_vram_preflight_folds_the_shared_siblings_on_the_candle_lane() {
-    let root = mochi_root_real_sized("candle_siblings");
+    let root_guard = mochi_root_real_sized("candle_siblings");
+    let root = root_guard.path();
     assert_eq!(
         crate::mlx_fit_gate::mochi_resident_bytes(&root.join("q4")),
         MOCHI_Q4_DIT_BYTES + MOCHI_Q4_TE_BYTES + MOCHI_Q4_VAE_BYTES,
@@ -1574,7 +1579,7 @@ fn mochi_vram_preflight_folds_the_shared_siblings_on_the_candle_lane() {
         "0",
         crate::vram_gate::apply_vram_cap(None, Some(20.0)),
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_err(),
         "a tier-only scan would admit this job on a 20 GB card and then OOM on the T5 + VAE"
@@ -1596,7 +1601,8 @@ fn mochi_vram_preflight_folds_the_shared_siblings_on_the_candle_lane() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() {
-    let root = mochi_root_shared_only("candle_reject");
+    let root_guard = mochi_root_shared_only("candle_reject");
+    let root = root_guard.path();
     // The requested tier does NOT exist yet — the pre-check must still decide.
     let tier_dir = root.join("bf16");
     assert!(
@@ -1613,7 +1619,7 @@ fn candle_mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() 
         "0",
         rtx_5090(),
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .expect_err(
@@ -1643,7 +1649,8 @@ fn candle_mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_card() {
-    let root = mochi_root_shared_only("candle_floor");
+    let root_guard = mochi_root_shared_only("candle_floor");
+    let root = root_guard.path();
     let tier_dir = root.join("bf16");
     let card_64 = crate::vram_gate::apply_vram_cap(None, Some(64.0));
 
@@ -1666,7 +1673,7 @@ fn candle_mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_card()
         "0",
         card_64,
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_err(),
         "the shared T5 + VAE (~9.73 GiB) push the total to ~72 GB, over the 64 GB card — a \
@@ -1681,7 +1688,8 @@ fn candle_mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_card()
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_mochi_precheck_admits_a_short_clip_on_the_same_rtx_5090() {
-    let root = mochi_root_shared_only("candle_admit");
+    let root_guard = mochi_root_shared_only("candle_admit");
+    let root = root_guard.path();
     let tier_dir = root.join("bf16");
     // 7 frames: 9.73 floor + 4.66 decode + 2 ≈ 16.4 GB, well inside 32.
     let out = mochi_vram_precheck(
@@ -1694,7 +1702,7 @@ fn candle_mochi_precheck_admits_a_short_clip_on_the_same_rtx_5090() {
         "0",
         rtx_5090(),
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_ok(),
         "a 7-frame clip fits a 32 GB card — refusing it here would block the download for a job \
@@ -1714,7 +1722,9 @@ fn candle_mochi_precheck_admits_without_a_signal() {
         "no locatable model root ⇒ no signal ⇒ the download must proceed"
     );
 
-    let root = mochi_root_shared_only("candle_nosignal");
+    let root_guard = mochi_root_shared_only("candle_nosignal");
+
+    let root = root_guard.path();
     let tier_dir = root.join("bf16");
     // A real floor, but no budget ⇒ admit.
     assert!(
@@ -1731,7 +1741,7 @@ fn candle_mochi_precheck_admits_without_a_signal() {
         .is_ok(),
         "no budget signal ⇒ admit — the pre-check refuses only against a real reading"
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 // -----------------------------------------------------------------------------------------
@@ -1988,11 +1998,12 @@ fn drive_mochi_arm(
 #[cfg(target_os = "macos")]
 #[test]
 fn generate_mochi_using_hands_the_engine_the_mochi_lattice_frame_count() {
-    let root = mochi_root_real_sized("arm_lattice");
+    let root_guard = mochi_root_real_sized("arm_lattice");
+    let root = root_guard.path();
     let probe = ArmProbe::default();
     // A budget no clip can overflow, so the fit gate cannot be what fails this test.
-    let out = drive_mochi_arm(&root, "512", &probe, &mochi_request(json!({})));
-    std::fs::remove_dir_all(&root).ok();
+    let out = drive_mochi_arm(root, "512", &probe, &mochi_request(json!({})));
+    std::fs::remove_dir_all(root).ok();
 
     let (decoded, raw_settings) = out.expect("a 151-frame clip fits a 512 GB budget");
     assert_eq!(
@@ -2059,10 +2070,11 @@ fn generate_mochi_using_hands_the_engine_the_mochi_lattice_frame_count() {
 #[cfg(target_os = "macos")]
 #[test]
 fn generate_mochi_using_refuses_an_over_budget_clip_before_loading_the_engine() {
-    let root = mochi_root_real_sized("arm_reject");
+    let root_guard = mochi_root_real_sized("arm_reject");
+    let root = root_guard.path();
     let probe = ArmProbe::default();
-    let out = drive_mochi_arm(&root, "64", &probe, &mochi_request(json!({})));
-    std::fs::remove_dir_all(&root).ok();
+    let out = drive_mochi_arm(root, "64", &probe, &mochi_request(json!({})));
+    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .err()
@@ -2114,7 +2126,8 @@ fn generate_mochi_using_refuses_an_over_budget_clip_before_loading_the_engine() 
 #[test]
 fn generate_mochi_using_refuses_after_the_fetch_when_the_precheck_floor_admitted() {
     // q4 installed at its real hosted size; q8 is NOT — the fixture stages no other tier.
-    let root = mochi_root_real_sized("arm_floor_vs_full");
+    let root_guard = mochi_root_real_sized("arm_floor_vs_full");
+    let root = root_guard.path();
     let probe = ArmProbe::default();
     // 3.8 s x 30 fps = 114 raw ⇒ 115 frames at 848x480, inside the 109..127 divergence window on a
     // 64 GB Mac. Every geometry term is EXPLICIT because `VideoRequest`'s defaults are none of
@@ -2161,8 +2174,8 @@ fn generate_mochi_using_refuses_after_the_fetch_when_the_precheck_floor_admitted
              before the fetch and this test would collapse into its sibling"
     );
 
-    let out = drive_mochi_arm(&root, "64", &probe, &request);
-    std::fs::remove_dir_all(&root).ok();
+    let out = drive_mochi_arm(root, "64", &probe, &request);
+    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .err()
@@ -2193,12 +2206,12 @@ fn generate_mochi_using_refuses_after_the_fetch_when_the_precheck_floor_admitted
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn mochi_hf_cache_shared_only(tag: &str) -> PathBuf {
-    let hub = std::env::temp_dir().join(format!(
-        "mochi_hf_hub_{tag}_{}_{}",
-        std::process::id(),
-        line!()
-    ));
+fn mochi_hf_cache_shared_only(tag: &str) -> tempfile::TempDir {
+    let hub_guard = tempfile::Builder::new()
+        .prefix(&format!("mochi_hf_hub_{tag}_"))
+        .tempdir()
+        .expect("temp dir");
+    let hub = hub_guard.path();
     let repo_dir = hub.join(format!(
         "models--{}",
         sceneworks_core::hf_home::safe_repo_dir_name(MOCHI_REPO).expect("the mochi repo slug")
@@ -2215,7 +2228,7 @@ fn mochi_hf_cache_shared_only(tag: &str) -> PathBuf {
     std::fs::create_dir_all(snapshot.join("tokenizer")).unwrap();
     std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
     std::fs::write(repo_dir.join("refs").join("main"), MOCHI_REVISION).unwrap();
-    hub
+    hub_guard
 }
 
 /// **Closes the residual sc-12322 recorded against this story.** Its own mutation table ends with
@@ -2247,7 +2260,8 @@ fn mochi_hf_cache_shared_only(tag: &str) -> PathBuf {
 #[cfg(target_os = "macos")]
 #[test]
 fn generate_mochi_using_refuses_before_paying_for_the_tier_download() {
-    let hub = mochi_hf_cache_shared_only("arm_precheck");
+    let hub_guard = mochi_hf_cache_shared_only("arm_precheck");
+    let hub = hub_guard.path();
     let probe = ArmProbe::default();
     let request = mochi_request(json!({ "mlxQuantize": 8 }));
     // `offline_settings` pins BOTH `api_url` and the `huggingface_base_url` the tier fetch
@@ -2280,7 +2294,7 @@ fn generate_mochi_using_refuses_before_paying_for_the_tier_download() {
                 ))
         },
     );
-    std::fs::remove_dir_all(&hub).ok();
+    std::fs::remove_dir_all(hub).ok();
 
     let message = out
         .err()
@@ -2310,7 +2324,8 @@ fn generate_mochi_using_refuses_before_paying_for_the_tier_download() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() {
-    let root = mochi_root("arm_lattice_candle", &["q4"], true);
+    let root_guard = mochi_root("arm_lattice_candle", &["q4"], true);
+    let root = root_guard.path();
     let probe = ArmProbe::default();
     let request = mochi_request(json!({}));
     // This pinned `api_url` alone until sc-12380. It never dialed the hub only because an empty
@@ -2342,7 +2357,7 @@ fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() 
                 ))
         },
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let (_decoded, adapter, _raw_settings) = out.expect("the candle mochi arm runs to completion");
     assert_eq!(
@@ -2386,7 +2401,8 @@ fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn generate_candle_video_using_refuses_before_paying_for_the_tier_download() {
-    let hub = mochi_hf_cache_shared_only("candle_arm_precheck");
+    let hub_guard = mochi_hf_cache_shared_only("candle_arm_precheck");
+    let hub = hub_guard.path();
     let probe = ArmProbe::default();
     let request = mochi_request(json!({ "mlxQuantize": 8 }));
     // `offline_settings` pins BOTH `api_url` and the `huggingface_base_url` the tier fetch
@@ -2419,7 +2435,7 @@ fn generate_candle_video_using_refuses_before_paying_for_the_tier_download() {
                 ))
         },
     );
-    std::fs::remove_dir_all(&hub).ok();
+    std::fs::remove_dir_all(hub).ok();
 
     let message = out
         .err()
@@ -2447,12 +2463,12 @@ fn generate_candle_video_using_refuses_before_paying_for_the_tier_download() {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn mochi_root_shared_only(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "mochi_precheck_{tag}_{}_{}",
-        std::process::id(),
-        line!()
-    ));
+fn mochi_root_shared_only(tag: &str) -> tempfile::TempDir {
+    let root_guard = tempfile::Builder::new()
+        .prefix(&format!("mochi_precheck_{tag}_"))
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     for (relative, len) in [
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
@@ -2462,7 +2478,7 @@ fn mochi_root_shared_only(tag: &str) -> PathBuf {
         std::fs::File::create(&path).unwrap().set_len(len).unwrap();
     }
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
-    root
+    root_guard
 }
 
 /// THE sc-12322 behavior: the 5 s default is refused on a 64 GB Mac with NO tier on disk — i.e.
@@ -2484,7 +2500,8 @@ fn mochi_root_shared_only(tag: &str) -> PathBuf {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() {
-    let root = mochi_root_shared_only("reject");
+    let root_guard = mochi_root_shared_only("reject");
+    let root = root_guard.path();
     // The requested tier does NOT exist yet — the pre-check must still decide.
     let tier_dir = root.join("bf16");
     assert!(
@@ -2494,7 +2511,7 @@ fn mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() {
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_precheck("mochi_1", "mochi_1", Some(&tier_dir), 150, 848, 480)
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     let message = out
             .expect_err(
@@ -2531,7 +2548,8 @@ fn mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_default() {
     );
 
     // … but the floor the shared components already put on disk does.
-    let root = mochi_root_shared_only("floor");
+    let root_guard = mochi_root_shared_only("floor");
+    let root = root_guard.path();
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_precheck(
             "mochi_1",
@@ -2542,7 +2560,7 @@ fn mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_default() {
             480,
         )
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_err(),
         "the shared co-requisites (~9.73 GiB) are already on disk before any tier fetch, and \
@@ -2557,11 +2575,12 @@ fn mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_default() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_precheck_admits_a_short_clip_on_the_same_64gb_mac() {
-    let root = mochi_root_shared_only("admit");
+    let root_guard = mochi_root_shared_only("admit");
+    let root = root_guard.path();
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_precheck("mochi_1", "mochi_1", Some(&root.join("bf16")), 19, 848, 480)
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     out.expect(
         "19 frames needs 9.73 floor + 9.32 decode + 2 OS = 21.1 GiB — it fits, so the pre-check \
@@ -2583,7 +2602,11 @@ fn mochi_precheck_admits_without_a_signal() {
     .expect("no locatable model root ⇒ no signal ⇒ admit, never a phantom refusal");
 
     // An empty root ⇒ the scan sums 0 bytes ⇒ still no signal, even though the clip is huge.
-    let root = std::env::temp_dir().join(format!("mochi_precheck_empty_{}", std::process::id()));
+    let root_guard = tempfile::Builder::new()
+        .prefix("mochi_precheck_empty_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     std::fs::create_dir_all(root.join("bf16")).unwrap();
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_precheck(
@@ -2595,7 +2618,6 @@ fn mochi_precheck_admits_without_a_signal() {
             480,
         )
     });
-    std::fs::remove_dir_all(&root).ok();
     out.expect("unmeasurable weights ⇒ no signal ⇒ admit and let the full gate decide later");
 }
 
@@ -2605,7 +2627,8 @@ fn mochi_precheck_admits_without_a_signal() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_precheck_dir_names_the_requested_tier_not_the_installed_fallback() {
-    let root = mochi_root("precheck_dir", &["q4"], true);
+    let root_guard = mochi_root("precheck_dir", &["q4"], true);
+    let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
         ..Settings::from_env()
@@ -2614,7 +2637,7 @@ fn mochi_precheck_dir_names_the_requested_tier_not_the_installed_fallback() {
         // bf16 requested; only q4 is on disk.
         mochi_precheck_dir(&settings, &mochi_request(json!({ "mlxQuantize": 16 })))
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 
     assert_eq!(
         dir.as_deref(),
@@ -2631,7 +2654,8 @@ fn mochi_precheck_dir_names_the_requested_tier_not_the_installed_fallback() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_available_is_text_to_video_only() {
-    let root = mochi_root("mode", &["q4"], true);
+    let root_guard = mochi_root("mode", &["q4"], true);
+    let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
         ..Settings::from_env()
@@ -2668,7 +2692,7 @@ fn mochi_available_is_text_to_video_only() {
             "a payload with no mode defaults to i2v and must NOT reach the t2v-only engine"
         );
     });
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
@@ -2701,7 +2725,8 @@ fn mochi_mode_gate_rejects_every_conditioning_shape() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
-    let root = mochi_root("route", &["q4"], true);
+    let root_guard = mochi_root("route", &["q4"], true);
+    let root = root_guard.path();
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
         ..Settings::from_env()
@@ -2726,10 +2751,13 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
 
     // Weights absent (no override, empty data dir) ⇒ the route falls to Stub, BUT the Stub arm's
     // fail-loud gate must refuse rather than hand back a procedural fake video.
-    let empty = std::env::temp_dir().join(format!("mochi_empty_{}", std::process::id()));
-    std::fs::create_dir_all(&empty).unwrap();
+    let empty_guard = tempfile::Builder::new()
+        .prefix("mochi_empty_")
+        .tempdir()
+        .expect("temp dir");
+    let empty = empty_guard.path();
     let bare = Settings {
-        data_dir: empty.clone(),
+        data_dir: empty.to_path_buf(),
         ..Settings::from_env()
     };
     temp_env_var(MOCHI_DIR_ENV, "", || {
@@ -2744,8 +2772,7 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
             "the error must name the model and tell the user what to do: {message}"
         );
     });
-    std::fs::remove_dir_all(&root).ok();
-    std::fs::remove_dir_all(&empty).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -2754,10 +2781,18 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
 
 /// A temp dir holding just a `config.json`, so `local_mlx_dir` accepts it as a resolvable Krea
 /// Realtime snapshot (the loader is stubbed in the mapping test, so the contents are never read).
+///
+/// Returns the guard rather than a bare path: the `temp_dir()/krea_{tag}_{pid}` this replaces was
+/// never removed on ANY path — not even a passing one — and keyed uniqueness on the process, so a
+/// run landing on a recycled PID resolved against an unrelated earlier run's snapshot (sc-17707).
+/// Callers must hold the guard for as long as the resolver reads the directory.
 #[cfg(target_os = "macos")]
-fn krea_fake_model_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("krea_{tag}_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+fn krea_fake_model_dir(tag: &str) -> tempfile::TempDir {
+    let dir_guard = tempfile::Builder::new()
+        .prefix(&format!("krea_{tag}_"))
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     // A FLAT locally-converted snapshot: `config.json` is what `local_mlx_dir` counts, and
     // `dit.safetensors` (+ the stock Wan companions) is what makes it actually loadable — the
     // `krea_realtime_dir_has_transformer` probe the resolver runs, mirroring the engine's own
@@ -2772,7 +2807,7 @@ fn krea_fake_model_dir(tag: &str) -> PathBuf {
     ] {
         std::fs::write(dir.join(file), "{}").unwrap();
     }
-    dir
+    dir_guard
 }
 
 /// A `JobSnapshot` for a Krea Realtime video job.
@@ -2901,9 +2936,16 @@ fn krea_realtime_conditioning_i2v_drops_strength_v2v_honors_it() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() {
-    let model_dir = krea_fake_model_dir("route");
+    let model_dir_guard = krea_fake_model_dir("route");
+    let model_dir = model_dir_guard.path();
+    // Never created and never cleaned before: a bare `temp_dir()/krea_route_data_{pid}` path
+    // handed straight to `Settings` (sc-17707).
+    let data_dir_guard = tempfile::Builder::new()
+        .prefix("krea_route_data_")
+        .tempdir()
+        .expect("temp dir");
     let settings = Settings {
-        data_dir: std::env::temp_dir().join(format!("krea_route_data_{}", std::process::id())),
+        data_dir: data_dir_guard.path().to_path_buf(),
         ..Settings::from_env()
     };
     let req = request(json!({
@@ -2936,10 +2978,13 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
 
     // Weights absent (empty env override, empty data dir) ⇒ the route falls to Stub, BUT the Stub
     // arm's fail-loud gate must refuse rather than hand back a procedural fake video.
-    let empty = std::env::temp_dir().join(format!("krea_empty_{}", std::process::id()));
-    std::fs::create_dir_all(&empty).unwrap();
+    let empty_guard = tempfile::Builder::new()
+        .prefix("krea_empty_")
+        .tempdir()
+        .expect("temp dir");
+    let empty = empty_guard.path();
     let bare = Settings {
-        data_dir: empty.clone(),
+        data_dir: empty.to_path_buf(),
         ..Settings::from_env()
     };
     temp_env_var("SCENEWORKS_MLX_KREA_REALTIME_DIR", "", || {
@@ -2954,8 +2999,7 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
             "the error must name the model and tell the user what to do: {message}"
         );
     });
-    std::fs::remove_dir_all(&model_dir).ok();
-    std::fs::remove_dir_all(&empty).ok();
+    std::fs::remove_dir_all(model_dir).ok();
 }
 
 /// The caller-side mapping pin: drives `generate_krea_realtime_using` end to end (through the
@@ -2967,7 +3011,8 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
-    let model_dir = krea_fake_model_dir("map");
+    let model_dir_guard = krea_fake_model_dir("map");
+    let model_dir = model_dir_guard.path();
     let settings = Settings {
         data_dir: model_dir.join("unused-data-dir"),
         ..offline_settings()
@@ -3002,7 +3047,7 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
                     &job,
                     &req,
                     // project_path — never touched by a t2v request (no media loaded).
-                    &model_dir,
+                    model_dir,
                     "krea_realtime_14b",
                     "mlx",
                     loader,
@@ -3040,7 +3085,7 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
     );
 
     drop(seen);
-    std::fs::remove_dir_all(&model_dir).ok();
+    std::fs::remove_dir_all(model_dir).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -3060,14 +3105,15 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_passes_selected_loras_to_the_engine_load_spec() {
-    let root = krea_fake_model_dir("lora");
+    let root_guard = krea_fake_model_dir("lora");
+    let root = root_guard.path();
     let style = root.join("origami_style.safetensors");
     let character = root.join("hero.safetensors");
     write_lora_fixture(&style, None);
     write_lora_fixture(&character, Some("lokr"));
     // sc-5723: LoRA paths are confined to the app data dir, so point `data_dir` at the fixture root.
     let settings = Settings {
-        data_dir: root.clone(),
+        data_dir: root.to_path_buf(),
         ..offline_settings()
     };
     let req = request(json!({
@@ -3099,7 +3145,7 @@ fn krea_realtime_passes_selected_loras_to_the_engine_load_spec() {
                     &settings,
                     &job,
                     &req,
-                    &root,
+                    root,
                     "krea_realtime_14b",
                     "mlx",
                     loader,
@@ -3131,7 +3177,7 @@ fn krea_realtime_passes_selected_loras_to_the_engine_load_spec() {
     );
 
     drop(seen);
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// The per-job LoRA cap is enforced on the krea arm too, and it is enforced BEFORE the tier fetch —
@@ -3140,11 +3186,12 @@ fn krea_realtime_passes_selected_loras_to_the_engine_load_spec() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_rejects_more_loras_than_the_cap_before_loading_anything() {
-    let root = krea_fake_model_dir("loracap");
+    let root_guard = krea_fake_model_dir("loracap");
+    let root = root_guard.path();
     let style = root.join("style.safetensors");
     write_lora_fixture(&style, None);
     let settings = Settings {
-        data_dir: root.clone(),
+        data_dir: root.to_path_buf(),
         ..offline_settings()
     };
     let many: Vec<Value> = (0..MAX_JOB_LORAS + 1)
@@ -3192,7 +3239,7 @@ fn krea_realtime_rejects_more_loras_than_the_cap_before_loading_anything() {
                     &settings,
                     &job,
                     &over,
-                    &root,
+                    root,
                     "krea_realtime_14b",
                     "mlx",
                     loader,
@@ -3204,7 +3251,7 @@ fn krea_realtime_rejects_more_loras_than_the_cap_before_loading_anything() {
         probe.spec.lock().unwrap().is_none(),
         "an over-cap job must be refused before any engine load"
     );
-    std::fs::remove_dir_all(&root).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 /// Coverage comes only from the engine's actual report. A fully-applied lightx2v-shaped file must not
@@ -3296,9 +3343,10 @@ fn krea_realtime_coverage_uses_engine_reports_not_header_predictions() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_arm_stamps_the_report_returned_by_the_loaded_generator() {
-    let root = krea_fake_model_dir("reported_coverage");
+    let root_guard = krea_fake_model_dir("reported_coverage");
+    let root = root_guard.path();
     let settings = Settings {
-        data_dir: root.clone(),
+        data_dir: root.to_path_buf(),
         ..offline_settings()
     };
     let req = request(json!({
@@ -3326,7 +3374,7 @@ fn krea_realtime_arm_stamps_the_report_returned_by_the_loaded_generator() {
                     &settings,
                     &krea_job_snapshot(),
                     &req,
-                    &root,
+                    root,
                     "krea_realtime_14b",
                     "mlx",
                     probe.loader(),
@@ -3615,32 +3663,35 @@ fn krea_realtime_tier_order_tracks_the_quant_and_never_drops_bf16() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_tier_subdir_resolves_each_tier_including_the_sharded_bf16() {
-    let root = std::env::temp_dir().join(format!("sw_krea_tier_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_krea_tier_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let default = krea_tier_request(json!({}));
     let q8_req = krea_tier_request(json!({ "mlxQuantize": 8 }));
     let bf16_req = krea_tier_request(json!({ "mlxQuantize": 0 }));
 
     // A bare root (the published repo before any tier is installed) resolves nothing.
-    assert_eq!(krea_realtime_tier_subdir(&root, &default), None);
+    assert_eq!(krea_realtime_tier_subdir(root, &default), None);
 
     // q4 only: every request falls back to it (there is nothing else on disk).
-    write_complete_krea_tier(&root, "q4");
+    write_complete_krea_tier(root, "q4");
     assert_eq!(
-        krea_realtime_tier_subdir(&root, &default),
+        krea_realtime_tier_subdir(root, &default),
         Some(("q4", root.join("q4")))
     );
     assert_eq!(
-        krea_realtime_tier_subdir(&root, &q8_req),
+        krea_realtime_tier_subdir(root, &q8_req),
         Some(("q4", root.join("q4")))
     );
 
     // A torn q8 (config.json only) is skipped — not resolved and then failed inside the loader.
     std::fs::create_dir_all(root.join("q8")).unwrap();
     std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
-    assert!(!krea_realtime_tier_is_complete(&root, "q8"));
+    assert!(!krea_realtime_tier_is_complete(root, "q8"));
     assert_eq!(
-        krea_realtime_missing_tier_files(&root, "q8"),
+        krea_realtime_missing_tier_files(root, "q8"),
         vec![
             "q8/dit.safetensors",
             "q8/t5_encoder.safetensors",
@@ -3650,25 +3701,25 @@ fn krea_realtime_tier_subdir_resolves_each_tier_including_the_sharded_bf16() {
         "the loud-failure path must NAME what a torn tier is missing"
     );
     assert_eq!(
-        krea_realtime_tier_subdir(&root, &q8_req),
+        krea_realtime_tier_subdir(root, &q8_req),
         Some(("q4", root.join("q4")))
     );
 
     // Completed q8 wins for an explicit q8 pick; a default job still resolves q4-first.
-    write_complete_krea_tier(&root, "q8");
+    write_complete_krea_tier(root, "q8");
     assert_eq!(
-        krea_realtime_tier_subdir(&root, &q8_req),
+        krea_realtime_tier_subdir(root, &q8_req),
         Some(("q8", root.join("q8")))
     );
     assert_eq!(
-        krea_realtime_tier_subdir(&root, &default),
+        krea_realtime_tier_subdir(root, &default),
         Some(("q4", root.join("q4")))
     );
 
     // bf16: the nested transformer/ layout resolves to the TIER dir (what the engine's
     // `open_transformer_weights` probes), and the shards really are one level below it.
-    write_complete_krea_tier(&root, "bf16");
-    let (name, resolved) = krea_realtime_tier_subdir(&root, &bf16_req).expect("bf16 resolves");
+    write_complete_krea_tier(root, "bf16");
+    let (name, resolved) = krea_realtime_tier_subdir(root, &bf16_req).expect("bf16 resolves");
     assert_eq!(
         name, "bf16",
         "the resolved tier names ITSELF — the asset records this"
@@ -3687,33 +3738,31 @@ fn krea_realtime_tier_subdir_resolves_each_tier_including_the_sharded_bf16() {
     // Still q4-first for a default job even with all three installed: the tier order prefers the
     // lean tier, it does not merely take whatever exists.
     assert_eq!(
-        krea_realtime_tier_subdir(&root, &default),
+        krea_realtime_tier_subdir(root, &default),
         Some(("q4", root.join("q4")))
     );
 
     // Losing ONE of the seven bf16 shards makes the tier incomplete — the sc-13513 "installed but
     // unloadable" class — so an explicit bf16 pick falls through to q8 instead.
     std::fs::remove_file(root.join("bf16/transformer/dit-00004-of-00007.safetensors")).unwrap();
-    assert!(!krea_realtime_tier_is_complete(&root, "bf16"));
+    assert!(!krea_realtime_tier_is_complete(root, "bf16"));
     assert_eq!(
-        krea_realtime_missing_tier_files(&root, "bf16"),
+        krea_realtime_missing_tier_files(root, "bf16"),
         vec!["bf16/transformer/dit-00004-of-00007.safetensors"],
         "a torn bf16 must name the exact missing shard, not just report incomplete"
     );
     assert_eq!(
-        krea_realtime_tier_subdir(&root, &bf16_req),
+        krea_realtime_tier_subdir(root, &bf16_req),
         Some(("q8", root.join("q8")))
     );
 
     // An unpublished tier is never complete, even as a real (empty) directory.
     std::fs::create_dir_all(root.join("q6")).unwrap();
-    assert!(!krea_realtime_tier_is_complete(&root, "q6"));
+    assert!(!krea_realtime_tier_is_complete(root, "q6"));
     assert!(
-        !krea_realtime_missing_tier_files(&root, "q6").is_empty(),
+        !krea_realtime_missing_tier_files(root, "q6").is_empty(),
         "an unpublished tier must report ITSELF missing — an empty vec would read COMPLETE"
     );
-
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// 🔴 The story's trap, end to end: a user who deliberately installed ONLY the **bf16** tier must get
@@ -3730,12 +3779,15 @@ fn krea_realtime_tier_subdir_resolves_each_tier_including_the_sharded_bf16() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_bf16_install_is_served_dense_not_downgraded_to_q4() {
-    let root = std::env::temp_dir().join(format!("sw_krea_bf16_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_krea_bf16_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     // `local_mlx_dir` counts an override dir only when it holds a `config.json`; the tier matrix's
     // own config.json files live inside the tier dirs, so the fixture carries a root marker.
     std::fs::write(root.join("config.json"), "{}").unwrap();
-    write_complete_krea_tier(&root, "bf16");
+    write_complete_krea_tier(root, "bf16");
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
         ..offline_settings()
@@ -3774,7 +3826,7 @@ fn krea_realtime_bf16_install_is_served_dense_not_downgraded_to_q4() {
 
             // Now install q4 too: the SAME default request moves to q4 — proving the bf16 answer
             // above was the tier order resolving, not a constant.
-            write_complete_krea_tier(&root, "q4");
+            write_complete_krea_tier(root, "q4");
             let load = resolve_krea_realtime_tier_dir_and_quant(&settings, &default).unwrap();
             assert_eq!(load.dir, root.join("q4"));
             assert_eq!(
@@ -3812,7 +3864,6 @@ fn krea_realtime_bf16_install_is_served_dense_not_downgraded_to_q4() {
             );
         },
     );
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// A FLAT snapshot (a local convert / env override with the DiT at its root — the only layout that has
@@ -3828,7 +3879,8 @@ fn krea_realtime_bf16_install_is_served_dense_not_downgraded_to_q4() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_flat_snapshot_takes_the_q4_dense_video_default() {
-    let flat = krea_fake_model_dir("flatquant");
+    let flat_guard = krea_fake_model_dir("flatquant");
+    let flat = flat_guard.path();
     let settings = Settings {
         data_dir: flat.join("unused-data-dir"),
         ..offline_settings()
@@ -3892,7 +3944,7 @@ fn krea_realtime_flat_snapshot_takes_the_q4_dense_video_default() {
                     &settings,
                     &job,
                     &req,
-                    &flat,
+                    flat,
                     "krea_realtime_14b",
                     "mlx",
                     loader,
@@ -3921,7 +3973,7 @@ fn krea_realtime_flat_snapshot_takes_the_q4_dense_video_default() {
     assert_eq!(spec_weights_dir(spec), flat);
 
     drop(seen);
-    std::fs::remove_dir_all(&flat).ok();
+    std::fs::remove_dir_all(flat).ok();
 }
 
 /// A resolved TIER reaches the engine as the tier DIR with `quantize: None` — the loadability half of
@@ -3934,10 +3986,13 @@ fn krea_realtime_flat_snapshot_takes_the_q4_dense_video_default() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_hands_the_engine_the_installed_tier_dir_not_the_snapshot_root() {
-    let root = std::env::temp_dir().join(format!("sw_krea_arm_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_krea_arm_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     std::fs::write(root.join("config.json"), "{}").unwrap();
-    write_complete_krea_tier(&root, "q4");
+    write_complete_krea_tier(root, "q4");
     let settings = Settings {
         data_dir: root.join("unused-data-dir"),
         ..offline_settings()
@@ -3967,7 +4022,7 @@ fn krea_realtime_hands_the_engine_the_installed_tier_dir_not_the_snapshot_root()
                     &settings,
                     &job,
                     &req,
-                    &root,
+                    root,
                     "krea_realtime_14b",
                     "mlx",
                     loader,
@@ -3990,7 +4045,6 @@ fn krea_realtime_hands_the_engine_the_installed_tier_dir_not_the_snapshot_root()
     );
 
     drop(seen);
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// A tier-matrix root with NO complete tier fails loudly and actionably — it must never fall back to
@@ -4002,8 +4056,11 @@ fn krea_realtime_hands_the_engine_the_installed_tier_dir_not_the_snapshot_root()
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_torn_install_fails_loudly_instead_of_resolving_the_root() {
-    let root = std::env::temp_dir().join(format!("sw_krea_torn_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_krea_torn_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     // The published repo root: a card + tier dirs, no weights of its own. `config.json` is the
     // `local_mlx_dir` marker so the ROOT resolves — the point is that resolving the root is not
     // enough, which is exactly the bug this story fixes.
@@ -4045,7 +4102,7 @@ fn krea_realtime_torn_install_fails_loudly_instead_of_resolving_the_root() {
             assert!(ensure_video_engine_weights(&req, &settings).is_err());
 
             // Completing the tier flips every one of those.
-            write_complete_krea_tier(&root, "q4");
+            write_complete_krea_tier(root, "q4");
             let load = resolve_krea_realtime_tier_dir_and_quant(&settings, &req).unwrap();
             assert_eq!(load.dir, root.join("q4"));
             assert_eq!(load.quant, None);
@@ -4053,7 +4110,6 @@ fn krea_realtime_torn_install_fails_loudly_instead_of_resolving_the_root() {
             assert!(krea_realtime_available(&req, &settings));
         },
     );
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// The tier matrix installed the way users actually get it — the pinned HF snapshot under the data
@@ -4062,7 +4118,11 @@ fn krea_realtime_torn_install_fails_loudly_instead_of_resolving_the_root() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_realtime_resolves_the_tier_from_a_downloaded_hf_snapshot() {
-    let hub = std::env::temp_dir().join(format!("sw_krea_hub_{}", Uuid::new_v4().simple()));
+    let hub_guard = tempfile::Builder::new()
+        .prefix("sw_krea_hub_")
+        .tempdir()
+        .expect("temp dir");
+    let hub = hub_guard.path();
     let repo_dir = hub.join(format!(
         "models--{}",
         sceneworks_core::hf_home::safe_repo_dir_name(KREA_REALTIME_REPO)
@@ -4103,7 +4163,6 @@ fn krea_realtime_resolves_the_tier_from_a_downloaded_hf_snapshot() {
             );
         },
     );
-    std::fs::remove_dir_all(&hub).ok();
 }
 
 /// The on-demand tier fetch is gated on the request's tier toggle — the krea twin of
@@ -4194,7 +4253,11 @@ fn krea_realtime_fetch_of_a_remotely_torn_tier_fails_loudly_instead_of_downgradi
     use axum::http::{Response, StatusCode};
     use axum::Router;
 
-    let hub = std::env::temp_dir().join(format!("sw_krea_fetch_{}", Uuid::new_v4().simple()));
+    let hub_guard = tempfile::Builder::new()
+        .prefix("sw_krea_fetch_")
+        .tempdir()
+        .expect("temp dir");
+    let hub = hub_guard.path();
     let repo_dir = hub.join(format!(
         "models--{}",
         sceneworks_core::hf_home::safe_repo_dir_name(KREA_REALTIME_REPO)
@@ -4313,7 +4376,6 @@ fn krea_realtime_fetch_of_a_remotely_torn_tier_fails_loudly_instead_of_downgradi
             "the fetch should have downloaded q8/{file}"
         );
     }
-    std::fs::remove_dir_all(&hub).ok();
 }
 
 /// The Krea tier repo must pin an exact commit (not the mutable `main`) so an upstream re-push can't
@@ -6579,35 +6641,37 @@ fn wan_tier_order_prefers_then_falls_back() {
 #[cfg(target_os = "macos")]
 #[test]
 fn wan_tier_subdir_resolves_and_falls_back() {
-    let root = std::env::temp_dir().join(format!("sw_wan_tier_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_wan_tier_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     // Legacy flat root (no tier subdirs) → None (caller keeps root + load-time quant).
     let q8_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
-    assert_eq!(wan_tier_subdir(&root, &q8_req), None);
+    assert_eq!(wan_tier_subdir(root, &q8_req), None);
 
     // Only q4 present: a q8 request falls back to the smaller complete q4 tier.
-    write_complete_wan_tier(&root, "q4");
-    assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+    write_complete_wan_tier(root, "q4");
+    assert_eq!(wan_tier_subdir(root, &q8_req), Some(root.join("q4")));
 
     // A partial q8 (missing a file) is skipped, still falling back to q4.
     std::fs::create_dir_all(root.join("q8")).unwrap();
     std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
-    assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+    assert_eq!(wan_tier_subdir(root, &q8_req), Some(root.join("q4")));
 
     // Completed q8 now wins for an explicit q8 request; but a DEFAULT job (no mlxQuantize) resolves
     // q4-first on the video lane even with q8 installed (sc-10859: the sc-10726 app-wide q8 default
     // is not applied to video — no MLX video Q8 lever). An explicit q4 pick still resolves q4.
-    write_complete_wan_tier(&root, "q8");
-    assert_eq!(wan_tier_subdir(&root, &q8_req), Some(root.join("q8")));
+    write_complete_wan_tier(root, "q8");
+    assert_eq!(wan_tier_subdir(root, &q8_req), Some(root.join("q8")));
     let default_req = request(json!({ "projectId": "p" }));
-    assert_eq!(wan_tier_subdir(&root, &default_req), Some(root.join("q4")));
+    assert_eq!(wan_tier_subdir(root, &default_req), Some(root.join("q4")));
     let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
-    assert_eq!(wan_tier_subdir(&root, &q4_req), Some(root.join("q4")));
+    assert_eq!(wan_tier_subdir(root, &q4_req), Some(root.join("q4")));
 
     // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
     let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
-    assert_eq!(wan_tier_subdir(&root, &bf16_req), Some(root.join("q8")));
-    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(wan_tier_subdir(root, &bf16_req), Some(root.join("q8")));
 }
 
 /// Every Wan quant-matrix tier repo (TI2V-5B sc-9941 / T2V sc-9942 / I2V sc-9943) must pin an
@@ -6686,8 +6750,11 @@ fn bernini_tier_revision_is_pinned_commit_not_main() {
 #[cfg(target_os = "macos")]
 #[test]
 fn bernini_tier_subdir_resolves_complete_tier() {
-    let root = std::env::temp_dir().join(format!("bernini-tier-test-{}", std::process::id()));
-    std::fs::remove_dir_all(&root).ok();
+    let root_guard = tempfile::Builder::new()
+        .prefix("bernini-tier-test-")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let make_tier = |tier: &str| {
         for file in BERNINI_TIER_FILES {
             let path = root.join(tier).join(file);
@@ -6701,37 +6768,35 @@ fn bernini_tier_subdir_resolves_complete_tier() {
     // No explicit pick: the default is LANE-DEPENDENT (sc-10859), clamped to what's on disk. The
     // VIDEO lane defaults q4-first (OOM carve-out); the IMAGE lane keeps epic-10721's q8 default.
     assert_eq!(
-        bernini_tier_subdir(&root, None, BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+        bernini_tier_subdir(root, None, BERNINI_VIDEO_DEFAULT_TIER_ORDER),
         Some(root.join("q4"))
     );
     assert_eq!(
-        bernini_tier_subdir(&root, None, BERNINI_IMAGE_DEFAULT_TIER_ORDER),
+        bernini_tier_subdir(root, None, BERNINI_IMAGE_DEFAULT_TIER_ORDER),
         Some(root.join("q8"))
     );
     // Explicit picks are lane-independent (`default_order` is consulted ONLY for `None`).
     // An explicit Q4 pick stays q4 (never overridden by a default).
     assert_eq!(
-        bernini_tier_subdir(&root, Some(4), BERNINI_IMAGE_DEFAULT_TIER_ORDER),
+        bernini_tier_subdir(root, Some(4), BERNINI_IMAGE_DEFAULT_TIER_ORDER),
         Some(root.join("q4"))
     );
     // Q8 (bits >= 8) → q8.
     assert_eq!(
-        bernini_tier_subdir(&root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+        bernini_tier_subdir(root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
         Some(root.join("q8"))
     );
     // bf16 (bits <= 0) with no bf16 tier falls back to q8 (never silently to a default).
     assert_eq!(
-        bernini_tier_subdir(&root, Some(0), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+        bernini_tier_subdir(root, Some(0), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
         Some(root.join("q8"))
     );
     // An incomplete tier (missing the nested planner tokenizer) is not resolved.
     std::fs::remove_file(root.join("q8").join("mllm/tokenizer.json")).unwrap();
     assert_eq!(
-        bernini_tier_subdir(&root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
+        bernini_tier_subdir(root, Some(8), BERNINI_VIDEO_DEFAULT_TIER_ORDER),
         Some(root.join("q4"))
     );
-
-    std::fs::remove_dir_all(&root).ok();
 }
 
 /// The single-expert TI2V-5B tier (sc-9941) is COMPLETE with one `model.safetensors` (not the
@@ -6742,7 +6807,11 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
     assert_eq!(wan_tier_files("wan_2_2"), WAN_TI2V_5B_TIER_FILES);
     assert_eq!(wan_tier_files("wan_2_2_t2v_14b"), WAN_A14B_TIER_FILES);
 
-    let root = std::env::temp_dir().join(format!("sw_wan5b_{}", Uuid::new_v4().simple()));
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_wan5b_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let dir = root.join("q4");
     std::fs::create_dir_all(&dir).unwrap();
     for file in WAN_TI2V_5B_TIER_FILES {
@@ -6753,8 +6822,7 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
     assert!(!wan_tier_is_complete(&dir, WAN_A14B_TIER_FILES));
 
     let req = request(json!({ "projectId": "p", "model": "wan_2_2" }));
-    assert_eq!(wan_tier_subdir(&root, &req), Some(dir));
-    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(wan_tier_subdir(root, &req), Some(dir));
 }
 
 /// Write the six files that make a SCAIL-2 tier subdir COMPLETE ([`scail2_tier_is_complete`]), so
@@ -6792,38 +6860,40 @@ fn scail2_tier_order_prefers_then_falls_back() {
 #[cfg(target_os = "macos")]
 #[test]
 fn scail2_tier_subdir_resolves_and_falls_back() {
-    let root = std::env::temp_dir().join(format!("sw_scail2_tier_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&root).unwrap();
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_scail2_tier_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     // Legacy flat root (no tier subdirs) → None (caller keeps root + load-time quant).
     let q8_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
-    assert_eq!(scail2_tier_subdir(&root, &q8_req), None);
+    assert_eq!(scail2_tier_subdir(root, &q8_req), None);
 
     // Only q4 present: a q8 request falls back to the smaller complete q4 tier.
-    write_complete_scail2_tier(&root, "q4");
-    assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+    write_complete_scail2_tier(root, "q4");
+    assert_eq!(scail2_tier_subdir(root, &q8_req), Some(root.join("q4")));
 
     // A partial q8 (missing files) is skipped, still falling back to q4.
     std::fs::create_dir_all(root.join("q8")).unwrap();
     std::fs::write(root.join("q8").join("config.json"), b"x").unwrap();
-    assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q4")));
+    assert_eq!(scail2_tier_subdir(root, &q8_req), Some(root.join("q4")));
 
     // Completed q8 now wins for an explicit q8 request; but a DEFAULT job (no mlxQuantize) resolves
     // q4-first on the video lane even with q8 installed (sc-10859: the sc-10726 app-wide q8 default
     // is not applied to video — no MLX video Q8 lever). An explicit q4 pick still resolves q4.
-    write_complete_scail2_tier(&root, "q8");
-    assert_eq!(scail2_tier_subdir(&root, &q8_req), Some(root.join("q8")));
+    write_complete_scail2_tier(root, "q8");
+    assert_eq!(scail2_tier_subdir(root, &q8_req), Some(root.join("q8")));
     let default_req = request(json!({ "projectId": "p" }));
     assert_eq!(
-        scail2_tier_subdir(&root, &default_req),
+        scail2_tier_subdir(root, &default_req),
         Some(root.join("q4"))
     );
     let q4_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 4 } }));
-    assert_eq!(scail2_tier_subdir(&root, &q4_req), Some(root.join("q4")));
+    assert_eq!(scail2_tier_subdir(root, &q4_req), Some(root.join("q4")));
 
     // bf16 request with no bf16 tier falls back to q8 (never silently to a default).
     let bf16_req = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 0 } }));
-    assert_eq!(scail2_tier_subdir(&root, &bf16_req), Some(root.join("q8")));
-    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(scail2_tier_subdir(root, &bf16_req), Some(root.join("q8")));
 }
 
 /// The SCAIL-2 quant-matrix tier repo (sc-9944) must pin an exact commit (not the mutable `main`)
@@ -6860,8 +6930,11 @@ fn scail2_tier_revision_is_pinned_commit_not_main() {
 #[cfg(target_os = "macos")]
 #[test]
 fn wan_moe_sibling_pairs_high_and_low() {
-    let dir = std::env::temp_dir().join(format!("sw_moe_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_moe_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let high = dir.join("char.high_noise.safetensors");
     let low = dir.join("char.low_noise.safetensors");
     std::fs::write(&high, b"x").unwrap();
@@ -6873,7 +6946,6 @@ fn wan_moe_sibling_pairs_high_and_low() {
     let single = dir.join("plain.safetensors");
     std::fs::write(&single, b"x").unwrap();
     assert_eq!(wan_moe_low_noise_sibling(&single), None);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Minimal valid safetensors (8-byte LE header length + JSON header), optionally stamping
@@ -6899,8 +6971,11 @@ fn write_lora_fixture(path: &Path, network_type: Option<&str>) {
 #[cfg(target_os = "macos")]
 #[test]
 fn wan_vace_adapters_are_single_dense() {
-    let dir = std::env::temp_dir().join(format!("sw_vace_lora_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_vace_lora_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let plain = dir.join("style.safetensors");
     let lokr = dir.join("char.safetensors");
     write_lora_fixture(&plain, None);
@@ -6916,7 +6991,7 @@ fn wan_vace_adapters_are_single_dense() {
     // sc-5723: LoRA paths are confined to the app data dir, so point data_dir at
     // the fixture dir the temp LoRAs live in.
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
     let specs = resolve_wan_vace_adapters(&settings, &req).expect("resolve vace adapters");
@@ -6939,7 +7014,6 @@ fn wan_vace_adapters_are_single_dense() {
         resolve_wan_vace_adapters(&settings, &over),
         Err(WorkerError::InvalidPayload(_))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Lay down a fake `lightx2v/Wan2.2-Lightning` HF snapshot under `data_dir` with the
@@ -6977,8 +7051,11 @@ fn write_fake_wan_lightning(data_dir: &Path, engine_id: &str) -> (PathBuf, PathB
 #[cfg(target_os = "macos")]
 #[test]
 fn wan_adapters_gate_lightning_on_toggle() {
-    let dir = std::env::temp_dir().join(format!("sw_wan_light_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_wan_light_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     // PIN the hub cache at this fixture's own dir for the whole test. `huggingface_hub_cache_dir`
     // reads `HF_HUB_CACHE` (then `HUGGINGFACE_HUB_CACHE` / `HF_HOME`) BEFORE `data_dir`, so the old
     // "skip if any HF var is set" guard raced a concurrent test's `EnvVars::set` writer: a real HF
@@ -6988,15 +7065,15 @@ fn wan_adapters_gate_lightning_on_toggle() {
     // window; pinning the value also means this never silently no-ops on a box with an HF var set.
     let _env = EnvVars::set(&[(
         "HF_HUB_CACHE",
-        fake_hf_hub_dir(&dir).to_str().expect("utf-8 fixture hub"),
+        fake_hf_hub_dir(dir).to_str().expect("utf-8 fixture hub"),
     )]);
-    let (high, low) = write_fake_wan_lightning(&dir, "wan2_2_t2v_14b");
+    let (high, low) = write_fake_wan_lightning(dir, "wan2_2_t2v_14b");
     // A user LoRA lives under data_dir so the confinement check passes.
     let user_lora = dir.join("style.safetensors");
     write_lora_fixture(&user_lora, None);
 
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
 
@@ -7039,8 +7116,6 @@ fn wan_adapters_gate_lightning_on_toggle() {
     let specs_no_light = resolve_wan_adapters(&settings, &off, "wan2_2_t2v_14b")
         .expect("lightning-off needs no Lightning snapshot");
     assert_eq!(specs_no_light.len(), 1);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// sc-5723 (WKA-002): a LoRA path from the (attacker-controllable) payload that
@@ -7050,15 +7125,23 @@ fn wan_adapters_gate_lightning_on_toggle() {
 #[cfg(target_os = "macos")]
 #[test]
 fn lora_path_outside_app_managed_root_is_rejected() {
-    let data_dir = std::env::temp_dir().join(format!("sw_lora_data_{}", Uuid::new_v4().simple()));
-    let outside = std::env::temp_dir().join(format!("sw_lora_evil_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&data_dir).unwrap();
-    std::fs::create_dir_all(&outside).unwrap();
+    let data_dir_guard = tempfile::Builder::new()
+        .prefix("sw_lora_data_")
+        .tempdir()
+        .expect("temp dir");
+    let data_dir = data_dir_guard.path();
+    let outside_guard = tempfile::Builder::new()
+        .prefix("sw_lora_evil_")
+        .tempdir()
+        .expect("temp dir");
+    let outside = outside_guard.path();
+    std::fs::create_dir_all(data_dir).unwrap();
+    std::fs::create_dir_all(outside).unwrap();
     let evil = outside.join("evil.safetensors");
     write_lora_fixture(&evil, None);
 
     let settings = Settings {
-        data_dir: data_dir.clone(),
+        data_dir: data_dir.to_path_buf(),
         ..Settings::from_env()
     };
     let req = request(json!({
@@ -7073,9 +7156,6 @@ fn lora_path_outside_app_managed_root_is_rejected() {
         matches!(result, Err(WorkerError::InvalidPayload(_))),
         "expected out-of-root LoRA to be rejected, got {result:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&data_dir);
-    let _ = std::fs::remove_dir_all(&outside);
 }
 
 /// SCAIL-2 is single-dense like Wan-VACE (sc-5451/sc-5686): each user LoRA/LoKr (and the bundled
@@ -7085,8 +7165,11 @@ fn lora_path_outside_app_managed_root_is_rejected() {
 #[cfg(target_os = "macos")]
 #[test]
 fn scail2_adapters_are_single_dense() {
-    let dir = std::env::temp_dir().join(format!("sw_scail2_lora_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_scail2_lora_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let plain = dir.join("dpo.safetensors");
     let lokr = dir.join("char.safetensors");
     write_lora_fixture(&plain, None);
@@ -7102,7 +7185,7 @@ fn scail2_adapters_are_single_dense() {
     // sc-5723: LoRA paths are confined to the app data dir, so point data_dir at
     // the fixture dir the temp LoRAs live in.
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
     let specs = resolve_scail2_adapters(&settings, &req).expect("resolve scail2 adapters");
@@ -7124,7 +7207,6 @@ fn scail2_adapters_are_single_dense() {
         resolve_scail2_adapters(&settings, &over),
         Err(WorkerError::InvalidPayload(_))
     ));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// sc-8830 drift-fix regression: the shared [`resolve_lora_file`] resolves a `.safetensors`
@@ -7135,22 +7217,25 @@ fn scail2_adapters_are_single_dense() {
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_lora_file_finds_nested_safetensors() {
-    let dir = std::env::temp_dir().join(format!("sw_lora_nested_{}", Uuid::new_v4().simple()));
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_lora_nested_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let nested = dir.join("adapter");
     std::fs::create_dir_all(&nested).unwrap();
     let weight = nested.join("model.safetensors");
     write_lora_fixture(&weight, None);
 
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
     // Point the resolver at the LoRA dir (not the file); it must recurse into `adapter/`.
     // No declared file → falls back to the recursive scan.
-    let resolved =
-        resolve_lora_file(&settings, dir.clone(), None).expect("nested .safetensors must resolve");
+    let resolved = resolve_lora_file(&settings, dir.to_path_buf(), None)
+        .expect("nested .safetensors must resolve");
     assert_eq!(resolved, weight.canonicalize().unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// sc-10221: a trained LoRA's folder holds step checkpoints alongside the final
@@ -7159,20 +7244,22 @@ fn resolve_lora_file_finds_nested_safetensors() {
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_lora_file_prefers_declared_over_checkpoint() {
-    let dir = std::env::temp_dir().join(format!("sw_lora_ckpt_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_lora_ckpt_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let final_adapter = dir.join("my_style.safetensors");
     write_lora_fixture(&dir.join("my_style-step250.safetensors"), None);
     write_lora_fixture(&final_adapter, None);
 
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
-    let resolved = resolve_lora_file(&settings, dir.clone(), Some("my_style.safetensors"))
+    let resolved = resolve_lora_file(&settings, dir.to_path_buf(), Some("my_style.safetensors"))
         .expect("declared adapter must resolve");
     assert_eq!(resolved, final_adapter.canonicalize().unwrap());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// sc-8830: the shared [`resolve_dense_adapters`] enforces exactly the `max_loras` cap it is
@@ -7180,12 +7267,15 @@ fn resolve_lora_file_prefers_declared_over_checkpoint() {
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_dense_adapters_honors_the_max_lora_cap() {
-    let dir = std::env::temp_dir().join(format!("sw_dense_cap_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_dense_cap_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let plain = dir.join("style.safetensors");
     write_lora_fixture(&plain, None);
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
 
@@ -7201,7 +7291,6 @@ fn resolve_dense_adapters_honors_the_max_lora_cap() {
     let specs = resolve_dense_adapters(&settings, &req, 2).expect("under cap resolves");
     assert_eq!(specs.len(), 2);
     assert!(specs.iter().all(|s| s.moe_expert.is_none()));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// sc-8830: [`non_empty_negative_prompt`] trims and maps empty/whitespace to `None` (so engines
@@ -8286,7 +8375,11 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
             std::fs::write(dir.join(file), b"x").unwrap();
         }
     }
-    let root = std::env::temp_dir().join(format!("sw_ltx_bundle_{}", Uuid::new_v4().simple()));
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_bundle_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let (q4, q8, bf16) = (root.join("q4"), root.join("q8"), root.join("bf16"));
     write_complete_ltx_dir(&q4);
     write_complete_ltx_dir(&q8);
@@ -8295,20 +8388,20 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
 
     // Each tier order prefers its own subdir (default q4, mlxQuantize:8 q8, mlxQuantize<=0 bf16).
     assert_eq!(
-        ltx_bundle_subdir(&root, &["q4", "q8"]).as_deref(),
+        ltx_bundle_subdir(root, &["q4", "q8"]).as_deref(),
         Some(q4.as_path())
     );
     assert_eq!(
-        ltx_bundle_subdir(&root, &["q8", "q4"]).as_deref(),
+        ltx_bundle_subdir(root, &["q8", "q4"]).as_deref(),
         Some(q8.as_path())
     );
     assert_eq!(
-        ltx_bundle_subdir(&root, &["bf16", "q8", "q4"]).as_deref(),
+        ltx_bundle_subdir(root, &["bf16", "q8", "q4"]).as_deref(),
         Some(bf16.as_path())
     );
     // The default order never loads the huge bf16 tier even when present.
     assert_eq!(
-        ltx_bundle_subdir(&root, &["q4", "q8"]).as_deref(),
+        ltx_bundle_subdir(root, &["q4", "q8"]).as_deref(),
         Some(q4.as_path())
     );
 
@@ -8321,23 +8414,24 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
     // An incomplete preferred subdir falls back to the complete sibling (q8 → q4, bf16 → q8).
     std::fs::remove_file(q8.join("vocoder.safetensors")).unwrap();
     assert_eq!(
-        ltx_bundle_subdir(&root, &["q8", "q4"]).as_deref(),
+        ltx_bundle_subdir(root, &["q8", "q4"]).as_deref(),
         Some(q4.as_path())
     );
     std::fs::remove_file(bf16.join("vocoder.safetensors")).unwrap();
     assert_eq!(
-        ltx_bundle_subdir(&root, &["bf16", "q8", "q4"]).as_deref(),
+        ltx_bundle_subdir(root, &["bf16", "q8", "q4"]).as_deref(),
         Some(q4.as_path())
     );
 
     // No complete subdir → None; no gemma sibling → None.
-    let bare = std::env::temp_dir().join(format!("sw_ltx_bare_{}", Uuid::new_v4().simple()));
+    let bare_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_bare_")
+        .tempdir()
+        .expect("temp dir");
+    let bare = bare_guard.path();
     std::fs::create_dir_all(bare.join("q4")).unwrap();
-    assert!(ltx_bundle_subdir(&bare, &["q4", "q8"]).is_none());
+    assert!(ltx_bundle_subdir(bare, &["q4", "q8"]).is_none());
     assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
-
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(&bare);
 }
 
 /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: config, tokenizer, a two-shard
@@ -8525,23 +8619,27 @@ fn generate_ltx_validates_and_stages_the_selector_before_side_effects() {
 ))]
 #[test]
 fn ltx_gemma_completeness_requires_config_and_all_shards() {
-    let root = std::env::temp_dir().join(format!("sw_gemma_ok_{}", Uuid::new_v4().simple()));
-    write_complete_gemma_dir(&root);
-    assert!(ltx_gemma_dir_is_complete(&root));
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_gemma_ok_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
+    write_complete_gemma_dir(root);
+    assert!(ltx_gemma_dir_is_complete(root));
 
     // A missing shard the index references → incomplete (a partial download must not pass).
     std::fs::remove_file(root.join("model-00002-of-00002.safetensors")).unwrap();
-    assert!(!ltx_gemma_dir_is_complete(&root));
+    assert!(!ltx_gemma_dir_is_complete(root));
 
     // Missing config.json → incomplete even with weights present.
     write_tiny_safetensors(&root.join("model-00002-of-00002.safetensors"));
     std::fs::remove_file(root.join("config.json")).unwrap();
-    assert!(!ltx_gemma_dir_is_complete(&root));
+    assert!(!ltx_gemma_dir_is_complete(root));
 
     // Missing tokenizer.json → incomplete even with config + all weights present.
     std::fs::write(root.join("config.json"), br#"{"model_type":"gemma3_text"}"#).unwrap();
     std::fs::remove_file(root.join("tokenizer.json")).unwrap();
-    assert!(!ltx_gemma_dir_is_complete(&root));
+    assert!(!ltx_gemma_dir_is_complete(root));
 
     // Empty or non-string weight maps must not pass vacuously.
     std::fs::write(root.join("tokenizer.json"), br#"{"model":{"type":"BPE"}}"#).unwrap();
@@ -8550,13 +8648,13 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
         br#"{"weight_map":{}}"#,
     )
     .unwrap();
-    assert!(!ltx_gemma_dir_is_complete(&root));
+    assert!(!ltx_gemma_dir_is_complete(root));
     std::fs::write(
         root.join("model.safetensors.index.json"),
         br#"{"weight_map":{"bad":42}}"#,
     )
     .unwrap();
-    assert!(!ltx_gemma_dir_is_complete(&root));
+    assert!(!ltx_gemma_dir_is_complete(root));
 
     // An index cannot escape its snapshot through either portable traversal syntax or an absolute
     // path, even when the target outside the Gemma dir is a structurally valid safetensors file.
@@ -8574,7 +8672,7 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
         )
         .unwrap();
         assert!(
-            !ltx_gemma_dir_is_complete(&root),
+            !ltx_gemma_dir_is_complete(root),
             "unsafe indexed shard must be rejected: {unsafe_shard}"
         );
     }
@@ -8591,13 +8689,16 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
     )
     .unwrap();
     assert!(
-        !ltx_gemma_dir_is_complete(&root),
+        !ltx_gemma_dir_is_complete(root),
         "filename-only shard placeholders must not be resolved by the worker"
     );
 
     // Single-file checkpoint (no index) is complete once config + tokenizer + weights exist.
-    let single = std::env::temp_dir().join(format!("sw_gemma_1f_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&single).unwrap();
+    let single_guard = tempfile::Builder::new()
+        .prefix("sw_gemma_1f_")
+        .tempdir()
+        .expect("temp dir");
+    let single = single_guard.path();
     std::fs::write(
         single.join("config.json"),
         br#"{"model_type":"gemma3_text"}"#,
@@ -8608,17 +8709,15 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
         br#"{"model":{"type":"BPE"}}"#,
     )
     .unwrap();
-    assert!(!ltx_gemma_dir_is_complete(&single));
+    assert!(!ltx_gemma_dir_is_complete(single));
     std::fs::write(single.join("model.safetensors"), b"x").unwrap();
     assert!(
-        !ltx_gemma_dir_is_complete(&single),
+        !ltx_gemma_dir_is_complete(single),
         "filename-only placeholder weights must not be advertised as loadable"
     );
     write_tiny_safetensors(&single.join("model.safetensors"));
-    assert!(ltx_gemma_dir_is_complete(&single));
+    assert!(ltx_gemma_dir_is_complete(single));
 
-    let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(&single);
     let _ = std::fs::remove_file(&outside);
 }
 
@@ -8629,7 +8728,11 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
 #[cfg(target_os = "macos")]
 #[test]
 fn bundled_ltx_gemma_resolves_across_split_snapshot_revisions() {
-    let root = std::env::temp_dir().join(format!("sw_ltx_split_{}", Uuid::new_v4().simple()));
+    let root_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_split_")
+        .tempdir()
+        .expect("temp dir");
+    let root = root_guard.path();
     let snapshots = root.join("models--SceneWorks--ltx-2.3-mlx/snapshots");
     let tier_snapshot = snapshots.join("tier-revision");
     let tier = tier_snapshot.join("q8");
@@ -8655,8 +8758,6 @@ fn bundled_ltx_gemma_resolves_across_split_snapshot_revisions() {
     let local = root.join("models/mlx/ltx_2_3_base_q8");
     std::fs::create_dir_all(&local).unwrap();
     assert!(bundled_ltx_gemma_dir(&local).is_none());
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// sc-13664: the operator `$LTX_GEMMA_DIR` override now RIDES `LoadSpec::text_encoder` (the MLX LTX
@@ -8667,26 +8768,27 @@ fn bundled_ltx_gemma_resolves_across_split_snapshot_revisions() {
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx_gemma_override_path_requires_complete_dir() {
-    let complete =
-        std::env::temp_dir().join(format!("sw_gemma_ovr_ok_{}", Uuid::new_v4().simple()));
-    write_complete_gemma_dir(&complete);
+    let complete_guard = tempfile::Builder::new()
+        .prefix("sw_gemma_ovr_ok_")
+        .tempdir()
+        .expect("temp dir");
+    let complete = complete_guard.path();
+    write_complete_gemma_dir(complete);
     assert_eq!(
-        ltx_gemma_override_path(Some(complete.clone().into_os_string())).as_deref(),
-        Some(complete.as_path()),
+        ltx_gemma_override_path(Some(complete.as_os_str().to_owned())).as_deref(),
+        Some(complete),
         "a complete $LTX_GEMMA_DIR resolves to the TE path (rides the spec)"
     );
 
     // A set-but-incomplete override yields None so a good bundled/cache gemma still wins.
     std::fs::remove_file(complete.join("model-00002-of-00002.safetensors")).unwrap();
     assert!(
-        ltx_gemma_override_path(Some(complete.clone().into_os_string())).is_none(),
+        ltx_gemma_override_path(Some(complete.as_os_str().to_owned())).is_none(),
         "an incomplete $LTX_GEMMA_DIR must not win"
     );
 
     // Unset override → None (the bundled/cache resolution proceeds).
     assert!(ltx_gemma_override_path(None).is_none());
-
-    let _ = std::fs::remove_dir_all(&complete);
 }
 
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
@@ -8699,12 +8801,16 @@ fn resolve_ltx_eros_gemma_prefers_local_sibling() {
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
         return;
     }
-    let data = std::env::temp_dir().join(format!("sw_eros_gemma_{}", Uuid::new_v4().simple()));
+    let data_guard = tempfile::Builder::new()
+        .prefix("sw_eros_gemma_")
+        .tempdir()
+        .expect("temp dir");
+    let data = data_guard.path();
     let mlx = data.join("models").join("mlx");
     let eros = mlx.join("ltx_2_3_eros");
     std::fs::create_dir_all(&eros).unwrap();
     let settings = Settings {
-        data_dir: data.clone(),
+        data_dir: data.to_path_buf(),
         ..Settings::from_env()
     };
 
@@ -8722,8 +8828,6 @@ fn resolve_ltx_eros_gemma_prefers_local_sibling() {
     // An incomplete sibling does not win (falls through to the absent bundle → None).
     std::fs::remove_file(gemma.join("model-00001-of-00002.safetensors")).unwrap();
     assert!(resolve_ltx_eros_gemma_dir(&settings, &eros).is_none());
-
-    let _ = std::fs::remove_dir_all(&data);
 }
 
 /// sc-8827 (F-025): the LTX Gemma-encoder dir rides `LoadSpec::text_encoder` (via
@@ -9516,10 +9620,11 @@ fn seedvr2_stream_upscales_formerly_capped_clip() {
 ))]
 #[test]
 fn scratch_dir_guard_cleans_up_on_drop_and_respects_disarm() {
-    let base = std::env::temp_dir().join(format!(
-        "sceneworks_seedvr2_scratchtest_{}",
-        Uuid::new_v4().simple()
-    ));
+    let base_guard = tempfile::Builder::new()
+        .prefix("sceneworks_seedvr2_scratchtest_")
+        .tempdir()
+        .expect("temp dir");
+    let base = base_guard.path();
 
     // ARMED guard dropped (error path): a populated dir + a nested file are removed on Drop.
     let armed_dir = base.join("armed");
@@ -9555,8 +9660,6 @@ fn scratch_dir_guard_cleans_up_on_drop_and_respects_disarm() {
         let _guard = ScratchDir::new(missing_dir.clone());
     }
     assert!(!missing_dir.exists());
-
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// `advanced.noAudio` maps to the engine's `video_mode = "no_audio"`; enhance flags
@@ -9619,8 +9722,11 @@ fn eros_manifest_entry(repo: &str, file: &str) -> Value {
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx_eros_auto_injects_distill_lora_per_pass() {
-    let dir = std::env::temp_dir().join(format!("sw_eros_distill_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_eros_distill_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     // PIN the hub cache at this fixture's own dir for the whole test, rather than depending on
     // the ambient environment. `huggingface_hub_cache_dir` reads `HF_HUB_CACHE` FIRST and returns
     // it outright, so this alone decides the resolver — whatever the host or a concurrent test
@@ -9634,13 +9740,13 @@ fn ltx_eros_auto_injects_distill_lora_per_pass() {
     // env lock until it drops at end of test, so no concurrent writer can retarget the resolver.
     let _env = EnvVars::set(&[(
         "HF_HUB_CACHE",
-        fake_hf_hub_dir(&dir).to_str().expect("utf-8 fixture hub"),
+        fake_hf_hub_dir(dir).to_str().expect("utf-8 fixture hub"),
     )]);
     let repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
     let file = "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors";
-    let distill = write_fake_hf_lora(&dir, repo, file);
+    let distill = write_fake_hf_lora(dir, repo, file);
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
 
@@ -9690,8 +9796,6 @@ fn ltx_eros_auto_injects_distill_lora_per_pass() {
     assert!(resolve_ltx_adapters(&settings, &req_off)
         .unwrap()
         .is_empty());
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A model that declares `mlx.autoDistillLora` but whose co-requisite distill LoRA is not installed
@@ -9700,8 +9804,11 @@ fn ltx_eros_auto_injects_distill_lora_per_pass() {
 #[cfg(target_os = "macos")]
 #[test]
 fn ltx_distill_lora_missing_errors_and_base_model_is_noop() {
-    let dir = std::env::temp_dir().join(format!("sw_eros_missing_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_eros_missing_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     // PIN the hub cache at this fixture's own (empty) dir for the whole test, the hermetic pattern
     // of `ltx_eros_auto_injects_distill_lora_per_pass`. Nothing is staged under it, so the distill
     // LoRA is genuinely missing → the resolver must error. The old "skip if any HF var is set"
@@ -9710,10 +9817,10 @@ fn ltx_distill_lora_missing_errors_and_base_model_is_noop() {
     // lock until it drops, so no concurrent writer can retarget the resolver mid-test.
     let _env = EnvVars::set(&[(
         "HF_HUB_CACHE",
-        fake_hf_hub_dir(&dir).to_str().expect("utf-8 fixture hub"),
+        fake_hf_hub_dir(dir).to_str().expect("utf-8 fixture hub"),
     )]);
     let settings = Settings {
-        data_dir: dir.clone(),
+        data_dir: dir.to_path_buf(),
         ..Settings::from_env()
     };
 
@@ -9735,8 +9842,6 @@ fn ltx_distill_lora_missing_errors_and_base_model_is_noop() {
         "modelManifestEntry": { "family": "ltx-video" },
     }));
     assert!(resolve_ltx_adapters(&settings, &base).unwrap().is_empty());
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The FLF keyframe knobs (sc-3055) parse from JSON numbers + numeric strings and fall back
@@ -10159,8 +10264,11 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     }));
     let decoded = generate_stub_video(&request, 11);
     assert!(decoded.audio.is_some());
-    let dir = std::env::temp_dir().join(format!("sw_vid_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_vid_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let media_path = dir.join("clip.mp4");
     encode_media(&media_path, decoded, None, None)
         .await
@@ -10175,13 +10283,15 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     assert!(!media_path.with_extension("frames").exists());
     assert!(!media_path.with_extension("enc.mp4").exists());
     assert!(!media_path.with_extension("audio.wav").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
-    let dir = std::env::temp_dir().join(format!("sw_vid_bad_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_vid_bad_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let media_path = dir.join("clip.mp4");
     let decoded = DecodedVideo {
         frames: vec![RgbFrame {
@@ -10200,7 +10310,6 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
 
     assert!(error.to_string().contains("frame buffer size mismatch"));
     assert!(!media_path.exists());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn ffmpeg_reachable() -> bool {
@@ -10601,8 +10710,11 @@ mod candle_video_label_tests {
     /// tier, and returns `None` for a non-wan engine or a flat/dense repo with no tier subdirs.
     #[test]
     fn candle_wan_tier_subdir_resolves_by_mlx_quantize() {
-        let root = std::env::temp_dir().join(format!("sc10027_wan_tier_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root_guard = tempfile::Builder::new()
+            .prefix("sc10027_wan_tier_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         // Complete q4 + q8 A14B tiers (transformer + transformer_2 + text_encoder + vae + tokenizer).
         for tier in ["q4", "q8"] {
             for sub in [
@@ -10620,35 +10732,35 @@ mod candle_video_label_tests {
         };
 
         // Default (no mlxQuantize) → q8 when installed (sc-10726), clamped to what's on disk.
-        let (d, q) = candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({}))).unwrap();
+        let (d, q) = candle_wan_tier_subdir(root, "wan2_2_t2v_14b", &req(json!({}))).unwrap();
         assert!(d.ends_with("q8"));
         assert_eq!(q, Some(Quant::Q8));
         // An explicit Q4 pick stays q4 (never overridden by the q8 default).
         let (d, q) =
-            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 4 })))
+            candle_wan_tier_subdir(root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 4 })))
                 .unwrap();
         assert!(d.ends_with("q4"));
         assert_eq!(q, Some(Quant::Q4));
         // mlxQuantize = 8 → q8.
         let (d, q) =
-            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 8 })))
+            candle_wan_tier_subdir(root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 8 })))
                 .unwrap();
         assert!(d.ends_with("q8"));
         assert_eq!(q, Some(Quant::Q8));
         // bf16 requested but no bf16 tier present → falls back through q8/q4 (never a missing dir).
         let (d, _) =
-            candle_wan_tier_subdir(&root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 0 })))
+            candle_wan_tier_subdir(root, "wan2_2_t2v_14b", &req(json!({ "mlxQuantize": 0 })))
                 .unwrap();
         assert!(d.ends_with("q8") || d.ends_with("q4"));
         // Non-wan engine → None (ltx loads its flat snapshot).
-        assert!(candle_wan_tier_subdir(&root, "ltx_2_3_distilled", &req(json!({}))).is_none());
+        assert!(candle_wan_tier_subdir(root, "ltx_2_3_distilled", &req(json!({}))).is_none());
         // A flat repo (the dense Wan-AI/*-Diffusers fallback — no tier subdirs) → None.
-        let flat = std::env::temp_dir().join(format!("sc10027_flat_{}", std::process::id()));
-        std::fs::create_dir_all(&flat).unwrap();
-        assert!(candle_wan_tier_subdir(&flat, "wan2_2_t2v_14b", &req(json!({}))).is_none());
-
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&flat).ok();
+        let flat_guard = tempfile::Builder::new()
+            .prefix("sc10027_flat_")
+            .tempdir()
+            .expect("temp dir");
+        let flat = flat_guard.path();
+        assert!(candle_wan_tier_subdir(flat, "wan2_2_t2v_14b", &req(json!({}))).is_none());
     }
 }
 
@@ -10721,10 +10833,13 @@ async fn the_envelope_survives_the_whole_encode_chain() {
     let decoded = generate_stub_video(&request, 11);
     assert!(decoded.audio.is_some(), "the audio arm must actually run");
 
-    let dir = std::env::temp_dir().join(format!("sw_wf_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_wf_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let media_path = dir.join("clip.mp4");
-    let document = workflow_document(&dir, video_workflow_payload());
+    let document = workflow_document(dir, video_workflow_payload());
 
     encode_media(&media_path, decoded, Some(document.as_path()), None)
         .await
@@ -10768,8 +10883,6 @@ async fn the_envelope_survives_the_whole_encode_chain() {
         !text.contains("fp8"),
         "`precision` is a hardware budget and must not travel"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `None` still writes exactly the file it wrote before — the setting-off / no-payload path.
@@ -10783,8 +10896,11 @@ async fn no_document_means_no_tag_and_an_otherwise_identical_clip() {
         "projectId": "p", "model": "wan2_2_t2v_14b", "prompt": "fox",
         "duration": 1.0, "fps": 9, "width": 128, "height": 128
     }));
-    let dir = std::env::temp_dir().join(format!("sw_wf_off_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_wf_off_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let media_path = dir.join("clip.mp4");
     encode_media(&media_path, generate_stub_video(&request, 11), None, None)
         .await
@@ -10795,7 +10911,6 @@ async fn no_document_means_no_tag_and_an_otherwise_identical_clip() {
         None,
         "with the setting off there must be no recipe in the file at all"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// **The survival measurement, as a test.** The tag outlives a representative re-encode, and dies
@@ -10817,10 +10932,13 @@ async fn the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip() {
         "projectId": "p", "model": "ltx_2_3", "prompt": "fox",
         "duration": 1.0, "fps": 9, "width": 128, "height": 128
     }));
-    let dir = std::env::temp_dir().join(format!("sw_wf_re_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_wf_re_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let source = dir.join("clip.mp4");
-    let document = workflow_document(&dir, video_workflow_payload());
+    let document = workflow_document(dir, video_workflow_payload());
     encode_media(
         &source,
         generate_stub_video(&request, 11),
@@ -10959,8 +11077,6 @@ async fn the_tag_survives_a_re_encode_and_dies_on_a_deliberate_strip() {
         None,
         "an HLS round trip loses the tag even at `-c copy` — MPEG-TS has no `ilst`, so the mp4 is          rebuilt from segments that never carried it. Recorded as a measured limit of this          container, not hidden behind \"it survives a remux\"."
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -11038,7 +11154,11 @@ async fn the_upscaled_clip_carries_its_own_recipe() {
         eprintln!("skipping the_upscaled_clip_carries_its_own_recipe: ffmpeg not found");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("sw_up_wf_{}", Uuid::new_v4().simple()));
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_up_wf_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let frames = dir.join("frames");
     std::fs::create_dir_all(&frames).unwrap();
     for index in 0..3_u32 {
@@ -11105,7 +11225,6 @@ async fn the_upscaled_clip_carries_its_own_recipe() {
     }
 
     assert!(media_path.with_extension("poster.jpg").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same lane with the preference OFF writes exactly the clip it wrote before.
@@ -11115,7 +11234,11 @@ async fn an_upscale_with_the_setting_off_carries_nothing() {
         eprintln!("skipping an_upscale_with_the_setting_off_carries_nothing: ffmpeg not found");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("sw_up_off_{}", Uuid::new_v4().simple()));
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_up_off_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
     let frames = dir.join("frames");
     let config = dir.join("config");
     std::fs::create_dir_all(&frames).unwrap();
@@ -11154,7 +11277,6 @@ async fn an_upscale_with_the_setting_off_carries_nothing() {
         sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path).expect("readable"),
         None
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The `.workflow.ffmeta` scratch is removed BEFORE the encode's error propagates, on both lanes.
@@ -11295,8 +11417,11 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
         );
         return;
     }
-    let dir = std::env::temp_dir().join(format!("sw_regrep_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_regrep_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
 
     // Lane one: a GENERATED clip, through `encode_media` and its three ffmpeg steps.
     let request = request(json!({
@@ -11304,7 +11429,7 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
         "duration": 1.0, "fps": 9, "width": 128, "height": 128
     }));
     let generated = dir.join("generated.mp4");
-    let document = workflow_document(&dir, hostile_person_payload());
+    let document = workflow_document(dir, hostile_person_payload());
     encode_media(
         &generated,
         generate_stub_video(&request, 11),
@@ -11367,6 +11492,4 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
     );
     assert_no_person_track_strings(&upscaled, "the upscaled clip");
     assert_no_person_track_strings(&upscaled.with_extension("poster.jpg"), "its poster");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

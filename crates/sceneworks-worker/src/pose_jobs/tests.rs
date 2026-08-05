@@ -408,8 +408,14 @@ fn shared_resolve_env_file_pin_errors_on_missing_env_path() {
     );
 
     // Set and existing: resolve to that path. Write a real temp file to point at.
-    let existing_path =
-        std::env::temp_dir().join(format!("sw-dwpose-pin-test-{}.onnx", std::process::id()));
+    // The pin names a FILE, so the guard is the directory around it: the
+    // `temp_dir()/sw-dwpose-pin-test-{pid}.onnx` this replaces was unlinked on a trailing
+    // line a panicking test skips, and repeated on a recycled PID (sc-17707).
+    let pin_guard = tempfile::Builder::new()
+        .prefix("sw-dwpose-pin-test-")
+        .tempdir()
+        .expect("temp dir");
+    let existing_path = pin_guard.path().join("dwpose-det.onnx");
     std::fs::write(&existing_path, b"onnx").expect("write temp weight");
     let resolved = resolve_env_file_pin(
         "SCENEWORKS_DWPOSE_DET",
@@ -422,7 +428,6 @@ fn shared_resolve_env_file_pin_errors_on_missing_env_path() {
         Some(existing_path.as_path()),
         "existing pin resolves"
     );
-    let _ = std::fs::remove_file(&existing_path);
 }
 
 /// sc-8875: a project-relative source path is confined to the project tree — any `..`

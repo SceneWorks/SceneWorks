@@ -1702,11 +1702,11 @@ mod tests {
     ))]
     #[test]
     fn training_text_encoder_gates_on_engine_and_bundle() {
-        let root = std::env::temp_dir().join(format!(
-            "sw_ltx_train_te_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("sw_ltx_train_te_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let (tier, gemma) = (root.join("q4"), root.join("gemma"));
         std::fs::create_dir_all(&tier).unwrap();
         std::fs::create_dir_all(&gemma).unwrap();
@@ -1740,8 +1740,6 @@ mod tests {
         let bare = root.join("no_sibling").join("q4");
         std::fs::create_dir_all(&bare).unwrap();
         assert!(training_text_encoder("ltx_2_3", &bare).is_none());
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn test_settings(data_dir: &Path) -> Settings {
@@ -3191,7 +3189,7 @@ mod tests {
                 control_image_path: None,
             }],
             config,
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             file_name: "kolors_smoke.safetensors".to_owned(),
             trigger_words: Vec::new(),
             cancel: CancelFlag::new(),
@@ -3302,7 +3300,7 @@ mod tests {
                 control_image_path: None,
             }],
             config,
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             file_name: "lens_smoke.safetensors".to_owned(),
             trigger_words: Vec::new(),
             cancel: CancelFlag::new(),
@@ -3416,7 +3414,7 @@ mod tests {
                 control_image_path: None,
             }],
             config,
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             file_name: "z_image_1024_smoke.safetensors".to_owned(),
             trigger_words: Vec::new(),
             cancel: CancelFlag::new(),
@@ -3568,7 +3566,7 @@ mod tests {
                 control_image_path: None,
             }],
             config,
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             file_name: file_name.to_owned(),
             trigger_words: Vec::new(),
             cancel: CancelFlag::new(),
@@ -3751,7 +3749,7 @@ mod tests {
                 control_image_path: None,
             }],
             config,
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             file_name: format!("{stem}.safetensors"),
             trigger_words: Vec::new(),
             cancel: CancelFlag::new(),
@@ -4163,8 +4161,11 @@ mod tests {
         assert!(!items.is_empty(), "no items in {}", data.display());
         eprintln!("krea_control smoke: {} items, {steps} steps", items.len());
 
-        let output_dir = std::env::temp_dir().join("krea-control-smoke");
-        std::fs::create_dir_all(&output_dir).unwrap();
+        let output_dir_guard = tempfile::Builder::new()
+            .prefix("krea-control-smoke-")
+            .tempdir()
+            .expect("temp dir");
+        let output_dir = output_dir_guard.path();
         let config = TrainingConfig {
             steps,
             resolution: 512,
@@ -4179,7 +4180,7 @@ mod tests {
         let request = TrainingRequest {
             items,
             config,
-            output_dir: output_dir.clone(),
+            output_dir: output_dir.to_path_buf(),
             file_name: "krea_pose_control.safetensors".to_owned(),
             trigger_words: Vec::new(),
             cancel: CancelFlag::new(),

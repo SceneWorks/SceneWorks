@@ -6109,20 +6109,15 @@ mod tests {
             MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
         };
         use std::fs::File;
-        use std::time::{SystemTime, UNIX_EPOCH};
 
         const BASE_SOURCE_BYTES: u64 = 4_000;
         const CONTROL_SOURCE_BYTES: u64 = 2_000;
         const CONTROL_RESIDENT_BYTES: u64 = 1_000;
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "sceneworks-mlx-fit-sc-16065-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).expect("fixture directory");
+        let root_guard = tempfile::Builder::new()
+            .prefix("sceneworks-mlx-fit-sc-16065-")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let base = root.join("base.safetensors");
         let control = root.join("control.safetensors");
         File::create(&base)
@@ -6318,9 +6313,11 @@ mod tests {
 
         let mut inputs = request_inputs(512, 512, 1);
         inputs.adapter_count = 1;
-        let root =
-            std::env::temp_dir().join(format!("mage-request-adapter-plan-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root_guard = tempfile::Builder::new()
+            .prefix("mage-request-adapter-plan-")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let base = root.join("base.safetensors");
         let adapter = root.join("adapter.safetensors");
         std::fs::write(&base, vec![0_u8; 100]).unwrap();
@@ -6724,14 +6721,15 @@ mod tests {
     fn full_finetune_memory_error_no_signal_when_transformer_absent() {
         // The live entry point permits when the base isn't installed (transformer/ sums to 0) — the
         // base-installed gate is what reports "not installed".
-        let empty =
-            std::env::temp_dir().join(format!("mage_full_gate_{}_{}", std::process::id(), line!()));
-        std::fs::create_dir_all(&empty).expect("mk dir");
+        let empty_guard = tempfile::Builder::new()
+            .prefix("mage_full_gate_")
+            .tempdir()
+            .expect("temp dir");
+        let empty = empty_guard.path();
         assert_eq!(
-            full_finetune_memory_error(&empty, 1024, 1, "Mage-Flow Base"),
+            full_finetune_memory_error(empty, 1024, 1, "Mage-Flow Base"),
             None
         );
-        std::fs::remove_dir_all(&empty).ok();
     }
 
     #[test]
@@ -6798,11 +6796,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn lens_provider_footprint_distinguishes_storage_format() {
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_sc11924_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_sc11924_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         for (component, bytes) in [("text_encoder", 13), ("transformer", 11), ("vae", 3)] {
             let dir = root.join(component);
             std::fs::create_dir_all(&dir).expect("component dir");
@@ -6813,7 +6811,7 @@ mod tests {
             r#"{"dtype":"bfloat16","quantization_config":{"quant_method":"mxfp4"}}"#,
         )
         .expect("mxfp4 marker");
-        let spec = LoadSpec::new(WeightsSource::Dir(root.clone()));
+        let spec = LoadSpec::new(WeightsSource::Dir(root.to_path_buf()));
         let (dense_total, dense_te, dense_headroom) = spec_component_bytes("lens_turbo", &spec);
         let expected_te = (30.07 * BYTES_PER_GIB).ceil() as u64;
         assert_eq!(dense_te, expected_te);
@@ -6870,7 +6868,6 @@ mod tests {
                 "{engine_id} packed q4/q8 must preserve the generic 14 GiB activation fallback"
             );
         }
-        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -6904,11 +6901,11 @@ mod tests {
 
     #[test]
     fn sum_safetensors_skips_appledouble_and_nonweights_and_recurses() {
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_sum_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_sum_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let te = root.join("text_encoder");
         let dit = root.join("transformer");
         std::fs::create_dir_all(&te).expect("mk te");
@@ -6919,21 +6916,19 @@ mod tests {
         std::fs::write(te.join("._model.safetensors"), vec![0u8; 500]).expect("sidecar");
         std::fs::write(dit.join("config.json"), vec![0u8; 700]).expect("config");
 
-        assert_eq!(sum_safetensors_bytes(&root), 3000);
+        assert_eq!(sum_safetensors_bytes(root), 3000);
         // Missing dir ⇒ 0 (no signal).
         assert_eq!(sum_safetensors_bytes(&root.join("nope")), 0);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Adapter factors are resident only when the provider keeps them as additive residuals.
     #[test]
     fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_adapters_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_adapters_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let weights = root.join("weights");
         std::fs::create_dir_all(&weights).expect("weights dir");
         std::fs::write(weights.join("model.safetensors"), vec![0_u8; 1_000]).expect("base weights");
@@ -6981,18 +6976,17 @@ mod tests {
             1_250,
             "pre-packed Wan retains adapter factors as additive residuals"
         );
-        std::fs::remove_dir_all(root).ok();
     }
 
     /// sc-15154: a split-layout tier's staged co-requisites are part of what it loads. Mage-Flow's
     /// per-tier dir holds the DiT alone; the shared text encoder and VAE must still count.
     #[test]
     fn a_staged_component_counts_toward_the_tier_that_loads_it() {
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_staged_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_staged_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let write = |dir: std::path::PathBuf, bytes: usize| {
             std::fs::create_dir_all(&dir).expect("mk dir");
             std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).expect("write");
@@ -7044,8 +7038,6 @@ mod tests {
         let flat = LoadSpec::new(WeightsSource::Dir(tier))
             .with_component("text_encoder", WeightsSource::Dir(flat_te));
         assert_eq!(spec_component_bytes("mage_flow_edit", &flat).0, 3_700);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-15154 — the Mage q4 admit boundary, from the REAL published install sizes.
@@ -7109,12 +7101,11 @@ mod tests {
         // The qwen_image_control VACE branch ships either as a single `.safetensors` File or as a Dir
         // of shards; both must be counted so `apply_residency_policy` folds the control branch into the
         // heavy side of the staged-peak split (else the DiT-phase working set is under-counted).
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_ctrl_{}_{}",
-            std::process::id(),
-            line!()
-        ));
-        std::fs::create_dir_all(&root).expect("mk root");
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_ctrl_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
 
         // Single-file control checkpoint ⇒ its file length.
         let file = root.join("control.safetensors");
@@ -7131,8 +7122,6 @@ mod tests {
         std::fs::write(dir.join("part-2.safetensors"), vec![0u8; 2000]).expect("shard 2");
         std::fs::write(dir.join("._part-1.safetensors"), vec![0u8; 999]).expect("sidecar");
         assert_eq!(weights_source_bytes(&WeightsSource::Dir(dir)), 3000);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The gate derives sequential-capability from each engine's REGISTERED descriptor bit
@@ -7483,11 +7472,11 @@ mod tests {
 
     #[test]
     fn sum_text_encoder_bytes_sums_only_text_encoder_subdirs() {
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_te_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_te_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         // SDXL-shaped tree: two CLIP encoders + the U-Net + VAE.
         for (sub, bytes) in [
             ("text_encoder", 1000usize),
@@ -7500,13 +7489,11 @@ mod tests {
             std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).expect("weights");
         }
         // Only the two text-encoder subdirs count (1000 + 3000); unet/vae are excluded.
-        assert_eq!(sum_text_encoder_bytes(&root), 4000);
+        assert_eq!(sum_text_encoder_bytes(root), 4000);
         // The whole-model sum includes everything.
-        assert_eq!(sum_safetensors_bytes(&root), 13400);
+        assert_eq!(sum_safetensors_bytes(root), 13400);
         // Missing dir ⇒ 0.
         assert_eq!(sum_text_encoder_bytes(&root.join("nope")), 0);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     // HF cache stores each shard as a symlink into `blobs/`; the gate must follow those to the real
@@ -7515,11 +7502,11 @@ mod tests {
     #[test]
     fn sum_safetensors_follows_hf_cache_symlinks() {
         use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_symlink_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_symlink_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let blobs = root.join("blobs");
         let snap = root.join("snapshots/hash/transformer");
         std::fs::create_dir_all(&blobs).expect("mk blobs");
@@ -7536,27 +7523,23 @@ mod tests {
         // Summing the SNAPSHOT dir follows the symlink to the 4096-byte blob and skips the `._`
         // sidecar; the `blobs/` dir is not under the snapshot, so nothing is double-counted.
         assert_eq!(sum_safetensors_bytes(&root.join("snapshots/hash")), 4096);
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[cfg(unix)]
     #[test]
     fn sum_safetensors_terminates_on_directory_symlink_cycles() {
         use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_cycle_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_cycle_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let weights = root.join("weights");
         std::fs::create_dir_all(&weights).expect("mk weights");
         std::fs::write(weights.join("model.safetensors"), vec![0_u8; 4096]).expect("write weights");
-        symlink(&root, weights.join("cycle")).expect("create directory cycle");
+        symlink(root, weights.join("cycle")).expect("create directory cycle");
 
-        assert_eq!(sum_safetensors_bytes(&root), 4096);
-
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(sum_safetensors_bytes(root), 4096);
     }
 
     /// sc-10894: on a boogu-style snapshot (text encoder under `mllm/`, not `text_encoder*`), the
@@ -7564,11 +7547,11 @@ mod tests {
     /// present and only falls back to the scan when it is `None`.
     #[test]
     fn resolve_text_encoder_prefers_footprint_over_subdir_scan() {
-        let root = std::env::temp_dir().join(format!(
-            "mlx_fit_gate_resolve_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_resolve_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         // Encoder under `mllm/`, DiT `transformer/`, VAE `vae/` — NO `text_encoder*` subdir.
         for (sub, bytes) in [("mllm", 1500usize), ("transformer", 9000), ("vae", 400)] {
             let dir = root.join(sub);
@@ -7576,15 +7559,13 @@ mod tests {
             std::fs::write(dir.join("model.safetensors"), vec![0u8; bytes]).expect("weights");
         }
         // The historical subdir scan finds no `text_encoder*` → 0 (the bug this seam fixes).
-        assert_eq!(sum_text_encoder_bytes(&root), 0);
+        assert_eq!(sum_text_encoder_bytes(root), 0);
         // The whole-model sum still sees every component.
-        assert_eq!(sum_safetensors_bytes(&root), 10900);
+        assert_eq!(sum_safetensors_bytes(root), 10900);
         // No footprint declared ⇒ fall back to the (zero) subdir scan.
-        assert_eq!(resolve_text_encoder_bytes(None, &root), 0);
+        assert_eq!(resolve_text_encoder_bytes(None, root), 0);
         // A provider footprint (the `mllm/` bytes) is preferred, even though the scan reads zero.
-        assert_eq!(resolve_text_encoder_bytes(Some(1500), &root), 1500);
-
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(resolve_text_encoder_bytes(Some(1500), root), 1500);
     }
 
     /// #1544 baseline through the LIVE gate path on REAL weights (ignored — needs the model on disk +
@@ -8065,8 +8046,11 @@ mod tests {
     /// would under-count by ~9.7 GiB and admit a job that then dies.
     #[test]
     fn mochi_resident_bytes_folds_the_shared_parent_siblings() {
-        let root =
-            std::env::temp_dir().join(format!("mochi_resident_{}_{}", std::process::id(), line!()));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mochi_resident_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         // The A6 installed layout: tier dirs as siblings of the shared components.
         for (sub, bytes) in [
             ("q4/transformer", 400_usize),
@@ -8104,7 +8088,5 @@ mod tests {
             900,
             "a self-contained snapshot counts its own components exactly once"
         );
-
-        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -6425,6 +6425,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
  "tracing",
  "windows-sys 0.59.0",
