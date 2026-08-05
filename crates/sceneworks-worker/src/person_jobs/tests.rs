@@ -754,7 +754,15 @@ fn resolve_detector_weights_env_pin_missing_errors_and_unset_falls_through() {
     // Holds the lock for the whole staged mutation AND restores the operator's prior value on drop —
     // including if an assertion below panics, which the hand-rolled restore tail could not. The body
     // re-points `key` freely inside the guard.
-    let _env = crate::test_env::EnvVars::set(&[(key, "")]);
+    // The HF-cache vars are neutralized in the SAME guard (sc-17629): the resolver now consults
+    // the HF cache, so on a machine with this repo already cached the "unset falls through" case
+    // would resolve `Ok(Some(..))` and fail for reasons unrelated to the env pin.
+    let _env = crate::test_env::EnvVars::set(&[
+        (key, ""),
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
     let dir = tempfile::tempdir().expect("tempdir");
     let settings = f011_test_settings(dir.path().to_path_buf());
 
@@ -791,5 +799,121 @@ fn detector_provenance_matches_the_compiled_runtime() {
     {
         assert_eq!(crate::media_jobs::PERSON_DETECTOR_ADAPTER, "yolo11_ort");
         assert_eq!(crate::media_jobs::PERSON_DETECTOR_BACKEND, "ort");
+    }
+}
+
+/// sc-17629 (epic 17625) — the person detector resolves from the HF cache and can no longer
+/// download. `DET_REPO`/`DET_REVISION`/`DET_FILE` are cfg-selected, so these run against whichever
+/// platform artifact this build targets — the same pair the `person_detector` catalog entry
+/// installs after `retain_downloads_for_os` picks this OS's row.
+mod resolve_only {
+    use super::*;
+
+    fn isolate() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("SCENEWORKS_PERSON_DETECTOR_WEIGHTS", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    fn stage_install(data_dir: &std::path::Path) -> PathBuf {
+        let snapshot = crate::huggingface_repo_cache_path(data_dir, DET_REPO)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(DET_REVISION);
+        std::fs::create_dir_all(&snapshot).expect("mk snapshot");
+        let path = snapshot.join(DET_FILE);
+        std::fs::write(&path, b"hf weights").expect("write");
+        path
+    }
+
+    fn stage_legacy(data_dir: &std::path::Path) -> PathBuf {
+        let dir = data_dir.join("cache").join("person-detect");
+        std::fs::create_dir_all(&dir).expect("mk legacy");
+        let path = dir.join(DET_FILE);
+        std::fs::write(&path, b"legacy weights").expect("write");
+        path
+    }
+
+    /// AC4: an HF-cache-resident install resolves, with nothing downloaded.
+    #[test]
+    fn resolves_an_installed_snapshot_from_the_hf_cache() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = f011_test_settings(dir.path().to_path_buf());
+        let staged = stage_install(dir.path());
+        assert_eq!(
+            resolve_detector_weights(&settings).expect("resolves"),
+            Some(staged)
+        );
+    }
+
+    /// The OTHER platform's repo does not satisfy this build. The two YOLO artifacts are a
+    /// safetensors and an ONNX with different pins — resolving across them would hand the loader a
+    /// file it cannot parse. Staging the wrong repo must leave the detector unresolved.
+    #[test]
+    fn does_not_resolve_the_other_platforms_repo() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = f011_test_settings(dir.path().to_path_buf());
+        let other_repo = if cfg!(target_os = "macos") {
+            "SceneWorks/yolo11m-person-detect-onnx"
+        } else {
+            "SceneWorks/yolo11m-person-detect-mlx"
+        };
+        let snapshot = crate::huggingface_repo_cache_path(dir.path(), other_repo)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(DET_REVISION);
+        std::fs::create_dir_all(&snapshot).expect("mk snapshot");
+        std::fs::write(snapshot.join(DET_FILE), b"wrong platform").expect("write");
+
+        assert_eq!(
+            resolve_detector_weights(&settings).expect("resolves"),
+            None,
+            "the other platform's detector repo must not satisfy this build"
+        );
+    }
+
+    /// AC10: a pre-migration install still works, so upgrading re-downloads nothing.
+    #[test]
+    fn falls_back_to_the_legacy_cache_dir() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = f011_test_settings(dir.path().to_path_buf());
+        let legacy = stage_legacy(dir.path());
+        assert_eq!(
+            resolve_detector_weights(&settings).expect("resolves"),
+            Some(legacy)
+        );
+    }
+
+    /// The legacy tree drains: the HF cache wins when both exist.
+    #[test]
+    fn prefers_the_hf_cache_over_the_legacy_dir() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = f011_test_settings(dir.path().to_path_buf());
+        let staged = stage_install(dir.path());
+        stage_legacy(dir.path());
+        assert_eq!(
+            resolve_detector_weights(&settings).expect("resolves"),
+            Some(staged)
+        );
+    }
+
+    /// AC7 / S10: absent weights produce an actionable install error, not a download.
+    #[test]
+    fn require_errors_actionably_when_nothing_is_installed() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = f011_test_settings(dir.path().to_path_buf());
+        let error = require_detector_weights(&settings).expect_err("nothing is installed");
+        assert!(
+            format!("{error:?}").contains("Model Manager"),
+            "the error must tell the user how to fix it, got {error:?}"
+        );
     }
 }

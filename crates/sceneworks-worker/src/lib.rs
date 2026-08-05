@@ -1755,7 +1755,7 @@ async fn run_utility_job(
             JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Timeline export failed.", error)),
-            JobType::PersonDetect => run_person_detect_job(api, settings, http_client, &job)
+            JobType::PersonDetect => run_person_detect_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person detection failed.", error)),
             // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
@@ -1808,11 +1808,9 @@ async fn run_utility_job(
             // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
             // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
             #[cfg(target_os = "macos")]
-            JobType::ImageSegment => {
-                segment_jobs::run_image_segment_job(api, settings, http_client, &job)
-                    .await
-                    .map_err(|error| ("Smart-select segmentation failed.", error))
-            }
+            JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Smart-select segmentation failed.", error)),
             // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
             // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
             // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
@@ -1827,7 +1825,7 @@ async fn run_utility_job(
                     .await
                     .map_err(|error| ("Video upscale failed.", error))
             }
-            JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
+            JobType::PersonTrack => run_person_track_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person tracking failed.", error)),
             _ => {

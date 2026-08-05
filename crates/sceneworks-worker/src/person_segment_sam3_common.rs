@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 
 use gen_core::CancelFlag;
 
-use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::{Settings, WorkerError, WorkerResult};
 
 /// Cancel copy surfaced when a SAM2/SAM3 person segmentation is interrupted by a user cancel — either
@@ -48,10 +47,14 @@ pub(crate) fn check_segment_canceled(cancel: Option<&CancelFlag>) -> WorkerResul
 pub(crate) const MODEL_FILE: &str = "model.safetensors";
 pub(crate) const TOKENIZER_FILE: &str = "tokenizer.json";
 
-/// Download-on-first-use repo: the stock `facebook/sam3` checkpoint mirror owned by SceneWorks (the
-/// same `model.safetensors` + `tokenizer.json` both backends use — no MLX-specific conversion, despite
-/// the `-mlx` name). Publishing the public mirror is gated on sign-off (Meta SAM License → must ship a
-/// LICENSE copy); until then point `SCENEWORKS_SAM3_WEIGHTS` at a local `facebook/sam3` snapshot dir.
+/// The stock `facebook/sam3` checkpoint mirror owned by SceneWorks (the same `model.safetensors` +
+/// `tokenizer.json` both backends use — no MLX-specific conversion, despite the `-mlx` name).
+///
+/// Installed from the Model Manager as the `sam3_person_segment` catalog entry, which declares this
+/// repo and [`SEG_REVISION`] (sc-17627). It is no longer downloaded on first use: this module
+/// RESOLVES only (sc-17629). The mirror is public and ships the Meta SAM License copy the earlier
+/// sign-off gate required, so `SCENEWORKS_SAM3_WEIGHTS` is now an operator override rather than the
+/// only way to get weights.
 pub(crate) const SEG_REPO: &str = "SceneWorks/sam3-mlx";
 
 /// Pinned SAM3 weights revision (sc-9879, F-077 follow-up). Even though `SEG_REPO` is a
@@ -87,14 +90,25 @@ pub(crate) trait Sam3FrameOutput {
     fn masks(&self) -> &[Vec<f32>];
 }
 
-/// Resolve already-present SAM3 weights: an explicit env pin (`SCENEWORKS_SAM3_WEIGHTS`, a dir or
-/// the `model.safetensors` inside it), then the app cache `<data_dir>/cache/person-segment-sam3/`,
-/// then the model dir `<data_dir>/models/person-segment-sam3/`. Both `model.safetensors` and
-/// `tokenizer.json` must be present. Returns `Ok(Some((model_path, tokenizer_path)))` or `Ok(None)`
-/// (then [`ensure_segmenter_weights`] downloads them).
+/// Resolve already-present SAM3 weights, in priority order:
+///
+/// 1. the explicit env pin `SCENEWORKS_SAM3_WEIGHTS` (a dir, or the `model.safetensors` inside it),
+/// 2. the **HF cache**, where the `sam3_person_segment` Model Manager install puts them (sc-17629),
+/// 3. the legacy `<data_dir>/cache/person-segment-sam3/` and `<data_dir>/models/person-segment-sam3/`.
+///
+/// Both `model.safetensors` and `tokenizer.json` must be present, **from the same root** — a torn
+/// pair is not a resolution. Returns `Ok(Some((model_path, tokenizer_path)))` or `Ok(None)`.
+///
+/// Step 3 is the migration path (AC10 of sc-17598): before this story the weights were downloaded
+/// mid-job into `<data_dir>/cache/person-segment-sam3/`, so an existing install has them there.
+/// Reading those keeps it working and stops the upgrade re-fetching 3.4 GB. Nothing WRITES there
+/// any more, so the legacy tree only drains.
+///
+/// `Ok(None)` no longer means "now download it" — there is no download half. It means not
+/// installed, which [`require_segmenter_weights`] turns into an actionable install error.
 ///
 /// A set-but-missing `SCENEWORKS_SAM3_WEIGHTS` is an operator error: it fails loudly
-/// (`InvalidPayload`) instead of silently falling through to the cache/HF download and loading
+/// (`InvalidPayload`) instead of silently falling through to the cache and loading
 /// different weights than the operator asked for (sc-11175/F-011, mirroring the sc-8911 upscaler
 /// pin). [`crate::util::resolve_env_file_pin`] errors if the pinned path itself is absent; an
 /// incomplete pinned dir (missing either file of the pair) is likewise a loud error, not a
@@ -126,6 +140,15 @@ pub(crate) fn resolve_segmenter_weights(
             ))
         });
     }
+    // The installed location: whatever the `sam3_person_segment` Model Manager entry cached.
+    let cached = |file: &str| {
+        crate::downloads::resolve_hf_component_file(settings, SEG_REPO, SEG_REVISION, file)
+    };
+    if let (Some(model), Some(tokenizer)) = (cached(MODEL_FILE), cached(TOKENIZER_FILE)) {
+        return Ok(Some((model, tokenizer)));
+    }
+    // Legacy pre-migration roots, read-only (AC10). `pair_in` keeps the pair whole per root, so a
+    // half-populated legacy dir falls through to the next candidate instead of returning a torn pair.
     for sub in ["cache/person-segment-sam3", "models/person-segment-sam3"] {
         if let Some(pair) = pair_in(&settings.data_dir.join(sub)) {
             return Ok(Some(pair));
@@ -134,33 +157,19 @@ pub(crate) fn resolve_segmenter_weights(
     Ok(None)
 }
 
-/// Resolve the SAM3 weights, downloading `model.safetensors` + `tokenizer.json` from HuggingFace
-/// on first use (into the app cache) with streaming progress/cancel and size-aware resume.
-pub(crate) async fn ensure_segmenter_weights(
-    settings: &Settings,
-    context: &DownloadContext<'_>,
-) -> WorkerResult<(PathBuf, PathBuf)> {
-    if let Some(pair) = resolve_segmenter_weights(settings)? {
-        return Ok(pair);
-    }
-    let dir = settings.data_dir.join("cache").join("person-segment-sam3");
-    let model = ensure_hf_cached_file(
-        context,
-        SEG_REPO,
-        SEG_REVISION,
-        MODEL_FILE,
-        &dir.join(MODEL_FILE),
-    )
-    .await?;
-    let tokenizer = ensure_hf_cached_file(
-        context,
-        SEG_REPO,
-        SEG_REVISION,
-        TOKENIZER_FILE,
-        &dir.join(TOKENIZER_FILE),
-    )
-    .await?;
-    Ok((model, tokenizer))
+/// The SAM3 weights, or an actionable install error (sc-17629 / sc-17635).
+///
+/// Replaces the former `ensure_segmenter_weights`, which downloaded 3.4 GB mid-generation when the
+/// weights were absent. Taking `&Settings` and **no `DownloadContext`** is the enforcement: this
+/// cannot reach the network, so the whole SAM3 lane is resolve-only by construction rather than by
+/// convention (epic 17625).
+pub(crate) fn require_segmenter_weights(settings: &Settings) -> WorkerResult<(PathBuf, PathBuf)> {
+    resolve_segmenter_weights(settings)?.ok_or_else(|| {
+        crate::WorkerError::InvalidPayload(format!(
+            "The SAM3 person segmenter is not installed. Install \"SAM3 Person Segmenter\" from the \
+             Model Manager, or point SCENEWORKS_SAM3_WEIGHTS at a local {SEG_REPO} snapshot dir."
+        ))
+    })
 }
 
 /// Pack a `size×size` interleaved-RGB `u8` buffer into a channel-major `[3·size·size]` f32 vector
@@ -694,7 +703,17 @@ mod tests {
         // Holds the lock for the whole staged mutation AND restores the operator's prior value on
         // drop — including if an assertion below panics, which the hand-rolled restore tail could
         // not. The body re-points `key` freely inside the guard.
-        let _env = crate::test_env::EnvVars::set(&[(key, "")]);
+        //
+        // The HF-cache vars are neutralized in the SAME guard (sc-17629): the resolver now consults
+        // the HF cache, so on any machine that has `SceneWorks/sam3-mlx` cached — a CI runner with
+        // warm weights, or a developer who installed SAM3 — case (c) would resolve `Ok(Some(..))`
+        // and this test would fail for reasons unrelated to the env pin it is testing.
+        let _env = crate::test_env::EnvVars::set(&[
+            (key, ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
         let dir = tempfile::tempdir().expect("tempdir");
         let settings = f011_test_settings(dir.path().to_path_buf());
 
@@ -725,5 +744,127 @@ mod tests {
             "an unset SAM3 pin must fall through to Ok(None), got {unset:?}"
         );
         // `_env` restores the prior value on drop.
+    }
+
+    /// sc-17629 (epic 17625) — SAM3 resolves from the HF cache, where the `sam3_person_segment`
+    /// Model Manager install puts it, and can no longer download.
+    mod resolve_only {
+        use super::*;
+
+        fn isolate() -> crate::test_env::EnvVars {
+            crate::test_env::EnvVars::set(&[
+                ("SCENEWORKS_SAM3_WEIGHTS", ""),
+                ("HF_HUB_CACHE", ""),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ])
+        }
+
+        /// Stage the pinned snapshot the way a Model Manager install leaves it.
+        fn stage_install(data_dir: &Path, files: &[&str]) -> PathBuf {
+            let snapshot = crate::huggingface_repo_cache_path(data_dir, SEG_REPO)
+                .expect("repo cache path")
+                .join("snapshots")
+                .join(SEG_REVISION);
+            std::fs::create_dir_all(&snapshot).expect("mk snapshot");
+            for file in files {
+                std::fs::write(snapshot.join(file), b"hf weights").expect("write");
+            }
+            snapshot
+        }
+
+        fn stage_legacy(data_dir: &Path, files: &[&str]) -> PathBuf {
+            let dir = data_dir.join("cache").join("person-segment-sam3");
+            std::fs::create_dir_all(&dir).expect("mk legacy");
+            for file in files {
+                std::fs::write(dir.join(file), b"legacy weights").expect("write");
+            }
+            dir
+        }
+
+        /// AC4: HF-cache-resident weights resolve, with nothing downloaded.
+        #[test]
+        fn resolves_an_installed_snapshot_from_the_hf_cache() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            let snapshot = stage_install(dir.path(), &[MODEL_FILE, TOKENIZER_FILE]);
+
+            let resolved = resolve_segmenter_weights(&settings).expect("resolves");
+            assert_eq!(
+                resolved,
+                Some((snapshot.join(MODEL_FILE), snapshot.join(TOKENIZER_FILE)))
+            );
+        }
+
+        /// AC10: a pre-migration install still works, so upgrading re-downloads nothing.
+        #[test]
+        fn falls_back_to_the_legacy_cache_dir() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            let legacy = stage_legacy(dir.path(), &[MODEL_FILE, TOKENIZER_FILE]);
+
+            let resolved = resolve_segmenter_weights(&settings).expect("resolves");
+            assert_eq!(
+                resolved,
+                Some((legacy.join(MODEL_FILE), legacy.join(TOKENIZER_FILE)))
+            );
+        }
+
+        /// The legacy tree drains: once installed properly, the HF cache wins even with the old
+        /// bytes still on disk. Swapping the two arms passes the previous test and fails this one.
+        #[test]
+        fn prefers_the_hf_cache_over_the_legacy_dir() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            let snapshot = stage_install(dir.path(), &[MODEL_FILE, TOKENIZER_FILE]);
+            stage_legacy(dir.path(), &[MODEL_FILE, TOKENIZER_FILE]);
+
+            let resolved = resolve_segmenter_weights(&settings).expect("resolves");
+            assert_eq!(
+                resolved,
+                Some((snapshot.join(MODEL_FILE), snapshot.join(TOKENIZER_FILE)))
+            );
+        }
+
+        /// A TORN install is not a resolution: half a pair must not be handed to the loader, in
+        /// either root. A resolver that checked the two files independently — rather than per root
+        /// — would happily pair an HF-cache `model.safetensors` with a legacy `tokenizer.json`.
+        #[test]
+        fn refuses_a_torn_pair_in_either_root() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+            stage_install(dir.path(), &[MODEL_FILE]);
+            stage_legacy(dir.path(), &[TOKENIZER_FILE]);
+
+            assert_eq!(
+                resolve_segmenter_weights(&settings).expect("resolves"),
+                None,
+                "a model.safetensors in the HF cache and a tokenizer.json in the legacy dir is \
+                 not a usable install"
+            );
+        }
+
+        /// AC7 / S10: absent weights produce an actionable install error, not a download.
+        #[test]
+        fn require_errors_actionably_when_nothing_is_installed() {
+            let _env = isolate();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let settings = f011_test_settings(dir.path().to_path_buf());
+
+            let error = require_segmenter_weights(&settings).expect_err("nothing is installed");
+            let message = format!("{error:?}");
+            assert!(
+                message.contains("Model Manager"),
+                "the error must tell the user how to fix it, got {message}"
+            );
+            assert!(
+                matches!(error, crate::WorkerError::InvalidPayload(_)),
+                "a missing install is a caller-actionable payload error, got {error:?}"
+            );
+        }
     }
 }
