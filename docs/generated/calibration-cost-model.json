@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:872c1441f0c6582670c5e2bb1ad9c580216520ff25a61bb90c5bf1e4e6235295",
-    "matrixRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+    "sceneWorksRevision": "source-tree:2859ab0b209dc68d5f8b355a9bb7cb26aa082e50c374549d60c322490680aff2",
+    "matrixRevision": "source-tree:e9db717d883e0e350c3b232cb24820194b8cadeb9039d67dc2f5910007250f98",
     "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "b973786b4671720aec72667850a2d64d6795aa9b464537f5640c66e5dc1e4bf0"
+        "sha256": "9f4c697aece606403d2e9a025cb097b8eebd0aaffa3bf9caf56b31df183bfe96"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "c979d28eefa80c145a1bcb90fd451f3ecf67fbbe565e38687ada8c38c7348133"
+        "sha256": "ab64e0560e529a9dcdbb81df92f5d7036b99d63543afe71f46e5607a8dbf5504"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -39,7 +39,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "bf8db9bd75c8ccbca4ed1f813e3d634cd237ae1b59fc634977978883b9835157"
+        "sha256": "69b5bce3921a5a1d79241b5e6ffa24f5ccd618a0169f2a5ab6f4fcb4427a2b7d"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
@@ -67,9 +67,9 @@
     "runtimeCompleteRecords": 15,
     "activationEligibleRecords": 65,
     "matrixSummaryCalibrationRuns": 65,
-    "matrixSummaryCurrentCalibrationRuns": 0,
-    "verifiedCells": 0,
-    "note": "50 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "matrixSummaryCurrentCalibrationRuns": 11,
+    "verifiedCells": 10,
+    "note": "50 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 11 current calibration run(s) and 10 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -391,9 +391,10 @@
   "cells": {
     "total": 9140,
     "byState": {
-      "Implemented/unverified": 3150,
+      "Implemented/unverified": 3140,
       "Missing": 5984,
-      "Structurally N/A": 6
+      "Structurally N/A": 6,
+      "Verified": 10
     },
     "byBackend": {
       "candle": 4520,
@@ -401,10 +402,11 @@
     },
     "byStateAndBackend": {
       "Implemented/unverified @ candle": 1201,
-      "Implemented/unverified @ mlx": 1949,
+      "Implemented/unverified @ mlx": 1939,
       "Missing @ candle": 3313,
       "Missing @ mlx": 2671,
-      "Structurally N/A @ candle": 6
+      "Structurally N/A @ candle": 6,
+      "Verified @ mlx": 10
     },
     "byRung": {
       "bounded_attention": 1828,

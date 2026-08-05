@@ -3074,7 +3074,11 @@ mod tests {
             .expect("Qwen calibration bindings are valid")
             .expect("Qwen declares exact MLX calibration bindings");
 
-        assert_eq!(bindings.len(), 9, "bf16 five-rung ladder plus q8 and q4 pairs");
+        assert_eq!(
+            bindings.len(),
+            9,
+            "bf16 five-rung ladder plus q8 and q4 pairs"
+        );
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
                 && binding.provider == "qwen_image"
@@ -3132,16 +3136,20 @@ mod tests {
         }
     }
 
-
     /// SC-16915 acceptance: the SHIPPED manifest opt-in and the SHIPPED evidence bundle must agree
     /// well enough for a covered cell to take the calibrated path. Every other test in this module
     /// builds its own fixture manifest and fixture bundle, so all of them stay green even when the
     /// two real artefacts have drifted apart — which is exactly the state this story had to repair.
     /// This one reads both real files and nothing else.
     ///
-    /// It fails if the manifest's `abi`/`loadShape`/`fingerprint`/`inferenceRevision`/artifact
-    /// identity stops matching the promoted records, i.e. the precise failure that silently
-    /// degrades production to the legacy estimator with no user-visible error.
+    /// Driven over EVERY shipped tier, not just bf16. `packaged_admission_route` filters candidates
+    /// by `binding.tier == plan_tier_key(plan.tier)`, so a bf16-only spec never even considers the
+    /// q8/q4 bindings — asserting `path == Evidence` on bf16 alone would leave 8 of the 9 qwen
+    /// bindings free to lose their backing record with the test still green. `mlx.quantize` for
+    /// qwen_image is 4, so q4 is the tier a default install actually reaches.
+    ///
+    /// The count assertion is what makes a dropped record fail: `path == Evidence` only needs the
+    /// candidate list to be non-empty, so one surviving rung would mask the loss of every other.
     #[test]
     fn shipped_qwen_manifest_and_packaged_evidence_select_the_calibrated_path() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
@@ -3156,77 +3164,108 @@ mod tests {
             .find(|model| model.get("id").and_then(Value::as_str) == Some("qwen_image"))
             .and_then(Value::as_object)
             .expect("qwen_image manifest entry");
-
-        // Take the request identity from the opt-in itself rather than restating it, so the test
-        // cannot drift from the manifest it is checking.
-        let binding = entry
+        let calibrations = entry
             .get("mlx")
             .and_then(|mlx| mlx.get("calibrations"))
             .and_then(Value::as_array)
-            .expect("qwen_image declares mlx.calibrations")
-            .iter()
-            .find(|item| {
-                item.get("rung").and_then(Value::as_str) == Some("resident")
-                    && item.get("tier").and_then(Value::as_str) == Some("bf16")
-            })
-            .expect("the bf16 resident cell is part of the shipped opt-in");
-        let text = |key: &str| {
-            binding
-                .get(key)
-                .and_then(Value::as_str)
-                .unwrap_or_else(|| panic!("calibration binding is missing {key}"))
-                .to_owned()
-        };
-        let geometry = binding.get("geometry").expect("binding geometry");
-        let dimension = |key: &str| {
-            u32::try_from(
-                geometry
+            .expect("qwen_image declares mlx.calibrations");
+
+        for (tier, quant, expected_rungs) in [
+            ("bf16", None, 5_usize),
+            ("q8", Some(gen_core::Quant::Q8), 2),
+            ("q4", Some(gen_core::Quant::Q4), 2),
+        ] {
+            // Take the request identity from the opt-in itself rather than restating it, so the
+            // test cannot drift from the manifest it is checking.
+            let binding = calibrations
+                .iter()
+                .find(|item| item.get("tier").and_then(Value::as_str) == Some(tier))
+                .unwrap_or_else(|| panic!("{tier} is part of the shipped opt-in"));
+            let text = |key: &str| {
+                binding
                     .get(key)
-                    .and_then(Value::as_u64)
-                    .unwrap_or_else(|| panic!("geometry is missing {key}")),
-            )
-            .expect("geometry fits u32")
-        };
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{tier} binding is missing {key}"))
+                    .to_owned()
+            };
+            let geometry = binding.get("geometry").expect("binding geometry");
+            let dimension = |key: &str| {
+                u32::try_from(
+                    geometry
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .unwrap_or_else(|| panic!("geometry is missing {key}")),
+                )
+                .expect("geometry fits u32")
+            };
 
-        let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
-            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/bf16",
-        )));
-        let plan = MlxRequestPlan::for_spec_and_manifest(
-            "qwen_image",
-            "qwen_image",
-            &spec,
-            Some(entry),
-            Some(ResolvedArtifactProvenance {
-                identity: crate::model_jobs::ResolvedArtifactIdentity {
-                    repository: text("artifactRepository"),
-                    revision: text("artifactResolvedRevision"),
-                    variant: text("artifactVariant"),
-                    fingerprint: text("resolvedPathFingerprint"),
-                },
-                fixed_artifact_tier: Some(text("tier")),
-            }),
-        );
-        assert!(
-            matches!(plan.calibration, MlxCalibrationConfig::Valid(_)),
-            "the shipped opt-in must parse as a valid binding set, not Absent/Unproven/Invalid"
-        );
+            let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(format!(
+                "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/{tier}"
+            ))));
+            if let Some(quant) = quant {
+                spec = spec.with_quant(quant);
+            }
+            let plan = MlxRequestPlan::for_spec_and_manifest(
+                "qwen_image",
+                "qwen_image",
+                &spec,
+                Some(entry),
+                Some(ResolvedArtifactProvenance {
+                    identity: crate::model_jobs::ResolvedArtifactIdentity {
+                        repository: text("artifactRepository"),
+                        revision: text("artifactResolvedRevision"),
+                        variant: text("artifactVariant"),
+                        fingerprint: text("resolvedPathFingerprint"),
+                    },
+                    fixed_artifact_tier: Some(tier.to_owned()),
+                }),
+            );
+            assert!(
+                matches!(plan.calibration, MlxCalibrationConfig::Valid(_)),
+                "{tier}: the shipped opt-in must parse as a valid binding set"
+            );
 
-        let mut inputs = fixture_inputs(dimension("width"), dimension("height"));
-        inputs.overlay = None;
-        let route = packaged_admission_route(&plan, &inputs, &text("mode"), fixture_budget(128.0))
-            .expect("a covered cell must not error");
-        assert_eq!(
-            route.path,
-            AdmissionPath::Evidence,
-            "shipped manifest + shipped evidence must reach calibrated admission; got fallback {:?}",
-            route.fallback_reason
-        );
+            let mut inputs = fixture_inputs(dimension("width"), dimension("height"));
+            inputs.overlay = None;
+            let route =
+                packaged_admission_route(&plan, &inputs, &text("mode"), fixture_budget(128.0))
+                    .expect("a covered cell must not error");
+            assert_eq!(
+                route.path,
+                AdmissionPath::Evidence,
+                "{tier}: shipped manifest + shipped evidence must reach calibrated admission; \
+                 got fallback {:?}",
+                route.fallback_reason
+            );
+            assert_eq!(
+                route.evidence.len(),
+                expected_rungs,
+                "{tier}: every declared rung must resolve to a promoted record, not just one"
+            );
+            assert!(
+                route
+                    .evidence
+                    .iter()
+                    .all(|candidate| !candidate.record_id.is_empty()),
+                "{tier}: each candidate names the exact record backing it"
+            );
+        }
 
-        // Mutation check for the axis this story exists to restore. Asserting only the line above
+        // Mutation check for the axis this story exists to restore. Asserting only the route above
         // is a FALSE GREEN for `loadShape`: the route matches whichever binding fits the request,
         // so corrupting one cell's shape just selects a different cell and still reaches Evidence.
         // Flip EVERY declared shape and the whole opt-in must stop matching — the receipts say
         // which cells were measured eager and which deferred, and the two are not interchangeable.
+        let bf16 = calibrations
+            .iter()
+            .find(|item| item.get("tier").and_then(Value::as_str) == Some("bf16"))
+            .expect("bf16 binding");
+        let text = |key: &str| {
+            bf16.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("binding is missing {key}"))
+                .to_owned()
+        };
         let mut mutated = entry.clone();
         for calibration in mutated
             .get_mut("mlx")
@@ -3237,12 +3276,17 @@ mod tests {
             let shape = calibration
                 .get("loadShape")
                 .and_then(Value::as_str)
-                .expect("every ABI-3 binding declares a loadShape");
+                .expect("every binding declares a loadShape");
             calibration["loadShape"] = Value::from(match shape {
                 "eager_materialization" => "deferred_materialization",
                 _ => "eager_materialization",
             });
         }
+        let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/bf16",
+        )));
+        let mut inputs = fixture_inputs(1024, 1024);
+        inputs.overlay = None;
         let mutated_route = packaged_admission_route(
             &MlxRequestPlan::for_spec_and_manifest(
                 "qwen_image",
@@ -3256,11 +3300,11 @@ mod tests {
                         variant: text("artifactVariant"),
                         fingerprint: text("resolvedPathFingerprint"),
                     },
-                    fixed_artifact_tier: Some(text("tier")),
+                    fixed_artifact_tier: Some("bf16".to_owned()),
                 }),
             ),
             &inputs,
-            &text("mode"),
+            "text_to_image",
             fixture_budget(128.0),
         )
         .expect("a load-shape mismatch degrades, never errors");
@@ -3277,6 +3321,101 @@ mod tests {
             Some(LegacyAdmissionReason::StaleIdentity),
             "the bindings must PARSE and then go stale on the shape, not fail to parse"
         );
+    }
+
+    /// The krea half of the same guarantee. `packaged_krea_plan` synthesizes its bindings FROM the
+    /// evidence records, so it is current-by-construction and structurally cannot notice the
+    /// shipped krea manifest disagreeing with the shipped bundle. krea_2_turbo_control is a covered
+    /// provider of sc-16915, so it gets the same real-manifest × real-evidence route check qwen has.
+    #[test]
+    fn shipped_krea_manifest_and_packaged_evidence_select_the_calibrated_path() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        let entry = manifest
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("models array")
+            .iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some("krea_2_turbo"))
+            .and_then(Value::as_object)
+            .expect("krea_2_turbo manifest entry");
+        let calibrations = entry
+            .get("mlx")
+            .and_then(|mlx| mlx.get("calibrations"))
+            .and_then(Value::as_array)
+            .expect("krea_2_turbo declares mlx.calibrations");
+        assert_eq!(
+            calibrations.len(),
+            2,
+            "the shipped krea opt-in is the 768² and 896² pose-control pair"
+        );
+
+        for binding in calibrations {
+            let text = |key: &str| {
+                binding
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("krea binding is missing {key}"))
+                    .to_owned()
+            };
+            let geometry = binding.get("geometry").expect("binding geometry");
+            let dimension = |key: &str| {
+                u32::try_from(
+                    geometry
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .expect("dimension"),
+                )
+                .expect("geometry fits u32")
+            };
+            let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
+                "/cache/models--SceneWorks--krea-2-turbo-mlx/snapshots/x/q4",
+            )))
+            .with_quant(gen_core::Quant::Q4);
+            // `packaged_admission_route` filters on `binding.provider == plan.engine_id`, so the
+            // engine id is the PROVIDER (`krea_2_turbo_control`) and the model id is the catalog
+            // entry (`krea_2_turbo`) — the order production uses in `image_jobs/krea_control.rs`,
+            // which passes `KREA_CONTROL_ENGINE_ID` then `&request.model`. Swapping them yields
+            // `StaleIdentity` and a silent legacy fallback.
+            let plan = MlxRequestPlan::for_spec_and_manifest(
+                "krea_2_turbo_control",
+                "krea_2_turbo",
+                &spec,
+                Some(entry),
+                Some(ResolvedArtifactProvenance {
+                    identity: crate::model_jobs::ResolvedArtifactIdentity {
+                        repository: text("artifactRepository"),
+                        revision: text("artifactResolvedRevision"),
+                        variant: text("artifactVariant"),
+                        fingerprint: text("resolvedPathFingerprint"),
+                    },
+                    fixed_artifact_tier: Some(text("tier")),
+                }),
+            );
+            assert!(
+                matches!(plan.calibration, MlxCalibrationConfig::Valid(_)),
+                "the shipped krea opt-in must parse as a valid binding set"
+            );
+
+            let mut inputs = fixture_inputs(dimension("width"), dimension("height"));
+            inputs.overlay = Some(text("overlay"));
+            inputs.has_reference = true;
+            inputs.reference_count = 1;
+            let route =
+                packaged_admission_route(&plan, &inputs, &text("mode"), fixture_budget(128.0))
+                    .expect("a covered krea cell must not error");
+            assert_eq!(
+                route.path,
+                AdmissionPath::Evidence,
+                "{}x{}: shipped krea manifest + evidence must reach calibrated admission; \
+                 got fallback {:?}",
+                dimension("width"),
+                dimension("height"),
+                route.fallback_reason
+            );
+        }
     }
 
     /// SC-16915 acceptance, end to end on real weights (ignored — needs the qwen-image-mlx bf16
