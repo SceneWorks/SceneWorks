@@ -135,7 +135,7 @@ pub(crate) fn resolve_segmenter_weights(
             crate::WorkerError::InvalidPayload(format!(
                 "SCENEWORKS_SAM3_WEIGHTS is set to {} but that directory is missing {MODEL_FILE} \
                  and/or {TOKENIZER_FILE}. Point it at a complete facebook/sam3 snapshot dir, or \
-                 unset it to download on first use.",
+                 unset it to use the copy installed from the Model Manager.",
                 dir.display()
             ))
         });

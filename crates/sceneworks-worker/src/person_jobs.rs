@@ -935,7 +935,7 @@ pub(crate) fn detect_people_blocking(
 }
 
 // ---------------------------------------------------------------------------
-// weights resolution + download-on-first-use (backend-neutral: the macOS MLX safetensors
+// weights resolution (backend-neutral: the macOS MLX safetensors
 // or the off-Mac ONNX export, selected by the cfg-split `DET_FILE`/`DET_REPO`)
 // ---------------------------------------------------------------------------
 

@@ -915,5 +915,11 @@ mod resolve_only {
             format!("{error:?}").contains("Model Manager"),
             "the error must tell the user how to fix it, got {error:?}"
         );
+        assert!(
+            matches!(error, crate::WorkerError::InvalidPayload(_)),
+            "a missing install is a caller-actionable payload error — the person-track lane \
+             routes on exactly this variant to surface it instead of degrading silently, \
+             got {error:?}"
+        );
     }
 }

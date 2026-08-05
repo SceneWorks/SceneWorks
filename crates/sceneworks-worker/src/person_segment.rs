@@ -40,7 +40,8 @@ pub(crate) use crate::person_segment_sam3_common::{
 /// The production SAM2 size (matches the spike + the `SceneWorks/sam2-mlx` upload).
 const SEG_FILE: &str = "sam2.1_hiera_large.safetensors";
 
-/// Download-on-first-use repo: the converted MLX SAM2 weights owned by SceneWorks
+/// The converted MLX SAM2 weights owned by SceneWorks, installed from the Model Manager as the
+/// `sam2_person_segment` catalog entry (sc-17627) — no longer downloaded on first use
 /// (sc-3707, uploaded from the official Meta `.pt` via `tools/convert_sam2_to_mlx.py`;
 /// bit-identical to the avbiswas reference).
 const SEG_REPO: &str = "SceneWorks/sam2-mlx";
@@ -663,6 +664,12 @@ mod tests {
             assert!(
                 format!("{error:?}").contains("Model Manager"),
                 "the error must tell the user how to fix it, got {error:?}"
+            );
+            assert!(
+                matches!(error, crate::WorkerError::InvalidPayload(_)),
+                "a missing install is a caller-actionable payload error — the person-track lane \
+                 routes on exactly this variant to surface it instead of degrading silently, \
+                 got {error:?}"
             );
         }
     }

@@ -220,7 +220,7 @@ pub(crate) async fn run_image_segment_job(
         ),
     )
     .await?;
-    // Both prompt modes load the same facebook/sam3 checkpoint — one resolve/download.
+    // Both prompt modes load the same facebook/sam3 checkpoint — one resolve.
     let (model_path, tokenizer_path) = require_segmenter_weights(settings)?;
 
     update_job(

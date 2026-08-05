@@ -318,7 +318,8 @@ pub(super) async fn resolve_scail2_conditioning(
     )
     .await?;
 
-    // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
+    // SAM3 segmenter weights, resolved from the Model Manager install (sc-17629), shared by both
+    // segmentation passes.
     let (sam_model, sam_tokenizer) =
         crate::person_segment_sam3::require_segmenter_weights(settings)?;
 

@@ -384,7 +384,7 @@ fn instantid_revision(repo: &str) -> &'static str {
 
 /// Resolve a single InstantID weight file: return it if already present in `dir`, else
 /// download `url` into `dir` (atomic `.tmp` + rename, so a partial download is never mistaken
-/// for a complete one — same shape as `person_segment::resolve_segmenter_weights`).
+/// for a complete one).
 async fn ensure_instantid_file(
     context: &DownloadContext<'_>,
     repo: &str,

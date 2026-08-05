@@ -672,7 +672,6 @@ async fn run_yolo11_person_detect(
 async fn run_yolo11_person_detect(
     _api: &ApiClient,
     _settings: &Settings,
-    _http_client: &reqwest::Client,
     _job: &JobSnapshot,
     _frame_path: PathBuf,
     _confidence: f64,
@@ -1038,8 +1037,19 @@ pub(crate) struct SegmentClip {
 pub(crate) enum SegmentOutcome {
     /// One binary mask per clip frame (detected + gap), index-aligned with `SegmentClip::clip_paths`.
     Masks(Vec<Vec<u8>>),
-    /// Segmenter unavailable / failed → fall back to box-derived masks at replacement time.
+    /// Segmenter failed (engine error, task join, corrupt weights) → fall back to box-derived masks
+    /// at replacement time. Nothing the user can act on, so it degrades quietly as it always has.
     Degraded,
+    /// The segmenter weights are **not installed** — carries the actionable install message
+    /// (sc-17629 / sc-17635).
+    ///
+    /// Distinct from [`SegmentOutcome::Degraded`] on purpose. Before sc-17629 a missing segmenter
+    /// meant an automatic mid-job download, so "unavailable" was always a genuine failure; now it
+    /// is the ordinary state of a fresh install, and folding it into `Degraded` would silently
+    /// hand the user box masks with nothing anywhere telling them to install SAM3. It still
+    /// degrades rather than failing — a track that already located the person is never failed by
+    /// the mask pass — but the reason reaches the job.
+    Unavailable(String),
     /// The user canceled the job mid-segmentation; terminal for the whole person-track job.
     Canceled(String),
 }
@@ -1163,7 +1173,33 @@ where
         SegmentOutcome::Masks(masks) => masks,
         // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
         SegmentOutcome::Canceled(message) => return Err(WorkerError::Canceled(message)),
-        // Any other failure (weights unavailable, engine error, task join) degrades to box masks.
+        // The segmenter is not installed. Still degrade to box masks — the track already found the
+        // person and must not be failed by the mask pass — but SAY SO, on the job and in the log.
+        // Otherwise a fresh install silently produces worse masks forever with no hint that
+        // installing "SAM3 Person Segmenter" would fix it (sc-17629).
+        SegmentOutcome::Unavailable(message) => {
+            tracing::warn!(
+                event = "person_track_segmenter_not_installed",
+                track_id,
+                detail = %message
+            );
+            update_job(
+                api,
+                &job.id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Tracking,
+                    0.9,
+                    &format!("Using box masks: {message}"),
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await?;
+            return Ok("degraded");
+        }
+        // Any other failure (engine error, task join) degrades to box masks.
         SegmentOutcome::Degraded => return Ok("degraded"),
     };
 
@@ -1235,6 +1271,11 @@ async fn run_macos_segmenter(
                     Err(WorkerError::Canceled(message)) => {
                         return SegmentOutcome::Canceled(message)
                     }
+                    // `require_*` reports a missing install as `InvalidPayload` carrying the
+                    // actionable message; anything else is a genuine failure (sc-17629).
+                    Err(WorkerError::InvalidPayload(message)) => {
+                        return SegmentOutcome::Unavailable(message)
+                    }
                     Err(_) => return SegmentOutcome::Degraded,
                 };
             let flag = cancel.clone();
@@ -1265,6 +1306,9 @@ async fn run_macos_segmenter(
             let weights = match crate::person_segment::require_segmenter_weights(settings) {
                 Ok(path) => path,
                 Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+                Err(WorkerError::InvalidPayload(message)) => {
+                    return SegmentOutcome::Unavailable(message)
+                }
                 Err(_) => return SegmentOutcome::Degraded,
             };
             let flag = cancel.clone();
@@ -1319,6 +1363,9 @@ async fn run_candle_segmenter(
         match crate::person_segment_sam3_candle::require_segmenter_weights(settings) {
             Ok(pair) => pair,
             Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+            Err(WorkerError::InvalidPayload(message)) => {
+                return SegmentOutcome::Unavailable(message)
+            }
             Err(_) => return SegmentOutcome::Degraded,
         };
     let cancel = gen_core::CancelFlag::new();
@@ -3399,7 +3446,8 @@ mod person_detect_timestamp_tests {
 ///   person_track_e2e -- --ignored --nocapture
 /// ```
 ///
-/// The YOLO11 and SAM2 weights download on first use from the public `SceneWorks/*` HF
+/// The YOLO11 and SAM2 weights must already be installed from the Model Manager (sc-17629); the
+/// smoke resolves them from the public `SceneWorks/*` HF
 /// repos (or pin them with `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` / `SCENEWORKS_SAM2_WEIGHTS`).
 #[cfg(all(test, target_os = "macos"))]
 mod person_track_e2e_tests {
@@ -3440,7 +3488,6 @@ mod person_track_e2e_tests {
     /// identical setup lines the SAM2 and SAM3 E2E tests each carried (sc-8955 / F-153).
     async fn detect_and_assemble(
         settings: &crate::Settings,
-        download_context: &DownloadContext<'_>,
         video: &std::path::Path,
         duration: f64,
         timestamps: &[f64],
@@ -3450,7 +3497,7 @@ mod person_track_e2e_tests {
         let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
             Vec::with_capacity(timestamps.len());
         let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-        let frames_dir = download_context.settings.data_dir.join("person-e2e-frames");
+        let frames_dir = settings.data_dir.join("person-e2e-frames");
         std::fs::create_dir_all(&frames_dir).expect("frames dir");
         for (index, &timestamp) in timestamps.iter().enumerate() {
             let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
@@ -3602,21 +3649,8 @@ mod person_track_e2e_tests {
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
-            let http = reqwest::Client::new();
-            let api = ApiClient::new(&settings);
-            let download_context = DownloadContext {
-                api: &api,
-                client: &http,
-                settings: &settings,
-                job_id: "person-track-e2e",
-                cancel_message: "person track e2e canceled while fetching weights",
-                fresh_download: false,
-            };
-
             // 1-2. Detect + assemble the selected person (shared with the SAM3 E2E, sc-8955).
-            let clip =
-                detect_and_assemble(&settings, &download_context, &video, duration, &timestamps)
-                    .await;
+            let clip = detect_and_assemble(&settings, &video, duration, &timestamps).await;
             let AssembledClip {
                 detected_total,
                 first,
@@ -3721,16 +3755,6 @@ mod person_track_e2e_tests {
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
-            let http = reqwest::Client::new();
-            let api = ApiClient::new(&settings);
-            let download_context = DownloadContext {
-                api: &api,
-                client: &http,
-                settings: &settings,
-                job_id: "person-track-e2e-sam3",
-                cancel_message: "person track e2e (sam3) canceled while fetching weights",
-                fresh_download: false,
-            };
 
             // detect → track → assemble (shared with the SAM2 E2E, sc-8955).
             let AssembledClip {
@@ -3739,7 +3763,7 @@ mod person_track_e2e_tests {
                 last,
                 clip_paths,
                 anchors,
-            } = detect_and_assemble(&settings, &download_context, &video, duration, &timestamps)
+            } = detect_and_assemble(&settings, &video, duration, &timestamps)
                 .await;
             let clip_detected: Vec<bool> = anchors.iter().map(Option::is_some).collect();
 
