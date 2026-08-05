@@ -7231,9 +7231,11 @@ fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
 /// are therefore pinned here, next to the code that computes them (sc-17640).
 #[test]
 fn terminal_side_effect_retry_backoff_doubles_and_survives_restart() {
-    // Keep the path so the store can be reopened; `store()` wipes the file.
-    let path = temp_db("terminal-side-effect-backoff");
-    let store = JobsStore::new(path.clone());
+    // Keep the GUARD alive, not just the path: `store()` wipes the file, and this test reopens the
+    // same database below. `temp_db` hands back a `TempDb` whose `Drop` removes the directory, so
+    // holding only `db.path()` would delete the database out from under the reopen.
+    let db = temp_db("terminal-side-effect-backoff");
+    let store = JobsStore::new(db.path());
     store.initialize().expect("store initializes");
     register_image_worker(&store);
     let created = store
@@ -7316,7 +7318,7 @@ fn terminal_side_effect_retry_backoff_doubles_and_survives_restart() {
     // restarting it at the 5s base. A worker that crash-loops the API cannot
     // reset its own backoff.
     drop(store);
-    let restarted = JobsStore::new(path);
+    let restarted = JobsStore::new(db.path());
     restarted.initialize().expect("restarted store initializes");
     defer_and_bracket(&restarted, 20, "third failure after restart");
 }
