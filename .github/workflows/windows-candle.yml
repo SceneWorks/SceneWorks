@@ -21,6 +21,11 @@ name: Windows Candle worker
 # place to catch a candle sidecar build break on the PR instead of at release-tag
 # time. (embed-web is left off — it needs a built web bundle; see the step comment.)
 #
+# And because linking candle is what it takes to produce them, this is the only PR
+# lane that can prove `config/engine-capabilities/capabilities.candle.json` is a real
+# dump rather than a restamped stale one — the last step in the job (sc-17592), the
+# off-Mac mirror of the MLX step in macos-mlx.yml.
+#
 # RUNS ON A SELF-HOSTED Windows + NVIDIA (CUDA) RUNNER (label `cuda`). GitHub's
 # hosted windows runners have no GPU and only compile; a real candle build also
 # needs the box's MSVC 14.44 BuildTools toolset (CUDA 12.9's nvcc rejects VS2026's
@@ -52,6 +57,30 @@ on:
       # `manifest_menu_is_subset_of_descriptor` drift guard, so a manifest edit can
       # turn the candle suite red — gate on it.
       - "config/manifests/**"
+      # The stage-1 candle facts dump this lane is the sole PR-triggered producer of
+      # (sc-17592). Without this entry the "real dump, not a restamp" step below is
+      # unreachable for the one edit it exists to catch: a restamp touches ONLY
+      # config/engine-capabilities/capabilities.candle.json, which matches no other path
+      # here, so the lane would not run at all on the PR that made the file wrong. Same
+      # gap sc-17119 closed on the macOS side.
+      #
+      # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also
+      # matched capabilities.mlx.json, so an mlx-only restamp woke this ENTIRE job — every
+      # step below, on the fleet's single `cuda` box — for a file the verify step never
+      # opens. Nothing in this lane reads it: no Rust reads the facts directory at all
+      # (`default_facts_dir()` only builds the dumper bin's default OUTPUT path; a repo-wide
+      # grep finds no reader), and the three consumers that DO glob the whole directory are
+      # all outside this job — `previewSupportCatalog.test.js` runs in check.yml's hosted
+      # Linux `web` job, while `generate-preview-support.mjs` and `bump-inference.mjs` are
+      # manual developer scripts that no workflow invokes at all.
+      #
+      # Narrowing costs no coverage. A restamp is the ONLY edit this drops, and it is
+      # precisely the edit this lane cannot check; any *material* change to the sibling dump
+      # also regenerates config/manifests/builtin.preview-support.jsonc, and
+      # `config/manifests/**` above still wakes both lanes. Path filters match DELETES and
+      # ADDS as well as modifications, so a restamp, a delete or a re-add of this file still
+      # triggers the lane, and a rename is a delete+add that still matches.
+      - "config/engine-capabilities/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/actions/prepare-rust-runner/**"
@@ -341,3 +370,75 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings
+      # sc-17592, the off-Mac mirror of macos-mlx.yml's MLX step. THE ONLY PR LANE THAT CAN PRODUCE
+      # capabilities.candle.json, so it is the only place the checked-in file can be checked against
+      # a real registry rather than taken on trust. (desktop-windows.yml builds the candle sidecar on
+      # main/release only and runs no dumper; server-candle-linux.yml is workflow_dispatch-only.)
+      #
+      # Every other guard reads that file as a SOURCE: `verifyEngineCapabilityFacts` in
+      # scripts/bump-inference.mjs checks that the file exists, names a backend SCENEWORKS_BACKENDS
+      # declares, and carries the current `inferenceRevision` — nothing about the engine list — and
+      # the vitest drift guard re-derives the catalog from its contents. Both are satisfied by editing
+      # one line. That is not hypothetical — this file was RESTAMPED (revision line rewritten, all 264
+      # lines of content untouched) through the same pin bumps that restamped the MLX one, because no
+      # CUDA box re-dumped it and nothing could tell the difference. Measured before this step landed:
+      # at pin a4f409ae the checked-in file matches a fresh dump BYTE-FOR-BYTE, so the restamps
+      # happened to be correct — but nothing proved it until this step existed.
+      #
+      # `git diff --no-index --exit-code`, not `fc`: `cmd` has no `diff`, `bash` here resolves to the
+      # box's WSL stub rather than Git Bash (see the header), and `fc`'s exit semantics are unreliable
+      # for this. git is already on PATH — actions/checkout requires it. The byte diff is sound
+      # because the dump is deterministic (BTreeMap grouping + sort_by(id) + a const revision + a
+      # cfg!-derived dumper string; nothing path- or time-dependent) and `.gitattributes`
+      # (`* text=auto eol=lf`) checks the file out LF even on Windows with core.autocrlf=true, so it
+      # cannot false-red on line endings.
+      #
+      # Cheap: the steps above already built the candle graph, so this is a link plus a weights-free
+      # registry walk. It needs the vcvars preamble anyway because the dumper links runtime-cuda.
+      # Dumps to a scratch dir under RUNNER_TEMP, NEVER over the checked-in file, so a red run leaves
+      # a readable diff instead of a mutated tree.
+      #
+      # `--no-default-features --features backend-candle` matches `dumper_invocation()`, which keys
+      # only on `cfg!(target_os = "macos")` — so the `dumper` field a Windows dump emits is the exact
+      # string the checked-in file already carries. (sceneworks-worker declares no `default` feature,
+      # so this resolves the same graph as the plain `--features backend-candle` steps above.)
+      #
+      # LAST, deliberately — the same ordering rule sc-17119 landed on the macOS side. A step failure
+      # aborts the job, and this one goes red on exactly the routine pin-bump PRs where nobody
+      # re-dumped on a CUDA box. Placed earlier it would cancel `cargo test -p sceneworks-worker
+      # --features backend-candle` — which THIS LANE IS THE ONLY PR LANE TO RUN — plus the sidecar
+      # check, the memory-adapter check and clippy. A missing dump must not suppress unrelated
+      # coverage; it is the least urgent signal in this job, so it reports last.
+      #
+      # When this fails after a pin bump, the fix is to commit the dump it just produced and re-run
+      # `npm run gen:preview-support` from apps/web — not to restamp the revision line.
+      - name: Verify capabilities.candle.json is a real dump, not a restamp
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          if not defined RUNNER_TEMP goto :no_runner_temp
+          set "scratch=%RUNNER_TEMP%\engine-capability-facts-verify"
+          rmdir /s /q "%scratch%" 2>nul
+          if exist "%scratch%\capabilities.candle.json" goto :stale_scratch
+          cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle -- "%scratch%" || exit /b 1
+          if not exist "%scratch%\capabilities.candle.json" goto :no_candle_file
+          git diff --no-index --exit-code -- config\engine-capabilities\capabilities.candle.json "%scratch%\capabilities.candle.json"
+          if errorlevel 2 goto :diff_failed
+          if errorlevel 1 goto :restamped
+          exit /b 0
+          :no_runner_temp
+          echo ::error::RUNNER_TEMP is not set, so there is nowhere safe to dump. Refusing to run rather than risk writing into the checked-out tree.
+          exit /b 1
+          :stale_scratch
+          echo ::error::could not clear the scratch dir, so a previous run's capabilities.candle.json is still there and would be diffed instead of a fresh dump. This runner is self-hosted - check for a stray handle on %scratch%.
+          exit /b 1
+          :no_candle_file
+          echo ::error::the dumper exited 0 but wrote no capabilities.candle.json. This lane linked a registry whose backend is not named candle, so nothing was verified - reconcile SCENEWORKS_BACKENDS with the linked backend.
+          exit /b 1
+          :diff_failed
+          echo ::error::git could not compare the checked-in capabilities.candle.json against the fresh dump. This is a tooling or missing-file failure, NOT a restamp - read the git error above.
+          exit /b 1
+          :restamped
+          echo ::error::config/engine-capabilities/capabilities.candle.json does not match a fresh dump at this pin. Re-dump it on a CUDA box with: cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle - then run npm run gen:preview-support from apps/web. Do NOT just rewrite the inferenceRevision line.
+          exit /b 1

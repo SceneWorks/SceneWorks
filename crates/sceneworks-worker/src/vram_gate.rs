@@ -352,10 +352,18 @@ pub(crate) enum KreaTurboFit {
     },
 }
 
-const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
-// The 1c4354 inference merge is additive to Mage/request contracts and leaves the Krea CUDA
-// implementation plus its calibration fingerprint unchanged.
-const KREA_TURBO_INFERENCE_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
+pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
+// sc-17097: the inference revision the shipped Krea phase curves are declared COMPATIBLE with. It must
+// stay equal to the manifest's `turboFit.inferenceRevision` - `candidate_exclusion` compares the two and
+// stales every optimized rung when they diverge.
+//
+// The curves were captured against `277f4238`; each evidence record keeps
+// that exact commit in its own `inferenceCommit` receipt, which is never rewritten (sc-16482: a receipt
+// testifies to its own run). This constant moved to the sc-15819 closeout pin only after verifying the
+// range is a single commit whose diff against BOTH `candle-gen-krea` and `gen-core/src/memory_strategy.rs`
+// is empty - the measured path and the calibration identity (ABI 3, fingerprint, deferred load shape) are
+// byte-for-byte unchanged, so the captures remain valid rather than merely re-stamped.
+pub(crate) const KREA_TURBO_INFERENCE_REVISION: &str = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {
@@ -498,6 +506,18 @@ fn krea_phase_curve(phase: &JsonObject, pixels: u64) -> Option<f64> {
     Some(fixed + per_mpx * pixels as f64 / 1_000_000.0)
 }
 
+/// The typed materialization shape the shipped Krea Turbo curves were measured under (sc-17097).
+///
+/// `None` for a missing or unrecognized value, which fails the fit closed rather than defaulting: a
+/// silently assumed shape is what let calibration ABI 2's load-shape axis do no work on this route.
+pub(crate) fn krea_turbo_load_shape(turbo_fit: &Value) -> Option<gen_core::LoadShape> {
+    match turbo_fit.get("loadShape")?.as_str()? {
+        "eager_materialization" => Some(gen_core::LoadShape::EagerMaterialization),
+        "deferred_materialization" => Some(gen_core::LoadShape::DeferredMaterialization),
+        _ => None,
+    }
+}
+
 fn krea_rung_phase_peaks(
     manifest_entry: &JsonObject,
     tier: &str,
@@ -593,6 +613,11 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
     let calibration_fingerprint = turbo_fit.get("calibrationFingerprint")?.as_str()?;
     let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
+    // sc-17097: calibration ABI 2 added the typed load shape, but this route never read it - the
+    // worker took the shape from the provider alone, so the axis could not detect drift here. The
+    // manifest now states the shape its curves were MEASURED under and the handshake below compares
+    // the two; eager and deferred measurements are not interchangeable.
+    let declared_load_shape = krea_turbo_load_shape(turbo_fit)?;
     let scene_works_revision = turbo_fit.get("sceneWorksRevision")?.as_str()?;
     let inference_revision = turbo_fit.get("inferenceRevision")?.as_str()?;
     let max_pixels = turbo_fit.get("maxMeasuredPixels")?.as_u64()?;
@@ -729,7 +754,9 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             .calibration
             .as_ref()
             .is_some_and(|identity| {
-                identity.abi == calibration_abi && identity.fingerprint == calibration_fingerprint
+                identity.abi == calibration_abi
+                    && identity.fingerprint == calibration_fingerprint
+                    && identity.load_shape == declared_load_shape
             });
         let valid_commit = |field: &str| {
             evidence_record
@@ -1634,13 +1661,16 @@ mod tests {
             "candle": {
                 "vramGbByTier": { "q4": 30.0 },
                 "turboFit": {
-                    // The fixture opts in at the CURRENT calibration ABI: these tests pin the
-                    // verified selector ladder, not receipt provenance (production manifests stay
-                    // at their measured ABI and correctly degrade until sc-16915 re-collects).
+                    // This is a SYNTHETIC ladder fixture (30 GiB flat q4 curves), not the shipped
+                    // manifest, so tracking the current constants is authoring rather than surgery -
+                    // `builtin_krea_turbo_calibration_abi_tracks_the_pinned_provider` and
+                    // `builtin_krea_turbo_resident_admission_passes_the_provider_handshake` are the
+                    // tests that read the SHIPPED values, and neither patches anything.
                     "calibrationAbi": gen_core::MEMORY_CALIBRATION_ABI,
+                    "loadShape": "deferred_materialization",
                     "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
                     "sceneWorksRevision": "sc-15449-contract-v1",
-                    "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+                    "inferenceRevision": KREA_TURBO_INFERENCE_REVISION,
                     "measured": true,
                     "maxMeasuredPixels": 1048576,
                     "evidenceRecords": [{
@@ -1652,7 +1682,7 @@ mod tests {
                         "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
                         "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
                         "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-                        "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+                        "compatibleInferenceRevision": KREA_TURBO_INFERENCE_REVISION,
                         "measuredCompositions": {
                             "threeStage": ["resident", "staged_residency"],
                             "tiledVae": ["resident", "staged_residency", "bounded_decode"],
@@ -1788,12 +1818,208 @@ mod tests {
         let mut manifest = builtin_krea_turbo_manifest();
         manifest["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
-        // Same fixture surgery as the fingerprint line: pin the opt-in to the CURRENT calibration
-        // ABI so these tests keep exercising the verified ladder. The shipped manifest stays at
-        // its measured ABI and correctly degrades until sc-16915 re-collects.
-        manifest["candle"]["turboFit"]["calibrationAbi"] =
-            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
         manifest
+    }
+
+    /// sc-17097: NO shipped route may carry a `calibrationAbi` stamp the pinned gen-core has moved
+    /// past, whatever its manifest shape.
+    ///
+    /// The per-route tests below cover `krea_2_turbo` in depth because it is the one stamp that reaches
+    /// a provider run context. This sweep is the cheap net for the next ABI bump: it walks the whole
+    /// builtin manifest for any key named `calibrationAbi` and fails on the first stale one, so a route
+    /// added later cannot ship a stale stamp just because nobody wrote it a bespoke test.
+    ///
+    /// Deliberately NOT swept: `mlx.calibrations[].abi` and `memoryStrategyContract.abi`. The former is
+    /// a historical receipt binding whose ABI-1 rows are correct provenance and demote fail-closed to
+    /// the legacy estimator (sc-16482 forbids backfilling them); the latter is an unrelated
+    /// static-contract version that the schema independently pins.
+    #[test]
+    fn no_builtin_route_ships_a_stale_calibration_abi_stamp() {
+        let jsonc = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let parsed: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
+                .expect("builtin model manifest parses");
+
+        // Two shapes carry a live calibration ABI: `turboFit.calibrationAbi` (Krea's bespoke opt-in)
+        // and `<backend>.calibrations[].abi` (the packaged-evidence bindings, read into
+        // `MemoryEvidence::calibration_abi` by `candle_memory_strategy::binding`). Both are swept.
+        fn walk(value: &Value, path: &str, found: &mut Vec<(String, u64)>) {
+            match value {
+                Value::Object(map) => {
+                    for (key, child) in map {
+                        let child_path = format!("{path}.{key}");
+                        let is_stamp = key == "calibrationAbi"
+                            // `mlx.calibrations[]` rows are HISTORICAL receipts: sc-16482 forbids
+                            // backfilling them and `mlx_fit_gate` demotes a stale one to
+                            // `AdmissionPath::Legacy`, so an ABI-1 row there is correct provenance,
+                            // not drift. The candle rows have no such carve-out.
+                            || (key == "abi" && path.ends_with("]") && path.contains(".candle.calibrations"));
+                        if is_stamp {
+                            found.push((
+                                child_path.clone(),
+                                child
+                                    .as_u64()
+                                    .expect("a calibration ABI stamp is an integer"),
+                            ));
+                        }
+                        walk(child, &child_path, found);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        walk(child, &format!("{path}[{index}]"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&parsed, "manifest", &mut found);
+        assert!(
+            !found.is_empty(),
+            "the sweep found no calibrationAbi stamps at all — it has stopped inspecting what it \
+             claims to guard"
+        );
+        let stale = found
+            .iter()
+            .filter(|(_, abi)| *abi != u64::from(gen_core::MEMORY_CALIBRATION_ABI))
+            .collect::<Vec<_>>();
+        assert!(
+            stale.is_empty(),
+            "{stale:?} are stamped at a calibration ABI the pinned gen-core ({}) has moved past; \
+             re-measure those fits, do not re-stamp them",
+            gen_core::MEMORY_CALIBRATION_ABI
+        );
+    }
+
+    /// sc-17097: the shipped `krea_2_turbo` opt-in must be stamped at the calibration ABI the pinned
+    /// provider actually declares.
+    ///
+    /// A stale stamp is not a soft degrade. [`gen_core::MemoryRunContext`] documents that "resident
+    /// requests carry this handshake too", and `optimized_eligibility` returns `Ok(())` for the
+    /// non-optimized resident rung *before* it ever reaches the ABI comparison — so on any card where
+    /// Krea fits resident (every tier on a 96 GB RTX PRO 6000) the selector still returns
+    /// `KreaTurboFit::Resident`, the worker still builds a run context out of this stamp, and
+    /// `standard_memory_strategy_safety_check` rejects the whole request with
+    /// `unsupported: krea_2_turbo: calibration handshake mismatch`.
+    #[test]
+    fn builtin_krea_turbo_calibration_abi_tracks_the_pinned_provider() {
+        let manifest = builtin_krea_turbo_manifest();
+        let shipped = manifest["candle"]["turboFit"]["calibrationAbi"]
+            .as_u64()
+            .expect("shipped calibrationAbi");
+        assert_eq!(
+            u32::try_from(shipped).expect("calibrationAbi fits u32"),
+            gen_core::MEMORY_CALIBRATION_ABI,
+            "builtin.models.jsonc stamps calibrationAbi {shipped} while the pinned gen-core declares \
+             {}; every Krea Turbo candle t2i that fits resident fails the provider handshake until \
+             the fit is re-measured under the current ABI",
+            gen_core::MEMORY_CALIBRATION_ABI
+        );
+    }
+
+    /// sc-17097 end-to-end regression: drive the exact seam `image_jobs::base` uses — the shipped
+    /// manifest's own stamp into a real [`gen_core::MemoryRunContext`], checked against the real
+    /// pinned provider contract — and require the provider to ACCEPT.
+    ///
+    /// This is the production failure reproduced in-process: it goes RED the moment the shipped stamp
+    /// drifts from the provider, whatever the reason, and no fixture surgery can hide it because the
+    /// manifest is read unpatched.
+    #[test]
+    fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
+        let manifest = builtin_krea_turbo_manifest();
+        let turbo_fit = manifest["candle"]["turboFit"]
+            .as_object()
+            .expect("Krea turbo fit");
+        let provider_contract = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
+            )
+            .expect("Krea contract lookup succeeds")
+            .expect("Krea contract exists");
+        let identity = provider_contract
+            .calibration
+            .as_ref()
+            .expect("Krea provider declares calibration");
+
+        // A card that comfortably holds the resident tier, which is what makes this a hard reject
+        // rather than a fallback: the selector picks Resident and the worker builds a context.
+        let budget = Some(VramBudget {
+            free_gb: 90.0,
+            total_gb: 96.0,
+        });
+        let fit = krea_turbo_fit(&manifest, "q4", 1024, 1024, budget, true);
+        let Some(KreaTurboFit::Resident {
+            peak_gb, selection, ..
+        }) = fit
+        else {
+            panic!("expected the shipped Krea manifest to select the resident rung, got {fit:?}");
+        };
+
+        let gb_to_bytes = |gb: f64| {
+            (gb * 1024.0 * 1024.0 * 1024.0)
+                .round()
+                .clamp(0.0, u64::MAX as f64) as u64
+        };
+        // Field-for-field the context `image_jobs::base` builds for a plain Krea Turbo t2i.
+        let context = gen_core::MemoryRunContext {
+            selection,
+            calibration_abi: u32::try_from(
+                turbo_fit["calibrationAbi"]
+                    .as_u64()
+                    .expect("shipped calibrationAbi"),
+            )
+            .expect("calibrationAbi fits u32"),
+            calibration_fingerprint: turbo_fit["calibrationFingerprint"]
+                .as_str()
+                .expect("shipped calibrationFingerprint")
+                .to_owned(),
+            // From the MANIFEST, exactly as `image_jobs::base` does. Reading it back off `identity`
+            // would compare the provider against itself and could never catch a shape mismatch -
+            // which is the whole reason calibration ABI 2 added this axis.
+            load_shape: krea_turbo_load_shape(&manifest["candle"]["turboFit"])
+                .expect("the shipped turbo fit declares a load shape"),
+            mode: gen_core::MemoryMode::TextToImage,
+            has_reference: false,
+            use_pid: false,
+            has_phases: false,
+            geometry: gen_core::MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            overlay: None,
+            budget: gen_core::MemoryBudget {
+                total_bytes: gb_to_bytes(96.0),
+                committed_bytes: gb_to_bytes(6.0),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: gb_to_bytes(2.0),
+            },
+            predicted_peak_bytes: gb_to_bytes(peak_gb),
+            cache_state: gen_core::MemoryCacheState::Cold,
+            evidence_revision: format!(
+                "{KREA_TURBO_SCENEWORKS_REVISION}@{KREA_TURBO_INFERENCE_REVISION}"
+            ),
+        };
+
+        let decision = gen_core::standard_memory_strategy_safety_check(
+            &provider_contract,
+            &context,
+            None,
+            None,
+        );
+        assert_eq!(
+            decision,
+            gen_core::MemorySafetyDecision::Accept,
+            "the shipped Krea Turbo opt-in must satisfy the pinned provider's calibration handshake \
+             (manifest ABI {}, provider ABI {})",
+            context.calibration_abi,
+            identity.abi
+        );
     }
 
     #[test]
@@ -2365,8 +2591,24 @@ mod tests {
                 ..
             })
         ));
+        // sc-17097: bounded-decode re-measured 15.41 -> 13.32 GiB at 1024^2, so a 16 GiB card now
+        // stops one rung EARLIER than it did under the ABI-1 curves - it no longer has to chunk
+        // attention to fit. The ladder order is unchanged; the rung that fits moved.
         assert!(matches!(
             fit(16.0),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
+                ..
+            })
+        ));
+        // Moving the 16 GiB probe down to bounded-decode left bounded-attention unprobed: after the
+        // sc-17097 re-measurement it is selected only for free_gb in [12.54, 15.32). Probe inside
+        // that window so every rung the ladder can still reach keeps a golden.
+        assert!(matches!(
+            fit(14.0),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedAttention,
@@ -2441,8 +2683,20 @@ mod tests {
                 ..
             })
         ));
+        // sc-17097: the Q8 tiled-VAE rung is no longer a measured no-op (see below), so 24 GiB now
+        // fits bounded-decode and 20 GiB fits bounded-attention - each card stops one rung earlier.
         assert!(matches!(
             fit(24.0),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            fit(20.0),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedAttention,
@@ -2451,32 +2705,8 @@ mod tests {
                 ..
             })
         ));
-        for free_gb in [20.0, 12.0] {
-            assert!(matches!(
-                fit(free_gb),
-                Some(KreaTurboFit::Fits {
-                    selection: gen_core::MemorySelection {
-                        strategy: MemoryStrategy::BoundedTransformerResidency,
-                        ..
-                    },
-                    ..
-                })
-            ));
-        }
-
-        let three_stage =
-            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::StagedResidency, 1024, 1024)
-                .expect("Q8 three-stage evidence");
-        let tiled =
-            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::BoundedDecode, 1024, 1024)
-                .expect("Q8 tiled-VAE evidence");
-        assert!(
-            tiled.peak_gb() >= three_stage.peak_gb(),
-            "the measured Q8 tiled-VAE no-op must never displace the cheaper three-stage rung"
-        );
-
         assert!(matches!(
-            fit(8.96),
+            fit(12.0),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedTransformerResidency,
@@ -2485,10 +2715,45 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(fit(8.95), Some(KreaTurboFit::Reject { .. })));
+
+        let three_stage =
+            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::StagedResidency, 1024, 1024)
+                .expect("Q8 three-stage evidence");
+        let tiled =
+            krea_rung_phase_peaks(&manifest, "q8", MemoryStrategy::BoundedDecode, 1024, 1024)
+                .expect("Q8 tiled-VAE evidence");
+        // sc-17097 INVERTS this assertion, and the inversion is the finding. Under the ABI-1
+        // capture the Q8 decode peak was identical with and without tiling (16.514 -> 16.514), so
+        // tiled VAE was a measured no-op that had to be prevented from displacing the cheaper
+        // three-stage rung. Re-measured under ABI 3 it is a real saving: three-stage peaks at 25.92
+        // GiB (decode-bound) against tiled VAE's 19.04. Keeping the old direction would now assert
+        // that a rung which demonstrably helps must not be offered.
+        assert!(
+            tiled.peak_gb() < three_stage.peak_gb(),
+            "the re-measured Q8 tiled-VAE rung is a real decode saving ({:.3} GiB against \
+             three-stage {:.3}) and must be selectable",
+            tiled.peak_gb(),
+            three_stage.peak_gb()
+        );
+
+        // sc-17097: the Q8 streamed-block floor re-measured 6.85 -> 5.01 GiB, so the admit/reject
+        // boundary moved from ~8.95 to ~7.01 GiB (peak plus the 2 GiB reserve). Probed 0.01 GiB clear
+        // of the boundary on each side rather than exactly on it: the byte-exact tie is decided by
+        // f64 rounding of `free_gb - headroom`, which is not the behaviour under test.
+        assert!(matches!(
+            fit(7.02),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedTransformerResidency,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(matches!(fit(7.00), Some(KreaTurboFit::Reject { .. })));
         let budget = Some(VramBudget {
-            free_gb: 8.95,
-            total_gb: 8.95,
+            free_gb: 7.00,
+            total_gb: 7.00,
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "q8", 1024, 1024, budget, true),
@@ -2496,8 +2761,8 @@ mod tests {
             "lower-aspect curves without exact parity records must not be recommended"
         );
         let no_escape_budget = Some(VramBudget {
-            free_gb: 8.5,
-            total_gb: 8.5,
+            free_gb: 6.5,
+            total_gb: 6.5,
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "q8", 1024, 1024, no_escape_budget, true,),
@@ -2513,34 +2778,34 @@ mod tests {
             (
                 MemoryStrategy::StagedResidency,
                 768,
-                [6.345, 18.357, 16.514],
+                [5.003, 15.690, 21.411],
             ),
             (
                 MemoryStrategy::StagedResidency,
                 1024,
-                [6.345, 22.015, 16.514],
+                [5.003, 19.159, 25.911],
             ),
-            (MemoryStrategy::BoundedDecode, 768, [6.345, 18.357, 16.548]),
-            (MemoryStrategy::BoundedDecode, 1024, [6.345, 22.015, 16.514]),
+            (MemoryStrategy::BoundedDecode, 768, [5.003, 15.503, 13.692]),
+            (MemoryStrategy::BoundedDecode, 1024, [5.003, 19.034, 13.724]),
             (
                 MemoryStrategy::BoundedAttention,
                 768,
-                [6.345, 17.619, 16.514],
+                [5.003, 14.878, 13.661],
             ),
             (
                 MemoryStrategy::BoundedAttention,
                 1024,
-                [6.345, 18.156, 16.512],
+                [5.003, 15.253, 13.724],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 768,
-                [6.345, 6.211, 4.837],
+                [5.003, 4.878, 4.411],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 1024,
-                [6.847, 6.757, 4.132],
+                [5.003, 4.878, 3.661],
             ),
         ];
         for (rung, edge, measured) in samples {
@@ -2693,6 +2958,19 @@ mod tests {
                 ..
             })
         ));
+        // Newly reachable: under the ABI-1 curves the BF16 tiled-VAE and three-stage peaks were tied
+        // at 32.1157 GiB, so bounded-decode could never be selected. The re-measurement separates
+        // them (29.86 against 36.73), making this a live rung for free_gb in [31.86, 38.73).
+        assert!(matches!(
+            fit(33.0),
+            Some(KreaTurboFit::Fits {
+                selection: gen_core::MemorySelection {
+                    strategy: MemoryStrategy::BoundedDecode,
+                    ..
+                },
+                ..
+            })
+        ));
         assert!(matches!(
             fit(31.0),
             Some(KreaTurboFit::Fits {
@@ -2725,13 +3003,21 @@ mod tests {
         let tiled =
             krea_rung_phase_peaks(&manifest, "bf16", MemoryStrategy::BoundedDecode, 1024, 1024)
                 .expect("BF16 tiled-VAE evidence");
+        // sc-17097 inverts this for the same reason as the Q8 sibling: the ABI-1 BF16 decode peak
+        // was flat across tiling (26.446 -> 26.446), so tiled VAE measured as a no-op. Re-measured
+        // it is a real saving - three-stage 36.73 GiB against tiled VAE 29.86.
         assert!(
-            tiled.peak_gb() >= three_stage.peak_gb(),
-            "the measured BF16 tiled-VAE no-op must never displace the cheaper three-stage rung"
+            tiled.peak_gb() < three_stage.peak_gb(),
+            "the re-measured BF16 tiled-VAE rung is a real decode saving ({:.3} GiB against \
+             three-stage {:.3}) and must be selectable",
+            tiled.peak_gb(),
+            three_stage.peak_gb()
         );
 
+        // sc-17097: the BF16 streamed floor re-measured 8.53 -> 8.42 GiB, moving the boundary from
+        // ~10.63 to ~10.42. Probed 0.01 GiB clear on each side, as for Q8.
         assert!(matches!(
-            fit(10.64),
+            fit(10.43),
             Some(KreaTurboFit::Fits {
                 selection: gen_core::MemorySelection {
                     strategy: MemoryStrategy::BoundedTransformerResidency,
@@ -2740,10 +3026,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(fit(10.63), Some(KreaTurboFit::Reject { .. })));
+        assert!(matches!(fit(10.41), Some(KreaTurboFit::Reject { .. })));
         let immediate_below = Some(VramBudget {
-            free_gb: 10.63,
-            total_gb: 10.63,
+            free_gb: 10.41,
+            total_gb: 10.41,
         });
         assert_eq!(
             krea_turbo_smaller_fit(&manifest, "bf16", 1024, 1024, immediate_below, true),
@@ -2760,34 +3046,34 @@ mod tests {
             (
                 MemoryStrategy::StagedResidency,
                 768,
-                [8.694, 28.390, 26.413],
+                [7.940, 26.565, 32.255],
             ),
             (
                 MemoryStrategy::StagedResidency,
                 1024,
-                [8.694, 32.014, 26.446],
+                [7.972, 29.972, 36.724],
             ),
-            (MemoryStrategy::BoundedDecode, 768, [8.694, 28.390, 26.446]),
-            (MemoryStrategy::BoundedDecode, 1024, [8.560, 32.014, 26.446]),
+            (MemoryStrategy::BoundedDecode, 768, [8.097, 26.472, 24.599]),
+            (MemoryStrategy::BoundedDecode, 1024, [8.097, 29.847, 24.630]),
             (
                 MemoryStrategy::BoundedAttention,
                 768,
-                [8.527, 27.552, 26.414],
+                [8.097, 25.659, 24.599],
             ),
             (
                 MemoryStrategy::BoundedAttention,
                 1024,
-                [8.526, 27.652, 26.413],
+                [8.097, 25.753, 24.599],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 768,
-                [8.535, 8.533, 2.130],
+                [8.097, 7.940, 4.474],
             ),
             (
                 MemoryStrategy::BoundedTransformerResidency,
                 1024,
-                [8.526, 8.526, 3.629],
+                [7.940, 8.408, 3.848],
             ),
         ];
         for (rung, edge, measured) in samples {

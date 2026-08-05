@@ -20,12 +20,21 @@
 //      ids to engine ids (many-to-one). Parsed, not mirrored, so a new row makes the artifacts
 //      stale on the same PR that adds it.
 //
-// A single-stage generator would have had to link an engine registry itself, and both candle lanes
-// (desktop-windows.yml, server-candle-linux.yml) are `workflow_dispatch`-only — its drift guard
-// could never have run on an ordinary PR. That the stage-1 lane is dispatch-only is NOT an
-// unguarded gap: sc-16951's `candle-gen-catalog` bidirectional test runs in the *inference* repo's
-// CI on every PR, so descriptor-level truth is guarded continuously upstream; SceneWorks only needs
-// to re-dump at pin time.
+// A single-stage generator would have had to link an engine registry itself, which only the two
+// self-hosted lanes can do — so its drift guard would have been reachable only where an engine
+// links, instead of on every ordinary PR. Splitting it in two is what buys the every-PR guard.
+//
+// Those two lanes DO verify their own dump on every PR that can invalidate it: `macos-mlx.yml`
+// re-dumps and diffs `capabilities.mlx.json` (sc-17119), and `windows-candle.yml` does the same for
+// `capabilities.candle.json` (sc-17592); each watches its OWN dump by exact path, not the whole
+// directory, so neither self-hosted box is woken for the other backend's file (sc-17665). So a
+// restamp — the `inferenceRevision` line rewritten over a stale engine list — cannot reach main
+// unnoticed.
+// (The remaining candle lanes verify nothing: `desktop-windows.yml` does its candle work in the
+// `package-windows` job, which is skipped on pull_request, and `server-candle-linux.yml` is
+// `workflow_dispatch`-only.) Descriptor-level truth is additionally guarded upstream and
+// continuously by sc-16951's `candle-gen-catalog` bidirectional test in the *inference* repo's CI,
+// so SceneWorks only needs to re-dump at pin time.
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

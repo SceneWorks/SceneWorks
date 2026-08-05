@@ -516,10 +516,25 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // other crates a Mac ships were dark. Both halves are pinned here.
   const mlx = await source(".github/workflows/macos-mlx.yml");
   assert.match(mlx, /^\s+run: cargo clippy --all-targets -- -D warnings$/m);
-  // `npm run rust:check` runs a bare `cargo test` too, so the lane must not narrow
-  // either half back to the single crate.
-  assert.match(mlx, /^\s+run: cargo test$/m);
-  assert.doesNotMatch(mlx, /cargo test -p sceneworks-worker/);
+  // The lane is now split by HARDWARE, not by cost: `macos-checks` (hosted macos-26)
+  // carries the build, both clippy steps and the workspace suite, while `nax-worker`
+  // (self-hosted, M5) carries only the matrix-unit guard. Pin BOTH halves against each
+  // other — a skip on one side is only safe while the other side actually runs the
+  // skipped test, and nothing else in the fleet would notice if it stopped.
+  //
+  // `npm run rust:check` runs a bare `cargo test` (the whole default-member set), so the
+  // hosted half must stay workspace-wide. Narrowing it back to `-p sceneworks-worker`
+  // would re-dark macOS-conditional code in sceneworks-core / rust-api / image-quality,
+  // which is precisely what sc-17026 fixed.
+  const NAX_TEST = "nax_16bit_sdpa_is_correct";
+  assert.match(mlx, new RegExp(`^\\s+run: cargo test -- --skip ${NAX_TEST}$`, "m"));
+  // The one exemption is the targeted guard invocation below; a bare narrowing of the
+  // suite to the single crate is still forbidden.
+  assert.doesNotMatch(mlx, /run: cargo test -p sceneworks-worker\s*$/m);
+  // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
+  // self-hosted half would drop the entire NAX verdict while every lane stayed green —
+  // the same declared-but-unreachable trap as sc-17026, one job over.
+  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard$/m);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
   // outside the worker and is NOT under `crates/**`, so without this path entry the
@@ -530,7 +545,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf("run: cargo test\n");
+  const testAt = mlx.indexOf(`run: cargo test -- --skip ${NAX_TEST}`);
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
@@ -597,4 +612,113 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard > 0, "macos-mlx.yml must clippy the MLX memory adapter");
   assert.ok(firstDispatchOnly > 0, "macos-mlx.yml must still have dispatch-only calibration steps");
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
+});
+
+test("both stage-1 lanes verify their own capability dump, LAST and reachably", async () => {
+  // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
+  // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
+  // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
+  // contents. All of that is satisfied by a RESTAMP — rewriting the revision line over a stale
+  // engine list — which is how both files were actually produced through two consecutive pin bumps.
+  // Only a lane that LINKS the engine can tell the difference, and there is exactly one such PR lane
+  // per backend.
+  const lanes = [
+    [".github/workflows/macos-mlx.yml", "capabilities.mlx.json"],
+    [".github/workflows/windows-candle.yml", "capabilities.candle.json"],
+  ];
+  for (const [path, file] of lanes) {
+    const lane = await source(path);
+    const verifyAt = lane.indexOf(`- name: Verify ${file} is a real dump, not a restamp`);
+    assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
+    // Re-dump to a SCRATCH dir and compare. Dumping over the checked-in file would make the
+    // comparison vacuous and mutate the tree on a red run.
+    assert.match(lane, /bin dump-engine-capabilities/, path);
+
+    // LAST on the PR path. A step failure aborts the job, and this one goes red on exactly the
+    // routine pin-bump PRs where nobody re-dumped — so placed earlier it would cancel the coverage
+    // each lane uniquely carries (macOS: `nax_guard`; Windows: the only PR run of
+    // `cargo test -p sceneworks-worker --features backend-candle`). A missing dump must not suppress
+    // unrelated verdicts.
+    //
+    // "Last" means last among steps that RUN on a pull request, not last in the file: macos-mlx.yml
+    // keeps a long `workflow_dispatch`-only calibration tail after it, which is skipped on every PR
+    // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
+    // the point — nothing else would notice an unconditional step being appended later.
+    for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+      assert.match(
+        block,
+        /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
+        `${path}: "${block.split("\n")[0]}" runs after the dump-verification step on the PR path. ` +
+          "That step must stay last for everything a PR executes, so its failure cannot cancel " +
+          "coverage this lane is the only place to have. Move it above the verification step.",
+      );
+    }
+
+    // Reachability. A restamp touches ONLY the facts file, so without this path entry the lane does
+    // not run at all on the one PR the step exists to catch — declared but unreachable, the same
+    // trap sc-17026 was about.
+    //
+    // Pinned to THIS lane's own file, not `config/engine-capabilities/**` (sc-17665). The directory
+    // glob satisfied reachability too, but it also woke each lane for the OTHER backend's dump — a
+    // whole self-hosted job, on the fleet's most constrained resource, for a file the woken lane
+    // never opens.
+    //
+    // Asserted by MATCHING the declared globs against both filenames, not by forbidding particular
+    // spellings. A spelling blocklist only catches a straight revert: keeping the narrow entry and
+    // *adding* `config/engine-capabilities/*.json`, `config/engine-capabilities/**/*` or `config/**`
+    // restores the cross-wake in full, and every one of those passes a `**`/`*` blocklist. Matching
+    // is spelling-independent and closes all of them at once.
+    const anchorAt = lane.indexOf("paths: &");
+    assert.ok(anchorAt > 0, `${path} must declare a paths anchor`);
+    const declared = [
+      ...lane
+        .slice(anchorAt, lane.indexOf("pull_request:"))
+        .matchAll(/^ {6}- "([^"]+)"$/gm),
+    ].map((match) => match[1]);
+    // GitHub filter-pattern syntax: `*` matches any run of characters except `/`, `**` matches any
+    // run including `/`. `**/` is treated as "zero or more directories", matching the convention
+    // GitHub's own `**/README.md` example implies. That reading is also the SAFE one here: it makes
+    // `config/engine-capabilities/**/*` count as matching a file directly in that directory, so an
+    // ambiguous pattern is rejected rather than quietly permitted. Nobody needs to spell it that way.
+    const matches = (glob, target) => {
+      let source = "";
+      for (let i = 0; i < glob.length; i += 1) {
+        const char = glob[i];
+        if (char === "*") {
+          if (glob[i + 1] === "*") {
+            if (glob[i + 2] === "/") {
+              source += "(?:.*/)?";
+              i += 2;
+            } else {
+              source += ".*";
+              i += 1;
+            }
+          } else {
+            source += "[^/]*";
+          }
+        } else {
+          source += "\\^$+?.()|[]{}".includes(char) ? `\\${char}` : char;
+        }
+      }
+      return new RegExp(`^${source}$`).test(target);
+    };
+    const own = `config/engine-capabilities/${file}`;
+    assert.ok(
+      declared.some((glob) => matches(glob, own)),
+      `${path} must watch ${own}, or a restamp of it — which touches nothing else — never ` +
+        "triggers the lane and the verification step is declared but unreachable.",
+    );
+    for (const [, otherFile] of lanes) {
+      if (otherFile === file) continue;
+      const foreign = `config/engine-capabilities/${otherFile}`;
+      const culprits = declared.filter((glob) => matches(glob, foreign));
+      assert.deepEqual(
+        culprits,
+        [],
+        `${path} triggers on ${foreign} via ${JSON.stringify(culprits)}, but has no step that ` +
+          "reads it. That wakes an entire self-hosted job — the fleet's most constrained " +
+          "resource — for a file this lane cannot check. Narrow the pattern to this lane's own dump.",
+      );
+    }
+  }
 });

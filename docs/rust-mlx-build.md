@@ -70,7 +70,8 @@ schedule onto them by label:
 | `nax` | `macos-mlx.yml` (this repo), `SceneWorks/inference` `ci.yml` | macOS >= 26.2, **Apple M5 or newer**, full Xcode + Metal, Rust, CMake |
 | `signing` | `release.yml` (this repo) | Developer ID cert in the **login keychain** + notary `.p8` on disk |
 | `weights` | `macos-mlx.yml` `workflow_dispatch` calibration paths | the Qwen / Z-Image calibration snapshots in the local HF cache |
-| `real-weights` | `SceneWorks/inference` `real-weights.yml` (22 jobs, weekly) | the full real-weight snapshot set + runner-local HF auth |
+| `rw-audio`, `rw-chroma`, `rw-krea`, `rw-llm`, `rw-mage`, `rw-sa3` | `SceneWorks/inference` `real-weights.yml` — 25 macOS jobs, weekly, split per provider family | that family's snapshots + runner-local HF auth (every `stabilityai/*` model is gated). `rw-mage` additionally needs an operator-provisioned oracle bundle that **exists on no Hub** |
+| `real-weights` | `real-weights.yml`'s 10 **Windows/CUDA** jobs. No macOS job uses it — on a Mac this label is vestigial | nothing on macOS |
 
 Every label except `nax` gates on **host state that does not travel with the label** — a
 signing cert, a weights cache. A box that carries the label without the state takes the
@@ -116,9 +117,26 @@ release that needs manual recovery, after paying a full cold MLX build first.
 > pin has landed the job still matches bare `nax` and can schedule anywhere in the pool.
 
 Adding a plain-`nax` box is nonetheless the high-value move: the weekly `real-weights`
-marathon runs 22 jobs strictly one at a time and has head-of-line-blocked the `nax` PR
+marathon runs its jobs strictly one at a time and has head-of-line-blocked the `nax` PR
 lane for six hours at a stretch. A second `nax` box decouples PR/main MLX work from that
 marathon without needing weights parity.
+
+**Current placement.** All 25 macOS `real-weights` jobs run on `nax-macos-2`; `nax-macos`
+keeps `nax`, `signing` and `weights`. The point of that split is not parallelism — the
+weekly is still serial on one box — but *isolation*: `nax-macos` is a machine where agents
+run manual builds, and those contend with any CI job sharing the host — badly, if they
+share a `CARGO_TARGET_DIR` (see the warning under "Heavy-recompile mitigation" below).
+Moving the long jobs to a box with no interactive agent work removes that entirely.
+
+Note what routing *cannot* fix: a manual build does not make the runner busy, so GitHub
+sees an idle runner, assigns it a job, and only then does that job hit the contention.
+No label arrangement can steer around work GitHub cannot observe — which is why the fix
+for a shared box is separating the target directories, not moving labels.
+
+The `rw-*` labels make placement cheap to revisit: handing a family back is one label add
+and one remove, no workflow change. Note the flip side — a family whose label lives on
+exactly one runner has no fallback, so if that box is offline those jobs queue rather than
+failing over.
 
 ### Bootstrapping Xcode on a fresh box
 
@@ -234,6 +252,19 @@ brew install sccache
 export RUSTC_WRAPPER=sccache
 export CARGO_TARGET_DIR=~/.cache/sceneworks-target
 ```
+
+> **Do not do this on a machine that also hosts an Actions runner** — or if you do, keep it
+> out of the runner's environment (its `.env`, and the `PATH`/env `config.sh` snapshots).
+> `CARGO_TARGET_DIR` is exactly as effective at sharing a build as it is at sharing a
+> **lock**: cargo takes an exclusive lock per target directory, so a local build and a CI
+> job pointed at the same one do not compete for CPU, they serialize. The CI job parks at
+> `Blocking waiting for file lock on build directory` for as long as your build runs, which
+> reads in the Actions UI as a mysteriously slow lane rather than as contention. This has
+> bitten the `nax-macos` box, where agents run manual builds alongside CI.
+>
+> Safe combinations: share the target dir among your *own* worktrees and leave the runner on
+> its default `_work/.../target`; or give the runner its own `CARGO_TARGET_DIR` distinct
+> from yours. Either keeps the "compile MLX once" win without coupling the two.
 
 ## Local mlx-gen co-development
 
