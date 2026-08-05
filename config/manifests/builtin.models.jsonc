@@ -210,6 +210,23 @@
       // nvidia-smi high-water at q4 14.67 / q8 16.95 / bf16 20.41 GB for the registered 1024²,
       // 20-step RL path; the admission gate adds its standard transient headroom separately.
       "candle": {
+        // SC-15813 implements the provider surface; SC-15841 owns this route's exact CUDA
+        // calibration, so the selector remains resident-only until that evidence is packaged.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -429,6 +446,22 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15844 owns this route's exact CUDA calibration.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -653,6 +686,22 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15847 owns this route's exact CUDA calibration.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -852,6 +901,22 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15850 owns this route's exact CUDA calibration.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -1045,6 +1110,22 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15853 owns this route's exact CUDA calibration.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -1246,6 +1327,22 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15856 owns this route's exact CUDA calibration.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,

@@ -2593,6 +2593,16 @@ fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -
     }
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn shared_image_reference_count(edit_reference_count: usize, has_single_reference: bool) -> u32 {
+    let count = if edit_reference_count == 0 {
+        usize::from(has_single_reference)
+    } else {
+        edit_reference_count
+    };
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
 #[cfg(any(
     test,
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3233,7 +3243,22 @@ fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
         && spec.ip_adapter.is_none()
         && spec.pid.is_none()
         && spec.identity.is_none();
-    if qwen_native || flux_supported || flux2_supported {
+    let mage_supported = matches!(
+        engine_id,
+        "mage_flow_base"
+            | "mage_flow"
+            | "mage_flow_turbo"
+            | "mage_flow_edit_base"
+            | "mage_flow_edit"
+            | "mage_flow_edit_turbo"
+    ) && directory
+        && spec.adapters.is_empty()
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.pid.is_none()
+        && spec.identity.is_none();
+    if qwen_native || flux_supported || flux2_supported || mage_supported {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3257,7 +3282,7 @@ mod candle_image_load_shape_tests {
     }
 
     #[test]
-    fn native_qwen_and_flux_routes_use_deferred_materialization() {
+    fn adopting_native_image_routes_use_deferred_materialization() {
         for engine_id in [
             "qwen_image",
             "qwen_image_edit",
@@ -3265,6 +3290,12 @@ mod candle_image_load_shape_tests {
             "flux1_dev",
             "flux2_dev",
             "flux2_klein_9b",
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo",
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
         ] {
             assert_eq!(
                 apply_candle_image_load_shape(engine_id, fixture_spec()).load_shape,
@@ -3289,6 +3320,13 @@ mod candle_image_load_shape_tests {
                     WeightsSource::Dir(std::path::PathBuf::from("gemma")),
                 ),
             ),
+            (
+                "mage_flow_edit",
+                fixture_spec().with_pid(
+                    WeightsSource::File(std::path::PathBuf::from("pid.safetensors")),
+                    WeightsSource::Dir(std::path::PathBuf::from("gemma")),
+                ),
+            ),
             ("z_image", fixture_spec()),
         ];
         for (engine_id, spec) in cases {
@@ -3297,6 +3335,14 @@ mod candle_image_load_shape_tests {
                 gen_core::LoadShape::EagerMaterialization
             );
         }
+    }
+
+    #[test]
+    fn shared_reference_count_preserves_mage_multi_reference_geometry() {
+        assert_eq!(shared_image_reference_count(0, false), 0);
+        assert_eq!(shared_image_reference_count(0, true), 1);
+        assert_eq!(shared_image_reference_count(1, true), 1);
+        assert_eq!(shared_image_reference_count(8, true), 8);
     }
 
     #[test]
@@ -7775,20 +7821,25 @@ async fn generate_candle_stream(
     let mut memory_strategy_selection: Option<gen_core::MemorySelection> = None;
     let mut selected_memory_strategy_context: Option<gen_core::MemoryRunContext> = None;
     let mut adapted_peak_gb: Option<f64> = None;
-    // Z-Image and Qwen-Image use the same worker-owned selector as every adopting provider. Static
+    // Every adopting provider uses the same worker-owned selector. Static
     // Implemented/unverified declarations do not authorize optimized execution: this bridge always
     // submits the conservative resident estimate and adds deeper candidates only when an exact
     // authoritative record exists in the packaged evidence bundle.
-    let mut zimage_contract_spec = load_spec(weights_dir.clone(), quant, adapters.clone(), None);
+    let mut shared_contract_spec = load_spec(weights_dir.clone(), quant, adapters.clone(), None);
     if let Some(pid) = pid_weights.as_ref() {
-        zimage_contract_spec = zimage_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+        shared_contract_spec =
+            shared_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
-    zimage_contract_spec = apply_candle_image_load_shape(engine_id, zimage_contract_spec);
+    shared_contract_spec = apply_candle_image_load_shape(engine_id, shared_contract_spec);
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
-    let zimage_memory = crate::candle_memory_strategy::evaluate_shared_image(
+    let reference_count = shared_image_reference_count(
+        edit_refs.len(),
+        edit_reference.is_some() || img2img_reference.is_some(),
+    );
+    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
-        &zimage_contract_spec,
+        &shared_contract_spec,
         candle_certified_artifact_path(engine_id, settings, &weights_dir, tier),
         &request.model_manifest_entry,
         tier,
@@ -7799,11 +7850,9 @@ async fn generate_candle_stream(
             height,
             batch: 1,
             frames: 1,
-            reference_count: u32::from(
-                edit_reference.is_some() || img2img_reference.is_some(),
-            ),
+            reference_count,
         },
-        edit_reference.is_some() || img2img_reference.is_some(),
+        reference_count > 0,
         use_pid,
         hires_fix.is_some(),
         budget,
@@ -7815,7 +7864,7 @@ async fn generate_candle_stream(
             gen_core::MemoryCacheState::Cold
         },
     )?;
-    if let Some(evaluation) = zimage_memory {
+    if let Some(evaluation) = shared_memory {
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
