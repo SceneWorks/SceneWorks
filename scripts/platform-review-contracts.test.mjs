@@ -516,10 +516,25 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // other crates a Mac ships were dark. Both halves are pinned here.
   const mlx = await source(".github/workflows/macos-mlx.yml");
   assert.match(mlx, /^\s+run: cargo clippy --all-targets -- -D warnings$/m);
-  // `npm run rust:check` runs a bare `cargo test` too, so the lane must not narrow
-  // either half back to the single crate.
-  assert.match(mlx, /^\s+run: cargo test$/m);
-  assert.doesNotMatch(mlx, /cargo test -p sceneworks-worker/);
+  // The lane is now split by HARDWARE, not by cost: `macos-checks` (hosted macos-26)
+  // carries the build, both clippy steps and the workspace suite, while `nax-worker`
+  // (self-hosted, M5) carries only the matrix-unit guard. Pin BOTH halves against each
+  // other — a skip on one side is only safe while the other side actually runs the
+  // skipped test, and nothing else in the fleet would notice if it stopped.
+  //
+  // `npm run rust:check` runs a bare `cargo test` (the whole default-member set), so the
+  // hosted half must stay workspace-wide. Narrowing it back to `-p sceneworks-worker`
+  // would re-dark macOS-conditional code in sceneworks-core / rust-api / image-quality,
+  // which is precisely what sc-17026 fixed.
+  const NAX_TEST = "nax_16bit_sdpa_is_correct";
+  assert.match(mlx, new RegExp(`^\\s+run: cargo test -- --skip ${NAX_TEST}$`, "m"));
+  // The one exemption is the targeted guard invocation below; a bare narrowing of the
+  // suite to the single crate is still forbidden.
+  assert.doesNotMatch(mlx, /run: cargo test -p sceneworks-worker\s*$/m);
+  // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
+  // self-hosted half would drop the entire NAX verdict while every lane stayed green —
+  // the same declared-but-unreachable trap as sc-17026, one job over.
+  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard$/m);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
   // outside the worker and is NOT under `crates/**`, so without this path entry the
@@ -530,7 +545,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf("run: cargo test\n");
+  const testAt = mlx.indexOf(`run: cargo test -- --skip ${NAX_TEST}`);
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
