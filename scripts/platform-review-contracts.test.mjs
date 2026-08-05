@@ -760,7 +760,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
   // sc-17703, generalising sc-17665's lesson to the whole trigger surface. `apps/rust-worker/**`
   // sat in windows-candle.yml's paths while no cargo invocation in that job built the package
   // living there (`sceneworks-rust-worker` — a 4-line binary wrapper nothing depends on), so a
-  // wrapper edit woke the fleet's single cuda box for zero coverage. Pin the PROPERTY, not the
+  // wrapper edit woke a ~24m run on the `cuda` pool for zero coverage. Pin the PROPERTY, not the
   // spelling (epic 17702 rule 6): every `crates/`- or `apps/`-shaped `paths:` entry on a
   // self-hosted lane may only wake the lane for workspace members that lane's own cargo
   // invocations build, directly or through the local dependency graph; every other entry must be
@@ -1066,16 +1066,20 @@ test("every backend cfg the queue can break is compiled by a merge-group-trigger
 });
 
 test("merge groups never reach the scarce self-hosted boxes", async () => {
-  // windows-candle.yml is the fleet's single `cuda` box at ~28 min a run, and nax-worker is a
-  // two-Mac pool including a developer's daily driver. The queue can build several speculative
-  // groups at once, so a `merge_group:` trigger here multiplies the scarcest hardware in the fleet.
+  // windows-candle.yml runs on the self-hosted `cuda` pool at a ~24m median (p90 32m, max 44m;
+  // measured 2026-08-05 over 85 runs), and nax-worker is a two-Mac pool including a developer's
+  // daily driver. The queue can build several speculative groups at once, so a `merge_group:`
+  // trigger here multiplies self-hosted load — and with `check_response_timeout_minutes: 60`, a
+  // p90 queue wait (18m) plus a p90 run (32m) already reaches ~50m, so a required check on this
+  // lane would sit close to the eviction threshold on an ordinary day.
   // Their merge-time coverage is check.yml's `candle` job and macos-mlx.yml's hosted `macos-checks`
   // respectively — both on elastic runners.
   assert.doesNotMatch(
     await source(".github/workflows/windows-candle.yml"),
     /^ {2}merge_group:$/m,
     "windows-candle.yml must stay out of the merge queue; check.yml's `candle` job is its " +
-      "merge-time stand-in. Putting the single cuda box in the queue would wedge it.",
+      "merge-time stand-in. A ~24m median run (p90 32m) against a 60m check-response timeout " +
+      "leaves too little margin to gate the queue on this lane.",
   );
   assert.match(
     await source(".github/workflows/macos-mlx.yml"),

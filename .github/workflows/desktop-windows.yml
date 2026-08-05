@@ -11,7 +11,7 @@ name: Desktop (Windows)
 #     the desktop crate, so this is the only lane that exercises it
 #     (epic 1330 Phase 3 / sc-1356).
 #
-#   package-windows  (push:main + workflow_dispatch, SELF-HOSTED cuda box) — the full
+#   package-windows  (push:main + workflow_dispatch, SELF-HOSTED `cuda` pool) — the full
 #     candle/CUDA sidecar build + NSIS/MSI packaging, as an UNSIGNED smoke so a
 #     packaging break (NSIS's ~2 GB datablock limit, Tauri bundling) surfaces the
 #     moment it lands on main — before a release tag, not during one. Runs on the same
@@ -64,8 +64,8 @@ on:
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
 # windows-candle.yml (sc-12399). `package-windows` below is non-PR-only, so main is
 # the ONLY place the full candle/CUDA desktop package is built before a release tag;
-# cancelling it pushes packaging breaks to release time. It also shares the one
-# `cuda` box with windows-candle.yml, so it is part of the same queue.
+# cancelling it pushes packaging breaks to release time. It also shares the `cuda`
+# runner pool with windows-candle.yml, so it is part of the same queue.
 #
 # Main must key on `github.sha`, not `github.ref`: GitHub keeps at most ONE pending
 # run per group and evicts it when a newer run queues, so a shared main group still
@@ -154,14 +154,14 @@ jobs:
       CARGO_NET_OFFLINE: "true"
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
     # default (sc-10420). This is the full candle/CUDA sidecar build + NSIS/MSI
-    # packaging on the SOLE self-hosted cuda box (shared with windows-candle.yml),
-    # so a wedge here holds that box and starves every queued PR/main run on it
+    # packaging on the self-hosted `cuda` pool (shared with windows-candle.yml), so a
+    # wedge here holds a box and starves queued PR/main runs behind it
     # (sc-13603). Well above the healthy ~13-17 min warm package — a cold candle
     # rebuild fits.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # sc-13166: same self-hosted cuda box as windows-candle.yml — point this lane at
+      # sc-13166: same self-hosted `cuda` pool as windows-candle.yml — point this lane at
       # the real rustup toolchain bin (prepended to PATH) so it never dispatches through
       # the fragile %USERPROFILE%\.cargo\bin proxies that go dangling on rustup
       # self-update/deletion and fail with ERROR_NO_ASSOCIATION. package-windows is
