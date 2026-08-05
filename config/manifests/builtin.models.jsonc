@@ -11830,6 +11830,17 @@
           // delete it (6.9 GiB observed). Declaring the real artifacts here makes the install
           // match the load: one Model Manager install, into the HF cache, no mid-render fetch.
           //
+          // The loader half landed with it — `upscale_jobs::resolve_onnx` is cache-only and reads
+          // this snapshot. Declaring the ONNX WITHOUT that change would have been worse than
+          // leaving it alone: install state keys on the declared repo, so the entry would have
+          // flipped to "not installed", prompted a 134 MB download the loader ignored, and then
+          // still fetched the same bytes mid-upscale.
+          //
+          // Migration: an existing install keeps working from the legacy `cache/upscale/` copy, so
+          // nothing re-downloads. Its old `nateraw/real-esrgan` `.pth` bytes are now orphaned in
+          // the HF cache — never loaded, and no longer reachable from this entry's artifact paths.
+          // Reclaiming them is tracked on sc-17636 (S11), which owns delete/size coverage.
+          //
           // `resources.imageUpscalers.real-esrgan.x{2,4}` still records the `.pth` provenance —
           // `scripts/spikes/sc3489_export_reference.py` reproduces these ONNX files from it —
           // but provenance is metadata, not something every user needs on disk.

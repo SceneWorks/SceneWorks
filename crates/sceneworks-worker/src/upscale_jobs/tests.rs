@@ -787,3 +787,133 @@ fn validate_upscale_output_rejects_mismatched_shapes() {
         "a short output buffer must be an Engine error, got {short:?}"
     );
 }
+
+/// sc-17633 (epic 17625) — the Real-ESRGAN ONNX resolves from the HF cache and can no longer
+/// download. Before this, `ensure_onnx` fetched ~67 MB per factor mid-upscale into
+/// `<data_dir>/cache/upscale/`, a destination the Models screen can neither size nor delete.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod resolve_onnx_tests {
+    use super::*;
+
+    fn isolate() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("SCENEWORKS_REALESRGAN_X2_ONNX", ""),
+            ("SCENEWORKS_REALESRGAN_X4_ONNX", ""),
+            ("SCENEWORKS_REALESRGAN_ONNX", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    fn settings_at(data_dir: PathBuf) -> crate::Settings {
+        let mut settings = crate::Settings::from_env();
+        settings.data_dir = data_dir;
+        settings
+    }
+
+    fn stage_install(data_dir: &Path, factor: u8) -> PathBuf {
+        let snapshot = crate::huggingface_repo_cache_path(data_dir, ONNX_REPO)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(ONNX_REVISION);
+        std::fs::create_dir_all(&snapshot).expect("mk snapshot");
+        let path = snapshot.join(onnx_file(factor));
+        std::fs::write(&path, b"onnx").expect("write");
+        path
+    }
+
+    fn stage_legacy(data_dir: &Path, factor: u8) -> PathBuf {
+        let dir = data_dir.join("cache").join("upscale");
+        std::fs::create_dir_all(&dir).expect("mk legacy");
+        let path = dir.join(onnx_file(factor));
+        std::fs::write(&path, b"legacy onnx").expect("write");
+        path
+    }
+
+    /// The Model Manager install (declared at the SAME pin the loader reads) satisfies the loader.
+    #[test]
+    fn resolves_the_installed_snapshot_from_the_hf_cache() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged = stage_install(dir.path(), 4);
+        assert_eq!(
+            resolve_onnx(&settings_at(dir.path().to_path_buf()), 4, &Value::Null)
+                .expect("resolves"),
+            staged
+        );
+    }
+
+    /// AC10: an existing install keeps working from `<data_dir>/cache/upscale/` and re-downloads
+    /// nothing — the bytes the old job-time fetch left behind.
+    #[test]
+    fn falls_back_to_the_legacy_upscale_cache() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = stage_legacy(dir.path(), 2);
+        assert_eq!(
+            resolve_onnx(&settings_at(dir.path().to_path_buf()), 2, &Value::Null)
+                .expect("resolves"),
+            legacy
+        );
+    }
+
+    /// The legacy copy drains: once installed properly the HF cache wins.
+    #[test]
+    fn prefers_the_hf_cache_over_the_legacy_copy() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged = stage_install(dir.path(), 4);
+        stage_legacy(dir.path(), 4);
+        assert_eq!(
+            resolve_onnx(&settings_at(dir.path().to_path_buf()), 4, &Value::Null)
+                .expect("resolves"),
+            staged
+        );
+    }
+
+    /// A manifest `onnx` resource override is honored — and, being a NON-default repo, is read at
+    /// `refs/main` rather than the first-party pin. Staging it under the pin proves the override
+    /// path is taken (a resolver ignoring the override would find the default repo's absence).
+    #[test]
+    fn honors_a_manifest_override_repo() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry = serde_json::json!({
+            "resources": { "imageUpscalers": { "real-esrgan": {
+                "x4": { "onnx": { "repo": "acme/esrgan-onnx", "file": "custom_x4.onnx" } }
+            } } }
+        });
+        let repo_dir = crate::huggingface_repo_cache_path(dir.path(), "acme/esrgan-onnx")
+            .expect("repo cache path");
+        let snapshot = repo_dir.join("snapshots").join("deadbeef");
+        std::fs::create_dir_all(&snapshot).expect("mk snapshot");
+        let staged = snapshot.join("custom_x4.onnx");
+        std::fs::write(&staged, b"onnx").expect("write");
+        std::fs::create_dir_all(repo_dir.join("refs")).expect("mk refs");
+        std::fs::write(repo_dir.join("refs").join("main"), "deadbeef").expect("write refs/main");
+
+        assert_eq!(
+            resolve_onnx(&settings_at(dir.path().to_path_buf()), 4, &entry).expect("resolves"),
+            staged
+        );
+    }
+
+    /// Nothing installed anywhere → an actionable install error, NOT a download (AC7).
+    #[test]
+    fn errors_actionably_when_nothing_is_installed() {
+        let _env = isolate();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let error = resolve_onnx(&settings_at(dir.path().to_path_buf()), 4, &Value::Null)
+            .expect_err("nothing is installed");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Model Manager"),
+            "the error must tell the user how to fix it, got {message}"
+        );
+        assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error:?}");
+    }
+}

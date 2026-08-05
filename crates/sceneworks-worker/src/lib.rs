@@ -1800,7 +1800,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, http_client, &job)
+            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset upscale failed.", error)),
             // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,

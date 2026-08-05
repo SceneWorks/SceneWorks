@@ -91,17 +91,18 @@ const SEEDVR2_MAX_OUTPUT_DIMENSION: u32 = 4096;
 const CANCEL_MESSAGE: &str = "Image upscale canceled by user.";
 
 /// SceneWorks-owned HuggingFace repo hosting the pre-exported ONNX (reproducible from
-/// `scripts/spikes/sc3489_export_reference.py`). Public; downloaded on first use,
-/// parity with sc-3487's rtmlib weights. The same export feeds the off-Mac CUDA EP
-/// (sc-5499). Overridable via the manifest `onnx` resource or the env pin
-/// `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
+/// `scripts/spikes/sc3489_export_reference.py`). Public; declared by the `real_esrgan` catalog
+/// entry and installed from the Model Manager (sc-17633) — NOT downloaded on first use any more.
+/// The same export feeds the off-Mac CUDA EP (sc-5499). Overridable via the manifest `onnx`
+/// resource or the env pin `SCENEWORKS_REALESRGAN_X{2,4}_ONNX`.
 const ONNX_REPO: &str = "SceneWorks/real-esrgan-onnx";
 /// Pinned Real-ESRGAN ONNX revision (sc-9682, F-077 follow-up). Even though
 /// `SceneWorks/real-esrgan-onnx` is a first-party repo, fetching the mutable `main`
 /// branch means a re-push (or a compromised token) could silently swap the ONNX graph
 /// we load. Pin the exact commit for defense-in-depth, mirroring the SeedVR2 pin
-/// (sc-8879). HF's tree API still reports each file's `lfs.oid`, which
-/// `ensure_hf_cached_file` verifies the downloaded content against.
+/// (sc-8879). The `real_esrgan` catalog entry declares this SAME revision (sc-17633), so the
+/// Model Manager installs exactly the snapshot [`resolve_onnx`] then reads; the integrity check
+/// against each file's `lfs.oid` happens there, in the download job, not at load time.
 const ONNX_REVISION: &str = "09f741bac80a246b407da3ee902bf5f3291b602f";
 
 fn onnx_file(factor: u8) -> String {
@@ -446,7 +447,7 @@ fn upscale_blocking(
 }
 
 // ---------------------------------------------------------------------------
-// ONNX weight provisioning (download-on-first-use, mirrors Python resolution order)
+// ONNX weight provisioning (cache-only since sc-17633; mirrors Python resolution order)
 // ---------------------------------------------------------------------------
 
 /// Resolve the `SCENEWORKS_SEEDVR2_CHECKPOINT` dir pin (sc-8911). Unset → `Ok(None)`. Set
@@ -466,25 +467,30 @@ fn resolve_seedvr2_dir_pin(value: Option<std::ffi::OsString>) -> WorkerResult<Op
     )))
 }
 
-/// Resolve the ONNX for `factor`. Order: explicit env pin
-/// (`SCENEWORKS_REALESRGAN_X{factor}_ONNX`, then `SCENEWORKS_REALESRGAN_ONNX`), then the
-/// app cache `<data_dir>/cache/upscale/`, then a manifest `onnx` resource if the job
-/// carried one, else download from the default HF repo.
-async fn ensure_onnx(
-    api: &ApiClient,
-    settings: &Settings,
-    http_client: &reqwest::Client,
-    job: &JobSnapshot,
-    factor: u8,
-    manifest_entry: &Value,
-) -> WorkerResult<PathBuf> {
+/// Resolve the ONNX for `factor`, **cache-only** (sc-17633, epic 17625). Order:
+///
+/// 1. the explicit env pins `SCENEWORKS_REALESRGAN_X{factor}_ONNX`, then `SCENEWORKS_REALESRGAN_ONNX`;
+/// 2. the **HF cache**, where the `real_esrgan` Model Manager install puts it — the repo/file come
+///    from the job's `resources.imageUpscalers.real-esrgan.x{factor}.onnx`, falling back to
+///    [`ONNX_REPO`];
+/// 3. the legacy `<data_dir>/cache/upscale/` copy, read-only.
+///
+/// There is no download half. This used to fetch ~67 MB per factor mid-upscale via
+/// `ensure_hf_cached_file` into `<data_dir>/cache/upscale/` — a destination the Models screen can
+/// neither size nor delete (6.9 GiB observed on the audit machine). The manifest now declares the
+/// ONNX artifacts, so the weights arrive from the Model Manager like every other model, and a miss
+/// here is an actionable install error rather than a surprise transfer.
+///
+/// Step 3 is the migration path (AC10 of sc-17598): an existing install has these bytes under
+/// `cache/upscale/` already, so it keeps working and does not re-download. Nothing writes there any
+/// more, so that copy only drains.
+fn resolve_onnx(settings: &Settings, factor: u8, manifest_entry: &Value) -> WorkerResult<PathBuf> {
     for key in [
         format!("SCENEWORKS_REALESRGAN_X{factor}_ONNX"),
         "SCENEWORKS_REALESRGAN_ONNX".to_owned(),
     ] {
         // A set-but-missing env pin is an operator error: fail loudly instead of silently
-        // falling through to the cache/HF download and loading different weights than the
-        // operator asked for (sc-8911).
+        // falling through and loading different weights than the operator asked for (sc-8911).
         if let Some(path) = resolve_env_file_pin(
             &key,
             std::env::var_os(&key),
@@ -494,43 +500,38 @@ async fn ensure_onnx(
         }
     }
 
-    let cache = settings.data_dir.join("cache").join("upscale");
-    let target = cache.join(onnx_file(factor));
-    if target.exists() {
-        return Ok(target);
-    }
-
     // manifest resource: resources.imageUpscalers.real-esrgan.x{factor}.onnx -> {repo,file}
     let (repo, file) = manifest_onnx_resource(manifest_entry, factor)
         .unwrap_or_else(|| (ONNX_REPO.to_owned(), onnx_file(factor)));
-
-    tokio::fs::create_dir_all(&cache).await?;
-    let context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Image upscale canceled while fetching Real-ESRGAN weights.",
-        fresh_download: false,
-    };
-    // Pin the exact commit for the default first-party repo so `main` moving under us
-    // can't swap the ONNX graph (sc-9682). A manifest-supplied override repo may carry
-    // its own revision layout, so only pin when we're using the default repo.
+    // Pin the exact commit for the default first-party repo so `main` moving under us can't swap
+    // the ONNX graph (sc-9682) — the same pin the catalog entry declares, so install and load agree.
+    // A manifest-supplied override repo may carry its own revision layout, so only pin the default.
     let revision = if repo == ONNX_REPO {
         ONNX_REVISION
     } else {
         "main"
     };
-    ensure_hf_cached_file(&context, &repo, revision, &file, &target)
-        .await
-        .map_err(|error| match error {
-            WorkerError::InvalidPayload(detail) => WorkerError::InvalidPayload(format!(
-                "Real-ESRGAN ONNX download failed ({repo}/{file}): {detail}. Set SCENEWORKS_REALESRGAN_X{factor}_ONNX to a local export, or populate the {ONNX_REPO} HF repo."
-            )),
-            other => WorkerError::Engine(format!(
-                "Real-ESRGAN ONNX download failed ({repo}/{file}): {other}. Set SCENEWORKS_REALESRGAN_X{factor}_ONNX to a local export, or populate the {ONNX_REPO} HF repo."
-            )),
-        })
+    if let Some(path) =
+        crate::downloads::resolve_hf_component_file(settings, &repo, revision, &file)
+    {
+        return Ok(path);
+    }
+
+    // Legacy pre-migration destination, read-only.
+    let legacy = settings
+        .data_dir
+        .join("cache")
+        .join("upscale")
+        .join(onnx_file(factor));
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+
+    Err(WorkerError::InvalidPayload(format!(
+        "The Real-ESRGAN x{factor} upscaler weights are not installed ({repo}/{file}). Install \
+         \"Real-ESRGAN Upscaler\" from the Model Manager, or set \
+         SCENEWORKS_REALESRGAN_X{factor}_ONNX to a local export."
+    )))
 }
 
 /// Pull a `{repo,file}` ONNX resource out of a job's `modelManifestEntry` if present:
@@ -600,7 +601,7 @@ fn manifest_seedvr2_resource(manifest_entry: &Value) -> Option<(String, String, 
 }
 
 /// Resolve the raw SeedVR2 checkpoint dir (containing the canonical DiT + VAE filenames the engine
-/// loads). Order mirrors `ensure_onnx`: env pin (`SCENEWORKS_SEEDVR2_CHECKPOINT`, a dir holding both
+/// loads). Order mirrors `resolve_onnx`: env pin (`SCENEWORKS_SEEDVR2_CHECKPOINT`, a dir holding both
 /// files) → the app cache `<data_dir>/cache/upscale/seedvr2/` → download from the manifest/default HF
 /// repo on first use. The source filenames may be overridden by the manifest, but they are always
 /// stored under the canonical names so `Seedvr2Pipeline::load` finds them.
@@ -791,7 +792,7 @@ pub(crate) async fn upscale_image_in_memory(
             .await
         }
         _ => {
-            let onnx = ensure_onnx(api, settings, http_client, job, factor, manifest_entry).await?;
+            let onnx = resolve_onnx(settings, factor, manifest_entry)?;
             let task_cancel = cancel.clone();
             // This in-memory path feeds inline generation and does not build a device-reporting
             // result, so the session device is discarded here (surfaced on the standalone
@@ -1047,8 +1048,7 @@ pub(crate) async fn run_image_upscale_job(
             ),
         )
         .await?;
-        let onnx_path =
-            ensure_onnx(api, settings, http_client, job, factor, &manifest_entry).await?;
+        let onnx_path = resolve_onnx(settings, factor, &manifest_entry)?;
 
         update_job(
             api,
@@ -1186,7 +1186,7 @@ pub(crate) async fn run_image_upscale_job(
 
 // ---------------------------------------------------------------------------
 // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-resolution items, then
-// re-point each item at the upscaled bytes via the API. Reuses the engine above (ensure_onnx +
+// re-point each item at the upscaled bytes via the API. Reuses the engine above (resolve_onnx +
 // upscale_blocking). The payload-parse and repoint-body build are pure (unit-tested); the only
 // session-unverifiable leg is the literal upscale_blocking call.
 // ---------------------------------------------------------------------------
@@ -1260,7 +1260,6 @@ fn dataset_repoint_body(records: &[(String, String)]) -> Value {
 pub(crate) async fn run_dataset_upscale_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -1305,7 +1304,7 @@ pub(crate) async fn run_dataset_upscale_job(
         ),
     )
     .await?;
-    let onnx_path = ensure_onnx(api, settings, http_client, job, factor, &Value::Null).await?;
+    let onnx_path = resolve_onnx(settings, factor, &Value::Null)?;
 
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store
