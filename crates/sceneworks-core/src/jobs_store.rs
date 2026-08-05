@@ -883,6 +883,37 @@ impl JobsStore {
         }))
     }
 
+    /// Find an in-flight (non-terminal) `model_download` job for `model_id`, so the convert request
+    /// boundary can refuse a convert whose source weights are still streaming instead of queueing a
+    /// job that fails the moment a worker claims it. Returns the newest such job, or `None`.
+    ///
+    /// Keyed on the payload `modelId`, not the repo: a shared source repo backs several catalog cards
+    /// (the three Anima variants live in `circlestone-labs/Anima`), and converting variant A while
+    /// variant B downloads is legitimate — A's own weights are already on disk. The file-presence
+    /// half of the gate (`convert_source_state`) covers the rest.
+    ///
+    /// Read-only single-SELECT: no write mutex, relies on WAL reader isolation like `list_jobs`
+    /// (sc-8950 / F-148).
+    pub fn find_active_model_download_job(
+        &self,
+        model_id: &str,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(&format!(
+            "
+            select * from jobs
+             where type = 'model_download'
+               and status not in ({terminal})
+             order by created_at desc
+            ",
+            terminal = terminal_statuses_sql()
+        ))?;
+        let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
+        Ok(candidates
+            .into_iter()
+            .find(|job| job.payload.get("modelId").and_then(Value::as_str) == Some(model_id)))
+    }
+
     pub fn list_jobs(
         &self,
         project_id: Option<&str>,

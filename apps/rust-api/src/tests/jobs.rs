@@ -427,6 +427,147 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
     );
 }
 
+/// Write a two-variant convert-at-install family that SHARES one source repo — the Anima shape: each
+/// card names its own `mlx.convertSourceFile` inside `owner/shared`, and the per-variant downloads are
+/// serialized, so one variant's weights land while the other's are still streaming.
+fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    let models = ["alpha", "beta"]
+        .into_iter()
+        .map(|variant| {
+            json!({
+                "id": format!("fixture_{variant}"),
+                "name": format!("Fixture {variant}"),
+                "type": "image",
+                "family": "fixture",
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "owner/shared",
+                    "files": [format!("split_files/diffusion_models/{variant}.safetensors")]
+                }],
+                "mlx": {
+                    "requiresConversion": true,
+                    "converter": "fixture_quant",
+                    "convertSourceRepo": "owner/shared",
+                    "convertSourceFile": format!("split_files/diffusion_models/{variant}.safetensors")
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({ "schemaVersion": 1, "models": models }))
+            .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(config_dir);
+}
+
+/// Seed `file` into the HF cache snapshot for `repo` under `data_dir`, the way a completed download
+/// leaves it (`refs/main` → `snapshots/<rev>/<file>`).
+fn seed_snapshot_file(data_dir: &std::path::Path, repo: &str, file: &str) {
+    let revision = "a".repeat(40);
+    let repo_dir = huggingface_repo_cache_path(data_dir, repo).expect("repo cache path");
+    let snapshot = repo_dir.join("snapshots").join(&revision);
+    let path = snapshot.join(file);
+    std::fs::create_dir_all(path.parent().expect("snapshot parent")).expect("snapshot dir creates");
+    std::fs::write(&path, b"weights").expect("source file writes");
+    std::fs::create_dir_all(repo_dir.join("refs")).expect("refs dir creates");
+    std::fs::write(repo_dir.join("refs").join("main"), &revision).expect("refs/main writes");
+}
+
+/// Michael, on-device (Anima 2B Turbo): the three Anima variants share `circlestone-labs/Anima` and
+/// download one at a time, so the sibling cards flipped to *downloaded* the moment THEIR files landed.
+/// Converting the variant whose 4 GB DiT was still streaming enqueued a job that the worker failed
+/// instantly with a bare "Anima source DiT is missing." — indistinguishable from a real defect. The
+/// convert request boundary must refuse it while it can still explain why, and must NOT block the
+/// sibling whose weights ARE on disk.
+#[tokio::test]
+async fn model_convert_is_refused_while_its_source_weights_are_still_downloading() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _env = isolate_hf_cache();
+    shared_repo_convert_manifest(&temp_dir.path().join("config/manifests"));
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    let app = create_app(settings).expect("app creates");
+
+    // Nothing cached at all: the source repo, not just one variant's file, is missing.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"].as_str().is_some_and(
+            |detail| detail.contains("owner/shared") && detail.contains("not downloaded")
+        ),
+        "an uncached source repo must say so: {body}"
+    );
+
+    // Alpha's weights land; beta's are still streaming (the Anima situation).
+    seed_snapshot_file(
+        &data_dir,
+        "owner/shared",
+        "split_files/diffusion_models/alpha.safetensors",
+    );
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_beta/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"].as_str().is_some_and(|detail| detail
+            .contains("split_files/diffusion_models/beta.safetensors")
+            && detail.contains("has not finished downloading")),
+        "a shared-repo sibling's missing file must name the file, not the repo: {body}"
+    );
+
+    // The variant whose weights ARE cached converts — the gate refuses the unready one only.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a cached source must still convert: {body}"
+    );
+
+    // An in-flight download for the model itself is reported as such, with its progress, even once
+    // the file exists (a re-download of the same variant).
+    let (status, download) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{download}");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/fixture_alpha/convert",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("still downloading")),
+        "an in-flight download for this model must be named as the reason: {body}"
+    );
+}
+
 /// The route-derived output path is a trust-boundary input too. Confinement must run before
 /// `model_catalog` performs its filesystem/cache sweep, so an invalid path-shaped ID wins over the
 /// catalog's otherwise-observable "Model not found" response.
