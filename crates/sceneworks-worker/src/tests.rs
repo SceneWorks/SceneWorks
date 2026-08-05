@@ -116,3 +116,6 @@ include!("tests/support_stubs.rs");
 include!("tests/cancel_and_heartbeat.rs");
 // The `segment_assembly_frames` orchestrator contract tests (fake-segmenter mask assembly/rollup).
 include!("tests/segment_assembly.rs");
+// Source-level guard keeping test fixtures off the shared temp root (sc-17641 / sc-17707), with the
+// production work dirs and deliberate exceptions enumerated and justified.
+include!("tests/temp_fixture_guard.rs");

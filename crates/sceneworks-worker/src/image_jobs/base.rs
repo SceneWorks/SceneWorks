@@ -6873,11 +6873,11 @@ mod krea_turbo_memory_route_tests {
 
     #[test]
     fn adapter_bytes_disable_krea_streaming_and_missing_bytes_fail_closed() {
-        let root = std::env::temp_dir().join(format!(
-            "krea-adapter-evidence-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root_guard = tempfile::Builder::new()
+            .prefix("krea-adapter-evidence-")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let adapter = root.join("adapter.safetensors");
         std::fs::write(&adapter, vec![0_u8; 321]).unwrap();
         let measured = vec![gen_core::AdapterSpec::new(
@@ -6909,7 +6909,6 @@ mod krea_turbo_memory_route_tests {
             (false, None),
             "missing byte evidence must retain the count-based fail-closed fallback"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -11770,11 +11769,11 @@ mod mlx_downtier_emulation_tests {
         );
         // Sparse tier dirs: q8 ~5 GiB, q4 ~1 GiB LOGICAL (set_len ⇒ no real disk on APFS). The gate sums
         // `metadata.len()`, so these read as 5/1 GiB → predicted peaks 23/19 GiB (+18 headroom).
-        let root = std::env::temp_dir().join(format!(
-            "mlx_downtier_emu_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_downtier_emu_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let make_tier = |tier: &str, gib: u64| -> PathBuf {
             let dir = root.join(tier).join("transformer");
             std::fs::create_dir_all(&dir).expect("mk tier dir");
@@ -11802,7 +11801,6 @@ mod mlx_downtier_emulation_tests {
             "q8 default must capability-downtier to q4 under the {cap} GB emulated cap"
         );
         eprintln!("emulation knob cap={cap} GB → q8 default DOWNTIERED to q4 (sc-10733 ✓)");
-        std::fs::remove_dir_all(&root).ok();
     }
 }
 

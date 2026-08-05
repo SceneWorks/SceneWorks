@@ -416,35 +416,39 @@ mod tests {
 
     #[test]
     fn load_track_masks_degrades_to_box_when_no_stored_mask() {
-        let dir = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("sw_masks_")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_guard.path();
         let track = json!({
             "frames": [
                 { "box": { "x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5 }, "mask": Value::Null }
             ]
         });
-        let (masks, mode) = load_track_masks(&dir, &track, 64, 64, 3).unwrap();
+        let (masks, mode) = load_track_masks(dir, &track, 64, 64, 3).unwrap();
         assert_eq!(masks.len(), 3);
         assert_eq!(mode, MODE_DEGRADED_BOX);
         assert!(white_pixels(&masks[0]) > 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn load_track_masks_uses_stored_segmentation_when_present() {
-        let dir = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("sw_masks_")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_guard.path();
         // A real stored mask file: a 10×10 all-white luma PNG.
         let stored = image::GrayImage::from_pixel(10, 10, image::Luma([255]));
         stored.save(dir.join("seg0.png")).unwrap();
         let track = json!({
             "frames": [ { "box": { "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1 }, "mask": "seg0.png" } ]
         });
-        let (masks, mode) = load_track_masks(&dir, &track, 32, 32, 1).unwrap();
+        let (masks, mode) = load_track_masks(dir, &track, 32, 32, 1).unwrap();
         assert_eq!(mode, MODE_SEGMENTATION);
         // The stored all-white mask resizes to a fully-white 32×32 (not the small box).
         assert_eq!(white_pixels(&masks[0]), 32 * 32);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -452,7 +456,11 @@ mod tests {
         // sc-8876 / F-074: an absolute or `..`-traversing sidecar mask path must never resolve
         // outside the project dir. Even if a matching file exists at the traversal target, the
         // loader confines the join (Component::Normal-only) and degrades to a box mask.
-        let root = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
+        let root_guard = tempfile::Builder::new()
+            .prefix("sw_masks_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let project = root.join("project");
         let outside = root.join("secret");
         std::fs::create_dir_all(&project).unwrap();
@@ -476,15 +484,17 @@ mod tests {
         // image would have filled every pixel, so a partial fill proves the traversal was blocked.
         assert!(white_pixels(&masks[0]) > 0);
         assert!(white_pixels(&masks[0]) < 64 * 64);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn load_track_masks_degrades_to_box_on_corrupt_stored_mask() {
         // sc-8902 / F-100: a stored mask that exists but can't be decoded must degrade to a box
         // mask for that frame, not `?`-fail the whole replace-person job.
-        let dir = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("sw_masks_")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_guard.path();
         // A file with a `.png` name but garbage bytes → decode fails.
         std::fs::write(dir.join("corrupt.png"), b"not a real image").unwrap();
         let track = json!({
@@ -495,19 +505,21 @@ mod tests {
                 }
             ]
         });
-        let (masks, mode) = load_track_masks(&dir, &track, 64, 64, 1).unwrap();
+        let (masks, mode) = load_track_masks(dir, &track, 64, 64, 1).unwrap();
         assert_eq!(masks.len(), 1);
         // Degraded to a box mask (not segmentation) and did not error.
         assert_eq!(mode, MODE_DEGRADED_BOX);
         assert!(white_pixels(&masks[0]) > 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn load_track_masks_mixed_mode_when_one_mask_is_corrupt() {
         // A two-frame track where one stored mask decodes and one is corrupt → MIXED, still no error.
-        let dir = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("sw_masks_")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_guard.path();
         image::GrayImage::from_pixel(10, 10, image::Luma([255]))
             .save(dir.join("good.png"))
             .unwrap();
@@ -518,31 +530,37 @@ mod tests {
                 { "box": { "x": 0.2, "y": 0.2, "width": 0.1, "height": 0.1 }, "mask": "bad.png" }
             ]
         });
-        let (masks, mode) = load_track_masks(&dir, &track, 32, 32, 2).unwrap();
+        let (masks, mode) = load_track_masks(dir, &track, 32, 32, 2).unwrap();
         assert_eq!(masks.len(), 2);
         assert_eq!(mode, MODE_MIXED);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn person_track_masks_falls_back_to_selected_detection() {
-        let dir = std::env::temp_dir().join(format!("sw_masks_{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = tempfile::Builder::new()
+            .prefix("sw_masks_")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_guard.path();
         let track = json!({
             "frames": [],
             "selectedDetection": { "box": { "x": 0.25, "y": 0.25, "width": 0.5, "height": 0.5 } }
         });
-        let (masks, mode) = person_track_masks(&dir, &track, 64, 64, 2).unwrap();
+        let (masks, mode) = person_track_masks(dir, &track, 64, 64, 2).unwrap();
         assert_eq!(masks.len(), 2);
         assert_eq!(mode, MODE_DEGRADED_BOX);
         assert!(white_pixels(&masks[0]) > 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn person_track_masks_errors_without_frames_or_selection() {
-        let dir = std::env::temp_dir();
+        // A guard rather than the bare temp root: the callee returns before touching the
+        // filesystem TODAY, but that is a fact about `person_track_masks`, not about this test —
+        // a future pre-flight `create_dir_all` there would start writing into shared %TEMP%
+        // (sc-17707).
+        let dir_guard = tempfile::tempdir().expect("temp dir");
+        let dir = dir_guard.path();
         let track = json!({ "frames": [] });
-        assert!(person_track_masks(&dir, &track, 32, 32, 1).is_err());
+        assert!(person_track_masks(dir, &track, 32, 32, 1).is_err());
     }
 }
