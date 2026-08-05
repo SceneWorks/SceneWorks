@@ -433,7 +433,9 @@ same-revision probe, both revisions of `5ffd7612 → 06e0c5e9` in both build ord
 unmutated build of the sensitivity check (1), both revisions again when the record was re-emitted
 for the widened closure (2), both revisions of the shipped `5ffd7612 → a4f409ae` window (2), and
 both revisions once more when sc-17607 re-emitted that window against the narrowed nine-path
-closure (2) — a run that reproduced the record byte-for-byte, months of unrelated commits later.
+closure (2) — a run that reproduced the record byte-for-byte, months of unrelated commits later. The
+captured side of sc-17760's `5ffd7612 → fbb00d6b` run makes it fourteen across five, and that one
+mattered: it is the control that makes that run's ARTIFACTS DIFFER verdict readable at all.
 
 **Stable is not the same as blind**, and the flag that bought stability is the one most likely to
 over-normalize — so the other direction was measured too. Mutating a production constant in the
@@ -501,9 +503,15 @@ Moving the live pin at all — with or without a build — also means:
   `tests/test_memory_matrix.py::test_calibration_evidence_is_schema_valid_and_matrix_ingested` on the
   parity lane.
 
-Regenerate `docs/generated/*` afterwards; never hand-edit them. `scripts/bump-inference.mjs` is the
-tool that moves the pin and does not yet know about any of this — running this audit is still a
-manual step alongside it.
+Regenerate `docs/generated/*` afterwards; never hand-edit them. Running this audit is still a manual
+step alongside `scripts/bump-inference.mjs`, but since sc-17760 that script no longer runs blind: it
+reads `FLUX2_COMPATIBLE_INFERENCE_REVISION` and keys on the **transition**, refusing a bump that
+moves the pin OUT of the audited window and warning on one that merely inherits a pin already
+outside it. The asymmetry is deliberate and is explained on `verifyFlux2AuditWindow` — an
+ARTIFACTS DIFFER verdict is terminal until a re-capture, so a fail-closed guard would block every
+future bump over a demotion no future bump caused. It also reads the checked-in records first: a pin
+this repo has already probed is told the verdict and told *not* to re-run, which is the whole reason
+negative records are kept on disk. `--dry-run` reports the same thing before anything is written.
 
 Nothing above touches `flux2_composition_audit.rs`: it pins an *invariant* rather than a revision,
 so a pin bump that keeps `flux2_dev` wired to `candle-gen-flux2` needs no edit there and one that
@@ -513,3 +521,64 @@ The Rust half deliberately lives in its own module rather than in `candle_memory
 compiles only under `all(not(target_os = "macos"), feature = "backend-candle")` and whose tests link
 libcuda. The audit is pure JSON logic, so keeping it separate lets `cargo test -p sceneworks-worker
 --lib` run it on any platform instead of first executing it on the `windows-candle` CI lane.
+
+
+## When it exits 1: the window does not extend
+
+Exit 1 is not a failure of the run — it is the run's answer, and the checklist above does **not**
+apply to it. The frozen constants stay where they are, the record it wrote is evidence rather than
+an authorization, and the five `flux2_dev` q4 cells are *correctly* demoted from `Runtime verified`
+until the calibration is re-captured. Moving the constants anyway would assert compatibility a build
+just disproved.
+
+This is realized, not hypothetical. sc-17760 ran `5ffd7612 → fbb00d6b` (the pin #2120 moved to) on
+the RTX box:
+
+```
+[audit] closure paths moved: Cargo.lock, crates/contracts/gen-core,
+        crates/media/candle-gen/candle-gen, crates/media/candle-gen/candle-gen-flux2
+[audit] ARTIFACTS DIFFER
+  5ffd7612…: sha256:d80844f2…
+  fbb00d6b…: sha256:fee1c2de…
+```
+
+Three things in that record are worth reading together, and `inference-compatibility-fbb0.json` is
+checked in so they can be:
+
+- **The captured side reproduced.** `d80844f2…` is byte-identical to the digest frozen from the
+  earlier independent builds of the same revision, weeks and months of unrelated commits earlier —
+  the control that says the toolchain and link flags are still deterministic across runs on this
+  box, which on Windows is the thing that has actually failed before (see the determinism evidence
+  under [Running it](#running-it)). It came for free, because the tool always rebuilds both ends.
+  It is *a* control, not the complete one: it cannot rule out non-determinism introduced by
+  `fbb00d6b`'s own content, which would need that revision built twice. Nothing in the closure delta
+  below suggests it — no build script or proc-macro moved — but if a future ARTIFACTS DIFFER verdict
+  is going to authorize spending a capture, build the compatible end twice first.
+- **The feature witness held still** — `321625ed…` at both revisions. So the finding is squarely in
+  the compiled code, not in how the shipped bundle resolves features around it.
+- **`candle-gen-flux2` itself moved**, alongside `gen-core` and `candle-gen`. The provider crate is
+  the code the measurements ran, so this is the one case object identity cannot route around: the
+  binary that produced the numbers is not the binary that ships.
+
+What that means for [sc-15922](https://app.shortcut.com/trefry/story/15922) is a narrowing, not a
+new bill. That story was written before any of this machinery existed and reads as a full re-capture
+of the FLUX.2 calibration. The audit does not shrink the capture it will need — the digest moved, so
+the measurements genuinely have to be retaken — but it does tell it *why*, and the why is not
+incidental. Across `a4f409ae → fbb00d6b` the *closure* moved 685 lines in four files (the range as a
+whole is far wider; only these reach the audited binary):
+
+| file | +/− | commit |
+| --- | --- | --- |
+| `candle-gen-flux2/src/lib.rs` | +276/−44 | `41464d57` FLUX.2 Klein memory ladder (sc-15831), `fbb00d6b` Klein decode parity |
+| `candle-gen-flux2/src/memory_strategy.rs` | +259/−63 | same two |
+| `candle-gen-flux2/src/edit_provider.rs` | +120/−2 | same two |
+| `gen-core/src/residency.rs` | +30/−0 | `d02b8fcf` Anima 2B shared memory ladder — an **MLX** commit that lands in the closure via `gen-core` |
+
+Three quarters of it is the memory-strategy and residency code, in the provider crate whose ladder
+the q4 base cells measure. That does not prove `flux2_dev`'s own numbers moved — the two named
+commits are about **Klein** — but it does mean the demotion cannot be argued away as pin drift
+around untouched code, which is the only argument that would have let the cells stand.
+
+It also fixes the cost model for the rest of that campaign. A window probe is ~15 min warm with no
+GPU and no weights, so every future window can be tested before a capture is budgeted, and only the
+ones that come back ARTIFACTS DIFFER cost anything more.
