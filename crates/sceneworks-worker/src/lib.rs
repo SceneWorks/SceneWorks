@@ -179,7 +179,11 @@ mod conditioning_fit;
 use supervisor::*;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;
+// The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
+// requested against a still-downloading source is refused at the request boundary instead of failing
+// in the worker (see `convert_source_state`).
 use model_jobs::*;
+pub use model_jobs::{convert_source_state, ConvertSourceState};
 mod media_jobs;
 use media_jobs::*;
 // Image-decode backstop (sc-6143): transcodes a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/

@@ -86,7 +86,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
     records_by_status = Counter(record["status"] for record in calibration["records"])
-    assert records_by_status == {"complete": 33, "runtime_complete": 15}
+    # sc-16915 added seventeen Full-complete MLX records (qwen_image x15,
+    # krea_2_turbo_control x2) measured at the current pin: complete 33 -> 50. The
+    # base-only runtime-complete FLUX population is untouched.
+    assert records_by_status == {"complete": 50, "runtime_complete": 15}
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -131,7 +134,11 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["record"]["status"] == "runtime_complete"
     ]
-    assert {run["semantics"] for run in full_runs} == {"historical"}
+    # sc-16915 measured seventeen Full-complete runs AT the live pin, so the complete population is
+    # no longer uniformly historical. Both semantics must be present and the current count pinned:
+    # asserting only the set would pass if a single run stayed current.
+    assert {run["semantics"] for run in full_runs} == {"current", "historical"}
+    assert sum(1 for run in full_runs if run["semantics"] == "current") == 17
     expected_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
@@ -192,9 +199,44 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    assert {run["record"]["id"] for run in current_eligible} == (
-        set(expected_flux2_runtime) if within_audited_window else set()
+    # Two independent sources of "current", kept separate and both DERIVED from the live pin rather
+    # than hardcoded, so a pin bump makes each fall away on its own instead of making this wrong:
+    #
+    #   - records measured AT the live pin (sc-16915's MLX re-collection);
+    #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
+    #
+    # Before sc-16915 the first set was empty, so this read `set()` outside the window.
+    measured_at_live_pin = {
+        record["id"]
+        for record in calibration["records"]
+        if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
+    }
+    assert measured_at_live_pin, (
+        "the shipped bundle must contain evidence measured at the live pin; an empty set here "
+        "means calibrated admission has silently fallen back to the legacy estimator"
     )
+    # Measured at the live pin means CURRENT, without exception — a record may not be measured here
+    # and dated elsewhere.
+    assert {
+        run["semantics"]
+        for run in matrix["calibrationRuns"]
+        if run["record"]["id"] in measured_at_live_pin
+    } == {"current"}
+    # Current is necessary but not sufficient for eligible: a record must also BIND a declared cell.
+    # sc-16915 swept seven decode tile edges and the manifest binds only the production point
+    # (512/64), so the six off-point edges are current-but-ineligible by design — they widen the
+    # published range without certifying a cell of their own.
+    unbound_decode_edges = {
+        record["id"]
+        for record in calibration["records"]
+        if record["id"] in measured_at_live_pin
+        and record["strategy"]["rung"] == "bounded_decode"
+        and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
+    }
+    assert len(unbound_decode_edges) == 6
+    assert {run["record"]["id"] for run in current_eligible} == (
+        measured_at_live_pin - unbound_decode_edges
+    ) | (set(expected_flux2_runtime) if within_audited_window else set())
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.
@@ -218,16 +260,33 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # The long-standing bf16 captures remain in the bundle. Only resident/staged rows still bind to
     # cells without an independent current static fingerprint; the older bounded fingerprints must
     # not mask the provider contract, even as historical characterization.
+    # These four used to bind cleanly, because the shipped opt-in named the same suffixed
+    # fingerprint they carry. sc-16915 repointed the opt-in at the identity the provider actually
+    # declares — `mlx-gen-qwen-image` collapsed its `-v1-eager`/`-v1-deferred` pair into a single
+    # `qwen-image-mlx-shared-ladder-2026-08-01-v1` — so records still carrying the old suffixed
+    # spelling no longer describe the shipped provider and bind nothing.
+    #
+    # They are RETAINED, not deleted: the assertion moved from "eligible with no reasons" to
+    # "present, historical, and ineligible for exactly one stated reason". Dropping the block
+    # entirely would have hidden the change; asserting the reason keeps it legible and would fail
+    # if these rows started binding again or disappeared.
     historical_qwen = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "historical"
         and run["record"]["target"]["modelId"] == "qwen_image"
         and run["record"]["target"]["tier"] == "bf16"
-        and run["binding"]["eligible"]
+        and run["record"]["strategy"]["rung"] in {"resident", "staged_residency"}
     ]
     assert len(historical_qwen) == 4
-    assert all(run["binding"]["reasons"] == [] for run in historical_qwen)
+    assert all(not run["binding"]["eligible"] for run in historical_qwen)
+    assert all(
+        run["binding"]["reasons"] == ["fingerprint-mismatch"] for run in historical_qwen
+    )
+    assert all(
+        run["record"]["calibrationFingerprint"].endswith("-eager")
+        for run in historical_qwen
+    ), "the mismatch must be the collapsed load-shape suffix, not some other drift"
     assert {
         (
             run["record"]["backend"],
@@ -391,10 +450,36 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
 def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
-    # The pin bump prevents both Qwen and Z-Image history from promoting. Static provider contracts
-    # remain implemented, but exact runtime admission must fail closed until the records are recaptured.
-    verified = [cell for cell in matrix["cells"] if cell["state"] == "Verified"]
-    assert verified == []
+    # sc-16915 recaptured the Qwen and Krea MLX evidence at the current pin, which is what
+    # "until the records are recaptured" was waiting for, so those cells now promote.
+    # Z-Image was NOT recaptured and is the subject of this test: its history must still fail
+    # closed, which the per-model assertions below pin directly.
+    #
+    # Stated as the exact verified SET rather than as `== []`. A bare emptiness check stopped
+    # being meaningful the moment anything was verified, and a count would let one model's
+    # promotion silently cover another's regression.
+    verified = {
+        (cell["modelId"], cell["backend"], cell["tier"], cell["rung"])
+        for cell in matrix["cells"]
+        if cell["state"] == "Verified"
+    }
+    assert verified == {
+        ("qwen_image", "mlx", "bf16", "resident"),
+        ("qwen_image", "mlx", "bf16", "staged_residency"),
+        ("qwen_image", "mlx", "bf16", "bounded_decode"),
+        ("qwen_image", "mlx", "bf16", "bounded_attention"),
+        ("qwen_image", "mlx", "bf16", "bounded_transformer_residency"),
+        ("qwen_image", "mlx", "q8", "bounded_attention"),
+        ("qwen_image", "mlx", "q8", "bounded_transformer_residency"),
+        ("qwen_image", "mlx", "q4", "bounded_attention"),
+        ("qwen_image", "mlx", "q4", "bounded_transformer_residency"),
+        ("krea_2_turbo", "mlx", "q4", "bounded_decode"),
+    }
+    assert not [
+        cell
+        for cell in matrix["cells"]
+        if cell["state"] == "Verified" and cell["modelId"].startswith("z_image")
+    ], "Z-Image was not recaptured, so none of its cells may promote"
     historical_z_image_turbo = [
         cell
         for cell in matrix["cells"]
@@ -419,7 +504,10 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         and cell["evidence"]["historicalVerification"]
     ]
     assert historical_z_image == []
-    historical_qwen_cells = [
+    # sc-16915 recaptured this ladder, so these five are Verified rather than
+    # Implemented/unverified, and their parameters are the ones the promoted bindings name
+    # (overlap 64, attention chunk 64 MiB) rather than the previous 128 / 128 MiB point.
+    recaptured_qwen_cells = [
         cell
         for cell in matrix["cells"]
         if cell["modelId"] == "qwen_image"
@@ -428,21 +516,50 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         and cell["mode"] == "text_to_image"
         and cell["overlay"] == "none"
     ]
-    assert len(historical_qwen_cells) == 5
+    assert len(recaptured_qwen_cells) == 5
+    assert all(cell["state"] == "Verified" for cell in recaptured_qwen_cells)
     assert all(
-        cell["state"] == "Implemented/unverified" for cell in historical_qwen_cells
-    )
+        cell["evidence"]["currentEnvironmentVerification"]
+        for cell in recaptured_qwen_cells
+    ), "a Verified cell must carry the current-environment evidence its guard requires"
     assert {
         (cell["modelId"], cell["backend"], cell["tier"], cell["mode"], cell["overlay"])
-        for cell in historical_qwen_cells
+        for cell in recaptured_qwen_cells
     } == {("qwen_image", "mlx", "bf16", "text_to_image", "none")}
-    assert {cell["rung"] for cell in historical_qwen_cells} == {
+    assert {cell["rung"] for cell in recaptured_qwen_cells} == {
         "resident",
         "staged_residency",
         "bounded_decode",
         "bounded_attention",
         "bounded_transformer_residency",
     }
+    # The MLX Qwen ladder sc-16915 recaptured, bound at the production point. Kept separate from
+    # `expected_parameters` below, which belongs to the CANDLE Krea cells and still names the
+    # 128 / 128 MiB point — the two backends are not required to agree.
+    expected_qwen_parameters = {
+        "resident": {},
+        "staged_residency": {},
+        "bounded_decode": {"decodeTileEdge": 512, "decodeOverlap": 64},
+        "bounded_attention": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67_108_864,
+        },
+        "bounded_transformer_residency": {
+            "decodeTileEdge": 512,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 67_108_864,
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit",
+        },
+    }
+    for cell in recaptured_qwen_cells:
+        assert {
+            key: value
+            for key, value in cell["strategyParameters"].items()
+            if key not in {"manifestRung", "formula", "publishedRanges"}
+        } == expected_qwen_parameters[cell["rung"]]
+
     expected_parameters = {
         "resident": {},
         "staged_residency": {},

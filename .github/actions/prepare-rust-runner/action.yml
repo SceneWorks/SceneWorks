@@ -102,10 +102,12 @@ runs:
 
         # The channel this repo PINS (rust-toolchain.toml at the workspace root). CI must
         # build exactly this toolchain, not whatever the box default happens to be: this box
-        # carries both a version-pinned '1.96.0' default AND a 'stable' toolchain, and the
-        # repo pins channel="stable", so resolving the box default would silently build a
-        # different rustc/clippy than every other lane and could redden clippy on a lint
-        # delta that has nothing to do with the PR.
+        # carries several toolchains (a version-pinned default, 'stable', and the repo's
+        # pinned version), so resolving the box default would silently build a different
+        # rustc/clippy than every other lane and could redden clippy on a lint delta that
+        # has nothing to do with the PR. Since sc-17717 the channel is a concrete x.y.z,
+        # which names its OWN rustup toolchain dir — a bump must pre-install it on this box
+        # (see the bump recipe in rust-toolchain.toml) or the resolution below fails loudly.
         $repoChannel = $null
         if (Test-Path 'rust-toolchain.toml') {
           $cm = Select-String -Path 'rust-toolchain.toml' -Pattern '^\s*channel\s*=\s*"(.+?)"' -ErrorAction SilentlyContinue |
@@ -173,12 +175,21 @@ runs:
           $out = (& $cargo --version | Out-String).Trim()
         } catch {
           $why = ($_.Exception.Message -replace '\s+', ' ').Trim()
-          Write-Host "::error title=Rust toolchain broken on candle runner::Could not execute '$cargo' ($why). Reinstall the toolchain on the box: 'rustup toolchain install stable --force' (sc-13166)."
+          Write-Host "::error title=Rust toolchain broken on candle runner::Could not execute '$cargo' ($why). Reinstall the pinned toolchain on the box: 'rustup toolchain install $repoChannel --no-self-update -c rustfmt -c clippy' (sc-13166 / rust-toolchain.toml)."
           exit 1
         }
         if ($LASTEXITCODE -ne 0 -or $out -notmatch '^cargo\s') {
           $outLine = ($out -replace '\s+', ' ').Trim()
           Write-Host "::error title=Rust toolchain broken on candle runner::'$cargo --version' failed (exit=$LASTEXITCODE) output='$outLine'. See sc-13166: reinstall the pinned toolchain."
+          exit 1
+        }
+        # The pin must actually BE what got resolved (sc-17717). Fallback (2) above can
+        # select the recorded default or the newest install whenever (1) returns nothing
+        # (rustup missing, or a pinned version that is not installed and could not be
+        # fetched) - without this check that silently builds a DIFFERENT rustc/clippy
+        # than every other lane, the exact drift class the version pin exists to kill.
+        if ($repoChannel -match '^\d+\.\d+\.\d+$' -and $out -notmatch [regex]::Escape($repoChannel)) {
+          Write-Host "::error title=Wrong Rust toolchain on candle runner::Resolved '$cargo' reports '$out', not the pinned $repoChannel from rust-toolchain.toml. The pinned toolchain is missing on this box or resolution fell back to another install. Fix: 'rustup toolchain install $repoChannel --no-self-update -c rustfmt -c clippy' (see the bump recipe in rust-toolchain.toml)."
           exit 1
         }
         Write-Host "OK: $out"

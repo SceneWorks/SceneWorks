@@ -598,13 +598,14 @@ fn fit_ladder_for_tier(
 fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract> {
     // One directory per CALL: parallel tests sharing a per-process path race between this
     // writer and the provider's reader, which surfaces as a spurious `Unknown` ladder verdict.
-    static SNAPSHOT_SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let serial = SNAPSHOT_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "sw-krea-control-fit-{}-{serial}-{tier_key}",
-        std::process::id()
-    ));
-    let transformer = root.join("transformer");
+    // The guard also takes the snapshot with it when the call returns — the previous
+    // per-process path was never removed and had piled up 31,264 directories under `%TEMP%`
+    // on one box, the single largest leaker there (sc-17641).
+    let root = tempfile::Builder::new()
+        .prefix(&format!("sw-krea-control-fit-{tier_key}-"))
+        .tempdir()
+        .ok()?;
+    let transformer = root.path().join("transformer");
     std::fs::create_dir_all(&transformer).ok()?;
     let config = match tier_key {
         "q4" => Some(r#"{"quantization":{"bits":4,"group_size":64}}"#),
@@ -614,7 +615,7 @@ fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract
     if let Some(text) = config {
         std::fs::write(transformer.join("config.json"), text).ok()?;
     }
-    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(root));
+    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(root.path().to_path_buf()));
     if let Some(quant) = quant_for_tier_key(tier_key) {
         spec = spec.with_quant(quant);
     }
