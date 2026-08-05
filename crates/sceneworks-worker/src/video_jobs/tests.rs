@@ -5006,9 +5006,8 @@ fn wav_header_is_canonical_and_preserves_in_range_amplitude() {
         sample_rate: 48_000,
         channels: 1,
     };
-    let dir = std::env::temp_dir().join(format!("sw_wav_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("a.wav");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("a.wav");
     write_wav_pcm16(&audio, &path).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(&bytes[0..4], b"RIFF");
@@ -5032,9 +5031,8 @@ fn wav_normalizes_only_over_range_audio() {
         sample_rate: 48_000,
         channels: 1,
     };
-    let dir = std::env::temp_dir().join(format!("sw_wav_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("over-range.wav");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("over-range.wav");
     write_wav_pcm16(&audio, &path).unwrap();
     let bytes = std::fs::read(path).unwrap();
     assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), i16::MAX);
@@ -5043,8 +5041,8 @@ fn wav_normalizes_only_over_range_audio() {
 
 #[tokio::test]
 async fn seedvr2_failed_mux_cleanup_removes_silent_and_partial_outputs() {
-    let dir = std::env::temp_dir().join(format!("sw_seedvr2_mux_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::tempdir().expect("temp dir");
+    let dir = dir_guard.path();
     let media_path = dir.join("upscaled.mp4");
     let mux_tmp = dir.join("upscaled.audiomux.mp4");
     let poster_path = media_path.with_extension("poster.jpg");
@@ -5057,13 +5055,12 @@ async fn seedvr2_failed_mux_cleanup_removes_silent_and_partial_outputs() {
     assert!(!media_path.exists());
     assert!(!mux_tmp.exists());
     assert!(!poster_path.exists());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn seedvr2_output_guard_covers_the_full_post_encode_interval() {
-    let dir = std::env::temp_dir().join(format!("sw_seedvr2_guard_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::tempdir().expect("temp dir");
+    let dir = dir_guard.path();
     let media_path = dir.join("upscaled.mp4");
     let mux_tmp = dir.join("upscaled.audiomux.mp4");
     let poster_path = media_path.with_extension("poster.jpg");
@@ -5079,13 +5076,12 @@ fn seedvr2_output_guard_covers_the_full_post_encode_interval() {
     assert!(!media_path.exists());
     assert!(!mux_tmp.exists());
     assert!(!poster_path.exists());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn seedvr2_output_guard_preserves_published_outputs_after_disarm() {
-    let dir = std::env::temp_dir().join(format!("sw_seedvr2_guard_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir_guard = tempfile::tempdir().expect("temp dir");
+    let dir = dir_guard.path();
     let media_path = dir.join("upscaled.mp4");
     let mux_tmp = dir.join("upscaled.audiomux.mp4");
     let poster_path = media_path.with_extension("poster.jpg");
@@ -5101,7 +5097,6 @@ fn seedvr2_output_guard_preserves_published_outputs_after_disarm() {
     assert!(media_path.exists());
     assert!(mux_tmp.exists());
     assert!(poster_path.exists());
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -5130,9 +5125,8 @@ fn silent_audio_does_not_divide_by_zero() {
         sample_rate: 48_000,
         channels: 1,
     };
-    let dir = std::env::temp_dir().join(format!("sw_wav_{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("silent.wav");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("silent.wav");
     write_wav_pcm16(&audio, &path).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes[44..].iter().all(|&b| b == 0));

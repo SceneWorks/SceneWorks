@@ -345,6 +345,7 @@
       "type": "object",
       "required": [
         "calibrationAbi",
+        "loadShape",
         "calibrationFingerprint",
         "sceneWorksRevision",
         "inferenceRevision",
@@ -359,8 +360,12 @@
       "additionalProperties": false,
       "properties": {
         "calibrationAbi": {
-          "const": 1,
-          "description": "Memory-strategy calibration ABI consumed by the worker and supplied by the provider contract. A new ABI requires an explicit schema and worker migration."
+          "const": 3,
+          "description": "Memory-strategy calibration ABI consumed by the worker and supplied by the provider contract. A new ABI requires an explicit schema and worker migration, and re-measurement: each bump declares earlier records intentionally stale, so re-stamping a curve fitted under an older ABI is exactly the drift the handshake exists to reject (sc-17097)."
+        },
+        "loadShape": {
+          "enum": ["eager_materialization", "deferred_materialization"],
+          "description": "Typed materialization shape (calibration ABI 2) these curves were measured under. The worker compares it against the provider's own calibration identity: eager and deferred measurements are not interchangeable."
         },
         "calibrationFingerprint": {
           "type": "string",

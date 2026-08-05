@@ -1,5 +1,5 @@
-use std::fs;
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
 use sceneworks_core::contracts::{
@@ -11,23 +11,81 @@ use sceneworks_core::jobs_store::{
     DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
     WorkerHeartbeat, MAC_NOT_AVAILABLE_LABEL, MAX_JOB_ATTEMPTS,
 };
+use sceneworks_core::time::now_unix_seconds;
 use serde_json::{json, Map, Value};
 
-fn temp_db(name: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("sceneworks-core-{name}-{}.db", std::process::id()));
-    let _ = fs::remove_file(&path);
-    path
+/// A test database that owns the directory it lives in and takes the whole
+/// directory with it when it drops.
+///
+/// The shape this replaces — `temp_dir()/sceneworks-core-{name}-{pid}.db`,
+/// unlinked at the *start* of a run — was wrong twice over (sc-17641). Nothing
+/// ever removed the file, so every test in every run left its database behind:
+/// 46,773 of them had piled up in this box's `%TEMP%`, roughly a third of
+/// everything in it. And because the uniqueness key was the PID while only the
+/// `.db` was unlinked, a run that landed on a recycled PID opened a fresh, empty
+/// database next to a stale `-wal` left by an unrelated earlier run — a silent
+/// and very hard to trace flake source.
+///
+/// Owning a directory fixes both halves: `tempfile` names it uniquely per *call*
+/// rather than per process, and the `-wal`/`-shm` siblings leave with their
+/// parent. Cleanup rides on `Drop` rather than a line at the end of each test,
+/// because a test that panics is exactly the one whose leftovers matter.
+struct TempDb {
+    dir: tempfile::TempDir,
+}
+
+impl TempDb {
+    /// Path to the database file inside the guarded directory.
+    fn path(&self) -> PathBuf {
+        self.dir.path().join("jobs.db")
+    }
+}
+
+fn temp_db(name: &str) -> TempDb {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("sceneworks-core-{name}-"))
+        .tempdir()
+        .expect("temp dir for the test database");
+    TempDb { dir }
 }
 
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().expect("test value is an object").clone()
 }
 
-fn store(name: &str) -> JobsStore {
-    let store = JobsStore::new(temp_db(name));
+/// A [`JobsStore`] bundled with the temp directory it lives in, so callers keep
+/// writing `let store = store("name");` and still get cleanup for free.
+///
+/// Field order is load-bearing: `store` drops first, closing the long-lived write
+/// connection, and only then does `_db` remove the directory. Windows refuses to
+/// delete a file that still has an open handle, so the reverse order would leave
+/// the database behind — the very leak this replaces.
+struct TestStore {
+    store: JobsStore,
+    _db: TempDb,
+}
+
+impl Deref for TestStore {
+    type Target = JobsStore;
+
+    fn deref(&self) -> &JobsStore {
+        &self.store
+    }
+}
+
+/// Empty, but load-bearing: a `Drop` impl makes `TestStore` non-destructurable, so no
+/// caller can write `store("name").store` and move the `JobsStore` out on its own. That
+/// would drop the directory guard at the end of the statement and delete the database
+/// out from under a still-live connection.
+impl Drop for TestStore {
+    fn drop(&mut self) {}
+}
+
+fn store(name: &str) -> TestStore {
+    let db = temp_db(name);
+    let store = JobsStore::new(db.path());
     store.initialize().expect("store initializes");
-    store
+    TestStore { store, _db: db }
 }
 
 fn image_job(payload: Map<String, Value>) -> CreateJob {
@@ -57,9 +115,136 @@ fn register_image_worker(store: &JobsStore) {
         .expect("worker registers");
 }
 
+/// Assert a guarded directory is gone once its guard has dropped.
+///
+/// `TempDir::drop` removes the directory and SWALLOWS any failure, so a one-shot
+/// `exists()` here would itself be a flake — in the very suite this story de-flaked.
+/// A bounded wait costs nothing when cleanup worked (the first look succeeds) and
+/// still fails loudly when it did not: a genuinely leaked directory stays forever,
+/// not for a second.
+fn assert_removed(directory: &Path) {
+    for _ in 0..40 {
+        if !directory.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!(
+        "temp database directory outlived its guard: {}",
+        directory.display()
+    );
+}
+
+/// Rows currently in a store's `jobs` table, read through a fresh connection.
+fn job_count(store: &JobsStore) -> i64 {
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads")
+}
+
+#[test]
+fn same_named_stores_are_independent_databases() {
+    // The old scheme keyed uniqueness on `std::process::id()`, so two same-named
+    // databases in one process WERE one file, and a run landing on a recycled PID
+    // reopened an earlier run's path — inheriting whatever `-wal` it had stranded
+    // there. Assert the behaviour rather than just the names: separate paths are only
+    // interesting because the stores cannot see each other's rows.
+    let first = store("uniqueness");
+    let second = store("uniqueness");
+    assert_ne!(
+        first.db_path(),
+        second.db_path(),
+        "two stores with the same name must not share a path"
+    );
+
+    register_image_worker(&first);
+    first
+        .create_job(image_job(object(
+            json!({ "prompt": "only in the first store" }),
+        )))
+        .expect("job creates");
+
+    assert_eq!(job_count(&first), 1, "the first store holds its own job");
+    assert_eq!(
+        job_count(&second),
+        0,
+        "a same-named store must be a separate database, not the same file reopened"
+    );
+}
+
+#[test]
+fn temp_db_guard_removes_the_database_and_its_wal_siblings() {
+    let directory = {
+        let db = temp_db("guard-cleanup");
+        let path = db.path();
+
+        let store = JobsStore::new(path.clone());
+        store.initialize().expect("store initializes");
+        register_image_worker(&store);
+        store
+            .create_job(image_job(object(
+                json!({ "prompt": "leaves a wal behind" }),
+            )))
+            .expect("job creates");
+
+        // WAL mode parks `-wal`/`-shm` next to the database while a connection is open,
+        // and the old cleanup unlinked only the `.db`, stranding exactly those. Enabling
+        // WAL is explicitly allowed to fail (sc-4275 / F-CORE-16), in which case there is
+        // no sidecar to strand — so only demand the siblings when WAL actually took.
+        let connection = Connection::open(&path).expect("db opens");
+        let journal_mode: String = connection
+            .query_row("pragma journal_mode", [], |row| row.get(0))
+            .expect("journal mode reads");
+        drop(connection);
+        if journal_mode.eq_ignore_ascii_case("wal") {
+            assert!(
+                path.with_extension("db-wal").exists(),
+                "expected a -wal sibling while the write connection is open"
+            );
+            assert!(
+                path.with_extension("db-shm").exists(),
+                "expected a -shm sibling while the write connection is open"
+            );
+        }
+
+        path.parent()
+            .expect("database sits in its own directory")
+            .to_path_buf()
+    };
+
+    assert_removed(&directory);
+}
+
+#[test]
+fn store_helper_removes_its_directory_after_closing_the_connection() {
+    let directory = {
+        let store = store("guard-store-cleanup");
+        register_image_worker(&store);
+        store
+            .create_job(image_job(object(
+                json!({ "prompt": "opens the long-lived write connection" }),
+            )))
+            .expect("job creates");
+        store
+            .db_path()
+            .parent()
+            .expect("database sits in its own directory")
+            .to_path_buf()
+    };
+
+    // On WINDOWS this also pins the drop ORDER of `TestStore`'s fields: the OS refuses to
+    // unlink a file that still has an open handle, so a directory that is gone here proves
+    // the store's long-lived write connection closed before the guard removed it. On Unix
+    // `remove_dir_all` succeeds against an open descriptor, so there this checks only that
+    // cleanup happened at all — the ordering guarantee is Windows-verified.
+    assert_removed(&directory);
+}
+
 #[test]
 fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
-    let path = temp_db("retention");
+    let db = temp_db("retention");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     let connection = Connection::open(&path).expect("db opens");
@@ -87,31 +272,51 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
             )
             .expect("metrics seed");
     }
+    // Straddle the 90-day cutoff by half a day each way rather than sitting exactly on it: this
+    // test reads the wall clock twice (once to seed, once inside the purge), so a row seeded ON
+    // the cutoff lands on whichever side the clock reached by the time the sweep runs — it was
+    // asserting the elapsed time between two statements, not the retention window (sc-17597).
+    // Twelve hours of slack is ~40k× the observed jitter and still resolves a one-day error in
+    // either direction. The exact-tie semantics are pinned separately, and deterministically, by
+    // `retention_retains_a_job_completed_exactly_on_the_cutoff`. `strftime` rather than
+    // `datetime` so the fixtures carry the same `...THH:MM:SSZ` shape production writes.
+    for (id, days, hours) in [
+        ("boundary", "-89 days", "-12 hours"),
+        ("just-expired", "-90 days", "-12 hours"),
+    ] {
+        connection
+            .execute(
+                "insert into jobs (
+                   id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+                   attempts,cancel_requested,created_at,updated_at,completed_at
+                 ) values (?1,'image_generate','completed','{}','{}','auto',1,'completed','',1,0,
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3),
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3),
+                           strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3))",
+                params![id, days, hours],
+            )
+            .expect("cutoff-adjacent job seeds");
+        connection
+            .execute(
+                "insert into generation_metrics(job_id,updated_at)
+                 values (?1,strftime('%Y-%m-%dT%H:%M:%SZ','now',?2,?3))",
+                params![id, days, hours],
+            )
+            .expect("cutoff-adjacent metrics seed");
+    }
     connection
         .execute(
-            "insert into jobs (
-               id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
-               attempts,cancel_requested,created_at,updated_at,completed_at
-             ) values ('boundary','image_generate','completed','{}','{}','auto',1,'completed','',
-                       1,0,datetime('now','-90 days'),datetime('now','-90 days'),
-                       datetime('now','-90 days'))",
+            "insert into generation_metrics(job_id,updated_at) values ('orphan','2020-01-01T00:00:00Z')",
             [],
         )
-        .expect("boundary job seeds");
-    connection
-        .execute(
-            "insert into generation_metrics(job_id,updated_at) values
-             ('boundary',datetime('now','-90 days')),('orphan','2020-01-01T00:00:00Z')",
-            [],
-        )
-        .expect("boundary and orphan metrics seed");
+        .expect("orphan metrics seed");
     drop(connection);
 
     assert_eq!(
         store
             .purge_terminal_jobs_older_than(90)
             .expect("retention succeeds"),
-        4
+        5
     );
     let connection = Connection::open(&path).expect("db reopens");
     assert_eq!(
@@ -123,6 +328,48 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
             )
             .unwrap(),
         0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from jobs where id='just-expired'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "a terminal job an hour past the cutoff is purged"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics where job_id='just-expired'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "the purged job's owned metrics go with it"
+    );
+    assert_eq!(
+        connection
+            .query_row("select count(*) from jobs where id='boundary'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1,
+        "a terminal job an hour inside the cutoff is retained"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics where job_id='boundary'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1,
+        "the retained job keeps its owned metrics"
     );
     assert_eq!(
         connection
@@ -151,6 +398,17 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
         0,
         "legacy orphan metrics are job-owned garbage"
     );
+    assert_eq!(
+        connection
+            .query_row(
+                "select count(*) from generation_metrics_history",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        5,
+        "only the purged jobs materialize — retained ones would double-count in the stats union"
+    );
     drop(connection);
     let historical = store
         .list_generation_metrics(None, None, None, 100)
@@ -165,7 +423,11 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
     );
     assert!(
         historical.iter().any(|row| row.job_id == "boundary"),
-        "the exact cutoff boundary is retained"
+        "the job inside the cutoff is still live in Generation Stats"
+    );
+    assert!(
+        historical.iter().any(|row| row.job_id == "just-expired"),
+        "a job purged from just past the cutoff is materialized into Generation Stats"
     );
     let connection = Connection::open(&path).expect("db reopens");
     assert!(connection
@@ -178,8 +440,70 @@ fn startup_retention_purges_only_expired_terminal_jobs_and_owned_metrics() {
 }
 
 #[test]
+fn retention_retains_a_job_completed_exactly_on_the_cutoff() {
+    // "Older than 90 days" excludes a job that is exactly 90 days old, so the sweep compares with
+    // `<`, not `<=`. That tie is only observable if the caller owns the cutoff — while it was a
+    // `datetime('now','-90 days')` modifier that SQLite re-evaluated per statement, no test could
+    // seed a row onto it without racing the clock (sc-17597). Going through the cutoff-taking
+    // entry point pins the comparison exactly, with no wall-clock dependence at all.
+    let db = temp_db("retention-exact-tie");
+    let path = db.path();
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    let cutoff = "2026-05-07T00:00:00Z";
+    let connection = Connection::open(&path).expect("db opens");
+    for (id, completed_at) in [
+        ("one-second-before", "2026-05-06T23:59:59Z"),
+        ("exactly-on-cutoff", cutoff),
+        ("one-second-after", "2026-05-07T00:00:01Z"),
+    ] {
+        connection
+            .execute(
+                "insert into jobs (
+                   id,type,status,payload_json,result_json,requested_gpu,progress,stage,message,
+                   attempts,cancel_requested,created_at,updated_at,completed_at
+                 ) values (?1,'image_generate','completed','{}','{}','auto',1,'completed','',
+                           1,0,?2,?2,?2)",
+                params![id, completed_at],
+            )
+            .expect("tie job seeds");
+    }
+    drop(connection);
+
+    assert_eq!(
+        store
+            .purge_terminal_jobs_completed_before(cutoff)
+            .expect("retention succeeds"),
+        1,
+        "only the job completed strictly before the cutoff is purged"
+    );
+    let connection = Connection::open(&path).expect("db reopens");
+    let surviving = |id: &str| {
+        connection
+            .query_row(
+                "select count(*) from jobs where id=?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(surviving("one-second-before"), 0, "a second past is purged");
+    assert_eq!(
+        surviving("exactly-on-cutoff"),
+        1,
+        "a job exactly 90 days old is not OLDER than 90 days, so it is retained"
+    );
+    assert_eq!(
+        surviving("one-second-after"),
+        1,
+        "a second short is retained"
+    );
+}
+
+#[test]
 fn retention_is_atomic_when_job_deletion_fails() {
-    let path = temp_db("retention-rollback");
+    let db = temp_db("retention-rollback");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     let connection = Connection::open(&path).expect("db opens");
@@ -225,7 +549,8 @@ fn retention_is_atomic_when_job_deletion_fails() {
 
 #[test]
 fn zero_retention_preserves_terminal_history() {
-    let path = temp_db("retention-disabled");
+    let db = temp_db("retention-disabled");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     let connection = Connection::open(&path).expect("db opens");
@@ -6484,7 +6809,8 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
     const WORKERS: usize = 4;
     const JOBS: usize = 60;
 
-    let path = temp_db("concurrent-claim");
+    let db = temp_db("concurrent-claim");
+    let path = db.path();
     let primary = JobsStore::new(path.clone());
     primary.initialize().expect("store initializes");
 
@@ -6577,7 +6903,8 @@ fn reads_proceed_while_a_writer_holds_the_write_lock() {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    let path = temp_db("read-during-write");
+    let db = temp_db("read-during-write");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     register_image_worker(&store);
@@ -6892,6 +7219,110 @@ fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
     assert!(retry.side_effects_pending);
 }
 
+/// Pin the durable retry schedule that keeps a poison side-effect handoff from
+/// monopolizing the recovery batch: a fresh handoff is due immediately, each
+/// failure defers it by an exponentially growing delay, and the count backing
+/// that growth survives a process restart.
+///
+/// The rust-api fairness test
+/// (`terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation`)
+/// covers the batch-rotation behavior, but is deliberately written to hold for
+/// *any* positive delay so it cannot race the wall clock. The delays themselves
+/// are therefore pinned here, next to the code that computes them (sc-17640).
+#[test]
+fn terminal_side_effect_retry_backoff_doubles_and_survives_restart() {
+    // Keep the GUARD alive, not just the path: `store()` wipes the file, and this test reopens the
+    // same database below. `temp_db` hands back a `TempDb` whose `Drop` removes the directory, so
+    // holding only `db.path()` would delete the database out from under the reopen.
+    let db = temp_db("terminal-side-effect-backoff");
+    let store = JobsStore::new(db.path());
+    store.initialize().expect("store initializes");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    store
+        .update_job_progress_with_outcome(
+            &created.id,
+            ProgressUpdate {
+                status: JobStatus::Completed,
+                stage: ProgressStage::Completed,
+                progress: 1.0,
+                message: "done".to_owned(),
+                error: None,
+                result: Some(object(json!({ "assetWrites": [] }))),
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("terminal progress is accepted");
+
+    // An accepted handoff carries no backoff at all: its deadline is 0. That
+    // exactly-known deadline is what lets the scan's boundary be pinned to the
+    // second — a row is due once its deadline has ARRIVED (`<=`), not only
+    // strictly after it (`<`), so a one-second-late retry cannot creep in.
+    let due_as_of = |store: &JobsStore, as_of: i64| {
+        store
+            .pending_terminal_progress_side_effect_job_ids_as_of(as_of, 128)
+            .expect("recovery queue scans")
+    };
+    assert_eq!(
+        due_as_of(&store, 0),
+        vec![created.id.clone()],
+        "a row is due AT its deadline, not one second later"
+    );
+    assert!(
+        due_as_of(&store, -1).is_empty(),
+        "and is not due before its deadline"
+    );
+
+    // Each failed attempt brackets the row's new deadline. `defer` stamps
+    // `now + delay` at some instant in `before..=after`, so the deadline lands
+    // in `before + delay ..= after + delay`: it is never due at
+    // `before + delay - 1`, and always due at `after + delay`. Both bounds hold
+    // for any machine speed, so this cannot flake; together they pin `delay`
+    // whenever the two reads fall in the same second, which is the norm for a
+    // single sub-millisecond write.
+    let defer_and_bracket = |store: &JobsStore, delay: i64, what: &str| {
+        let before = now_unix_seconds();
+        assert!(
+            store
+                .defer_pending_terminal_progress_side_effects(&created.id)
+                .expect("a pending row defers"),
+            "{what}: the row is still pending, so it defers"
+        );
+        let after = now_unix_seconds();
+        assert!(
+            due_as_of(store, before + delay - 1).is_empty(),
+            "{what}: must not be due before {delay}s have passed"
+        );
+        assert_eq!(
+            due_as_of(store, after + delay),
+            vec![created.id.clone()],
+            "{what}: must be due once {delay}s have passed"
+        );
+    };
+
+    defer_and_bracket(&store, 5, "first failure");
+    defer_and_bracket(&store, 10, "second failure doubles the delay");
+
+    // Reopen the same database: the retry COUNT is durable, not process state,
+    // so the third failure continues the progression at 20s rather than
+    // restarting it at the 5s base. A worker that crash-loops the API cannot
+    // reset its own backoff.
+    drop(store);
+    let restarted = JobsStore::new(db.path());
+    restarted.initialize().expect("restarted store initializes");
+    defer_and_bracket(&restarted, 20, "third failure after restart");
+}
+
 #[test]
 fn cleared_terminal_same_status_retry_still_requires_the_stored_owner() {
     let store = store("cleared-terminal-owner");
@@ -7089,7 +7520,8 @@ fn mlx_worker_refuses_anima_edit_image_jobs() {
 /// connection preserves the concurrency contract the per-op opener guaranteed.
 #[test]
 fn long_lived_connection_survives_many_sequential_ops() {
-    let path = temp_db("long-lived-sequential");
+    let db = temp_db("long-lived-sequential");
+    let path = db.path();
     let store = JobsStore::new(path.clone());
     store.initialize().expect("store initializes");
     register_image_worker(&store);

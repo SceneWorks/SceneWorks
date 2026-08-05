@@ -7,13 +7,16 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e"
+      "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d"
     },
     "mlx": {
-      "inferenceRevision": "06e0c5e919918aeb7cec966a83ce6fe394feec5e"
+      "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d"
     }
   },
   "models": {
+    "acestep_v15_turbo": {
+      "candle": false
+    },
     "anima_aesthetic": {
       "candle": true,
       "mlx": true
@@ -41,6 +44,9 @@
     "boogu_image_turbo": {
       "candle": false,
       "mlx": false
+    },
+    "chatterbox_tts": {
+      "candle": false
     },
     "chroma1_base": {
       "candle": true,
@@ -94,6 +100,9 @@
       "candle": true,
       "mlx": true
     },
+    "kokoro_82m": {
+      "candle": false
+    },
     "kolors": {
       "candle": true,
       "mlx": true
@@ -137,6 +146,21 @@
     "mage_flow_turbo": {
       "candle": false,
       "mlx": false
+    },
+    "mmaudio_large_44k": {
+      "candle": false
+    },
+    "mmaudio_small_16k": {
+      "candle": false
+    },
+    "moss_sfx_v2": {
+      "candle": false
+    },
+    "moss_tts_realtime": {
+      "candle": false
+    },
+    "moss_ttsd_v05": {
+      "candle": false
     },
     "qwen_image": {
       "candle": true,
@@ -209,6 +233,24 @@
     "sensenova_u1_8b_infographic_v3_fast": {
       "candle": true,
       "mlx": false
+    },
+    "stable_audio_3_medium": {
+      "candle": false
+    },
+    "stable_audio_3_medium_base": {
+      "candle": false
+    },
+    "stable_audio_3_small_music": {
+      "candle": false
+    },
+    "stable_audio_3_small_music_base": {
+      "candle": false
+    },
+    "stable_audio_3_small_sfx": {
+      "candle": false
+    },
+    "stable_audio_3_small_sfx_base": {
+      "candle": false
     },
     "z_image": {
       "candle": true,

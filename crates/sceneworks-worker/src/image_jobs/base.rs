@@ -930,6 +930,9 @@ const FLUX1_DEV_MLX_TURNKEY_REVISION: &str =
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX2_DEV_MLX_TURNKEY_REVISION: &str =
     "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION: &str =
+    "acf05e8d5103838baba6a5e32dc91d6997a56023";
 
 #[cfg(any(
     target_os = "macos",
@@ -2501,6 +2504,10 @@ fn candle_certified_artifact_path(
             ("SceneWorks/flux1-schnell-mlx", FLUX1_SCHNELL_MLX_TURNKEY_REVISION),
         "flux1_dev" => ("SceneWorks/flux1-dev-mlx", FLUX1_DEV_MLX_TURNKEY_REVISION),
         "flux2_dev" => ("SceneWorks/flux2-dev-mlx", FLUX2_DEV_MLX_TURNKEY_REVISION),
+        "flux2_klein_9b" => (
+            "SceneWorks/flux2-klein-9b-mlx",
+            FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION,
+        ),
         _ => return false,
     };
     candle_certified_hf_artifact_path(settings, repo, revision, Path::new(tier), weights_dir)
@@ -2547,6 +2554,20 @@ pub(super) fn candle_artifact_path_matches(actual: &Path, expected: &Path) -> bo
     }
 }
 
+/// Identity of the Krea Turbo calibration this request was admitted under, built from the two
+/// constants the selector itself compares against (sc-17097).
+///
+/// It used to be a literal in two places, so a re-measurement had to remember to edit both; the
+/// tracing line and the run context would otherwise disagree about which capture was in force.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_evidence_revision() -> String {
+    format!(
+        "{}@{}",
+        crate::vram_gate::KREA_TURBO_SCENEWORKS_REVISION,
+        crate::vram_gate::KREA_TURBO_INFERENCE_REVISION
+    )
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn optimized_shared_memory_context(
     context: gen_core::MemoryRunContext,
@@ -2562,11 +2583,29 @@ fn optimized_shared_memory_context(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -> &'a str {
-    if engine_id == "flux2_dev" {
+    if engine_id == "flux2_dev"
+        || (engine_id == "flux2_klein_9b"
+            && matches!(request_mode, "image_generation" | "text_to_image"))
+    {
         "text_to_image"
     } else {
         request_mode
     }
+}
+
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn flux2_klein_reference_bearing_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        "edit_image"
+            | "reference"
+            | "image_to_image"
+            | "character_image"
+            | "style_variations"
+    )
 }
 
 /// The generation tiers (`bf16`/`q8`/`q4`) currently INSTALLED for `request`'s model, in DESCENDING
@@ -3187,14 +3226,14 @@ fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
         && spec.pid.is_none()
         && spec.identity.is_none()
         && !(spec.control.is_some() && spec.ip_adapter.is_some());
-    let flux2_dev_supported = engine_id == "flux2_dev"
+    let flux2_supported = matches!(engine_id, "flux2_dev" | "flux2_klein_9b")
         && directory
         && spec.adapters.is_empty()
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.pid.is_none()
         && spec.identity.is_none();
-    if qwen_native || flux_supported || flux2_dev_supported {
+    if qwen_native || flux_supported || flux2_supported {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3225,6 +3264,7 @@ mod candle_image_load_shape_tests {
             "flux1_schnell",
             "flux1_dev",
             "flux2_dev",
+            "flux2_klein_9b",
         ] {
             assert_eq!(
                 apply_candle_image_load_shape(engine_id, fixture_spec()).load_shape,
@@ -6267,7 +6307,10 @@ fn rejects_unverified_shared_memory_fallback(
     engine_id: &str,
     optimized_strategy_selected: bool,
 ) -> bool {
-    matches!(engine_id, "z_image" | "z_image_turbo" | "flux2_dev")
+    matches!(
+        engine_id,
+        "z_image" | "z_image_turbo" | "flux2_dev" | "flux2_klein_9b"
+    )
         && !optimized_strategy_selected
 }
 
@@ -6279,6 +6322,7 @@ fn verified_only_memory_family_label(engine_id: &str) -> Option<&'static str> {
     match engine_id {
         "z_image" | "z_image_turbo" => Some("Z-Image"),
         "flux2_dev" => Some("FLUX.2-dev"),
+        "flux2_klein_9b" => Some("FLUX.2 Klein"),
         _ => None,
     }
 }
@@ -6455,11 +6499,19 @@ mod candle_request_residency_tests {
             "flux2_dev",
             false
         ));
+        assert!(rejects_unverified_shared_memory_fallback(
+            "flux2_klein_9b",
+            false
+        ));
         assert!(!rejects_unverified_shared_memory_fallback(
             "z_image", true
         ));
         assert!(!rejects_unverified_shared_memory_fallback(
             "flux2_dev",
+            true
+        ));
+        assert!(!rejects_unverified_shared_memory_fallback(
+            "flux2_klein_9b",
             true
         ));
         assert!(!rejects_unverified_shared_memory_fallback(
@@ -6470,6 +6522,10 @@ mod candle_request_residency_tests {
             verified_only_memory_family_label("flux2_dev"),
             Some("FLUX.2-dev")
         );
+        assert_eq!(
+            verified_only_memory_family_label("flux2_klein_9b"),
+            Some("FLUX.2 Klein")
+        );
     }
 
     #[test]
@@ -6478,6 +6534,20 @@ mod candle_request_residency_tests {
             candle_base_memory_request_mode("flux2_dev", "style_variations"),
             "text_to_image"
         );
+        assert_eq!(
+            candle_base_memory_request_mode("flux2_klein_9b", "image_generation"),
+            "text_to_image"
+        );
+        for mode in [
+            "edit_image",
+            "reference",
+            "image_to_image",
+            "character_image",
+            "style_variations",
+        ] {
+            assert_eq!(candle_base_memory_request_mode("flux2_klein_9b", mode), mode);
+            assert!(flux2_klein_reference_bearing_mode(mode));
+        }
         for engine in ["z_image", "qwen_image", "flux1_dev"] {
             assert_eq!(
                 candle_base_memory_request_mode(engine, "style_variations"),
@@ -6758,11 +6828,9 @@ mod krea_turbo_memory_route_tests {
             .expect("Krea 2 Turbo manifest entry");
         model["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
-        // Same fixture surgery as the fingerprint line above: pin the opt-in to the CURRENT
-        // calibration ABI so these historical-curve selector tests keep exercising the verified
-        // ladder. The shipped manifest stays at its measured ABI (stale until sc-16915).
-        model["candle"]["turboFit"]["calibrationAbi"] =
-            Value::from(gen_core::MEMORY_CALIBRATION_ABI);
+        // sc-17097 removed the ABI re-stamp that used to sit here. Overwriting the shipped
+        // `calibrationAbi` with the current constant is what kept every selector test green while
+        // production rejected the same manifest: no test in the tree ever read the shipped value.
         model
             .as_object()
             .expect("Krea 2 Turbo manifest object")
@@ -6895,7 +6963,10 @@ mod krea_turbo_memory_route_tests {
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
 
         let manifest = historical_builtin_krea_turbo_manifest();
-        let available_gb = 8.95;
+        // sc-17097 re-measurement moved both streamed floors (q4 6.32 GiB, q8 7.01 GiB including the
+        // 2 GiB reserve). This budget still sits in the only window that makes the test meaningful:
+        // Q8 cannot fit at any rung while Q4 can, so a downtier is available and must NOT be taken.
+        let available_gb = 7.00;
         let budget = Some(VramBudget {
             free_gb: available_gb,
             total_gb: available_gb,
@@ -6937,7 +7008,9 @@ mod krea_turbo_memory_route_tests {
         use crate::vram_gate::{krea_turbo_fit_with_runtime as krea_turbo_fit, KreaTurboFit, VramBudget};
 
         let manifest = historical_builtin_krea_turbo_manifest();
-        let available_gb = 10.63;
+        // sc-17097: BF16's streamed floor is 10.42 GiB after the re-measurement, so this budget keeps
+        // BF16 unfittable while BOTH lower tiers fit - the case where downtiering is most tempting.
+        let available_gb = 10.41;
         let budget = Some(VramBudget {
             free_gb: available_gb,
             total_gb: available_gb,
@@ -7132,6 +7205,16 @@ async fn generate_candle_stream(
         ))
     })?;
     let engine_id = model.engine_id();
+    // Every Klein reference-bearing request belongs to the bespoke Flux2Edit route, which resolves
+    // and counts the actual reference set. Reaching the generic registered generator means routing
+    // could not prove a usable reference/base; fail closed instead of dropping the reference and
+    // silently authorizing the request as text-to-image.
+    if engine_id == "flux2_klein_9b" && flux2_klein_reference_bearing_mode(&request.mode) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} {} requires the FLUX.2 reference route and at least one resolvable reference image",
+            request.model, request.mode
+        )));
+    }
     // Report the descriptor's tensor backend ("candle"), not the gpu-id device label
     // (`_device_backend`), on the streamed progress + inference events (sc-3678) — parity with the
     // macOS path's `model.backend()` override, so the worker log + the UI architecture pill clearly
@@ -8116,7 +8199,7 @@ async fn generate_candle_stream(
         };
         tracing::info!(
             backend = "candle",
-            evidence_revision = "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+            evidence_revision = krea_evidence_revision(),
             reclaimable_gb,
             raw_available_gb = raw_budget.map_or(0.0, |raw| raw.free_gb),
             effective_available_gb = budget.free_gb,
@@ -8125,21 +8208,10 @@ async fn generate_candle_stream(
             strategy = ?selection.strategy,
             "shared memory-strategy selection admitted"
         );
-        // The manifest turboFit block pins the calibration fingerprint but not the materialization
-        // shape; the provider's own identity is the source the safety check compares against.
-        let load_shape = crate::inference_runtime::media()
-            .memory_strategy_contract(
-                "krea_2_turbo",
-                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default())),
-            )
-            .ok()
-            .flatten()
-            .map(|contract| {
-                contract
-                    .calibration
-                    .as_ref()
-                    .map_or(contract.load_shape, |identity| identity.load_shape)
-            })?;
+        // sc-17097: the shape now comes from the manifest, which states what the curves were MEASURED
+        // under. Reading it back off the provider - as this did - made the safety check compare the
+        // provider against itself, so calibration ABI 2's load-shape axis could never fail here.
+        let load_shape = crate::vram_gate::krea_turbo_load_shape(turbo_fit)?;
         Some(gen_core::MemoryRunContext {
             selection,
             calibration_abi,
@@ -8169,8 +8241,7 @@ async fn generate_candle_stream(
             } else {
                 gen_core::MemoryCacheState::Cold
             },
-            evidence_revision:
-                "sc-15449-contract-v1@1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".to_owned(),
+            evidence_revision: krea_evidence_revision(),
         })
     }));
     apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);

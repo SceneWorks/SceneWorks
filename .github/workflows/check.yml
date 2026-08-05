@@ -2,6 +2,11 @@ name: Check
 
 on:
   pull_request:
+  # The merge queue gates on this workflow's `web` + `parity` jobs, so they must
+  # run against the queue's speculative merge ref too. Without this trigger no
+  # run is ever created for `gh-readonly-queue/main/**`, the required checks stay
+  # pending forever, and every queued PR is evicted on timeout.
+  merge_group:
   push:
     branches:
       - main
@@ -54,7 +59,7 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
       - name: Fetch the private inference release

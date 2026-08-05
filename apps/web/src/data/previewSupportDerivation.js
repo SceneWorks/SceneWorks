@@ -29,6 +29,19 @@
 // facts file has not been dumped on this checkout, produces NO key — the consumer reads that as
 // "unknown" and renders exactly as it did before this story. Under-claiming is invisible;
 // over-claiming would leave a placeholder up forever on a route that never emits.
+//
+// ## Two registries, two join rules (sc-17593)
+//
+// `crate::inference_runtime::audio` is a SEPARATE `ProviderRegistry` from the media one (epic 13400):
+// audio is candle-native on every platform and rides its own lane rather than the mlx media graph.
+// Until sc-17593 nothing dumped it, so every audio route was "unknown" everywhere — reported exactly
+// like "not wired". Its facts arrive as a second input, from `config/engine-capabilities/audio/`.
+//
+// The join differs, which is why the inputs stay apart rather than being concatenated. Media engine
+// ids reach SceneWorks model ids through MODEL_TABLE; audio engine ids ARE SceneWorks model ids
+// (`kokoro_82m`, `chatterbox_tts`, `acestep_v15_turbo`, …) — `audio_jobs.rs` passes the payload's
+// `model` straight into `inference_runtime::load_audio`, so for audio the join is the identity. The
+// two id namespaces are independent, so an id claimed by both is a genuine ambiguity and refused.
 
 /** The artifact schema version, bumped when the derived shape changes incompatibly. */
 export const PREVIEW_SUPPORT_VERSION = 1;
@@ -58,7 +71,7 @@ const MIN_EXPECTED_MODEL_ROWS = 50;
  * String literals are copied verbatim (escapes honoured) so a `//` inside a repo URL — every
  * `default_repo` is one — can never be mistaken for a comment.
  */
-function stripRustComments(source) {
+function stripRustComments(source, sourceLabel = "engines.rs") {
   let out = "";
   let index = 0;
   let blockDepth = 0; // Rust block comments nest.
@@ -108,7 +121,7 @@ function stripRustComments(source) {
     index += 1;
   }
   if (blockDepth > 0) {
-    throw new Error("parseEngineModelTable: engines.rs has an unterminated `/*` block comment");
+    throw new Error(`${sourceLabel} has an unterminated \`/*\` block comment`);
   }
   return out;
 }
@@ -175,7 +188,7 @@ export function parseEngineModelTable(rustSource) {
   }
   // Comments first, then locate the table: a `];` or a `ModelRow` mention inside a comment must not
   // be able to end the table or be counted as a row.
-  const body = sliceModelTableBody(stripRustComments(rustSource));
+  const body = sliceModelTableBody(stripRustComments(rustSource, "parseEngineModelTable: engines.rs"));
 
   // Rows carry only scalar/string fields today — no nested braces — so a brace-free match is exact.
   // The moment that stops being true this regex silently SKIPS the row, so the count below is what
@@ -228,18 +241,207 @@ export function parseEngineModelTable(rustSource) {
 }
 
 /**
+ * Parse one declared `&[&str]` backend list out of
+ * `crates/sceneworks-worker/src/engine_capability_facts.rs`.
+ *
+ * Parsed rather than mirrored, for the same reason `MODEL_TABLE` is: a JS-side copy of the list
+ * would have to be kept in step by hand, and the failure mode of a stale copy is that it stops
+ * requiring a backend — i.e. it re-opens the hole rather than closing it.
+ *
+ * Throws on anything it cannot read in full. A partial parse here is the DANGEROUS direction: a
+ * dropped entry shrinks the required set, so {@link assertBackendCoverage} stops asking for a
+ * backend and a never-dumped file passes again, silently.
+ *
+ * @param {string} rustSource the engine_capability_facts.rs text
+ * @param {string} constName `SCENEWORKS_BACKENDS` (media) or `SCENEWORKS_AUDIO_BACKENDS` (audio)
+ * @param {string} caller the exported function name, so the error names what the caller asked for
+ */
+function parseBackendConst(rustSource, constName, caller) {
+  if (typeof rustSource !== "string" || rustSource.length === 0) {
+    throw new Error(`${caller}: expected the engine_capability_facts.rs source text`);
+  }
+  const open_token = `const ${constName}: &[&str] = &[`;
+  // Comments first: the doc comments above both consts name the backends in prose, and a
+  // `SCENEWORKS_BACKENDS` mention inside a comment must not be able to anchor the parse.
+  const source = stripRustComments(rustSource, `${caller}: engine_capability_facts.rs`);
+  // Each anchor carries its const's FULL name including the leading `const `, so neither declaration
+  // can match the other's search: `const SCENEWORKS_AUDIO_BACKENDS: …` does not contain the
+  // substring `const SCENEWORKS_BACKENDS: …`. Without that, reading one const as the other would
+  // require the wrong set — silently, and in the direction that requires less.
+  const open = source.indexOf(open_token);
+  if (open === -1) {
+    throw new Error(
+      `${caller}: no ${JSON.stringify(open_token)} in engine_capability_facts.rs — the backend ` +
+        "list was renamed or restructured; update this parser, or the stage-2 coverage guard " +
+        "silently stops requiring any backend at all",
+    );
+  }
+  const bodyStart = open + open_token.length;
+  const bodyEnd = source.indexOf("]", bodyStart);
+  if (bodyEnd === -1) {
+    throw new Error(`${caller}: ${constName}' opening \`&[\` is never closed`);
+  }
+  const body = source.slice(bodyStart, bodyEnd);
+
+  const backends = [...body.matchAll(/"([a-z0-9_-]+)"/g)].map((match) => match[1]);
+  // Every string literal in the body must have been read. An entry the matcher cannot parse (an
+  // escape, an unexpected character class, a `concat!`) would otherwise be dropped — and dropping
+  // one WEAKENS the guard, which is invisible by construction.
+  const quotes = (body.match(/"/g) ?? []).length;
+  if (quotes !== backends.length * 2) {
+    throw new Error(
+      `${caller}: ${constName} holds ${quotes / 2} string literal(s) but only ` +
+        `${backends.length} parsed (${JSON.stringify(backends)}). A dropped entry would stop this ` +
+        "guard requiring that backend's dump. Teach this parser the new shape.",
+    );
+  }
+  if (backends.length === 0) {
+    throw new Error(
+      `${caller}: ${constName} is empty, which would make the coverage assertion vacuous — the ` +
+        "exact class of hole it exists to close",
+    );
+  }
+  const seen = new Set();
+  for (const backend of backends) {
+    if (seen.has(backend)) {
+      throw new Error(`${caller}: ${constName} declares ${backend} twice`);
+    }
+    seen.add(backend);
+  }
+  return backends;
+}
+
+/** The declared MEDIA backend set — `SCENEWORKS_BACKENDS`. */
+export function parseSceneworksBackends(rustSource) {
+  return parseBackendConst(rustSource, "SCENEWORKS_BACKENDS", "parseSceneworksBackends");
+}
+
+/**
+ * The declared AUDIO backend set — `SCENEWORKS_AUDIO_BACKENDS` (sc-17593).
+ *
+ * A second const rather than a reuse of the media one because the two answer different questions.
+ * `SCENEWORKS_BACKENDS` contains `candle`, and the MEDIA dump satisfies it; that says nothing about
+ * whether the audio registry was ever walked. Backend-level coverage was the wrong granularity, and
+ * that is exactly how the audio gap survived sc-17119's new guard.
+ */
+export function parseSceneworksAudioBackends(rustSource) {
+  return parseBackendConst(
+    rustSource,
+    "SCENEWORKS_AUDIO_BACKENDS",
+    "parseSceneworksAudioBackends",
+  );
+}
+
+/**
+ * Assert the dumped facts files cover exactly the backends SceneWorks can run (sc-17119).
+ *
+ * Every other check in this pipeline is scoped to *what is on disk* — the generator globs the
+ * directory, the drift guard globs it, and `verifyEngineCapabilityFacts` validates only files that
+ * exist. So a backend that was NEVER dumped is not a failure anywhere; it is simply absent, and
+ * absence derives as "unknown", which renders exactly as it did before the feature shipped. This is
+ * the one assertion that can see a file that is not there.
+ *
+ * Both directions are errors:
+ * - **missing** — a declared backend has no dump; the catalog is silently blind to it.
+ * - **undeclared** — a dump exists for a backend the Rust list does not know about, so the list is
+ *   stale and cannot be trusted to require anything.
+ *
+ * The `lane` parameter exists because the media and audio registries are dumped separately and a
+ * media-shaped remediation message would send the operator to the wrong file (sc-17593). It only
+ * changes the wording — the assertion is identical, and it has to be, since "audio was never
+ * dumped" is the same invisible failure "mlx was never dumped" was.
+ *
+ * @param {string[]} declaredBackends from {@link parseSceneworksBackends} / {@link parseSceneworksAudioBackends}
+ * @param {string[]} dumpedBackends the `backend` field of each checked-in facts file
+ * @param {"media"|"audio"} lane which registry's dumps these are
+ */
+export function assertBackendCoverage(declaredBackends, dumpedBackends, lane = "media") {
+  if (lane !== "media" && lane !== "audio") {
+    throw new Error(`assertBackendCoverage: unknown lane ${JSON.stringify(lane)}`);
+  }
+  const constName = lane === "audio" ? "SCENEWORKS_AUDIO_BACKENDS" : "SCENEWORKS_BACKENDS";
+  const what = lane === "audio" ? "audio engine-capability facts" : "engine-capability facts";
+  // An empty declared set makes every check below vacuously true — the same hole
+  // `parseSceneworksBackends` refuses, refused again here because this function is exported and
+  // called from three places, not all of which get their list from that parser.
+  if (!Array.isArray(declaredBackends) || declaredBackends.length === 0) {
+    throw new Error(
+      "assertBackendCoverage: the declared backend set is empty, so this assertion would pass for " +
+        `ANY set of dumped files — including none. Read it from ${constName} in ` +
+        "crates/sceneworks-worker/src/engine_capability_facts.rs.",
+    );
+  }
+  // A facts file with no readable `backend` would otherwise flow through as `undefined` and be
+  // reported as an unnamed entry — "facts exist for backend(s) []" — which tells the operator
+  // nothing about which file is wrong.
+  const nameless = dumpedBackends.filter(
+    (backend) => typeof backend !== "string" || backend.length === 0,
+  );
+  if (nameless.length > 0) {
+    throw new Error(
+      `assertBackendCoverage: ${nameless.length} facts file(s) carry no readable \`backend\` ` +
+        `field, so they cannot be matched against ${constName}. A facts file names the ` +
+        "backend it belongs to; re-dump the offending file rather than hand-editing it.",
+    );
+  }
+  const dumped = new Set(dumpedBackends);
+  const missing = declaredBackends.filter((backend) => !dumped.has(backend));
+  if (missing.length > 0) {
+    throw new Error(
+      `${what} are missing for backend(s) [${missing.join(", ")}]. SceneWorks can ` +
+        "run them, so the served catalog reports \"unknown\" for every route they own — " +
+        "indistinguishable from \"not wired\". " +
+        (lane === "audio"
+          ? "The audio registry is candle-native on every platform, so EITHER lane dumps it:\n" +
+            "  cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
+            "[--no-default-features --features backend-candle]\n" +
+            "which writes config/engine-capabilities/audio/capabilities.<backend>.json, "
+          : "Dump each on the lane that owns it:\n" +
+            "  mlx    (macOS) : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
+            "  candle (off-Mac): cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
+            "--no-default-features --features backend-candle\n") +
+        "then re-run `npm run gen:preview-support` from apps/web.",
+    );
+  }
+  const undeclared = [...dumped].filter((backend) => !declaredBackends.includes(backend));
+  if (undeclared.length > 0) {
+    throw new Error(
+      `${what} exist for backend(s) [${undeclared.join(", ")}] that ` +
+        `${constName} (${JSON.stringify(declaredBackends)}) does not declare. Add them to ` +
+        "the const in crates/sceneworks-worker/src/engine_capability_facts.rs — until then nothing " +
+        "requires their dump, so deleting the file again would go unnoticed.",
+    );
+  }
+}
+
+/**
  * Validate one stage-1 facts file and index it as `Map<engineId, supportsPreview>`.
  *
  * Mirrors the Rust dumper's refusal (`engine_capability_facts::facts_from_descriptors`) on the JS
  * side, so a hand-edited or truncated facts file is caught here rather than becoming a confident
  * "nothing supports preview".
  */
-function indexFacts(facts, sourceLabel) {
+function indexFacts(facts, sourceLabel, lane = "media") {
   if (!facts || typeof facts !== "object") {
     throw new Error(`${sourceLabel}: not a JSON object`);
   }
   if (typeof facts.backend !== "string" || facts.backend.length === 0) {
     throw new Error(`${sourceLabel}: missing the \`backend\` this file belongs to`);
+  }
+  // The `registry` discriminator (sc-17593). A media dump and an audio dump can carry the SAME
+  // `backend` ("candle" on every platform for audio), so the file name alone cannot tell them
+  // apart — only where it sits, which is exactly what a mistaken copy gets wrong. Media files carry
+  // no `registry` key at all, deliberately: adding one would change their bytes and
+  // `capabilities.mlx.json` can only be re-dumped on a Mac.
+  const registry = facts.registry ?? "media";
+  if (registry !== lane) {
+    throw new Error(
+      `${sourceLabel}: this is a ${JSON.stringify(registry)} dump but it was read as ` +
+        `${JSON.stringify(lane)}. The media and audio registries have independent engine-id ` +
+        "namespaces and different stage-2 joins, so reading one as the other silently answers for " +
+        "the wrong routes. Media dumps live in config/engine-capabilities/, audio dumps in " +
+        "config/engine-capabilities/audio/.",
+    );
   }
   if (!Array.isArray(facts.engines) || facts.engines.length === 0) {
     throw new Error(
@@ -265,19 +467,43 @@ function indexFacts(facts, sourceLabel) {
   return index;
 }
 
+const byBackendName = (left, right) =>
+  left.backend < right.backend ? -1 : left.backend > right.backend ? 1 : 0;
+
 /**
- * Derive the served preview-support catalog from the MODEL_TABLE rows + the per-backend facts.
+ * Derive the served preview-support catalog from the MODEL_TABLE rows + the per-backend facts, plus
+ * the audio registry's own dumps (sc-17593).
+ *
+ * The two registries are joined by different rules and merged into one `models` object:
+ * - **media** — `MODEL_TABLE.sceneworks_id -> engine_id`, many-to-one.
+ * - **audio** — the identity: an audio engine id IS the SceneWorks model id it serves.
+ *
+ * An id claimed by both is refused rather than resolved, because there is no correct answer: two
+ * independent registries would be describing one catalog entry.
+ *
+ * Of the 14 dumped audio engines, 8 have a `builtin.models.jsonc` entry — the six `type: "audio"`
+ * ids plus `mmaudio_small_16k` / `mmaudio_large_44k`, which are typed `"utility"` there but are
+ * ordinary audio Generators in the registry, so they get a real served answer. The remaining six
+ * (`stable_audio_3_*`) have no entry and are emitted all the same. They are never *looked up* —
+ * `preview_support::apply_to_model_entry` only answers for ids the served catalog carries — and
+ * emitting them means the answer is already right on the day such a model is added, with no
+ * re-dump. Filtering through the manifest would buy nothing but a second parser, and would make a
+ * new audio model's arrival a re-dump event on a box that may not be to hand.
  *
  * @param {{sceneworksId: string, engineId: string}[]} rows from {@link parseEngineModelTable}
- * @param {{backend: string, generatedFrom?: object, engines: object[]}[]} factsFiles stage-1 dumps
+ * @param {{backend: string, generatedFrom?: object, engines: object[]}[]} factsFiles media stage-1 dumps
+ * @param {{backend: string, registry: string, generatedFrom?: object, engines: object[]}[]} audioFactsFiles audio stage-1 dumps
  * @returns the canonical catalog object both artifacts are written from
  */
-export function derivePreviewSupport(rows, factsFiles) {
+export function derivePreviewSupport(rows, factsFiles, audioFactsFiles = []) {
   if (!Array.isArray(factsFiles) || factsFiles.length === 0) {
     throw new Error(
       "derivePreviewSupport: no stage-1 facts files. Nothing can be derived without at least one " +
         "`config/engine-capabilities/capabilities.<backend>.json`.",
     );
+  }
+  if (!Array.isArray(audioFactsFiles)) {
+    throw new Error("derivePreviewSupport: audioFactsFiles must be an array of audio dumps");
   }
 
   const indexed = factsFiles
@@ -286,17 +512,30 @@ export function derivePreviewSupport(rows, factsFiles) {
       inferenceRevision: facts.generatedFrom?.inferenceRevision ?? null,
       engines: indexFacts(facts, `capabilities.${facts?.backend ?? "?"}.json`),
     }))
-    .sort((left, right) => (left.backend < right.backend ? -1 : left.backend > right.backend ? 1 : 0));
+    .sort(byBackendName);
 
   const backendNames = indexed.map((entry) => entry.backend);
   if (new Set(backendNames).size !== backendNames.length) {
     throw new Error(`derivePreviewSupport: two facts files claim the same backend (${backendNames})`);
   }
 
+  const audioIndexed = audioFactsFiles
+    .map((facts) => ({
+      backend: facts.backend,
+      inferenceRevision: facts.generatedFrom?.inferenceRevision ?? null,
+      engines: indexFacts(facts, `audio/capabilities.${facts?.backend ?? "?"}.json`, "audio"),
+    }))
+    .sort(byBackendName);
+
+  const audioBackendNames = audioIndexed.map((entry) => entry.backend);
+  if (new Set(audioBackendNames).size !== audioBackendNames.length) {
+    throw new Error(
+      `derivePreviewSupport: two audio facts files claim the same backend (${audioBackendNames})`,
+    );
+  }
+
   const models = {};
-  for (const row of [...rows].sort((left, right) =>
-    left.sceneworksId < right.sceneworksId ? -1 : left.sceneworksId > right.sceneworksId ? 1 : 0,
-  )) {
+  for (const row of rows) {
     const byBackend = {};
     for (const entry of indexed) {
       // Absence is UNKNOWN, not false: a backend that never registered this engine gets no key.
@@ -308,17 +547,52 @@ export function derivePreviewSupport(rows, factsFiles) {
     }
   }
 
+  // Every MODEL_TABLE id, not merely the ones that produced an answer: the collision is between the
+  // two NAMESPACES, and a media row whose engine happens to be in no facts file today would
+  // otherwise let an audio engine quietly take its name and answer for it.
+  const fromMedia = new Set(rows.map((row) => row.sceneworksId));
+  for (const entry of audioIndexed) {
+    for (const [engineId, supportsPreview] of entry.engines) {
+      if (fromMedia.has(engineId)) {
+        throw new Error(
+          `derivePreviewSupport: ${engineId} is both a MODEL_TABLE model id and an audio engine ` +
+            "id. The two registries have independent namespaces, so there is no correct answer " +
+            "here — one of them would silently overwrite the other. Rename the colliding id, or " +
+            "teach this derivation which registry owns it.",
+        );
+      }
+      models[engineId] = { ...(models[engineId] ?? {}), [entry.backend]: supportsPreview };
+    }
+  }
+
+  // Sorted so the artifact is byte-stable regardless of which registry contributed a key.
+  const sortedModels = {};
+  for (const id of Object.keys(models).sort()) sortedModels[id] = models[id];
+
   const generatedFrom = {};
-  for (const entry of indexed) {
+  for (const entry of [...indexed, ...audioIndexed]) {
+    const existing = generatedFrom[entry.backend];
+    // The media and audio dumps of ONE backend must come from one revision — `candle` is both, on
+    // every platform. A disagreement means one of the two was not re-dumped at the current pin, and
+    // silently keeping either would make `generatedFrom` describe a checkout that never existed.
+    if (existing && existing.inferenceRevision !== entry.inferenceRevision) {
+      throw new Error(
+        `derivePreviewSupport: backend ${entry.backend} was dumped at two different inference ` +
+          `revisions (${existing.inferenceRevision} and ${entry.inferenceRevision}). Re-dump both ` +
+          "its media and audio facts at the pin the worker currently carries.",
+      );
+    }
     generatedFrom[entry.backend] = { inferenceRevision: entry.inferenceRevision };
   }
 
   return {
     version: PREVIEW_SUPPORT_VERSION,
     generatedBy: PREVIEW_SUPPORT_GENERATOR,
-    backends: backendNames,
+    // The union, sorted: a backend that appears only in the audio lane must still be advertised, or
+    // a consumer iterating `backends` has no key for its routes.
+    backends: [...new Set([...backendNames, ...audioBackendNames])].sort(),
     generatedFrom,
-    models,
+    models: sortedModels,
   };
 }
 

@@ -2058,76 +2058,121 @@
         // wider production capability but cannot admit a request or verify either edit sibling.
         "calibrations": [
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
             "rung": "resident", "parameters": {}
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
             "rung": "staged_residency", "parameters": {}
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
-            "rung": "bounded_decode", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+            "rung": "bounded_decode", "parameters": { "decodeOverlap": 64, "decodeTileEdge": 512 }
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
-            "rung": "bounded_attention",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
-            "rung": "bounded_transformer_residency",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q4",
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q4",
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
           }
         ],
         "memoryStrategyContract": {
@@ -2904,7 +2949,50 @@
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 37.3, "q8": 42.0, "bf16": 52.0 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // SC-15819: exact packed q4/q8, no-overlay routes expose the shared Candle/CUDA ladder.
+        // This is implementation inventory only. SC-15874 still owns Lens-Turbo calibration and
+        // no current calibration binding is declared here.
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "lens_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            }
+          ]
+        }
       },
       "ui": {
         "label": "Lens-Turbo",
@@ -5086,40 +5174,30 @@
         // record through the shared reader. No curve or area interpolation is permitted.
         "calibrations": [
           {
-            "abi": 1,
-            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            "sceneWorksRevision": "95bb4babfed69581da36132c7bb44451000ca751",
-            "matrixSourceRevision": "source-tree:52936ede1054fe43de74c66d58d1aa0114d9578f2cb857e57aa9410f76b5e41a",
-            "inferenceRevision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-            "provider": "krea_2_turbo_control",
-            "tier": "q4",
-            "mode": "text_to_image",
-            "overlay": "control:1",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "provider": "krea_2_turbo_control", "tier": "q4", "mode": "text_to_image", "overlay": "control:1",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
-            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
-            "artifactVariant": "q4",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723", "artifactVariant": "q4",
             "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
-            "rung": "bounded_decode",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+            "rung": "bounded_decode", "parameters": { "decodeOverlap": 64, "decodeTileEdge": 512 }
           },
           {
-            "abi": 1,
-            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            "sceneWorksRevision": "95bb4babfed69581da36132c7bb44451000ca751",
-            "matrixSourceRevision": "source-tree:52936ede1054fe43de74c66d58d1aa0114d9578f2cb857e57aa9410f76b5e41a",
-            "inferenceRevision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-            "provider": "krea_2_turbo_control",
-            "tier": "q4",
-            "mode": "text_to_image",
-            "overlay": "control:1",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "provider": "krea_2_turbo_control", "tier": "q4", "mode": "text_to_image", "overlay": "control:1",
             "geometry": { "width": 896, "height": 896, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
-            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
-            "artifactVariant": "q4",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723", "artifactVariant": "q4",
             "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
-            "rung": "bounded_decode",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+            "rung": "bounded_decode", "parameters": { "decodeOverlap": 64, "decodeTileEdge": 512 }
           }
         ]
       },
@@ -5177,7 +5255,18 @@
         // the first sufficient rung in declaration order. Curves are conservative upper fits (+~0.1 GiB
         // calibration allowance) to rendered-device samples at 768² and 1024², seed 42, on an exclusive
         // RTX PRO 6000 Blackwell with the public q4 turnkey. Step count does not change the working set.
-        // Raw sample peaks (GiB):
+        //
+        // ==> SUPERSEDED BY sc-17097. The sc-15117/15205/15206/16514 sample tables below describe the
+        // calibration-ABI-1 captures and are retained as provenance for how this block was originally
+        // derived. They are NOT the shipped curves: `turboFit.phaseCurvesByTier` is now fitted from the
+        // ABI-3 re-measurement, whose raw samples are tabulated in Shortcut sc-17097 activity 17466 and
+        // reproduced per cell in each `evidenceRecords` entry's `observedPhasesGb` / `observedPeaksGb`.
+        // The methodology is unchanged (exclusive rendered-device phase peaks at 768² and 1024²); the
+        // instrument is now the versioned harness (`sceneworks-memory-v5`, 30 cells, --fresh-per-case)
+        // rather than an ad-hoc capture, and every fitted curve is pinned at or above BOTH measured
+        // geometries so no measured point can be under-predicted.
+        //
+        // Superseded ABI-1 raw sample peaks (GiB):
         //   threeStage       768² text/denoise/decode 3.895/11.747/10.843;
         //                    1024²                         3.895/15.405/15.440
         //   tiledVae        768²                           3.895/11.747/9.702;
@@ -5225,22 +5314,47 @@
           // measured-composition identity per rung. SC-16402 corrects the provider contract to attest
           // the physical staged-residency path already present in the tiled-VAE, chunked-attention,
           // and streamed-block captures, so every measured row binds to its exact executed composition.
-          "calibrationAbi": 1,
+          //
+          // sc-17097 re-collects every cell below under `gen_core::MEMORY_CALIBRATION_ABI` 3. The ABI
+          // moved 1 -> 2 (typed load shape, inference sc-16583) -> 3 (typed reference-count geometry,
+          // inference 5083b0ec), and each bump declares earlier records intentionally stale. Stamping 3
+          // onto the ABI-1 curves would have silenced the handshake while leaving a fit measured under
+          // different semantics, which is exactly what the handshake exists to stop - and the numbers
+          // moved, so it would also have shipped wrong ones. Every tier's three-stage peak is now
+          // materially HIGHER than the ABI-1 curve it replaces (q4 1024^2 15.44 -> 21.285 GiB, q8
+          // 22.015 -> 25.911, bf16 32.014 -> 36.724): the superseded manifest UNDER-predicted the rung
+          // a constrained card falls to first, while the deeper bounded rungs got cheaper.
+          //
+          // `loadShape` is the ABI-2 axis made load-bearing on this route. The worker used to take the
+          // shape from the provider alone, so the axis did no work here; it now compares this declared
+          // shape against the provider identity and refuses a fit measured under the other one.
+          "calibrationAbi": 3,
+          "loadShape": "deferred_materialization",
           "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
           "sceneWorksRevision": "sc-15449-contract-v1",
-          // The pinned 1c4354 merge changes Mage/request contracts only; Krea's measured CUDA
-          // implementation and calibration fingerprint are byte-for-byte unchanged, so the
-          // historical captures below are explicitly compatible with this additive revision.
-          "inferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+          // Inference revision these curves are declared COMPATIBLE with. The campaign measured against
+          // 277f4238 (kept verbatim in every record's own `inferenceCommit` receipt, which is never
+          // rewritten); this declaration moved to the sc-15819 closeout pin only after verifying that the
+          // one-commit range has an EMPTY diff against both `candle-gen-krea` and
+          // `gen-core/src/memory_strategy.rs`. The fingerprint is unchanged because the provider's tensor
+          // layout, quantization floors and execution structure did not move - only the shared contract
+          // ABI did, which is precisely the split the two identity fields exist to express.
+          "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
-            "stories": ["sc-15117", "sc-15205", "sc-15206"],
+            "stories": ["sc-15117", "sc-15205", "sc-15206", "sc-17097"],
             "method": "exclusive rendered-device phase peaks at 768x768 and 1024x1024",
-            "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB",
-            "outputParity": "ordinary CUDA text-to-image retains tier and output bytes"
+            "numericPolicy": "selector boundary exact; phase-curve golden tolerance 0.01 GiB; every fitted curve pinned at or above BOTH measured geometries after rounding, so no measured point can be under-predicted",
+            "outputParity": "ordinary CUDA text-to-image retains tier and output bytes; sc-17097 additionally compares a resident render against the deepest bounded rung from one loaded generator per tier, after proving the resident A-B-A repeat is bit-identical"
           },
-          // Machine-readable evidence cells. `exact_request` rows carry geometry-specific output
+          // Machine-readable evidence cells. Each row's `sceneWorksCommit` / `capturedAt` name its
+          // PHASE capture; the `parity` block on an `exact_request` row comes from a second run of the
+          // same source tree (the five-rung lane measures per-rung memory but compares no outputs, so
+          // parity needs the resident-versus-bounded lane). Both runs are recorded in sc-17097
+          // activity 17466 with their own timestamps.
+          //
+          // `exact_request` rows carry geometry-specific output
           // parity and may admit that exact request after runtime fingerprint/loadability checks.
           // `phase_fit_only` rows carry direct per-phase measurements that determine a bounded curve,
           // but cannot authorize runtime admission without parity for that same geometry. Observed
@@ -5251,14 +5365,14 @@
               "tier": "q4",
               "width": 768,
               "height": 768,
-              "capturedAt": "2026-07-26T21:22:50Z",
-              "harnessVersion": "sc-15117-activity-15189",
-              "sourceStory": "sc-15117",
-              "sourceActivity": 15189,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:43:06Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5266,38 +5380,94 @@
                 "tierRoot": "q4",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 11.85679552,
-                "tiledVae": 11.85679552,
-                "chunkedAttention": 11.18799616,
-                "streamedBlocks": 4.8491392
+                "threeStage": 16.28908,
+                "tiledVae": 10.40948,
+                "chunkedAttention": 9.7586,
+                "streamedBlocks": 4.32
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 4.0, "denoise": 11.85679552, "decode": 10.95593472 },
-                "tiledVae": { "text": 4.0, "denoise": 11.85679552, "decode": 9.80718592 },
-                "chunkedAttention": { "text": 4.0, "denoise": 11.18799616, "decode": 9.81 },
-                "streamedBlocks": { "text": 4.0, "denoise": 3.86928384, "decode": 4.8491392 }
+                "threeStage": {
+                  "text": 3.57,
+                  "denoise": 10.60069,
+                  "decode": 16.28908
+                },
+                "tiledVae": {
+                  "text": 3.57,
+                  "denoise": 10.40948,
+                  "decode": 8.6
+                },
+                "chunkedAttention": {
+                  "text": 3.44515,
+                  "denoise": 9.7586,
+                  "decode": 8.6
+                },
+                "streamedBlocks": {
+                  "text": 3.57,
+                  "denoise": 3.4444,
+                  "decode": 4.32
+                }
+              },
+              "observedPhasesGb": {
+                "threeStage": {
+                  "text": 3.565,
+                  "denoise": 10.597,
+                  "decode": 16.286
+                },
+                "tiledVae": {
+                  "text": 3.565,
+                  "denoise": 10.409,
+                  "decode": 8.599
+                },
+                "chunkedAttention": {
+                  "text": 3.44,
+                  "denoise": 9.753,
+                  "decode": 8.599
+                },
+                "streamedBlocks": {
+                  "text": 3.565,
+                  "denoise": 3.44,
+                  "decode": 4.317
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 11.747,
-                "tiledVae": 11.747,
-                "chunkedAttention": 11.076,
-                "streamedBlocks": 4.736
+                "threeStage": 16.286,
+                "tiledVae": 10.409,
+                "chunkedAttention": 9.753,
+                "streamedBlocks": 4.317
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
                 "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.213,
-                "fixture": "sc-15117-q4-768-seed42"
+                "maximumError": 0.011188,
+                "fixture": "krea-q4-768-seed42"
               }
             },
             {
@@ -5305,14 +5475,14 @@
               "tier": "q4",
               "width": 1024,
               "height": 1024,
-              "capturedAt": "2026-07-26T21:22:50Z",
-              "harnessVersion": "sc-15117-activity-15189",
-              "sourceStory": "sc-15117",
-              "sourceActivity": 15189,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:41:33Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5320,38 +5490,94 @@
                 "tierRoot": "q4",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 15.55721728,
-                "tiledVae": 15.51763648,
-                "chunkedAttention": 11.45865984,
-                "streamedBlocks": 5.7895808
+                "threeStage": 21.28948,
+                "tiledVae": 13.31797,
+                "chunkedAttention": 10.54306,
+                "streamedBlocks": 4.32
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 4.0, "denoise": 15.51763648, "decode": 15.55721728 },
-                "tiledVae": { "text": 4.0, "denoise": 15.51763648, "decode": 9.84388608 },
-                "chunkedAttention": { "text": 4.0, "denoise": 11.45865984, "decode": 9.81 },
-                "streamedBlocks": { "text": 4.0, "denoise": 4.17206016, "decode": 5.7895808 }
+                "threeStage": {
+                  "text": 3.57,
+                  "denoise": 14.53678,
+                  "decode": 21.28948
+                },
+                "tiledVae": {
+                  "text": 3.57,
+                  "denoise": 13.31797,
+                  "decode": 8.6
+                },
+                "chunkedAttention": {
+                  "text": 3.5736,
+                  "denoise": 10.54306,
+                  "decode": 8.6
+                },
+                "streamedBlocks": {
+                  "text": 3.57,
+                  "denoise": 3.69672,
+                  "decode": 4.32
+                }
+              },
+              "observedPhasesGb": {
+                "threeStage": {
+                  "text": 3.44,
+                  "denoise": 14.533,
+                  "decode": 21.285
+                },
+                "tiledVae": {
+                  "text": 3.098,
+                  "denoise": 13.316,
+                  "decode": 8.1
+                },
+                "chunkedAttention": {
+                  "text": 3.565,
+                  "denoise": 10.534,
+                  "decode": 8.599
+                },
+                "streamedBlocks": {
+                  "text": 3.565,
+                  "denoise": 3.69,
+                  "decode": 3.567
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 15.440,
-                "tiledVae": 15.405,
-                "chunkedAttention": 11.345,
-                "streamedBlocks": 5.676
+                "threeStage": 21.285,
+                "tiledVae": 13.316,
+                "chunkedAttention": 10.534,
+                "streamedBlocks": 3.69
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
                 "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.0528,
-                "fixture": "sc-15117-q4-1024-seed42"
+                "maximumError": 0.01681,
+                "fixture": "krea-q4-1024-seed42"
               }
             },
             {
@@ -5359,14 +5585,14 @@
               "tier": "q8",
               "width": 768,
               "height": 768,
-              "capturedAt": "2026-07-27T03:22:43Z",
-              "harnessVersion": "sc-15205-activity-15272",
-              "sourceStory": "sc-15205",
-              "sourceActivity": 15272,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:50:32Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5374,37 +5600,87 @@
                 "tierRoot": "q8",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 18.46679552,
-                "tiledVae": 18.46679552,
-                "chunkedAttention": 17.72599232,
-                "streamedBlocks": 6.4488064
+                "threeStage": 21.41617,
+                "tiledVae": 15.51164,
+                "chunkedAttention": 14.88366,
+                "streamedBlocks": 5.01
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 6.45, "denoise": 18.46679552, "decode": 16.62 },
-                "tiledVae": { "text": 6.45, "denoise": 18.46679552, "decode": 16.65 },
-                "chunkedAttention": { "text": 6.45, "denoise": 17.72599232, "decode": 16.62 },
-                "streamedBlocks": { "text": 6.4488064, "denoise": 6.3177888, "decode": 4.94 }
+                "threeStage": {
+                  "text": 5.01,
+                  "denoise": 15.69497,
+                  "decode": 21.41617
+                },
+                "tiledVae": {
+                  "text": 5.01,
+                  "denoise": 15.51164,
+                  "decode": 13.70129
+                },
+                "chunkedAttention": {
+                  "text": 5.01,
+                  "denoise": 14.88366,
+                  "decode": 13.66258
+                },
+                "streamedBlocks": {
+                  "text": 5.01,
+                  "denoise": 4.88,
+                  "decode": 4.42
+                }
               },
               "observedPhasesGb": {
-                "threeStage": { "text": 6.345, "denoise": 18.357, "decode": 16.514 },
-                "tiledVae": { "text": 6.345, "denoise": 18.357, "decode": 16.548 },
-                "chunkedAttention": { "text": 6.345, "denoise": 17.619, "decode": 16.514 },
-                "streamedBlocks": { "text": 6.345, "denoise": 6.211, "decode": 4.837 }
+                "threeStage": {
+                  "text": 5.003,
+                  "denoise": 15.69,
+                  "decode": 21.411
+                },
+                "tiledVae": {
+                  "text": 5.003,
+                  "denoise": 15.503,
+                  "decode": 13.692
+                },
+                "chunkedAttention": {
+                  "text": 5.003,
+                  "denoise": 14.878,
+                  "decode": 13.661
+                },
+                "streamedBlocks": {
+                  "text": 5.003,
+                  "denoise": 4.878,
+                  "decode": 4.411
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 18.357,
-                "tiledVae": 18.357,
-                "chunkedAttention": 17.619,
-                "streamedBlocks": 6.345
+                "threeStage": 21.411,
+                "tiledVae": 15.503,
+                "chunkedAttention": 14.878,
+                "streamedBlocks": 5.003
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               }
             },
             {
@@ -5412,14 +5688,14 @@
               "tier": "q8",
               "width": 1024,
               "height": 1024,
-              "capturedAt": "2026-07-27T03:22:43Z",
-              "harnessVersion": "sc-15205-activity-15272",
-              "sourceStory": "sc-15205",
-              "sourceActivity": 15272,
-              "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:49:46Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5427,44 +5703,94 @@
                 "tierRoot": "q8",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 22.12763648,
-                "tiledVae": 22.12763648,
-                "chunkedAttention": 18.26731968,
-                "streamedBlocks": 6.9534336
+                "threeStage": 25.91653,
+                "tiledVae": 19.04404,
+                "chunkedAttention": 15.25983,
+                "streamedBlocks": 5.01
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 6.45, "denoise": 22.12763648, "decode": 16.62 },
-                "tiledVae": { "text": 6.45, "denoise": 22.12763648, "decode": 16.65 },
-                "chunkedAttention": { "text": 6.45, "denoise": 18.26731968, "decode": 16.62 },
-                "streamedBlocks": { "text": 6.9534336, "denoise": 6.8682912, "decode": 4.94 }
+                "threeStage": {
+                  "text": 5.01,
+                  "denoise": 19.16772,
+                  "decode": 25.91653
+                },
+                "tiledVae": {
+                  "text": 5.01,
+                  "denoise": 19.04404,
+                  "decode": 13.7334
+                },
+                "chunkedAttention": {
+                  "text": 5.01,
+                  "denoise": 15.25983,
+                  "decode": 13.7268
+                },
+                "streamedBlocks": {
+                  "text": 5.01,
+                  "denoise": 4.88,
+                  "decode": 4.42
+                }
               },
               "observedPhasesGb": {
-                "threeStage": { "text": 6.345, "denoise": 22.015, "decode": 16.514 },
-                "tiledVae": { "text": 6.345, "denoise": 22.015, "decode": 16.514 },
-                "chunkedAttention": { "text": 6.345, "denoise": 18.156, "decode": 16.512 },
-                "streamedBlocks": { "text": 6.847, "denoise": 6.757, "decode": 4.132 }
+                "threeStage": {
+                  "text": 5.003,
+                  "denoise": 19.159,
+                  "decode": 25.911
+                },
+                "tiledVae": {
+                  "text": 5.003,
+                  "denoise": 19.034,
+                  "decode": 13.724
+                },
+                "chunkedAttention": {
+                  "text": 5.003,
+                  "denoise": 15.253,
+                  "decode": 13.724
+                },
+                "streamedBlocks": {
+                  "text": 5.003,
+                  "denoise": 4.878,
+                  "decode": 3.661
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 22.015,
-                "tiledVae": 22.015,
-                "chunkedAttention": 18.156,
-                "streamedBlocks": 6.847
+                "threeStage": 25.911,
+                "tiledVae": 19.034,
+                "chunkedAttention": 15.253,
+                "streamedBlocks": 5.003
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
                 "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.045161,
-                "fixture": "sc-15205-q8-1024-seed42"
+                "maximumError": 0.016112,
+                "fixture": "krea-q8-1024-seed42"
               }
             },
             {
@@ -5472,14 +5798,14 @@
               "tier": "bf16",
               "width": 768,
               "height": 768,
-              "capturedAt": "2026-07-27T11:24:32Z",
-              "harnessVersion": "sc-15206-activity-15314-waiver-15323",
-              "sourceStory": "sc-15206",
-              "sourceActivity": 15314,
-              "sceneWorksCommit": "1ad286f66d8c3c6c68f81923f992bddc65b9ea7b",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:56:48Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5487,37 +5813,87 @@
                 "tierRoot": "bf16",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 28.4896096,
-                "tiledVae": 28.4896096,
-                "chunkedAttention": 27.65976128,
-                "streamedBlocks": 8.64
+                "threeStage": 32.26078,
+                "tiledVae": 26.4811,
+                "chunkedAttention": 25.66386,
+                "streamedBlocks": 8.1
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 8.8, "denoise": 28.4896096, "decode": 26.51718592 },
-                "tiledVae": { "text": 8.8, "denoise": 28.4896096, "decode": 26.55 },
-                "chunkedAttention": { "text": 8.63, "denoise": 27.65976128, "decode": 26.52 },
-                "streamedBlocks": { "text": 8.64, "denoise": 8.64, "decode": 2.22872448 }
+                "threeStage": {
+                  "text": 7.94129,
+                  "denoise": 26.57239,
+                  "decode": 32.26078
+                },
+                "tiledVae": {
+                  "text": 8.1,
+                  "denoise": 26.4811,
+                  "decode": 24.60129
+                },
+                "chunkedAttention": {
+                  "text": 8.1,
+                  "denoise": 25.66386,
+                  "decode": 24.6
+                },
+                "streamedBlocks": {
+                  "text": 8.1,
+                  "denoise": 7.94752,
+                  "decode": 4.48
+                }
               },
               "observedPhasesGb": {
-                "threeStage": { "text": 8.694, "denoise": 28.390, "decode": 26.413 },
-                "tiledVae": { "text": 8.694, "denoise": 28.390, "decode": 26.446 },
-                "chunkedAttention": { "text": 8.527, "denoise": 27.552, "decode": 26.414 },
-                "streamedBlocks": { "text": 8.535, "denoise": 8.533, "decode": 2.130 }
+                "threeStage": {
+                  "text": 7.94,
+                  "denoise": 26.565,
+                  "decode": 32.255
+                },
+                "tiledVae": {
+                  "text": 8.097,
+                  "denoise": 26.472,
+                  "decode": 24.599
+                },
+                "chunkedAttention": {
+                  "text": 8.097,
+                  "denoise": 25.659,
+                  "decode": 24.599
+                },
+                "streamedBlocks": {
+                  "text": 8.097,
+                  "denoise": 7.94,
+                  "decode": 4.474
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 28.390,
-                "tiledVae": 28.390,
-                "chunkedAttention": 27.552,
-                "streamedBlocks": 8.535
+                "threeStage": 32.255,
+                "tiledVae": 26.472,
+                "chunkedAttention": 25.659,
+                "streamedBlocks": 8.097
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               }
             },
             {
@@ -5525,14 +5901,14 @@
               "tier": "bf16",
               "width": 1024,
               "height": 1024,
-              "capturedAt": "2026-07-27T11:24:32Z",
-              "harnessVersion": "sc-15206-activity-15314-waiver-15323",
-              "sourceStory": "sc-15206",
-              "sourceActivity": 15314,
-              "sceneWorksCommit": "1ad286f66d8c3c6c68f81923f992bddc65b9ea7b",
-              "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
+              "capturedAt": "2026-08-04T15:55:42Z",
+              "harnessVersion": "sceneworks-memory-v5",
+              "sourceStory": "sc-17097",
+              "sourceActivity": 17466,
+              "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
+              "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82",
+              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5540,44 +5916,94 @@
                 "tierRoot": "bf16",
                 "route": "krea_2_turbo",
                 "backend": "candle",
-                "computeCapability": 12.0
+                "computeCapability": 12
               },
               "predictedPeaksGb": {
-                "threeStage": 32.1137504,
-                "tiledVae": 32.1137504,
-                "chunkedAttention": 27.76068672,
-                "streamedBlocks": 8.64
+                "threeStage": 36.73362,
+                "tiledVae": 29.85752,
+                "chunkedAttention": 25.7602,
+                "streamedBlocks": 8.42003
               },
               "predictedPhasesGb": {
-                "threeStage": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55388608 },
-                "tiledVae": { "text": 8.8, "denoise": 32.1137504, "decode": 26.55 },
-                "chunkedAttention": { "text": 8.63, "denoise": 27.76068672, "decode": 26.52 },
-                "streamedBlocks": { "text": 8.64, "denoise": 8.64, "decode": 3.72884352 }
+                "threeStage": {
+                  "text": 7.9734,
+                  "denoise": 29.98092,
+                  "decode": 36.73362
+                },
+                "tiledVae": {
+                  "text": 8.1,
+                  "denoise": 29.85752,
+                  "decode": 24.6334
+                },
+                "chunkedAttention": {
+                  "text": 8.1,
+                  "denoise": 25.7602,
+                  "decode": 24.6
+                },
+                "streamedBlocks": {
+                  "text": 8.1,
+                  "denoise": 8.42003,
+                  "decode": 4.48
+                }
               },
               "observedPhasesGb": {
-                "threeStage": { "text": 8.694, "denoise": 32.014, "decode": 26.446 },
-                "tiledVae": { "text": 8.560, "denoise": 32.014, "decode": 26.446 },
-                "chunkedAttention": { "text": 8.526, "denoise": 27.652, "decode": 26.413 },
-                "streamedBlocks": { "text": 8.526, "denoise": 8.526, "decode": 3.629 }
+                "threeStage": {
+                  "text": 7.972,
+                  "denoise": 29.972,
+                  "decode": 36.724
+                },
+                "tiledVae": {
+                  "text": 8.097,
+                  "denoise": 29.847,
+                  "decode": 24.63
+                },
+                "chunkedAttention": {
+                  "text": 8.097,
+                  "denoise": 25.753,
+                  "decode": 24.599
+                },
+                "streamedBlocks": {
+                  "text": 7.94,
+                  "denoise": 8.408,
+                  "decode": 3.848
+                }
               },
               "observedPeaksGb": {
-                "threeStage": 32.014,
-                "tiledVae": 32.014,
-                "chunkedAttention": 27.652,
-                "streamedBlocks": 8.526
+                "threeStage": 36.724,
+                "tiledVae": 29.847,
+                "chunkedAttention": 25.753,
+                "streamedBlocks": 8.408
               },
               "measuredCompositions": {
-                "threeStage": ["resident", "staged_residency"],
-                "tiledVae": ["resident", "staged_residency", "bounded_decode"],
-                "chunkedAttention": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-                "streamedBlocks": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]
+                "threeStage": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "tiledVae": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "chunkedAttention": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "streamedBlocks": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
               },
               "parity": {
                 "contract": "golden",
                 "result": "passed",
                 "metric": "mean_absolute_rgb_delta_255",
-                "maximumError": 0.046175,
-                "fixture": "sc-15206-bf16-1024-seed42"
+                "maximumError": 0.016239,
+                "fixture": "krea-bf16-1024-seed42"
               }
             }
           ],
@@ -5619,68 +6045,176 @@
           "phaseCurvesByTier": {
             "q4": {
               "threeStage": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 7.15, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 5.04, "perMpxGb": 10.03 }
+                "text": {
+                  "fixedGb": 3.57,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 5.54,
+                  "perMpxGb": 8.58
+                },
+                "decode": {
+                  "fixedGb": 9.86,
+                  "perMpxGb": 10.9
+                }
               },
               "tiledVae": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 7.15, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 9.76, "perMpxGb": 0.08 }
+                "text": {
+                  "fixedGb": 3.57,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 6.67,
+                  "perMpxGb": 6.34
+                },
+                "decode": {
+                  "fixedGb": 8.6,
+                  "perMpxGb": 0
+                }
               },
               "chunkedAttention": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 10.84, "perMpxGb": 0.59 },
-                "decode": { "fixedGb": 9.81, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 3.28,
+                  "perMpxGb": 0.28
+                },
+                "denoise": {
+                  "fixedGb": 8.75,
+                  "perMpxGb": 1.71
+                },
+                "decode": {
+                  "fixedGb": 8.6,
+                  "perMpxGb": 0
+                }
               },
               "streamedBlocks": {
-                "text": { "fixedGb": 4.00, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 3.48, "perMpxGb": 0.66 },
-                "decode": { "fixedGb": 3.64, "perMpxGb": 2.05 }
+                "text": {
+                  "fixedGb": 3.57,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 3.12,
+                  "perMpxGb": 0.55
+                },
+                "decode": {
+                  "fixedGb": 4.32,
+                  "perMpxGb": 0
+                }
               }
             },
             "q8": {
               "threeStage": {
-                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 13.76, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 16.62, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 11.23,
+                  "perMpxGb": 7.57
+                },
+                "decode": {
+                  "fixedGb": 15.63,
+                  "perMpxGb": 9.81
+                }
               },
               "tiledVae": {
-                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 13.76, "perMpxGb": 7.98 },
-                "decode": { "fixedGb": 16.65, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 10.97,
+                  "perMpxGb": 7.7
+                },
+                "decode": {
+                  "fixedGb": 13.66,
+                  "perMpxGb": 0.07
+                }
               },
               "chunkedAttention": {
-                "text": { "fixedGb": 6.45, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 17.03, "perMpxGb": 1.18 },
-                "decode": { "fixedGb": 16.62, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 14.4,
+                  "perMpxGb": 0.82
+                },
+                "decode": {
+                  "fixedGb": 13.58,
+                  "perMpxGb": 0.14
+                }
               },
               "streamedBlocks": {
-                "text": { "fixedGb": 5.80, "perMpxGb": 1.10 },
-                "denoise": { "fixedGb": 5.61, "perMpxGb": 1.20 },
-                "decode": { "fixedGb": 4.94, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 5.01,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 4.88,
+                  "perMpxGb": 0
+                },
+                "decode": {
+                  "fixedGb": 4.42,
+                  "perMpxGb": 0
+                }
               }
             },
             "bf16": {
               "threeStage": {
-                "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 23.83, "perMpxGb": 7.90 },
-                "decode": { "fixedGb": 26.47, "perMpxGb": 0.08 }
+                "text": {
+                  "fixedGb": 7.9,
+                  "perMpxGb": 0.07
+                },
+                "denoise": {
+                  "fixedGb": 22.19,
+                  "perMpxGb": 7.43
+                },
+                "decode": {
+                  "fixedGb": 26.51,
+                  "perMpxGb": 9.75
+                }
               },
               "tiledVae": {
-                "text": { "fixedGb": 8.80, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 23.83, "perMpxGb": 7.90 },
-                "decode": { "fixedGb": 26.55, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 8.1,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 22.14,
+                  "perMpxGb": 7.36
+                },
+                "decode": {
+                  "fixedGb": 24.56,
+                  "perMpxGb": 0.07
+                }
               },
               "chunkedAttention": {
-                "text": { "fixedGb": 8.63, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 27.53, "perMpxGb": 0.22 },
-                "decode": { "fixedGb": 26.52, "perMpxGb": 0.00 }
+                "text": {
+                  "fixedGb": 8.1,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 25.54,
+                  "perMpxGb": 0.21
+                },
+                "decode": {
+                  "fixedGb": 24.6,
+                  "perMpxGb": 0
+                }
               },
               "streamedBlocks": {
-                "text": { "fixedGb": 8.64, "perMpxGb": 0.00 },
-                "denoise": { "fixedGb": 8.64, "perMpxGb": 0.00 },
-                "decode": { "fixedGb": 0.30, "perMpxGb": 3.27 }
+                "text": {
+                  "fixedGb": 8.1,
+                  "perMpxGb": 0
+                },
+                "denoise": {
+                  "fixedGb": 7.34,
+                  "perMpxGb": 1.03
+                },
+                "decode": {
+                  "fixedGb": 4.48,
+                  "perMpxGb": 0
+                }
               }
             }
           }
@@ -6132,6 +6666,26 @@
       // TE alone overflows them); even q4 needs ~24 GB sequential, so off-Mac klein is a big-card/offload
       // family. minMemoryGb 25 ≈ the q4 sequential floor; the dynamic fit-gate drives the per-card decision.
       "candle": {
+        // SC-15831: the provider-owned implementation is shared by the base, KV, and True V2
+        // catalog entries because all three resolve to the same Candle engine. Evidence remains
+        // entry-specific: only an exact artifact/tier/mode calibration may activate a candidate.
+        // Klein's 1024/1 decode tuple is intentionally full-edge: smaller tile domains fail the
+        // provider's real-weight RGB parity contract because the VAE tail contains spatial GroupNorm.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
         "minMemoryGb": 25,
         "vramGbByTier": { "q4": 46.2, "q8": 50.6, "bf16": 75.5 },
         "vramMeasuredPixels": 1048576,
@@ -6275,6 +6829,25 @@
         // see the base 9B entry above and `config/tier-integrity.jsonc` for the exception row.
         "denseTextEncoderTier": true
       },
+      "candle": {
+        // SC-15831 shared provider implementation. SC-17485 owns KV-specific artifact and
+        // calibration proof; without those exact records the selector fails closed.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        }
+      },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-kv-mlx/blob/main/LICENSE.md",
       "ui": {
@@ -6385,6 +6958,25 @@
         "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors",
         "convertBaseRepo": "SceneWorks/flux2-klein-9b-mlx",
         "convertBaseSubdir": "bf16"
+      },
+      "candle": {
+        // SC-15831 shared provider implementation. SC-17486 owns True V2-specific artifact and
+        // calibration proof; without those exact records the selector fails closed.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_decode": {
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
+            "overlays": ["none"]
+          },
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        }
       },
       "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md",
       "ui": {
@@ -6559,9 +7151,12 @@
         // SC-15833: exact Q4 base-only CUDA memory-ladder evidence. Edit and strict ControlNet
         // loadability are captured separately, but only the text-to-image/none coordinates below
         // are admitted as runtime-complete memory evidence. The captures remain truthfully pinned
-        // to 5ffd; `docs/calibration/sc-15833/inference-compatibility-277f.json` proves the exact
-        // Candle FLUX.2 dependency closure is tree-identical at 277f, so only that later pin is
-        // admitted as compatible. The MLX FLUX.2 changes in between are outside this CUDA closure.
+        // to 5ffd; `docs/calibration/sc-15833/inference-compatibility-a4f4.json` proves the Candle
+        // FLUX.2 closure still describes the same compiled code at a4f409ae, so only that later pin
+        // is admitted as compatible. sc-17524: two closure paths DID move across that window
+        // (`Cargo.lock` and `candle-gen`) and the audited `candle-gen-flux2` lib test binary is
+        // byte-identical at both ends, so the proof is a measured digest rather than tree identity.
+        // The MLX FLUX.2 changes in between are outside this CUDA closure.
         "calibrations": [
           {
             "abi": 3, "loadShape": "deferred_materialization",
@@ -6569,7 +7164,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -6583,7 +7178,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -6597,7 +7192,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -6611,7 +7206,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -6626,7 +7221,7 @@
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
             "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "277f423822bf1899340ed3d867c3d6a773473d7b",
+            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",

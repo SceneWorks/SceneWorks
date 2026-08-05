@@ -1571,13 +1571,11 @@ mod tests {
     /// is refused — a torn artifact must not register as a model that then fails at load.
     #[test]
     fn is_mage_flow_transformer_dir_requires_both_the_config_and_the_weights() {
-        let root = std::env::temp_dir().join(format!(
-            "mage-dir-probe-{}-{:?}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-        ));
+        // Guarded rather than hand-cleaned: the trailing `remove_dir_all` this replaces was
+        // skipped whenever an assertion below panicked, which is exactly when the leftovers
+        // pile up (sc-17641).
+        let root_guard = tempfile::tempdir().expect("temp dir for the probe fixtures");
+        let root = root_guard.path();
         let case = |name: &str, files: &[&str]| {
             let dir = root.join(name);
             fs::create_dir_all(&dir).unwrap();
@@ -1610,8 +1608,6 @@ mod tests {
         );
         assert!(!is_mage_flow_transformer_dir(&case("empty", &[])));
         assert!(!is_mage_flow_transformer_dir(&root.join("absent")));
-
-        fs::remove_dir_all(root).ok();
     }
 
     #[test]

@@ -158,6 +158,40 @@ mod tests {
         assert_eq!(supports_preview("flux2_dev", "candle"), Some(true));
     }
 
+    // sc-17593. The audio registry is a SEPARATE `ProviderRegistry` that nothing dumped until that
+    // story, so every audio route answered `None` — unknown — on every platform, which the card
+    // renders identically to "wired and does not preview". These are the ids the audio jobs route
+    // on (`audio_jobs.rs` hands the payload's `model` straight to `inference_runtime::load_audio`,
+    // which is why the audio join needs no MODEL_TABLE row).
+    #[test]
+    fn answers_for_audio_routes_instead_of_leaving_them_unknown() {
+        for model in [
+            "kokoro_82m",
+            "chatterbox_tts",
+            "acestep_v15_turbo",
+            "moss_sfx_v2",
+            "moss_tts_realtime",
+            "moss_ttsd_v05",
+            // Both MMAudio routes are typed `"utility"` in builtin.models.jsonc but are ordinary
+            // audio Generators in the registry, so they get a real answer like any other. Named
+            // here because the manifest `type` is NOT what decides: the audio join is the identity
+            // over the registry, so a served entry answers whatever its type field says.
+            "mmaudio_small_16k",
+            "mmaudio_large_44k",
+        ] {
+            assert_eq!(
+                supports_preview(model, "candle"),
+                Some(false),
+                "{model} must answer Some(false) — no audio generator emits PreviewSink frames at \
+                 the current pin, and `None` here would be the pre-sc-17593 hole rather than a fact"
+            );
+        }
+        // Only GENERATORS carry `Capabilities`, so the audio lane's transform/embedder providers
+        // have no `supports_preview` to dump and must stay unknown rather than be given a false.
+        assert_eq!(supports_preview("openvoice_v2", "candle"), None);
+        assert_eq!(supports_preview("chatterbox_ve", "candle"), None);
+    }
+
     // The distinction the whole story exists for: a wired route that does NOT preview answers
     // `Some(false)`, and an unknown backend/model answers `None`. Collapsing either into the other
     // reintroduces the bug.

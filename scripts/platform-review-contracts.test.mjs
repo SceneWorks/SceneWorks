@@ -1,9 +1,38 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
+}
+
+// GitHub filter-pattern syntax: `*` matches any run of characters except `/`, `**` matches any
+// run including `/`. `**/` is treated as "zero or more directories", matching the convention
+// GitHub's own `**/README.md` example implies. That reading is also the SAFE one for every guard
+// below: it makes `config/engine-capabilities/**/*` count as matching a file directly in that
+// directory, so an ambiguous pattern is rejected rather than quietly permitted. Nobody needs to
+// spell it that way.
+function matches(glob, target) {
+  let pattern = "";
+  for (let i = 0; i < glob.length; i += 1) {
+    const char = glob[i];
+    if (char === "*") {
+      if (glob[i + 1] === "*") {
+        if (glob[i + 2] === "/") {
+          pattern += "(?:.*/)?";
+          i += 2;
+        } else {
+          pattern += ".*";
+          i += 1;
+        }
+      } else {
+        pattern += "[^/]*";
+      }
+    } else {
+      pattern += "\\^$+?.()|[]{}".includes(char) ? `\\${char}` : char;
+    }
+  }
+  return new RegExp(`^${pattern}$`).test(target);
 }
 
 test("Windows workflows watch the local Rust runner action", async () => {
@@ -28,6 +57,50 @@ test("Windows runner prep falls back when its optional rustc wrapper is missing"
     action,
     /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/,
   );
+});
+
+test("Windows runner prep resolves rustup outside the job's CARGO_HOME", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  // rustup lives in the profile that installed it. The runner services pin CARGO_HOME
+  // to a per-runner dependency cache (D:\cargo-home-N) that has no bin\ at all, and
+  // windows-candle.yml repoints it again at $RUNNER_TEMP\cargo-home — so deriving
+  // rustup.exe from CARGO_HOME alone finds nothing and skips the authoritative
+  // `rustup which cargo` resolution on every run (sc-13166).
+  assert.match(action, /\$userCargoBin = Join-Path \(Join-Path \$env:USERPROFILE '\.cargo'\) 'bin'/);
+  assert.match(action, /Get-Command rustup\.exe -CommandType Application/);
+  assert.match(action, /\$cargoPath = \(& \$rustupExe which cargo \| Out-String\)\.Trim\(\)/);
+  assert.doesNotMatch(action, /\$rustupExe = Join-Path \$cargoHome/);
+});
+
+test("Windows runner prep only warns about a genuinely dangling .cargo\\bin", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  // A 0-byte reparse point is rustup's NORMAL Windows proxy shape and dispatches fine;
+  // the only state worth reporting is rustup.exe itself being gone. The old check
+  // warned on both the healthy shape and on a bin-less CARGO_HOME ("rustup was
+  // deleted"), so it fired on 100% of runs and became invisible (sc-13166).
+  // Scoped to the emitted ::warning lines — the header comment still narrates the old
+  // wording as history, and that prose must not trip this guard.
+  assert.doesNotMatch(action, /::warning[^\n]*rustup was deleted/);
+  assert.doesNotMatch(action, /::warning[^\n]*byte reparse point/);
+  assert.match(action, /\$profileRustup = Join-Path \$userCargoBin 'rustup\.exe'/);
+  assert.match(action, /if \(-not \$rustupIntact\)/);
+  // Still non-fatal: the lane is immune via the PATH prepend.
+  assert.match(action, /::warning title=Dangling \.cargo\\bin proxies on candle runner::/);
+});
+
+test("Windows runner prep emits only ASCII inside its PowerShell strings", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  // The step body is handed to powershell.exe as a file. If it is ever decoded as
+  // CP1252 rather than UTF-8, an em dash (E2 80 94) becomes "â€" + U+201D, and
+  // PowerShell honors U+201D as a STRING DELIMITER — the whole step dies on a parse
+  // error before it can resolve a toolchain. Comments tolerate the mangling (the rest
+  // of the line is ignored); quoted strings do not. So: non-ASCII stays in comments.
+  const offenders = [];
+  for (const [i, line] of action.split("\n").entries()) {
+    if (/^\s*#/.test(line)) continue; // YAML/PowerShell comment lines are safe
+    if (!/^[\x09\x20-\x7e]*$/.test(line)) offenders.push(`${i + 1}: ${line.trim()}`);
+  }
+  assert.deepEqual(offenders, []);
 });
 
 test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery", async () => {
@@ -472,10 +545,25 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // other crates a Mac ships were dark. Both halves are pinned here.
   const mlx = await source(".github/workflows/macos-mlx.yml");
   assert.match(mlx, /^\s+run: cargo clippy --all-targets -- -D warnings$/m);
-  // `npm run rust:check` runs a bare `cargo test` too, so the lane must not narrow
-  // either half back to the single crate.
-  assert.match(mlx, /^\s+run: cargo test$/m);
-  assert.doesNotMatch(mlx, /cargo test -p sceneworks-worker/);
+  // The lane is now split by HARDWARE, not by cost: `macos-checks` (hosted macos-26)
+  // carries the build, both clippy steps and the workspace suite, while `nax-worker`
+  // (self-hosted, M5) carries only the matrix-unit guard. Pin BOTH halves against each
+  // other — a skip on one side is only safe while the other side actually runs the
+  // skipped test, and nothing else in the fleet would notice if it stopped.
+  //
+  // `npm run rust:check` runs a bare `cargo test` (the whole default-member set), so the
+  // hosted half must stay workspace-wide. Narrowing it back to `-p sceneworks-worker`
+  // would re-dark macOS-conditional code in sceneworks-core / rust-api / image-quality,
+  // which is precisely what sc-17026 fixed.
+  const NAX_TEST = "nax_16bit_sdpa_is_correct";
+  assert.match(mlx, new RegExp(`^\\s+run: cargo test -- --skip ${NAX_TEST}$`, "m"));
+  // The one exemption is the targeted guard invocation below; a bare narrowing of the
+  // suite to the single crate is still forbidden.
+  assert.doesNotMatch(mlx, /run: cargo test -p sceneworks-worker\s*$/m);
+  // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
+  // self-hosted half would drop the entire NAX verdict while every lane stayed green —
+  // the same declared-but-unreachable trap as sc-17026, one job over.
+  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard$/m);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
   // outside the worker and is NOT under `crates/**`, so without this path entry the
@@ -486,7 +574,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf("run: cargo test\n");
+  const testAt = mlx.indexOf(`run: cargo test -- --skip ${NAX_TEST}`);
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
@@ -553,4 +641,382 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard > 0, "macos-mlx.yml must clippy the MLX memory adapter");
   assert.ok(firstDispatchOnly > 0, "macos-mlx.yml must still have dispatch-only calibration steps");
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
+});
+
+test("both stage-1 lanes verify their own capability dump, LAST and reachably", async () => {
+  // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
+  // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
+  // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
+  // contents. All of that is satisfied by a RESTAMP — rewriting the revision line over a stale
+  // engine list — which is how both files were actually produced through two consecutive pin bumps.
+  // Only a lane that LINKS the engine can tell the difference, and there is exactly one such PR lane
+  // per backend.
+  const lanes = [
+    [".github/workflows/macos-mlx.yml", "capabilities.mlx.json"],
+    [".github/workflows/windows-candle.yml", "capabilities.candle.json"],
+  ];
+  for (const [path, file] of lanes) {
+    const lane = await source(path);
+    const verifyAt = lane.indexOf(`- name: Verify ${file} is a real dump, not a restamp`);
+    assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
+    // Re-dump to a SCRATCH dir and compare. Dumping over the checked-in file would make the
+    // comparison vacuous and mutate the tree on a red run.
+    assert.match(lane, /bin dump-engine-capabilities/, path);
+
+    // LAST on the PR path. A step failure aborts the job, and this one goes red on exactly the
+    // routine pin-bump PRs where nobody re-dumped — so placed earlier it would cancel the coverage
+    // each lane uniquely carries (macOS: `nax_guard`; Windows: the only PR run of
+    // `cargo test -p sceneworks-worker --features backend-candle`). A missing dump must not suppress
+    // unrelated verdicts.
+    //
+    // "Last" means last among steps that RUN on a pull request, not last in the file: macos-mlx.yml
+    // keeps a long `workflow_dispatch`-only calibration tail after it, which is skipped on every PR
+    // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
+    // the point — nothing else would notice an unconditional step being appended later.
+    for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+      assert.match(
+        block,
+        /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
+        `${path}: "${block.split("\n")[0]}" runs after the dump-verification step on the PR path. ` +
+          "That step must stay last for everything a PR executes, so its failure cannot cancel " +
+          "coverage this lane is the only place to have. Move it above the verification step.",
+      );
+    }
+
+    // Reachability. A restamp touches ONLY the facts file, so without this path entry the lane does
+    // not run at all on the one PR the step exists to catch — declared but unreachable, the same
+    // trap sc-17026 was about.
+    //
+    // Pinned to THIS lane's own file, not `config/engine-capabilities/**` (sc-17665). The directory
+    // glob satisfied reachability too, but it also woke each lane for the OTHER backend's dump — a
+    // whole self-hosted job, on the fleet's most constrained resource, for a file the woken lane
+    // never opens.
+    //
+    // Asserted by MATCHING the declared globs against both filenames, not by forbidding particular
+    // spellings. A spelling blocklist only catches a straight revert: keeping the narrow entry and
+    // *adding* `config/engine-capabilities/*.json`, `config/engine-capabilities/**/*` or `config/**`
+    // restores the cross-wake in full, and every one of those passes a `**`/`*` blocklist. Matching
+    // is spelling-independent and closes all of them at once.
+    const anchorAt = lane.indexOf("paths: &");
+    assert.ok(anchorAt > 0, `${path} must declare a paths anchor`);
+    const declared = [
+      ...lane
+        .slice(anchorAt, lane.indexOf("pull_request:"))
+        .matchAll(/^ {6}- "([^"]+)"$/gm),
+    ].map((match) => match[1]);
+    // Every file this lane's verify step actually DIFFS must be watched. Read out of the step body
+    // rather than listed here, because the failure this closes was a step growing a new file while
+    // the filter stayed as it was — a hardcoded list would have been updated by the same edit that
+    // grew the step, or not at all, so it could not have caught it.
+    //
+    // sc-17593 added an audio diff to BOTH lanes' steps; sc-17665 had just narrowed both filters
+    // from `config/engine-capabilities/**` to a single filename. Each is right on its own. Together
+    // they left the audio verification declared but unreachable, which `97a7655a9` — an audio-only
+    // re-dump — demonstrated by waking neither stage-1 lane.
+    const diffed = new Set(
+      [
+        ...lane
+          .slice(verifyAt)
+          .split("\n      - name:")[0]
+          .matchAll(/config[/\\]engine-capabilities[/\\][\w./\\-]*\.json/g),
+      ].map((match) => match[0].replaceAll("\\", "/")),
+    );
+    assert.ok(
+      diffed.size >= 2,
+      `${path}: expected the verify step to diff at least ${file} and the audio dump, found ` +
+        `${JSON.stringify([...diffed])}`,
+    );
+    for (const target of diffed) {
+      assert.ok(
+        declared.some((glob) => matches(glob, target)),
+        `${path}'s verify step diffs ${target}, but no declared path matches it — so an edit to ` +
+          "that file alone never triggers the lane, and the check is declared but unreachable. " +
+          "Add it to the paths anchor.",
+      );
+    }
+
+    const own = `config/engine-capabilities/${file}`;
+    assert.ok(
+      declared.some((glob) => matches(glob, own)),
+      `${path} must watch ${own}, or a restamp of it — which touches nothing else — never ` +
+        "triggers the lane and the verification step is declared but unreachable.",
+    );
+    for (const [, otherFile] of lanes) {
+      if (otherFile === file) continue;
+      const foreign = `config/engine-capabilities/${otherFile}`;
+      const culprits = declared.filter((glob) => matches(glob, foreign));
+      assert.deepEqual(
+        culprits,
+        [],
+        `${path} triggers on ${foreign} via ${JSON.stringify(culprits)}, but has no step that ` +
+          "reads it. That wakes an entire self-hosted job — the fleet's most constrained " +
+          "resource — for a file this lane cannot check. Narrow the pattern to this lane's own dump.",
+      );
+    }
+  }
+});
+
+test("every workspace path a self-hosted lane watches maps to a package that lane builds", async () => {
+  // sc-17703, generalising sc-17665's lesson to the whole trigger surface. `apps/rust-worker/**`
+  // sat in windows-candle.yml's paths while no cargo invocation in that job built the package
+  // living there (`sceneworks-rust-worker` — a 4-line binary wrapper nothing depends on), so a
+  // wrapper edit woke the fleet's single cuda box for zero coverage. Pin the PROPERTY, not the
+  // spelling (epic 17702 rule 6): every `crates/`- or `apps/`-shaped `paths:` entry on a
+  // self-hosted lane may only wake the lane for workspace members that lane's own cargo
+  // invocations build, directly or through the local dependency graph; every other entry must be
+  // declared in the reasons-required allow-list below.
+  //
+  // Derived from the artifacts, not restated: the built set is parsed from each workflow's
+  // `cargo ... -p <pkg>` lines (a package-less `cargo test`/`clippy`/`check`/`build` acts on the
+  // whole default-member set, which is what macos-mlx.yml's hosted macos-checks job runs), and
+  // the closure comes from the `path = "..."` edges in the members' Cargo.toml files. So
+  // re-adding the rust-worker entry to the candle lane, watching a member no invocation reaches,
+  // or narrowing a lane's build out from under an entry it still watches all go red with no test
+  // edit.
+  const rootManifest = await source("Cargo.toml");
+  const listOf = (key) => {
+    // Anchored to line start: a bare indexOf("members = [") would land inside
+    // "default-members = [" if the root manifest's blocks were ever reordered.
+    const start = rootManifest.search(new RegExp(`^${key} = \\[`, "m"));
+    assert.ok(start >= 0, `root Cargo.toml must declare ${key}`);
+    const block = rootManifest.slice(start, rootManifest.indexOf("]", start));
+    return [...block.matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+  };
+  const memberDirs = listOf("members");
+  const defaultMemberDirs = listOf("default-members");
+
+  const normalize = (base, rel) => {
+    const parts = base.split("/");
+    for (const seg of rel.split("/")) {
+      if (seg === "..") parts.pop();
+      else if (seg !== "." && seg !== "") parts.push(seg);
+    }
+    return parts.join("/");
+  };
+  const dirOf = new Map();
+  const manifests = new Map();
+  for (const dir of memberDirs) {
+    const manifest = await source(`${dir}/Cargo.toml`);
+    const name = manifest.match(/^name = "([^"]+)"$/m);
+    assert.ok(name, `${dir}/Cargo.toml must name its package`);
+    dirOf.set(name[1], dir);
+    manifests.set(dir, manifest);
+  }
+  const dependsOn = new Map();
+  for (const [dir, manifest] of manifests) {
+    // `path = "..."` also appears under [[bin]] targets (e.g. sceneworks-memory-adapter's
+    // src/bin/mlx.rs); resolving against the member set filters those out — only an edge that
+    // lands on another workspace member is a dependency.
+    const edges = [...manifest.matchAll(/path\s*=\s*"([^"]+)"/g)]
+      .map((edge) => normalize(dir, edge[1]))
+      .filter((target) => manifests.has(target));
+    dependsOn.set(dir, edges);
+  }
+  const closure = (seedDirs) => {
+    const reached = new Set();
+    const queue = [...seedDirs];
+    while (queue.length > 0) {
+      const dir = queue.pop();
+      if (reached.has(dir)) continue;
+      reached.add(dir);
+      queue.push(...dependsOn.get(dir));
+    }
+    return reached;
+  };
+
+  const lanes = [
+    {
+      path: ".github/workflows/windows-candle.yml",
+      // Every non-cargo entry needs its reason recorded HERE, or the test fails. Watching a path
+      // no step reads costs a whole self-hosted job (epic 17702 rule 1), and "symmetry with the
+      // sibling lane" is never the reason (rule 2; sc-17592 is the scar).
+      allowed: [
+        "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
+        "config/engine-capabilities/capabilities.candle.json", // the restamp-verify step diffs it
+        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
+        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
+        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
+        // and not symmetry for its own sake.
+        "config/engine-capabilities/audio/capabilities.candle.json",
+        "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
+        "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
+        "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
+        ".cargo/config.toml", // git-fetch-with-cli, without which the token-injected inference fetch breaks
+        ".github/actions/prepare-rust-runner/**", // the job's own first step
+        ".github/workflows/windows-candle.yml", // the lane itself
+      ],
+    },
+    {
+      path: ".github/workflows/macos-mlx.yml",
+      allowed: [
+        "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
+        "config/engine-capabilities/capabilities.mlx.json", // the restamp-verify step diffs it
+        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
+        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
+        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
+        // and not symmetry for its own sake.
+        "config/engine-capabilities/audio/capabilities.candle.json",
+        "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
+        "Cargo.lock", // dependency pins, incl. the MLX revision the whole lane compiles
+        "rust-toolchain.toml", // governs the toolchain cargo resolves under the dtolnay install
+        ".cargo/config.toml", // the MACOSX_DEPLOYMENT_TARGET=26.2 pin every build here compiles under
+        ".github/workflows/macos-mlx.yml", // the lane itself
+      ],
+    },
+  ];
+  for (const { path, allowed } of lanes) {
+    const lane = await source(path);
+    // Only steps a pull_request actually executes may justify a PR path entry. A
+    // dispatch-only calibration build that reaches a member is not PR coverage of it, so
+    // drop every step block gated on workflow_dispatch before scanning (same step-splitting
+    // idiom as the capability-dump ordering check above).
+    const prSteps = lane
+      .split(/\n {6}- (?=name: |uses: )/)
+      .filter(
+        (block) => !/if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/.test(block),
+      )
+      .join("\n");
+    // Strip comment lines, then re-join backslash line continuations so a `-p <pkg>` split
+    // across lines cannot degrade into a "package-less" invocation (which the rule below
+    // would over-widen into the whole default-member set).
+    const executable = prSteps
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n")
+      .replace(/\\\n\s*/g, " ");
+    // LINE-INITIAL commands only. An `echo`ed fix-it message that merely QUOTES a
+    // package-less `cargo test` must not count as a workspace-wide build — counting it
+    // would quietly widen `covered` to every default member and defuse this whole guard.
+    const invocations = [
+      ...executable.matchAll(/^\s*(?:run: )?cargo +(?:test|check|clippy|build|run)\b[^\n]*/gm),
+    ];
+    assert.ok(invocations.length > 0, `${path} must contain cargo invocations to audit against`);
+    const built = new Set();
+    for (const [invocation] of invocations) {
+      const packages = [...invocation.matchAll(/(?:-p|--package)[ =]([A-Za-z0-9_-]+)/g)];
+      if (packages.length === 0) {
+        // A package-less build/test/lint acts on the whole default-member set — that is
+        // exactly macos-mlx.yml's hosted workspace-wide `cargo test` / `cargo clippy`.
+        for (const dir of defaultMemberDirs) built.add(dir);
+      } else {
+        for (const [, pkg] of packages) {
+          const dir = dirOf.get(pkg);
+          assert.ok(dir, `${path} invokes cargo on ${pkg}, which is not a workspace member`);
+          built.add(dir);
+        }
+      }
+    }
+    const covered = closure(built);
+
+    const anchorAt = lane.indexOf("paths: &");
+    assert.ok(anchorAt > 0, `${path} must declare a paths anchor`);
+    const anchorBlock = lane.slice(anchorAt, lane.indexOf("pull_request:"));
+    const declared = [...anchorBlock.matchAll(/^ {6}- "([^"]+)"$/gm)].map((entry) => entry[1]);
+    assert.ok(declared.length > 0, `${path} must declare path filters`);
+    // Completeness: an unquoted entry (`- apps/x/**`) or a trailing inline comment would
+    // fail the parse above and slip past this audit entirely. Every list item must be a
+    // bare quoted string, or the "EVERY paths entry" contract is fiction.
+    const entryLines = anchorBlock.split("\n").filter((line) => /^ {6}- /.test(line));
+    assert.equal(
+      declared.length,
+      entryLines.length,
+      `${path}: every paths entry must be a bare double-quoted string so this audit can ` +
+        "parse it; rewrite the unmatched entries.",
+    );
+
+    for (const glob of declared) {
+      if (!/^(?:crates|apps)\//.test(glob)) {
+        assert.ok(
+          allowed.includes(glob),
+          `${path} watches ${JSON.stringify(glob)}, which is neither a workspace path this job ` +
+            "builds nor a declared non-cargo entry. If a step really reads it, add it to this " +
+            "test's allow-list WITH the reason; symmetry with the sibling lane is not one (sc-17592).",
+        );
+        continue;
+      }
+      // Judge the entry by every member it can wake the lane for: a glob wakes a member if
+      // it can match the member's own manifest (`<dir>/Cargo.toml` — every member has one)
+      // or if it names a path INSIDE the member (a legitimate narrowing like
+      // "crates/x/tests/**", which cannot match the manifest but still wakes only that member).
+      const woken = memberDirs.filter(
+        (dir) => matches(glob, `${dir}/Cargo.toml`) || glob.startsWith(`${dir}/`),
+      );
+      assert.ok(
+        woken.length > 0,
+        `${path} watches ${JSON.stringify(glob)}, which matches no workspace member — dead ` +
+          "weight or a typo.",
+      );
+      for (const dir of woken) {
+        assert.ok(
+          covered.has(dir),
+          `${path} triggers on ${dir} via ${JSON.stringify(glob)}, but no cargo invocation in ` +
+            "that workflow builds it, directly or through a path dependency. That wakes a whole " +
+            "self-hosted job for an edit it cannot cover — exactly how apps/rust-worker/** sat " +
+            "on the candle lane (sc-17703). Narrow the entry, or make the job build the member.",
+        );
+      }
+    }
+  }
+});
+
+test("the Rust toolchain is pinned to one concrete version, everywhere", async () => {
+  // sc-17717. `channel = "stable"` let the effective toolchain move with NO file changing:
+  // hosted lanes' dtolnay steps installed whatever stable was current at run time while the
+  // self-hosted boxes used whatever was on disk — so lanes could compile the same commit
+  // with DIFFERENT rustcs, and a new stable's clippy lints could red `-D warnings` lanes on
+  // unrelated PRs. Three properties pinned here:
+  //
+  //   1. rust-toolchain.toml's channel is a concrete x.y.z, never a floating channel.
+  //   2. Every workflow's dtolnay `toolchain:` input equals that exact version — a
+  //      straggler left at `stable` double-installs on every hosted job and re-floats the
+  //      persistent Macs. Deriving the expectation from rust-toolchain.toml means a bump
+  //      only has to edit files, never this test.
+  //   3. Every dtolnay step HAS a `toolchain:` input. Omitting it makes the action fall
+  //      back to its tag (the pinned SHA tracks dtolnay's `stable` branch), which
+  //      reintroduces the float without the word "stable" appearing anywhere.
+  //
+  // The rustfmt/clippy components ride along: the self-hosted boxes pre-install the pin
+  // with both (see the bump recipe in rust-toolchain.toml), and clippy lanes assume them.
+  const toolchainFile = await source("rust-toolchain.toml");
+  const channelMatch = toolchainFile.match(/^channel = "([^"]+)"$/m);
+  assert.ok(channelMatch, "rust-toolchain.toml must declare a channel");
+  const pin = channelMatch[1];
+  assert.match(
+    pin,
+    /^\d+\.\d+\.\d+$/,
+    "rust-toolchain.toml must pin a concrete x.y.z version. 'stable' floats: the effective " +
+      "toolchain then changes with no file changing, which no CI trigger can catch (sc-17717).",
+  );
+  assert.match(
+    toolchainFile,
+    /^components = \["rustfmt", "clippy"\]$/m,
+    "the pin must carry rustfmt and clippy — the fmt gate and every -D warnings lane assume them",
+  );
+
+  const workflowFiles = (await readdir(new URL("../.github/workflows/", import.meta.url)))
+    .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"))
+    .sort();
+  assert.ok(workflowFiles.length > 0, "no workflows found — the audit would be vacuous");
+  let inputsSeen = 0;
+  for (const file of workflowFiles) {
+    const workflow = await source(`.github/workflows/${file}`);
+    const dtolnaySteps = [...workflow.matchAll(/uses: dtolnay\/rust-toolchain@/g)].length;
+    const inputs = [...workflow.matchAll(/^\s+toolchain: (.+)$/gm)].map((entry) => entry[1]);
+    assert.equal(
+      inputs.length,
+      dtolnaySteps,
+      `${file}: every dtolnay/rust-toolchain step needs an explicit toolchain: input — ` +
+        "omitting it falls back to the action tag's floating stable.",
+    );
+    for (const value of inputs) {
+      inputsSeen += 1;
+      assert.equal(
+        value,
+        `"${pin}"`,
+        `${file}: toolchain input ${value} must be "${pin}" (quoted), the version ` +
+          "rust-toolchain.toml pins — one version everywhere, bumped together.",
+      );
+    }
+  }
+  assert.ok(inputsSeen > 0, "no toolchain inputs found anywhere — the lockstep audit is vacuous");
 });

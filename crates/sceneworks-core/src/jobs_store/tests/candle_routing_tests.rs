@@ -118,6 +118,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::InstantId,
             CandleImageLane::SdxlEdit,
             CandleImageLane::Flux2Edit,
+            CandleImageLane::Flux2Edit,
             CandleImageLane::QwenEdit,
             CandleImageLane::ZImageEdit,
             CandleImageLane::ZImageIdentity,
@@ -1503,13 +1504,34 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
             "sourceAssetId": "asset_1"
         }))
     ));
-    // The -kv distill edit has no candle provider yet (needs the reference-K/V cache port) → NOT
-    // claimed by candle; it remains queued until an MLX worker can serve it.
-    assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
-        "model": "flux2_klein_9b_kv",
-        "mode": "edit_image",
-        "sourceAssetId": "asset_1"
-    }))));
+    // SC-15831: all three Klein catalog entries share the Candle reference provider, while exact
+    // artifact/calibration admission remains entry-specific inside the worker.
+    for model in [
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        for (mode, reference_field) in [
+            ("edit_image", "sourceAssetId"),
+            ("reference", "referenceAssetId"),
+            ("image_to_image", "referenceAssetId"),
+            ("character_image", "referenceAssetId"),
+            ("style_variations", "referenceAssetId"),
+        ] {
+            let mut payload = json!({ "model": model, "mode": mode });
+            payload
+                .as_object_mut()
+                .expect("image payload")
+                .insert(reference_field.to_owned(), json!("asset_1"));
+            assert!(
+                image_job_is_candle_eligible(&image_generate_job(payload)),
+                "model={model} mode={mode} must reach Candle Flux2Edit"
+            );
+            assert!(!flux2_edit_candle_eligible(&object(
+                json!({ "mode": mode })
+            )));
+        }
+    }
     // sc-7736 (epic 6564): FLUX.2-dev edit (`edit_image` + a source) is NOW the candle `Flux2Edit`
     // dev lane (`load_dev`, Q4) — the worker CLAIMS it (was deferred to torch under sc-7458's
     // txt2img-only slice). Multi-reference (the plural `referenceAssetIds`) rides the same lane.

@@ -2317,6 +2317,10 @@ mod tests {
         // SC-15823 then adds ten base-only runtime-complete FLUX.1 records (eight eager, two
         // deferred) without promoting them to Full completion. SC-15833 adds five deferred FLUX.2
         // runtime records and seven physical sessions without replacing any prior source receipt.
+        // SC-16915 re-collects the MLX qwen_image and krea_2_turbo_control evidence at pin
+        // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
+        // superseded 7fbcb4a2/1244b82f/96b13b66 rows in place as history — a receipt cannot be
+        // re-dated onto a pin it never ran against (sc-16482).
         let bundle = match load_packaged_bundle().expect("compiled bundle must parse") {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("packaged bundle must be current: {reason:?}"),
@@ -2445,7 +2449,7 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 33);
+        assert_eq!(complete_count, 50);
         let runtime_keys = bundle
             .records
             .iter()
@@ -2468,7 +2472,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
                 .count(),
-            36
+            50
         );
         assert_eq!(
             bundle
@@ -2476,7 +2480,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            12
+            15
         );
     }
 

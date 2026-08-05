@@ -510,14 +510,15 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
     ),
     "the static production contract must inventory the complete shipped ladder",
   );
-  // Promotion is a property of CURRENT evidence, and the shipped rung-4 records were measured under
-  // the previous inference pin (`8ffa211a`); sc-16962 moved it to `d4802320`, so on the shipped
-  // bundle they are historical and promote nothing. That is the fail-closed rule, asserted here so
-  // the exactness claim below cannot be read as a claim about the shipped matrix.
+  // `cells` is filtered to entries whose static implementation is sourced from the PROVIDER contract
+  // (`mlx-gen-qwen-image/src/memory_strategy.rs`). Promotion rewrites that source to the evidence
+  // route (`mlx_fit_gate.rs#evidence_admission_route`), so a Verified cell leaves this set by
+  // construction — the empty result holds whether or not the evidence is current, and says the
+  // static-contract inventory never claims verification on its own.
   assert.deepEqual(
     cells.filter((cell) => cell.state === "Verified").map((cell) => cell.id),
     [],
-    "records measured under a superseded inference pin must not stay Verified",
+    "the static production contract must never assert verification by itself",
   );
 
   const onCurrentPin = await buildMatrix({
@@ -530,9 +531,16 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
+  // sc-16915 re-collected bf16 alongside the q8/q4 rung pairs, so the exact set grew from the four
+  // rung-4 cells to seven. Pinned as the SET, not a count: a binding that quietly stops resolving to
+  // a record fails here rather than shrinking a number nobody reads. `bounded_decode` is bf16-only —
+  // the q8 and q4 opt-ins declare the attention and transformer-residency rungs and nothing else.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
       "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
       "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
@@ -540,8 +548,30 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
     ],
     "current evidence must promote only its exact entry, tier, mode, overlay, and rung",
   );
-  assert.ok(
-    verified.every((cell) => cell.evidence.currentEnvironmentVerification.length === 1),
+  // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
+  //
+  // bf16 carries one apiece — including `bounded_decode`, whose cell binds the production point
+  // 512/64. sc-16915 swept seven tile edges, but the other six are records at different parameter
+  // points and attach to no cell; the sweep widens the published range, it does not multiply the
+  // bound cell's evidence.
+  //
+  // q8/q4 carry two ONLY in this fixture: `qwenRung4OnCurrentPin` re-stamps the four superseded
+  // rung-4 records onto the current pin, so they join the sc-16915 measurements on those cells. On
+  // the shipped matrix each of these is 1 current + 1 historical — the Qwen provider fingerprint did
+  // not change, so the old records stay attached as this cell's history.
+  assert.deepEqual(
+    Object.fromEntries(
+      verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
+    ),
+    {
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 2,
+    },
     "every Verified Qwen cell must carry its exact dynamic evidence",
   );
   assert.ok(
@@ -1003,15 +1033,24 @@ test("a shipping control lane is declared, not inferred from having been measure
     "krea_2_turbo_control",
     "Krea control evidence must bind to the distinct production provider",
   );
+  // sc-16915 reran both geometries on the current runtime, which is what the previous wording
+  // ("until rerun on the new runtime") was waiting for, so current goes 0 -> 2.
+  //
+  // History goes 2 -> 0, which looks like a loss and is not. The superseded runs are still in the
+  // bundle, but they carry the pre-full-ladder fingerprint
+  // `krea-control-mlx-v4-q4-pose-bounded-decode-512-64`, and history attaches per cell by the
+  // fingerprint the cell now claims. A record measured against a different provider identity is not
+  // this cell's history — attaching it would be the same category error as re-dating it onto the
+  // new pin.
   assert.equal(
     kreaBounded?.evidence.currentEnvironmentVerification.length,
-    0,
-    "exact Krea control runs from the prior inference revision must not remain current after a pin bump",
+    2,
+    "both exact Krea control geometries are verified on the current runtime",
   );
   assert.equal(
     kreaBounded?.evidence.historicalVerification.length,
-    2,
-    "both exact Krea control geometries remain attached as history until rerun on the new runtime",
+    0,
+    "runs measured against the superseded provider fingerprint are not this cell's history",
   );
 
   for (const [modelId, provider] of [
@@ -1054,8 +1093,15 @@ test("a shipping control lane is declared, not inferred from having been measure
   // verbatim. It now asserts something: a declared lane with no measurement stays unverified while a
   // measured one is promoted, and the sc-16060 tests below prove the promotion path is live. What
   // this test forbids is DECLARATION alone producing verification.
-  const verifiedControl = control.filter((cell) => cell.state === "Verified");
-  assert.equal(verifiedControl.length, 0);
+  // sc-16915 gave the MLX Krea control lane a current capture, so it is now the one verified control
+  // cell. Pinned by IDENTITY rather than as a count of zero: the claim being defended is that
+  // DECLARATION alone never verifies, which is stated more precisely by naming the single lane that
+  // earned it and requiring every other declared control lane to stay unverified.
+  assert.deepEqual(
+    control.filter((cell) => cell.state === "Verified").map((cell) => cell.id),
+    [KREA_CONTROL_CELL],
+    "only a lane with a current control capture may be Verified",
+  );
   const attachedZImageControl = control.filter(
     (cell) =>
       cell.modelId === "z_image" &&
@@ -1134,7 +1180,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
     [
-      "15510:candle", "15510:mlx", "15511:mlx", "15512:mlx", "15517:candle", "15517:mlx",
+      "15510:candle", "15510:mlx", "15511:mlx", "15512:candle", "15512:mlx", "15517:candle", "15517:mlx",
       "15519:candle",
     ],
   );
@@ -1359,13 +1405,36 @@ test("an implemented family is Implemented/unverified only where the provider ac
   );
   assert.ok(candleLens.length > 0);
   assert.ok(
+    candleLens
+      .filter(
+        (cell) =>
+          cell.modelId === "lens_turbo" &&
+          ["q4", "q8"].includes(cell.tier) &&
+          cell.overlay === "none",
+      )
+      .every(
+      (cell) =>
+        cell.owningFamilyStory === 15819 &&
+        cell.state === "Implemented/unverified" &&
+        cell.rung4Survey.implementation === "shared-primitive" &&
+        cell.strategyParameters.transformerWindowSize === 1 &&
+        cell.strategyParameters.transformerWindowComponent === "Dit",
+      ),
+    "SC-15819 exposes the exact packed q4/q8 plain Candle Lens-Turbo ladder",
+  );
+  assert.ok(
+    candleLens
+      .filter((cell) => cell.tier === "bf16" || cell.overlay !== "none")
+      .every((cell) => cell.state === "Missing"),
+    "dense and adapter-bearing Candle Lens-Turbo cells remain fail-closed",
+  );
+  assert.ok(
     candleLens.every(
       (cell) =>
         cell.owningFamilyStory === 15819 &&
-        cell.state === "Missing" &&
-        cell.rung4Survey.implementation === "none",
+        cell.rung4Survey.implementation === "shared-primitive",
     ),
-    "the MLX reconciliation must preserve SC-15819's independent Candle ownership and verdict",
+    "the MLX reconciliation must preserve SC-15819's independent Candle ownership",
   );
 
   // MLX Krea registers the contract on all four base descriptors, so both catalog entries and both
@@ -2086,6 +2155,37 @@ async function currentEvidenceFixture({
   return JSON.stringify(parsed);
 }
 
+/// The inverse of [`currentEvidenceFixture`]: the shipped records re-stamped onto a SUPERSEDED
+/// inference revision.
+///
+/// Before sc-16915 the shipped bundle was entirely historical, so "historical evidence does not
+/// promote" could be asserted by simply reading the shipped matrix. Now that the evidence is
+/// current, that half has to be produced deliberately — otherwise the negative claim would quietly
+/// become untested the moment the positive one started holding.
+async function historicalEvidenceFixture({
+  select = (record) => record.target.provider === "krea_2_turbo_control",
+} = {}) {
+  const bundle = await readFile(
+    new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url),
+    "utf8",
+  );
+  const parsed = JSON.parse(bundle);
+  parsed.records = parsed.records.map((record) => {
+    if (!select(record)) return record;
+    const restamped = {
+      ...record,
+      repositories: {
+        ...record.repositories,
+        // A real superseded pin from this bundle's own history, not a synthetic string, so the
+        // fixture exercises the same comparison production performs.
+        inference: { ...record.repositories.inference, revision: "96b13b6630132410a29ae1bcdf4d8738db7af28a" },
+      },
+    };
+    return { ...restamped, id: recordId(restamped) };
+  });
+  return JSON.stringify(parsed);
+}
+
 /// Re-stamp the manifest half of an exact calibration binding alongside a synthetic current record.
 /// Production promotion requires both halves to name the linked inference runtime revision.
 async function currentManifestCalibrationFixture({
@@ -2127,22 +2227,25 @@ const qwenRung4OnCurrentPin = () =>
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
   const shipped = await buildMatrix();
   const shippedCell = shipped.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
+  // sc-16915 re-collected both families at the current pin, so the POSITIVE half of this test is now
+  // observable on the shipped matrix. It previously read `Implemented/unverified`, on the grounds
+  // that every shipped record predated the pin. The negative half is preserved below as an explicit
+  // mutation rather than as a property of the shipped bundle happening to be stale — which is the
+  // stronger arrangement, because it stays meaningful once the evidence is current.
   assert.equal(
     shippedCell.state,
-    "Implemented/unverified",
-    "the shipped Krea records are historical on the newly pinned inference revision",
+    "Verified",
+    "the shipped Krea records are current on the pinned inference revision",
+  );
+  assert.ok(
+    shippedCell.evidence.currentEnvironmentVerification.length > 0,
+    "a Verified cell must carry the dynamic evidence its guard requires",
   );
   const verifiedQwen = (matrix) =>
     matrix.cells.filter(
       (cell) => cell.modelId === "qwen_image" && cell.backend === "mlx" && cell.state === "Verified",
     ).length;
 
-  // sc-16353 ingested the Qwen rung-4 measurements under the `8ffa211a` pin, so on `main` at that
-  // moment they were CURRENT and four cells promoted off the shipped bundle. sc-16962 moved the pin
-  // to `d4802320`, which makes them historical by exactly the rule the Krea assertion above states.
-  // That is the fail-closed behaviour, not a loss of coverage — so the promotion claim moves onto
-  // records re-stamped onto the current pin, and the zeroed-pin mutation below is what keeps it live
-  // rather than passing because nothing could promote.
   const qwenOnCurrentPin = await qwenRung4OnCurrentPin();
   const qwenManifestOnCurrentPin = await currentManifestCalibrationFixture({
     select: (binding) => binding.provider === "qwen_image",
@@ -2155,13 +2258,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(promotedQwen),
-    4,
-    "the exact current Qwen Q4/Q8 rung pairs must promote only their four cells",
+    9,
+    "the exact current Qwen cells must promote only the rungs their bindings name",
   );
   assert.equal(
     verifiedQwen(shipped),
-    0,
-    "an inference pin bump must not carry the previous pin's Qwen verification forward",
+    9,
+    "the shipped Qwen opt-in is verified at the current pin",
   );
 
   const evidenceOnlyZ = await buildMatrix({
@@ -2197,24 +2300,31 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     "an inference pin change must fail closed instead of carrying Qwen verification forward",
   );
 
-  // MUTATION: the same two records, re-stamped onto the current pin. If the producer were absent —
-  // the state this story found the generator in — this assertion would fail while every other test
-  // in this file stayed green.
-  const promoted = await buildMatrix({
-    sourceOverrides: {
-      calibrationEvidence: await currentEvidenceFixture(),
-      manifest: await currentManifestCalibrationFixture(),
-    },
+  // MUTATION, and the negative half of this test's title. Re-stamping the SAME Krea records onto a
+  // superseded pin must demote the cell. Asserting only the positive direction would pass on a
+  // generator that promoted unconditionally — which is precisely the failure the `Verified` state
+  // exists to rule out.
+  //
+  // This replaces the previous mutation, which re-stamped the records onto the CURRENT pin. That
+  // direction became a no-op once the shipped evidence was re-collected: the fixture and the shipped
+  // bundle now agree, so it asserted nothing and `movedIds` would have been empty.
+  const demoted = await buildMatrix({
+    sourceOverrides: { calibrationEvidence: await historicalEvidenceFixture() },
   });
-  const promotedCell = promoted.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
-  assert.equal(promotedCell.state, "Verified", "current eligible evidence must promote its cell");
-  assert.ok(
-    promotedCell.evidence.currentEnvironmentVerification.length > 0,
-    "a Verified cell must carry the dynamic evidence its guard requires",
+  const demotedCell = demoted.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
+  assert.equal(
+    demotedCell.state,
+    "Implemented/unverified",
+    "records re-dated onto a superseded pin must stop verifying their cell",
+  );
+  assert.equal(
+    demotedCell.evidence.currentEnvironmentVerification.length,
+    0,
+    "a demoted cell must carry no current-environment verification",
   );
 
-  // Promotion is scoped to the cell the records bind. Nothing else may move.
-  const movedIds = promoted.cells
+  // Demotion is scoped to the cells those records bind. Nothing else may move.
+  const movedIds = demoted.cells
     .filter(
       (cell) => cell.state !== shipped.cells.find((other) => other.id === cell.id).state,
     )
