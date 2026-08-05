@@ -24,6 +24,8 @@
 //!    file *per backend* — `capabilities.candle.json` from a `backend-candle` lane,
 //!    `capabilities.mlx.json` from the macOS lane. One file per backend means two lanes never
 //!    rewrite the same file. These are the analogue of `documents/style.txt`: a checked-in source.
+//!    The **audio** registry is dumped alongside them into `config/engine-capabilities/audio/` —
+//!    see [the audio section](#the-audio-registry-is-a-second-dump-not-a-second-half-of-the-first).
 //! 2. `apps/web/scripts/generate-preview-support.mjs` derives the served catalog block from those
 //!    files, joined to SceneWorks model ids through [`crate::engines::MODEL_TABLE`], and
 //!    `apps/web/src/data/previewSupportCatalog.test.js` re-derives it as a drift guard.
@@ -49,6 +51,45 @@
 //! i.e. at an **inference pin bump**, where `scripts/bump-inference.mjs` fails closed on a stale
 //! facts file, beside the licence re-scan in the same generated-artifact cascade.
 //!
+//! # The audio registry is a second dump, not a second half of the first
+//!
+//! [`crate::inference_runtime::audio`] is a **separate** `ProviderRegistry` (epic 13400 / sc-13404):
+//! audio is candle-native on every platform and rides its own lane rather than the mlx media graph,
+//! which is why both runtime bundles carry it `default = ["media", "audio"]`. Until sc-17593 nothing
+//! dumped it, so `supports_preview` was absent from the derived catalog for **every** audio route on
+//! **every** platform — reported as "unknown", which renders exactly like "not wired".
+//!
+//! It gets its own file under `config/engine-capabilities/audio/` rather than being folded into the
+//! per-backend media file, for three reasons:
+//!
+//! 1. **Folding is unsound, not merely untidy.** `candle-audio-catalog::AUDIO_BACKEND` is `"candle"`
+//!    on every platform, so the macOS lane — media `mlx`, audio `candle` — would have to write a
+//!    *second* file named `capabilities.candle.json` and clobber the candle lane's **media** dump.
+//!    One file per backend exists precisely so two lanes never rewrite the same file. Filing macOS's
+//!    audio facts under `mlx` instead would be a plain lie: those descriptors say `backend: candle`.
+//! 2. **The two registries' engine ids are independent namespaces joined by different rules.** Media
+//!    engine ids reach SceneWorks model ids through [`crate::engines::MODEL_TABLE`]; audio engine ids
+//!    **are** SceneWorks model ids (`kokoro_82m`, `chatterbox_tts`, `acestep_v15_turbo`, …), which is
+//!    why [`crate::audio_jobs`] passes the payload's `model` straight into
+//!    [`crate::inference_runtime::load_audio`]. Nothing prevents the two namespaces from colliding;
+//!    one file would need a per-entry discriminator to keep the joins apart anyway.
+//! 3. **A subdirectory, not a longer file name.** Stage 2 discovers media facts in three places
+//!    (`bump-inference.mjs`, `generate-preview-support.mjs`, and the vitest guard's
+//!    `import.meta.glob`). `readdirSync` and that glob are both single-level, so a subdirectory is
+//!    invisible to all three *without editing the media discovery at all*; a sibling
+//!    `capabilities.candle.audio.json` would be picked up by the glob's `*`, which does cross a dot.
+//!
+//! The media files' schema is deliberately **unchanged**: `capabilities.mlx.json` can only be
+//! re-dumped on a Mac, so a schema change made off-Mac would strand it at the old shape with no lane
+//! able to fix it. The audio file instead carries its own [`AudioCapabilityFacts::registry`]
+//! discriminator, so a file can never be mistaken for the other kind regardless of where it sits.
+//!
+//! Only **generators** carry [`gen_core::Capabilities`], so only they are dumped. The audio lane's
+//! other provider kinds — `openvoice_v2` (an `AudioTransform`), `chatterbox_ve` (a `VoiceEmbedder`),
+//! Whisper (a `Transcriber`), CLAP (an `AudioEmbedder`) — have their own descriptor types with no
+//! `supports_preview` at all, so they stay **unknown**: the registry genuinely has no opinion, and
+//! inventing `false` would be asserting something never measured.
+//!
 //! # Running it
 //!
 //! ```text
@@ -56,6 +97,13 @@
 //!     --no-default-features --features backend-candle     # Windows / Linux CUDA → capabilities.candle.json
 //! cargo run -p sceneworks-worker --bin dump-engine-capabilities   # macOS → capabilities.mlx.json
 //! ```
+//!
+//! Either invocation also writes `audio/capabilities.candle.json`. Both lanes link the *same* audio
+//! catalog — `candle-audio-catalog` gates nothing on the platform, its `metal`/`cuda` features only
+//! forward the compute backend — so the two lanes produce byte-identical audio facts and neither
+//! owns the file exclusively. That is not left as an argument: **both** restamp-verification lanes
+//! diff this one file against their own fresh dump (`macos-mlx.yml` and `windows-candle.yml`), so
+//! the day the two lanes stop agreeing, one of them says so.
 //!
 //! # The vacuous-green trap
 //!
@@ -71,11 +119,12 @@ use std::path::{Path, PathBuf};
 /// Every backend SceneWorks can link a **media** registry for, and therefore every backend stage 2
 /// requires a checked-in facts file for (sc-17119).
 ///
-/// Scoped to [`crate::inference_runtime::media`] because that is the only registry this module
-/// dumps. [`crate::inference_runtime::audio`] is a separate registry whose descriptors are dumped
-/// **nowhere** — its `supports_preview` is unknown to the catalog on every platform. That gap is not
-/// closed here and is not visible to this list: audio is candle-native everywhere, so backend-level
-/// coverage is satisfied coincidentally rather than because anything checked. See sc-17593.
+/// Scoped to [`crate::inference_runtime::media`]. [`crate::inference_runtime::audio`] is a separate
+/// registry with its own declared set, [`SCENEWORKS_AUDIO_BACKENDS`] — and it needs one, because this
+/// list can never speak for it: audio is candle-native everywhere, so `candle` appearing here is
+/// satisfied by the *media* dump alone and says nothing about whether the audio registry was ever
+/// walked. Backend-level coverage was the wrong granularity, which is exactly how the audio gap
+/// survived sc-17119 (sc-17593).
 ///
 /// Without this list, "which backends are covered?" could only be answered by *the files on disk* —
 /// so a backend that was **never dumped** passed every guard forever, silently. That is not
@@ -93,6 +142,21 @@ use std::path::{Path, PathBuf};
 ///
 /// Sorted and unique; stage 2 compares it against the sorted set of dumped files.
 pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "mlx"];
+
+/// Every backend the **audio** registry ([`crate::inference_runtime::audio`]) can register under,
+/// and therefore every backend stage 2 requires an `audio/capabilities.<backend>.json` for (sc-17593).
+///
+/// One entry, on purpose. `candle-audio-catalog::AUDIO_BACKEND` is `"candle"` on every platform —
+/// the audio lane is candle-native even on macOS, where the media graph is mlx — so unlike
+/// [`SCENEWORKS_BACKENDS`] this is not a union across mutually exclusive lanes. **Both** lanes link
+/// the same audio catalog and can dump the whole of it, so `the_linked_audio_backend_is_declared`
+/// verifies this list completely on either box, and the two lanes' dumps are byte-identical.
+///
+/// It is a separate const rather than a reuse of [`SCENEWORKS_BACKENDS`] because the two lists answer
+/// different questions. `SCENEWORKS_BACKENDS` containing `candle` is satisfied by the media dump
+/// alone; without this const, "was the audio registry ever walked?" has no checkable answer — which
+/// is the hole sc-17119's backend-level coverage passed straight over.
+pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];
 
 /// One engine's weights-free preview facts, as written to a per-backend facts file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -138,6 +202,42 @@ impl EngineCapabilityFacts {
     }
 }
 
+/// The `registry` discriminator every audio facts file carries.
+///
+/// Media facts files carry **no** `registry` key — deliberately, because adding one would change
+/// their bytes and `capabilities.mlx.json` can only be re-dumped on a Mac. So "has
+/// `registry: audio`" is the test for an audio file, and its absence means media.
+pub const AUDIO_REGISTRY_LABEL: &str = "audio";
+
+/// One backend's complete, weights-free **audio** engine facts (sc-17593).
+///
+/// Structurally [`EngineCapabilityFacts`] plus the [`AUDIO_REGISTRY_LABEL`] discriminator, so a file
+/// that ends up in the wrong directory is still self-describing. A distinct type rather than a flag
+/// on the media struct for exactly that reason: the media schema must not move.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioCapabilityFacts {
+    /// Always [`AUDIO_REGISTRY_LABEL`]. Serialized first so the discriminator is the first line of
+    /// the file a human opens.
+    pub registry: String,
+    /// `"candle"` on every platform — `candle-audio-catalog::AUDIO_BACKEND`.
+    pub backend: String,
+    pub generated_from: FactsProvenance,
+    /// Every audio **generator** this backend registered, sorted by id. The lane's non-generator
+    /// providers (`AudioTransform`, `VoiceEmbedder`, `Transcriber`, `AudioEmbedder`) have descriptor
+    /// types with no `supports_preview`, so they are absent — i.e. unknown, which is the truth.
+    pub engines: Vec<EngineFact>,
+}
+
+impl AudioCapabilityFacts {
+    /// `capabilities.<backend>.json` — the name inside the `audio/` subdirectory, so it is
+    /// deliberately identical to the media file's. What separates them is the directory, and
+    /// failing that, [`AudioCapabilityFacts::registry`].
+    pub fn file_name(&self) -> String {
+        format!("capabilities.{}.json", self.backend)
+    }
+}
+
 fn modality_label(modality: &gen_core::Modality) -> &'static str {
     // Exhaustive on purpose: a new gen-core modality must break this build loudly at the next pin
     // bump rather than be silently flattened into a catch-all label.
@@ -175,31 +275,8 @@ pub fn facts_from_descriptors(
         );
     }
 
-    let mut by_backend: BTreeMap<String, Vec<EngineFact>> = BTreeMap::new();
-    for descriptor in descriptors {
-        by_backend
-            .entry(descriptor.backend.to_owned())
-            .or_default()
-            .push(EngineFact {
-                id: descriptor.id.to_owned(),
-                modality: modality_label(&descriptor.modality).to_owned(),
-                supports_preview: descriptor.capabilities.supports_preview,
-            });
-    }
-
-    let mut out = Vec::with_capacity(by_backend.len());
-    for (backend, mut engines) in by_backend {
-        engines.sort_by(|left, right| left.id.cmp(&right.id));
-        if let Some(duplicate) = engines
-            .windows(2)
-            .find(|pair| pair[0].id == pair[1].id)
-            .map(|pair| pair[0].id.clone())
-        {
-            return Err(format!(
-                "backend {backend:?} registered engine id {duplicate:?} more than once; the \
-                 stage-2 join through MODEL_TABLE.engine_id would be ambiguous"
-            ));
-        }
+    let mut out = Vec::new();
+    for (backend, engines) in group_by_backend(descriptors)? {
         out.push(EngineCapabilityFacts {
             backend,
             generated_from: FactsProvenance {
@@ -212,7 +289,87 @@ pub fn facts_from_descriptors(
     Ok(out)
 }
 
-/// How this build's facts files are reproduced, named in the file itself.
+/// Bucket descriptors per backend, each bucket sorted by id and proven duplicate-free.
+///
+/// Shared by the media and audio dumps because both need exactly this: the file must be byte-stable
+/// across runs, and a repeated id would make the stage-2 join resolve to whichever row won — a
+/// silently wrong answer for every SceneWorks id mapping onto it.
+fn group_by_backend(
+    descriptors: &[gen_core::ModelDescriptor],
+) -> Result<BTreeMap<String, Vec<EngineFact>>, String> {
+    let mut by_backend: BTreeMap<String, Vec<EngineFact>> = BTreeMap::new();
+    for descriptor in descriptors {
+        by_backend
+            .entry(descriptor.backend.to_owned())
+            .or_default()
+            .push(EngineFact {
+                id: descriptor.id.to_owned(),
+                modality: modality_label(&descriptor.modality).to_owned(),
+                supports_preview: descriptor.capabilities.supports_preview,
+            });
+    }
+    for (backend, engines) in &mut by_backend {
+        engines.sort_by(|left, right| left.id.cmp(&right.id));
+        if let Some(duplicate) = engines
+            .windows(2)
+            .find(|pair| pair[0].id == pair[1].id)
+            .map(|pair| pair[0].id.clone())
+        {
+            return Err(format!(
+                "backend {backend:?} registered engine id {duplicate:?} more than once; the \
+                 stage-2 join would be ambiguous (through MODEL_TABLE.engine_id for a media dump, \
+                 through the id itself for an audio one)"
+            ));
+        }
+    }
+    Ok(by_backend)
+}
+
+/// Group **audio** descriptors into one [`AudioCapabilityFacts`] per backend.
+///
+/// The audio twin of [`facts_from_descriptors`], pure for the same reason: the empty refusal is the
+/// vacuous-green trap, and it has to be exercisable on a lane that links no audio at all.
+///
+/// # Errors
+///
+/// - the descriptor list is **empty** — an audio registry that registered nothing would derive as
+///   "no audio route supports live preview", a confident wrong answer rather than a missing one;
+/// - a backend registered the same engine id twice.
+pub fn audio_facts_from_descriptors(
+    descriptors: &[gen_core::ModelDescriptor],
+    inference_revision: &str,
+    dumper: &str,
+) -> Result<Vec<AudioCapabilityFacts>, String> {
+    if descriptors.is_empty() {
+        return Err(
+            "refusing to write audio engine-capability facts: the audio provider registry is \
+             EMPTY. Stage 2 would read that as \"no audio route supports live preview\" — a \
+             confident wrong answer, not a missing one. Both runtime bundles carry the audio lane \
+             default-on (default = [\"media\", \"audio\"]), so an empty registry here means the \
+             bundle was built with --no-default-features and no `audio`."
+                .to_owned(),
+        );
+    }
+
+    let mut out = Vec::new();
+    for (backend, engines) in group_by_backend(descriptors)? {
+        out.push(AudioCapabilityFacts {
+            registry: AUDIO_REGISTRY_LABEL.to_owned(),
+            backend,
+            generated_from: FactsProvenance {
+                inference_revision: inference_revision.to_owned(),
+                dumper: dumper.to_owned(),
+            },
+            engines,
+        });
+    }
+    Ok(out)
+}
+
+/// How this build's **media** facts file is reproduced, named in the file itself.
+///
+/// Platform-branched, and correctly so: each media file is owned by exactly one lane, so naming that
+/// lane's invocation tells the reader the only command that can regenerate the file in front of them.
 fn dumper_invocation() -> &'static str {
     if cfg!(target_os = "macos") {
         "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
@@ -221,6 +378,18 @@ fn dumper_invocation() -> &'static str {
          --features backend-candle"
     }
 }
+
+/// How the **audio** facts file is reproduced — deliberately NOT platform-branched.
+///
+/// The audio file is the one file both lanes write, because `AUDIO_BACKEND` is `candle` everywhere.
+/// Stamping [`dumper_invocation`] into it would make the two lanes disagree on one line of a file
+/// they share, so re-dumping at each pin bump — the documented procedure — would flip that line back
+/// and forth forever, and no guard would object because nothing reads `dumper`. That is exactly the
+/// "two lanes rewrite one file" failure the per-backend media naming exists to prevent, so the audio
+/// provenance names both invocations instead of whichever box happened to run last.
+const AUDIO_DUMPER_INVOCATION: &str = "cargo run -p sceneworks-worker --bin \
+                                       dump-engine-capabilities [--no-default-features --features \
+                                       backend-candle]";
 
 /// Walk the linked provider registry weights-free and group it per backend.
 ///
@@ -238,12 +407,45 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
     )
 }
 
+/// Walk the linked **audio** provider registry weights-free and group it per backend (sc-17593).
+///
+/// Refuses when this build links no audio lane at all rather than skipping it silently: a skip would
+/// leave stage 2 with nothing to require, which is precisely the shape of the hole this story
+/// closes. Both shipped bundles carry `default = ["media", "audio"]`, so the only way to reach the
+/// refusal is to have deliberately built without the audio feature.
+pub fn collect_audio_capability_facts() -> Result<Vec<AudioCapabilityFacts>, String> {
+    let registry = crate::inference_runtime::audio().ok_or_else(|| {
+        "refusing to dump audio engine-capability facts: this build links NO audio registry. \
+         Skipping it silently is how `supports_preview` went undumped for every audio route on \
+         every platform in the first place. Build with the audio lane on — both runtime bundles \
+         carry it default-on — or dump on a lane that does."
+            .to_owned()
+    })?;
+    let descriptors: Vec<gen_core::ModelDescriptor> = registry
+        .generators()
+        .map(|registration| (registration.descriptor)())
+        .collect();
+    audio_facts_from_descriptors(
+        &descriptors,
+        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        AUDIO_DUMPER_INVOCATION,
+    )
+}
+
 /// Serialize one backend's facts as the exact bytes checked in (pretty JSON + trailing newline),
 /// matching `apps/web/scripts/generate-styles.mjs`'s `JSON.stringify(value, null, 2) + "\n"` so a
 /// JS-side rewrite and a Rust-side dump agree byte-for-byte.
 pub fn facts_json(facts: &EngineCapabilityFacts) -> Result<String, String> {
     let mut json = serde_json::to_string_pretty(facts)
         .map_err(|error| format!("engine capability facts do not serialize: {error}"))?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// [`facts_json`] for the audio dump — same bytes-on-disk contract.
+pub fn audio_facts_json(facts: &AudioCapabilityFacts) -> Result<String, String> {
+    let mut json = serde_json::to_string_pretty(facts)
+        .map_err(|error| format!("audio engine capability facts do not serialize: {error}"))?;
     json.push('\n');
     Ok(json)
 }
@@ -259,6 +461,18 @@ pub fn default_facts_dir() -> PathBuf {
         .join("..")
         .join("config")
         .join("engine-capabilities")
+}
+
+/// The subdirectory of the facts root that holds the audio dump.
+///
+/// A subdirectory rather than a longer file name so that stage 2's three media-discovery sites —
+/// `readdirSync` in two scripts and the vitest `import.meta.glob` — cannot pick it up: all three are
+/// single-level, while the glob's `*` would happily match `capabilities.candle.audio.json`.
+pub const AUDIO_FACTS_SUBDIR: &str = "audio";
+
+/// `<facts root>/audio` — where [`dump_audio_to`] writes.
+pub fn audio_facts_dir(root: &Path) -> PathBuf {
+    root.join(AUDIO_FACTS_SUBDIR)
 }
 
 /// Dump this build's facts files into `dir`, returning the paths written.
@@ -279,6 +493,25 @@ pub fn dump_to(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(written)
 }
 
+/// Dump this build's **audio** facts files into `<root>/audio`, returning the paths written.
+///
+/// Writes nothing when [`collect_audio_capability_facts`] refuses, for the same reason [`dump_to`]
+/// does: a valid-looking wrong file is worse than no file, because stage 2 reads it confidently.
+pub fn dump_audio_to(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let facts = collect_audio_capability_facts()?;
+    let dir = audio_facts_dir(root);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let mut written = Vec::with_capacity(facts.len());
+    for entry in &facts {
+        let path = dir.join(entry.file_name());
+        std::fs::write(&path, audio_facts_json(entry)?)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,11 +521,20 @@ mod tests {
         backend: &'static str,
         supports_preview: bool,
     ) -> gen_core::ModelDescriptor {
+        descriptor_with_modality(id, backend, supports_preview, gen_core::Modality::Image)
+    }
+
+    fn descriptor_with_modality(
+        id: &'static str,
+        backend: &'static str,
+        supports_preview: bool,
+        modality: gen_core::Modality,
+    ) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
             id,
             family: id,
             backend,
-            modality: gen_core::Modality::Image,
+            modality,
             capabilities: gen_core::Capabilities {
                 supports_preview,
                 ..Default::default()
@@ -300,6 +542,10 @@ mod tests {
             required_components: &[],
             control_kinds: None,
         }
+    }
+
+    fn audio_descriptor(id: &'static str, supports_preview: bool) -> gen_core::ModelDescriptor {
+        descriptor_with_modality(id, "candle", supports_preview, gen_core::Modality::Audio)
     }
 
     // The vacuous-green trap (epic 16948 decision, activity-16974). An empty registry is the
@@ -415,6 +661,189 @@ mod tests {
                 entry.file_name(),
             );
         }
+    }
+
+    // sc-17593. The audio twin of `refuses_to_dump_an_empty_registry`, and the same trap: an audio
+    // registry that registered nothing derives as "no audio route supports live preview".
+    #[test]
+    fn refuses_to_dump_an_empty_audio_registry() {
+        let error =
+            audio_facts_from_descriptors(&[], "a4f409ae8ce73eda2ee8117b89b5f479666606b8", "dump")
+                .expect_err("an empty audio descriptor list must not produce facts");
+        assert!(
+            error.contains("EMPTY"),
+            "the refusal must name the empty registry, got: {error}"
+        );
+        assert!(
+            error.contains("audio"),
+            "the refusal must say which registry is empty, got: {error}"
+        );
+    }
+
+    #[test]
+    fn audio_facts_carry_the_registry_discriminator_and_sort_by_id() {
+        let facts = audio_facts_from_descriptors(
+            &[
+                audio_descriptor("moss_sfx_v2", false),
+                audio_descriptor("chatterbox_tts", false),
+            ],
+            "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "dump",
+        )
+        .expect("non-empty audio descriptors produce facts");
+
+        assert_eq!(
+            facts.len(),
+            1,
+            "AUDIO_BACKEND is one value on every platform"
+        );
+        assert_eq!(facts[0].registry, AUDIO_REGISTRY_LABEL);
+        assert_eq!(facts[0].backend, "candle");
+        assert_eq!(
+            facts[0]
+                .engines
+                .iter()
+                .map(|engine| engine.id.as_str())
+                .collect::<Vec<_>>(),
+            ["chatterbox_tts", "moss_sfx_v2"],
+            "sorted by id so the checked-in file is byte-stable"
+        );
+        assert_eq!(facts[0].file_name(), "capabilities.candle.json");
+    }
+
+    // The discriminator is what keeps a misplaced file from being read as the other kind, so assert
+    // it is actually IN the bytes rather than only on the struct. Media files carry no `registry`
+    // key at all — deliberately, since changing their schema would strand capabilities.mlx.json,
+    // which only a Mac can re-dump.
+    #[test]
+    fn audio_json_is_discriminated_and_media_json_is_unchanged() {
+        let audio = audio_facts_from_descriptors(
+            &[audio_descriptor("kokoro_82m", false)],
+            "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "dump",
+        )
+        .expect("audio facts");
+        let json: serde_json::Value =
+            serde_json::from_str(&audio_facts_json(&audio[0]).expect("serializes"))
+                .expect("parses");
+        assert_eq!(json["registry"], AUDIO_REGISTRY_LABEL);
+        assert_eq!(json["backend"], "candle");
+        assert_eq!(json["engines"][0]["modality"], "audio");
+        assert_eq!(json["engines"][0]["supportsPreview"], false);
+
+        let media = facts_from_descriptors(
+            &[descriptor("krea_2_turbo", "candle", true)],
+            "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "dump",
+        )
+        .expect("media facts");
+        let media_json: serde_json::Value =
+            serde_json::from_str(&facts_json(&media[0]).expect("serializes")).expect("parses");
+        assert!(
+            media_json.get("registry").is_none(),
+            "the media schema must not move: capabilities.mlx.json can only be re-dumped on a Mac"
+        );
+    }
+
+    #[test]
+    fn rejects_a_duplicate_audio_engine_id() {
+        let error = audio_facts_from_descriptors(
+            &[
+                audio_descriptor("kokoro_82m", false),
+                audio_descriptor("kokoro_82m", true),
+            ],
+            "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "dump",
+        )
+        .expect_err("a duplicate audio engine id must be refused");
+        assert!(error.contains("kokoro_82m"), "got: {error}");
+    }
+
+    #[test]
+    fn sceneworks_audio_backends_is_sorted_and_unique() {
+        let mut sorted = SCENEWORKS_AUDIO_BACKENDS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted, SCENEWORKS_AUDIO_BACKENDS,
+            "SCENEWORKS_AUDIO_BACKENDS must be sorted and duplicate-free"
+        );
+        assert!(
+            !SCENEWORKS_AUDIO_BACKENDS.is_empty(),
+            "an empty audio backend list would make the stage-2 audio coverage assertion vacuous"
+        );
+    }
+
+    // Unlike SCENEWORKS_BACKENDS, this list is NOT a union across mutually exclusive lanes: audio is
+    // candle-native everywhere, so either lane links the whole audio catalog and can verify the list
+    // completely. That is also why both lanes' audio dumps are byte-identical.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn the_linked_audio_backend_is_declared() {
+        let facts = collect_audio_capability_facts()
+            .expect("this lane links the audio registry, so collecting audio facts must succeed");
+        assert!(
+            !facts.is_empty(),
+            "a lane that links the audio registry must produce at least one backend's facts"
+        );
+        let mut linked: Vec<&str> = facts.iter().map(|entry| entry.backend.as_str()).collect();
+        linked.sort_unstable();
+        assert_eq!(
+            linked, SCENEWORKS_AUDIO_BACKENDS,
+            "the audio registry is platform-independent, so the backends it links must be EXACTLY \
+             SCENEWORKS_AUDIO_BACKENDS — not merely a subset. A backend missing here means the \
+             const over-declares and stage 2 asks for a dump nothing can produce; an extra one \
+             means it under-declares and that backend's dump is required by nothing."
+        );
+    }
+
+    // The measurement sc-17593 asked for before choosing a shape, pinned so it cannot quietly stop
+    // being true: at the live pin EVERY audio generator reports `supports_preview: false`, which is
+    // why this story is a completeness fix (unknown -> false) rather than a user-visible one. If a
+    // future pin lights one up, this test goes red and the follow-up work is a UI question.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn no_audio_generator_advertises_live_preview_at_this_pin() {
+        let facts = collect_audio_capability_facts().expect("audio facts");
+        let advertising: Vec<&str> = facts
+            .iter()
+            .flat_map(|entry| entry.engines.iter())
+            .filter(|engine| engine.supports_preview)
+            .map(|engine| engine.id.as_str())
+            .collect();
+        assert!(
+            advertising.is_empty(),
+            "an audio generator now advertises live preview ({advertising:?}). That is a real \
+             capability change, not a test to relax: the derived catalog will start answering \
+             `true` for an audio route, and `previewSupport.js`'s PREVIEW_JOB_TYPES gate (image \
+             jobs only) means the UI still cannot show it. Decide what the audio card does first."
+        );
+    }
+
+    // The audio file is the ONE file both lanes write, so every byte of it has to be
+    // lane-independent or the documented "re-dump on each lane at every pin bump" procedure makes
+    // it oscillate in git history — silently, since nothing reads `dumper`. The engine list already
+    // is (candle-audio-catalog gates no registration on the platform); provenance is the field that
+    // could quietly stop being.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn the_audio_dump_provenance_does_not_vary_by_lane() {
+        let facts = collect_audio_capability_facts().expect("audio facts");
+        for entry in &facts {
+            assert_eq!(
+                entry.generated_from.dumper, AUDIO_DUMPER_INVOCATION,
+                "the audio dump must stamp the lane-neutral invocation, not this build's own — \
+                 otherwise macOS and candle write different bytes into the same file"
+            );
+            assert_ne!(
+                entry.generated_from.dumper,
+                dumper_invocation(),
+                "AUDIO_DUMPER_INVOCATION has collapsed into the platform-branched media one"
+            );
+        }
+        // Names both lanes, so a reader of the file knows either box regenerates it.
+        assert!(AUDIO_DUMPER_INVOCATION.contains("backend-candle"));
+        assert!(AUDIO_DUMPER_INVOCATION.contains('['));
     }
 
     #[test]

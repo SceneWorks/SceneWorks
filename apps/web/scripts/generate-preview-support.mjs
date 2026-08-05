@@ -19,6 +19,9 @@
 //   2. crates/sceneworks-worker/src/engines.rs — the static MODEL_TABLE joining SceneWorks model
 //      ids to engine ids (many-to-one). Parsed, not mirrored, so a new row makes the artifacts
 //      stale on the same PR that adds it.
+//   3. config/engine-capabilities/audio/capabilities.<backend>.json — the same dump of the SEPARATE
+//      audio registry (sc-17593), whose engine ids ARE SceneWorks model ids and so need no join.
+//      Written by the same command on either lane: audio is candle-native everywhere.
 //
 // A single-stage generator would have had to link an engine registry itself, which only the two
 // self-hosted lanes can do — so its drift guard would have been reachable only where an engine
@@ -43,10 +46,15 @@ import {
   catalogToWebPreviewSupport,
   derivePreviewSupport,
   parseEngineModelTable,
+  parseSceneworksAudioBackends,
   parseSceneworksBackends,
 } from "../src/data/previewSupportDerivation.js";
 
 const factsDir = fileURLToPath(new URL("../../../config/engine-capabilities", import.meta.url));
+// The audio registry's dumps (sc-17593). A SUBDIRECTORY, so `readdirSync` above — which is not
+// recursive — cannot pick them up as media facts: the two registries share backend names ("candle"
+// on every platform for audio) but have independent engine-id namespaces and different joins.
+const audioFactsDir = `${factsDir}/audio`;
 const enginesPath = fileURLToPath(
   new URL("../../../crates/sceneworks-worker/src/engines.rs", import.meta.url),
 );
@@ -75,19 +83,44 @@ export function readFactsFiles(dir = factsDir) {
   return names.map((name) => JSON.parse(readFileSync(`${dir}/${name}`, "utf8")));
 }
 
+/** The audio registry's dumps (sc-17593). Missing directory reads as "never dumped", which
+ *  `assertBackendCoverage` then reports — the point being that it must not read as "nothing to do". */
+export function readAudioFactsFiles(dir = audioFactsDir) {
+  let names;
+  try {
+    names = readdirSync(dir)
+      .filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name))
+      .sort();
+  } catch {
+    names = [];
+  }
+  return names.map((name) => JSON.parse(readFileSync(`${dir}/${name}`, "utf8")));
+}
+
 const factsFiles = readFactsFiles();
+const audioFactsFiles = readAudioFactsFiles();
+const factsDeclarationSource = readFileSync(factsDeclarationPath, "utf8");
 // Refuse to write a catalog that is blind to a backend SceneWorks can run (sc-17119). Everything
 // else here is scoped to what is on disk, so without this the artifacts regenerate perfectly
 // happily with a whole engine's answers missing — reported downstream as "unknown", which renders
 // exactly as it did before the feature shipped.
 assertBackendCoverage(
-  parseSceneworksBackends(readFileSync(factsDeclarationPath, "utf8")),
+  parseSceneworksBackends(factsDeclarationSource),
   factsFiles.map((facts) => facts.backend),
+);
+// The same assertion for the audio registry (sc-17593). Backend-level coverage above cannot stand in
+// for it: `candle` is satisfied by the MEDIA dump, so the audio registry going undumped — as it did
+// on every platform until this story — passes the check above every time.
+assertBackendCoverage(
+  parseSceneworksAudioBackends(factsDeclarationSource),
+  audioFactsFiles.map((facts) => facts.backend),
+  "audio",
 );
 
 const catalog = derivePreviewSupport(
   parseEngineModelTable(readFileSync(enginesPath, "utf8")),
   factsFiles,
+  audioFactsFiles,
 );
 
 writeFileSync(manifestPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
