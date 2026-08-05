@@ -1775,13 +1775,6 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
     Some(dir)
 }
 
-/// Resolve the local HF snapshot dir for a repo PINNED to an exact commit (`snapshots/<revision>/`) —
-/// the cache-only twin of [`huggingface_snapshot_dir`] for a download that carries an immutable
-/// `revision` (F-029). Unlike [`huggingface_snapshot_dir`] (which prefers `refs/main`), this reads the
-/// EXACT pinned snapshot, so a co-requisite pinned to a non-main commit in a SHARED repo (e.g.
-/// chatterbox's `ve.safetensors` @ 5bb1f6ee living alongside the primary `refs/main` snapshot) resolves
-/// to the right snapshot — mirroring the inference-side `hf_get_pinned`. Returns `None` when that
-/// pinned snapshot is not cached.
 /// Whether `revision` is an immutable pin (F-029) rather than a mutable branch name like `main`.
 ///
 /// A pinned revision is exactly one lowercase 40-hex commit component. This is BOTH a shape check
@@ -1792,9 +1785,15 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
 /// The manifest schema is not authoritative for the copy embedded in an untrusted job payload
 /// (sc-13842 / sc-13583), so the runtime contract is enforced here.
 ///
-/// Defined ONCE (sc-17626) because two resolvers now branch on it — [`huggingface_pinned_snapshot_dir`]
-/// and [`crate::downloads::resolve_hf_component_file`] — and a drift between them would mean one of
-/// them silently accepting `refs/main` where the other demands the pin.
+/// Extracted (sc-17626) so [`huggingface_pinned_snapshot_dir`] and
+/// [`crate::downloads::resolve_hf_component_file`] share one definition of "pinned": the latter
+/// must decide, BEFORE calling a resolver, whether to demand the exact snapshot or accept
+/// `refs/main`, and a second hand-rolled hex check could drift into accepting a mutable branch
+/// where the other demands the pin.
+///
+/// Note this is not the only pinned/unpinned branch in the crate: [`resolve_co_requisites`] and
+/// [`resolve_optional_component`] key off whether the manifest row *declares* a `revision` at all,
+/// which is a different question — a row declaring `"main"` is unpinned here but `Some` there.
 pub(crate) fn is_pinned_hf_revision(revision: &str) -> bool {
     revision.len() == 40
         && revision
@@ -1802,6 +1801,13 @@ pub(crate) fn is_pinned_hf_revision(revision: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Resolve the local HF snapshot dir for a repo PINNED to an exact commit (`snapshots/<revision>/`) —
+/// the cache-only twin of [`huggingface_snapshot_dir`] for a download that carries an immutable
+/// `revision` (F-029). Unlike [`huggingface_snapshot_dir`] (which prefers `refs/main`), this reads the
+/// EXACT pinned snapshot, so a co-requisite pinned to a non-main commit in a SHARED repo (e.g.
+/// chatterbox's `ve.safetensors` @ 5bb1f6ee living alongside the primary `refs/main` snapshot) resolves
+/// to the right snapshot — mirroring the inference-side `hf_get_pinned`. Returns `None` when the
+/// revision is not a pin ([`is_pinned_hf_revision`]) or that pinned snapshot is not cached.
 pub(crate) fn huggingface_pinned_snapshot_dir(
     data_dir: &Path,
     repo: &str,

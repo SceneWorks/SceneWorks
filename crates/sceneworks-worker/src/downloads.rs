@@ -367,8 +367,9 @@ async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerRes
 /// [`huggingface_snapshot_dir`]. There is deliberately **no fallback from a pinned revision to
 /// `refs/main`**: the pins exist precisely so a re-push (or a compromised token) cannot swap the
 /// weights we load (sc-9879 / sc-9682), and a silent fall-through to the mutable branch would hand
-/// back exactly the artifact the pin was added to refuse. This mirrors [`resolve_co_requisites`],
-/// which branches the same way for the same reason.
+/// back exactly the artifact the pin was added to refuse. `resolve_co_requisites` refuses the same
+/// fall-through, though it asks a different question: it branches on whether the manifest row
+/// DECLARES a `revision`, whereas this branches on whether the revision it was handed IS a pin.
 ///
 /// Returns `None` when the component is not cached. Callers turn that into an actionable
 /// "install X from the Model Manager" error (S10, sc-17635) rather than a fetch.
@@ -2517,20 +2518,44 @@ mod resolve_hf_component_file_tests {
         assert_eq!(resolved, None);
     }
 
-    /// A traversing `file` cannot escape the snapshot, even though the escape target exists.
+    /// A traversing `file` cannot escape the snapshot.
+    ///
+    /// The `..` depth is load-bearing and was wrong on the first draft of this test: the snapshot
+    /// root is `<data_dir>/cache/huggingface/hub/models--<slug>/snapshots/<PIN>/`, so escaping to
+    /// `<data_dir>` takes SIX levels (PIN -> snapshots -> models-- -> hub -> huggingface -> cache).
+    /// With four, the un-confined path lands on a directory that does not exist, `is_file()` is
+    /// false either way, and the test passes with `safe_join` swapped for a plain `Path::join` —
+    /// green while proving nothing.
+    ///
+    /// So the escape target is asserted reachable FIRST: `naive` is what an unconfined join would
+    /// produce, and it really is a file. Only then does the `None` mean confinement.
     #[test]
     fn confines_a_traversing_component_file() {
         let _env = isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        stage_snapshot_file(data_dir.path(), PIN, FILE);
+        let snapshot = stage_snapshot_file(data_dir.path(), PIN, FILE)
+            .parent()
+            .expect("snapshot dir")
+            .to_path_buf();
         let outside = data_dir.path().join("outside.safetensors");
         std::fs::write(&outside, b"host file").expect("write escape target");
+
+        const TRAVERSAL: &str = "../../../../../../outside.safetensors";
+        // What a plain `Path::join` would resolve to — proven to be a real file, so a resolver
+        // without confinement WOULD hand it back and this test would fail.
+        let naive = snapshot.join(TRAVERSAL);
+        assert!(
+            naive.is_file(),
+            "the traversal must actually reach a real file, else this test proves nothing; \
+             naive path was {}",
+            naive.display()
+        );
 
         let resolved = resolve_hf_component_file(
             &settings_at(data_dir.path().to_path_buf()),
             REPO,
             PIN,
-            "../../../../outside.safetensors",
+            TRAVERSAL,
         );
         assert_eq!(resolved, None, "a traversing file name must not resolve");
     }
