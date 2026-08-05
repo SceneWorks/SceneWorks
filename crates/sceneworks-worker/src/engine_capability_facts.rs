@@ -31,11 +31,20 @@
 //!    `apps/web/src/data/previewSupportCatalog.test.js` re-derives it as a drift guard.
 //!
 //! Stage 2 depends only on checked-in files, so its guard runs on **every PR**. Stage 1 needs a
-//! linked registry, which exists only on macOS and `backend-candle` lanes — and both candle lanes
-//! (`desktop-windows.yml`, `server-candle-linux.yml`) are `workflow_dispatch`-only. That is why
-//! stage 1 is a manual step rather than CI-wired.
+//! linked registry, which exists only on macOS and `backend-candle` lanes — so *writing* a facts
+//! file stays a manual step run on the matching box.
 //!
-//! **The dispatch-only lane is not an unguarded gap.** sc-16951's `candle-gen-catalog` bidirectional
+//! **Both files are nevertheless VERIFIED on every PR** that can invalidate them. `macos-mlx.yml`
+//! re-dumps to a scratch dir and diffs `capabilities.mlx.json` against it (sc-17119); the
+//! self-hosted CUDA lane `windows-candle.yml` does the same for `capabilities.candle.json` under
+//! `shell: cmd` (sc-17592). Both lanes watch `config/engine-capabilities/**`, so the one edit these
+//! guards exist to catch — a **restamp**, where the `inferenceRevision` line is rewritten and the
+//! engine list is left stale — cannot slip through by touching that file alone. Without those steps
+//! every remaining guard reads this file as a *source* and is satisfied by editing one line. (The
+//! other candle lanes still verify nothing: `desktop-windows.yml` builds the sidecar on main/release
+//! only, and `server-candle-linux.yml` is `workflow_dispatch`-only.)
+//!
+//! **Nor was the dispatch-only era an unguarded gap.** sc-16951's `candle-gen-catalog` bidirectional
 //! test runs in the *inference* repo's CI on every PR, so descriptor-level truth is guarded
 //! continuously upstream. SceneWorks only needs to re-dump when the descriptors can have moved —
 //! i.e. at an **inference pin bump**, where `scripts/bump-inference.mjs` fails closed on a stale
@@ -91,7 +100,9 @@
 //! Either invocation also writes `audio/capabilities.candle.json`. Both lanes link the *same* audio
 //! catalog — `candle-audio-catalog` gates nothing on the platform, its `metal`/`cuda` features only
 //! forward the compute backend — so the two lanes produce byte-identical audio facts and neither
-//! owns the file exclusively.
+//! owns the file exclusively. That is not left as an argument: **both** restamp-verification lanes
+//! diff this one file against their own fresh dump (`macos-mlx.yml` and `windows-candle.yml`), so
+//! the day the two lanes stop agreeing, one of them says so.
 //!
 //! # The vacuous-green trap
 //!

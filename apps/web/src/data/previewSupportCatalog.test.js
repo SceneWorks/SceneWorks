@@ -87,11 +87,17 @@ const inferencePin = (() => {
 // re-dumped, or a new MODEL_TABLE row lands — re-run `npm run gen:preview-support` (apps/web); this
 // fails until both artifacts are regenerated.
 //
-// This is the half of the design that runs on EVERY PR. Stage 1 needs a linked engine registry and
-// so can only run on macOS or a `backend-candle` lane (both dispatch-only), but it writes checked-in
-// files, and everything below reads only those. That the stage-1 lane is dispatch-only is not an
-// unguarded gap: sc-16951's `candle-gen-catalog` bidirectional test guards descriptor-level truth in
-// the inference repo's CI continuously.
+// This is the half of the design that runs on EVERY PR *and on every platform*. Stage 1 needs a
+// linked engine registry, so writing a facts file can only happen on macOS or a `backend-candle`
+// lane — but it writes checked-in files, and everything below reads only those.
+//
+// Reading them is not taking them on trust. Both stage-1 lanes are themselves PR lanes that re-dump
+// and diff their own file: `macos-mlx.yml` for `capabilities.mlx.json` (sc-17119) and the
+// self-hosted CUDA `windows-candle.yml` for `capabilities.candle.json` (sc-17592). Without those,
+// this suite would be satisfied by a restamp — it re-derives the catalog from the file's CONTENTS,
+// so rewriting only the `inferenceRevision` line over a stale engine list keeps it green.
+// Descriptor-level truth is guarded continuously upstream besides, by sc-16951's
+// `candle-gen-catalog` bidirectional test in the inference repo's CI.
 describe("preview-support catalog: the artifacts are derived, not authored", () => {
   it("re-deriving from engines.rs + the facts files reproduces builtin.preview-support.jsonc", () => {
     expect(JSON.parse(previewSupportManifestRaw)).toEqual(derived);

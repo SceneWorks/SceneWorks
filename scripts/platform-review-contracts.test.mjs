@@ -598,3 +598,50 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(firstDispatchOnly > 0, "macos-mlx.yml must still have dispatch-only calibration steps");
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
+
+test("both stage-1 lanes verify their own capability dump, LAST and reachably", async () => {
+  // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
+  // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
+  // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
+  // contents. All of that is satisfied by a RESTAMP — rewriting the revision line over a stale
+  // engine list — which is how both files were actually produced through two consecutive pin bumps.
+  // Only a lane that LINKS the engine can tell the difference, and there is exactly one such PR lane
+  // per backend.
+  const lanes = [
+    [".github/workflows/macos-mlx.yml", "capabilities.mlx.json"],
+    [".github/workflows/windows-candle.yml", "capabilities.candle.json"],
+  ];
+  for (const [path, file] of lanes) {
+    const lane = await source(path);
+    const verifyAt = lane.indexOf(`- name: Verify ${file} is a real dump, not a restamp`);
+    assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
+    // Re-dump to a SCRATCH dir and compare. Dumping over the checked-in file would make the
+    // comparison vacuous and mutate the tree on a red run.
+    assert.match(lane, /bin dump-engine-capabilities/, path);
+
+    // LAST on the PR path. A step failure aborts the job, and this one goes red on exactly the
+    // routine pin-bump PRs where nobody re-dumped — so placed earlier it would cancel the coverage
+    // each lane uniquely carries (macOS: `nax_guard`; Windows: the only PR run of
+    // `cargo test -p sceneworks-worker --features backend-candle`). A missing dump must not suppress
+    // unrelated verdicts.
+    //
+    // "Last" means last among steps that RUN on a pull request, not last in the file: macos-mlx.yml
+    // keeps a long `workflow_dispatch`-only calibration tail after it, which is skipped on every PR
+    // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
+    // the point — nothing else would notice an unconditional step being appended later.
+    for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+      assert.match(
+        block,
+        /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
+        `${path}: "${block.split("\n")[0]}" runs after the dump-verification step on the PR path. ` +
+          "That step must stay last for everything a PR executes, so its failure cannot cancel " +
+          "coverage this lane is the only place to have. Move it above the verification step.",
+      );
+    }
+
+    // Reachability. A restamp touches ONLY the facts file, so without this path entry the lane does
+    // not run at all on the one PR the step exists to catch — declared but unreachable, the same
+    // trap sc-17026 was about.
+    assert.match(lane, /^ {6}- "config\/engine-capabilities\/\*\*"$/m, path);
+  }
+});
