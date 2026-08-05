@@ -1090,9 +1090,16 @@ test("SC-17497 the audit script and both validators agree on the strings they al
   // taken over, so both are pinned. Fields are matched individually rather than as one block,
   // because a struct-literal regex would break on `cargo fmt` and be repaired by relaxing it.
   const witness = FLUX2_COMPATIBILITY_AUDIT.featureWitness;
+  // Scoped to the constant's own initializer, not first-match over the file. A bare
+  // /digest: "…"/ grades whatever literal appears first, so an earlier `digest:` or `target:`
+  // anywhere above — including in the test module's own fixture — would silently re-point every
+  // assertion below and this test would keep passing.
+  const rustWitness = /FLUX2_FEATURE_WITNESS: FeatureWitnessExpectation<'static> =([\s\S]*?)\n\s*\};/.exec(rust);
+  assert.ok(rustWitness, "the Rust feature witness must stay machine-readable from this test");
   for (const [jsKey, rustKey] of [
     ["shippedPackage", "shipped_package"],
     ["scopeRoot", "scope_root"],
+    ["scopeFeatures", "scope_features"],
     ["target", "target"],
     ["edges", "edges"],
   ]) {
@@ -1101,11 +1108,11 @@ test("SC-17497 the audit script and both validators agree on the strings they al
       FEATURE_WITNESS_RESOLUTION[jsKey],
       `the JS validator grades ${jsKey} against a resolution the script does not emit`,
     );
-    const rustValue = new RegExp(`${rustKey}: "([^"]+)"`).exec(rust);
+    const rustValue = new RegExp(`\\b${rustKey}: "([^"]+)"`).exec(rustWitness[1]);
     assert.ok(rustValue, `the Rust witness ${rustKey} must stay machine-readable from this test`);
     assert.equal(rustValue[1], witness[jsKey], `${jsKey} differs between the two validators`);
   }
-  const rustWitnessDigest = /digest: "(sha256:[0-9a-f]{64})"/.exec(rust);
+  const rustWitnessDigest = /\bdigest: "(sha256:[0-9a-f]{64})"/.exec(rustWitness[1]);
   assert.ok(rustWitnessDigest, "the Rust witness digest must stay machine-readable from this test");
   assert.equal(rustWitnessDigest[1], witness.digest, "one frozen feature witness, two languages");
 });
@@ -1165,6 +1172,7 @@ test("SC-17606 the shipped feature witness is required on every record, includin
   for (const [key, wrong] of [
     ["shippedPackage", "candle-gen-flux2"],
     ["scopeRoot", "runtime-cuda"],
+    ["scopeFeatures", "metal"],
     ["target", "aarch64-apple-darwin"],
     ["edges", "normal,build,dev"],
   ]) {

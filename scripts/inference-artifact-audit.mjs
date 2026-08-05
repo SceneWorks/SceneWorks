@@ -992,7 +992,25 @@ function usage() {
   );
 }
 
-export async function main(argv) {
+/**
+ * `runGit` and friends are injectable for the reason `assertComparableToolchains` was extracted from
+ * here (sc-17497): a rule that only ever runs behind two real CUDA builds is indistinguishable from
+ * a rule that is not there. sc-17606 put the load-bearing half of the witness layer INTO this
+ * function — which revision each witness resolves at, whose digest lands on which side of the
+ * record, what the exit code is — and none of it is reachable from a unit test of the pure
+ * functions. Swapping `compatibleWitness.digest` for `capturedWitness.digest` below would make the
+ * layer permanently green, and no test of those functions would notice.
+ */
+export async function main(
+  argv,
+  {
+    runGit = git,
+    runCargoTree = defaultCargoTreeRunner,
+    runCargo = defaultCargoRunner,
+    readArtifact = (file) => readFileSync(file),
+    readToolchain = defaultToolchain,
+  } = {},
+) {
   const value = (flag) => {
     const index = argv.indexOf(flag);
     return index === -1 ? undefined : argv[index + 1];
@@ -1007,9 +1025,9 @@ export async function main(argv) {
     return 2;
   }
 
-  const captured = resolveRevision(repo, capturedArg);
-  const compatible = resolveRevision(repo, compatibleArg);
-  const pairs = closureObjectPairs({ repo, captured, compatible });
+  const captured = resolveRevision(repo, capturedArg, { runGit });
+  const compatible = resolveRevision(repo, compatibleArg, { runGit });
+  const pairs = closureObjectPairs({ repo, captured, compatible, runGit });
   const changed = changedClosurePaths(pairs);
 
   let artifact = null;
@@ -1044,12 +1062,27 @@ export async function main(argv) {
   // target directory. The free path stays free of compilation, which was always the promise.
   const workdir = requestedWorkdir ?? mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-build-"));
   const cargoTargetDir = path.join(workdir, "..", `${path.basename(workdir)}-target`);
+  // `finally` does not run on a signal, and sc-17606 made the worktree happen on EVERY run rather
+  // than only behind a build — so a Ctrl-C now leaves a registration behind routinely instead of
+  // rarely. That matters more than it sounds: `--workdir` refuses a non-empty directory, so the
+  // leftover blocks the same path on the retry, which is the run the operator is most likely to
+  // attempt next.
+  const abandonWorktree = () => {
+    try {
+      runGit(repo, ["worktree", "remove", "--force", workdir]);
+    } catch {
+      /* nothing to remove, which is the same outcome */
+    }
+    process.exit(130);
+  };
+  process.once("SIGINT", abandonWorktree);
+  process.once("SIGTERM", abandonWorktree);
   try {
-    git(repo, ["worktree", "add", "--detach", workdir, captured]);
+    runGit(repo, ["worktree", "add", "--detach", workdir, captured]);
     process.stderr.write(`[audit] resolving the shipped feature set at ${captured}\n`);
-    const capturedWitness = resolveFeatureWitness({ workdir, revision: captured });
+    const capturedWitness = resolveFeatureWitness({ workdir, revision: captured, runGit, runCargoTree });
     process.stderr.write(`[audit] resolving the shipped feature set at ${compatible}\n`);
-    const compatibleWitness = resolveFeatureWitness({ workdir, revision: compatible });
+    const compatibleWitness = resolveFeatureWitness({ workdir, revision: compatible, runGit, runCargoTree });
     featureWitness = {
       ...FEATURE_WITNESS_RESOLUTION,
       packages: compatibleWitness.packages,
@@ -1068,9 +1101,20 @@ export async function main(argv) {
     });
     if (changed.length > 0) {
       process.stderr.write(`[audit] building ${captured} (${lane})\n`);
-      const capturedBuild = buildMeasurementBinary({ workdir, revision: captured, lane, cargoTargetDir });
+      const build = (revision) =>
+        buildMeasurementBinary({
+          workdir,
+          revision,
+          lane,
+          cargoTargetDir,
+          runGit,
+          runCargo,
+          readArtifact,
+          readToolchain,
+        });
+      const capturedBuild = build(captured);
       process.stderr.write(`[audit] building ${compatible} (${lane})\n`);
-      const compatibleBuild = buildMeasurementBinary({ workdir, revision: compatible, lane, cargoTargetDir });
+      const compatibleBuild = build(compatible);
       assertComparableToolchains({
         captured,
         compatible,
@@ -1091,10 +1135,12 @@ export async function main(argv) {
       };
     }
   } finally {
+    process.off("SIGINT", abandonWorktree);
+    process.off("SIGTERM", abandonWorktree);
     // `|| true`-style tolerance: if `worktree add` was what failed there is nothing to remove, and
     // masking that error with a second one would hide the real cause.
     try {
-      git(repo, ["worktree", "remove", "--force", workdir]);
+      runGit(repo, ["worktree", "remove", "--force", workdir]);
     } catch {
       rmSync(workdir, { recursive: true, force: true });
     }

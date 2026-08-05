@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -23,6 +23,7 @@ import {
   digestBytes,
   encodedRustflags,
   featureWitnessText,
+  main,
   measurementFeatureDelta,
   normalizePackageSource,
   parseFeatureTree,
@@ -646,7 +647,7 @@ test("the witness hashes the SHIPPED features of the packages FLUX.2 links, and 
   assert.throws(() => featureWitnessText({ shipped: orphaned, members }), /absent from runtime-cuda/);
 });
 
-test("the measured-vs-shipped feature delta is reported, and drift across the window is a hard stop", () => {
+test("the measured-vs-shipped feature delta is reported, and unexplained drift is surfaced", () => {
   const shipped = parseFeatureTree(TREE("candle-gen v0.0.0|cuda,default", "serde v1.0.0|default"), "/w", path.posix);
   const measured = parseFeatureTree(
     // The real shape at both audited revisions: the test binary turns on `candle-gen/testkit` and
@@ -750,6 +751,197 @@ test("the resolution the witness describes is the bundle SceneWorks actually con
     !FEATURE_WITNESS_RESOLUTION.edges.includes("dev"),
     "dev-dependencies do not ship; they belong in measurementDelta, not in what the witness certifies",
   );
+});
+
+/**
+ * A fake git + cargo tree pair that answers `main` for a two-revision run with NO build.
+ *
+ * `runCargoTree` answers from whichever revision `runGit` last checked out, which is the only way
+ * to catch a wiring bug that resolves both witnesses at the same revision — the fake has to model
+ * the checkout, or every assertion below passes with the two calls collapsed into one.
+ */
+function fakeAudit({ trees, objects = {} }) {
+  const calls = [];
+  let head = null;
+  const OBJECT_OF = (revision, objectPath) =>
+    (objects[revision]?.[objectPath] ?? objectPath).padEnd(40, "0").slice(0, 40).replace(/[^0-9a-f]/g, "a");
+  return {
+    calls,
+    head: () => head,
+    runGit(repo, args) {
+      calls.push(args.join(" "));
+      if (args[0] === "rev-parse" && args[1].endsWith("^{commit}")) {
+        return args[1].replace("^{commit}", "").padEnd(40, "0").replace(/[^0-9a-f]/g, "a");
+      }
+      if (args[0] === "rev-parse") {
+        const [revision, objectPath] = args[1].split(":");
+        return OBJECT_OF(revision, objectPath);
+      }
+      if (args[0] === "checkout") head = args[2];
+      if (args[0] === "worktree" && args[1] === "add") head = args[4];
+      return "";
+    },
+    runCargoTree({ args }) {
+      const selected = args[args.indexOf("-p") + 1];
+      calls.push(`tree@${head}:${selected}${args.includes("normal,build,dev") ? ":dev" : ""}`);
+      return trees[head][selected];
+    },
+  };
+}
+
+const REV_A = "a".repeat(40);
+const REV_B = "b".repeat(40);
+
+test("main resolves one witness per revision and puts each digest on its own side", async () => {
+  // sc-17606: every load-bearing part of the witness layer's WIRING lives in `main` — which
+  // revision each witness resolves at, whose digest lands where, and the exit code. None of it is
+  // reachable from a unit test of the pure functions: swapping `compatibleWitness.digest` for
+  // `capturedWitness.digest` makes the layer permanently green and leaves them all passing. This is
+  // the same argument that pulled `assertComparableToolchains` out of `main` in sc-17497.
+  const out = path.join(mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-")), "record.json");
+  const workdir = mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-wd-"));
+  const members = ["candle-gen-flux2 v0.0.0|cuda"];
+  const fake = fakeAudit({
+    trees: {
+      // The story's mechanism: something outside FLUX.2's closure widens a dependency it links.
+      [REV_A]: {
+        "runtime-cuda": ["candle-gen-flux2 v0.0.0|cuda", "serde_json v1.0.150|default,std"],
+        "candle-gen-flux2": [...members, "serde_json v1.0.150|default,std"],
+      },
+      [REV_B]: {
+        "runtime-cuda": ["candle-gen-flux2 v0.0.0|cuda", "serde_json v1.0.150|default,preserve_order,std"],
+        "candle-gen-flux2": [...members, "serde_json v1.0.150|default,std"],
+      },
+    },
+  });
+  try {
+    const code = await main(
+      ["--repo", "/r", "--captured", REV_A, "--compatible", REV_B, "--workdir", workdir, "--out", out],
+      { runGit: fake.runGit, runCargoTree: fake.runCargoTree },
+    );
+    const record = JSON.parse(readFileSync(out, "utf8"));
+    assert.deepEqual(record.changedClosurePaths, [], "no closure object moved — this IS the free path");
+    assert.ok(!("auditedArtifact" in record), "and nothing was built");
+    assert.notEqual(
+      record.featureWitness.capturedDigest,
+      record.featureWitness.compatibleDigest,
+      "the shipped resolution changed, and the record must say which side is which",
+    );
+    assert.equal(code, 1, "a free-path run that certified this would be the exact bug sc-17606 exists for");
+    // Each side must come from ITS revision, asserted by re-deriving one of them in isolation.
+    const only = (revision) =>
+      resolveFeatureWitness({
+        workdir,
+        revision,
+        runGit: fake.runGit,
+        runCargoTree: fake.runCargoTree,
+        platformPath: path.posix,
+      }).digest;
+    assert.equal(record.featureWitness.capturedDigest, only(REV_A));
+    assert.equal(record.featureWitness.compatibleDigest, only(REV_B));
+    assert.ok(
+      fake.calls.includes(`tree@${REV_A}:runtime-cuda`) && fake.calls.includes(`tree@${REV_B}:runtime-cuda`),
+      "both revisions are actually checked out and resolved, not one of them twice",
+    );
+  } finally {
+    rmSync(path.dirname(out), { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("main exits 0 and records a witness when the shipped resolution is unchanged", async () => {
+  const out = path.join(mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-")), "record.json");
+  const workdir = mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-wd-"));
+  const tree = {
+    "runtime-cuda": ["candle-gen-flux2 v0.0.0|cuda", "serde_json v1.0.150|default,std"],
+    "candle-gen-flux2": ["candle-gen-flux2 v0.0.0|cuda", "serde_json v1.0.150|default,std"],
+  };
+  const fake = fakeAudit({ trees: { [REV_A]: tree, [REV_B]: tree } });
+  try {
+    const code = await main(
+      ["--repo", "/r", "--captured", REV_A, "--compatible", REV_B, "--workdir", workdir, "--out", out],
+      { runGit: fake.runGit, runCargoTree: fake.runCargoTree },
+    );
+    const record = JSON.parse(readFileSync(out, "utf8"));
+    assert.equal(code, 0);
+    assert.equal(record.schemaVersion, 4);
+    assert.equal(record.featureWitness.capturedDigest, record.featureWitness.compatibleDigest);
+    assert.equal(record.featureWitness.packages, 2, "the member count, from the member tree");
+    assert.equal(record.featureWitness.scopeFeatures, "cuda");
+  } finally {
+    rmSync(path.dirname(out), { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("main puts each BUILD's digest on its own side, and reports both layers independently", async () => {
+  // The artifact layer's wiring has the same untestable-from-below shape as the witness layer's.
+  // Driven on `--lane metal` so the nvcc probe is not reached; the record is inert by construction.
+  const out = path.join(mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-")), "record.json");
+  const workdir = mkdtempSync(path.join(os.tmpdir(), "sceneworks-audit-main-wd-"));
+  const moved = "crates/media/candle-gen/candle-gen";
+  const tree = {
+    "runtime-cuda": ["candle-gen-flux2 v0.0.0|metal"],
+    "candle-gen-flux2": ["candle-gen-flux2 v0.0.0|metal"],
+  };
+  const fake = fakeAudit({
+    trees: { [REV_A]: tree, [REV_B]: tree },
+    // Only `candle-gen` differs between the two revisions, so a build is owed for exactly it.
+    objects: { [REV_B]: { [moved]: "f".repeat(40) } },
+  });
+  const report = [
+    JSON.stringify({
+      reason: "compiler-artifact",
+      executable: "/w/target/deps/candle_gen_flux2-1",
+      manifest_path: `${workdir}/crates/media/candle-gen/candle-gen-flux2/Cargo.toml`,
+      profile: { test: true },
+      target: { kind: ["lib"], name: "candle_gen_flux2" },
+    }),
+    JSON.stringify({ reason: "compiler-artifact", manifest_path: `${workdir}/${moved}/Cargo.toml` }),
+  ];
+  let built = 0;
+  try {
+    const code = await main(
+      [
+        ...["--repo", "/r", "--captured", REV_A, "--compatible", REV_B],
+        ...["--lane", "metal", "--workdir", workdir, "--out", out],
+      ],
+      {
+        runGit: fake.runGit,
+        runCargoTree: fake.runCargoTree,
+        runCargo: () => report,
+        // Bytes keyed to the CHECKED-OUT revision, not to a call counter: a counter makes two
+        // builds of the same revision disagree, and a wiring that builds the captured one twice
+        // then sails through. (It did — this fixture was rewritten after that mutation survived.)
+        readArtifact: () => {
+          built += 1;
+          return Buffer.from(`build of ${fake.head()}`);
+        },
+        readToolchain: () => "rustc 1.96.0",
+      },
+    );
+    const record = JSON.parse(readFileSync(out, "utf8"));
+    assert.deepEqual(record.changedClosurePaths, [moved]);
+    assert.equal(built, 2, "one build per revision");
+    assert.notEqual(record.auditedArtifact.capturedDigest, record.auditedArtifact.compatibleDigest);
+    assert.equal(code, 1, "artifacts that differ are a re-capture");
+    assert.equal(
+      record.featureWitness.capturedDigest,
+      record.featureWitness.compatibleDigest,
+      "the witness is quiet here — the two layers report independently",
+    );
+    assert.deepEqual(record.auditedArtifact.adjudicates, [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      ".cargo/config.toml",
+      "crates/media/candle-gen/candle-gen",
+      "crates/media/candle-gen/candle-gen-flux2",
+    ]);
+  } finally {
+    rmSync(path.dirname(out), { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });
 
 test("the closure covers the workspace build inputs, not only the crate trees", () => {

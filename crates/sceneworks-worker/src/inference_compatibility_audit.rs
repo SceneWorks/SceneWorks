@@ -62,6 +62,7 @@ pub(crate) struct FeatureWitnessExpectation<'a> {
     pub(crate) digest: &'a str,
     pub(crate) shipped_package: &'a str,
     pub(crate) scope_root: &'a str,
+    pub(crate) scope_features: &'a str,
     pub(crate) target: &'a str,
     pub(crate) edges: &'a str,
 }
@@ -84,6 +85,7 @@ pub(crate) const FLUX2_FEATURE_WITNESS: FeatureWitnessExpectation<'static> =
         digest: "sha256:321625ed01f837fd0682b2020d92cde068e8792db103d4e8ba3bf3ff8bff500b",
         shipped_package: "runtime-cuda",
         scope_root: "candle-gen-flux2",
+        scope_features: "cuda",
         target: "x86_64-pc-windows-msvc",
         edges: "normal,build",
     };
@@ -271,6 +273,10 @@ fn feature_witness_authorizes(
         // in answer something else, and their digests would compare on perfectly equal terms.
         || field("shippedPackage") != Some(expected.shipped_package)
         || field("scopeRoot") != Some(expected.scope_root)
+        // `cuda`, not `metal`: the provider's own feature selection is half of which code the
+        // bundle compiles for it, and an ungraded declaration beside a graded digest reads as
+        // though both were checked.
+        || field("scopeFeatures") != Some(expected.scope_features)
         || field("target") != Some(expected.target)
         || field("edges") != Some(expected.edges)
         || witness.get("packages").and_then(Value::as_u64).unwrap_or(0) == 0
@@ -315,6 +321,7 @@ mod sc_17497_artifact_audit_tests {
         digest: WITNESS_DIGEST,
         shipped_package: "runtime-cuda",
         scope_root: "candle-gen-flux2",
+        scope_features: "cuda",
         target: "x86_64-pc-windows-msvc",
         edges: "normal,build",
     };
@@ -519,6 +526,7 @@ mod sc_17497_artifact_audit_tests {
         for (key, wrong) in [
             ("shippedPackage", "candle-gen-flux2"),
             ("scopeRoot", "runtime-cuda"),
+            ("scopeFeatures", "metal"),
             ("target", "aarch64-apple-darwin"),
             ("edges", "normal,build,dev"),
         ] {

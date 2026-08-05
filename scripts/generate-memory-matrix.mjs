@@ -103,6 +103,7 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
     digest: "sha256:321625ed01f837fd0682b2020d92cde068e8792db103d4e8ba3bf3ff8bff500b",
     shippedPackage: "runtime-cuda",
     scopeRoot: "candle-gen-flux2",
+    scopeFeatures: "cuda",
     target: "x86_64-pc-windows-msvc",
     edges: "normal,build",
   }),
@@ -1398,6 +1399,10 @@ function validatedCompatibilityFeatureWitness(audit, expectedWitness) {
     // with dev edges folded in answers something else, and its digest would compare on equal terms.
     witness.shippedPackage !== expectedWitness.shippedPackage ||
     witness.scopeRoot !== expectedWitness.scopeRoot ||
+    // `cuda`, not `metal`: the provider's own feature selection is half of which code the bundle
+    // compiles for it, and it is inside the hashed text — but a record may declare anything, and an
+    // ungraded declaration next to a graded digest reads as though both were checked.
+    witness.scopeFeatures !== expectedWitness.scopeFeatures ||
     witness.target !== expectedWitness.target ||
     witness.edges !== expectedWitness.edges ||
     !Number.isInteger(witness.packages) ||

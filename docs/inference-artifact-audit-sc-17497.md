@@ -176,6 +176,12 @@ restriction is what keeps this from becoming the ~50-crate trigger rejected abov
 resolves **243** packages, FLUX.2 links **173** of them, and a feature change confined to the other
 70 moves nothing.
 
+The 173 are not all numerics, though, and the trigger is not zero. `image`, `windows-sys`, `winapi`
+and `tracing-core` are among them, so a bundle crate adding a `windows-sys` feature moves the
+witness and costs a re-capture for a change that cannot touch VRAM. That is the conservative
+direction and far narrower than the source-commit trigger this epic removed, but it is a real cost
+rather than a free check.
+
 | | |
 | --- | --- |
 | shipped package | `runtime-cuda`, default features (`media` + `audio`) — what `sceneworks-worker` and `sceneworks-memory-adapter` both take |
@@ -235,22 +241,29 @@ evidence, not just the verdict.
 
 The witness answers "did the shipped resolution **change** across this window?", which is the
 question a two-revision audit can answer. It does not make the measured code equal to the shipped
-code. That static gap is recorded rather than argued: `featureWitness.measurementDelta` is computed
-at both revisions and the tool refuses to emit a record where they disagree, because a delta that
-*grows* means the hashed binary represents the shipped code less well at one end than the other —
-which no digest comparison can see, since both sides drifted together.
-
-Today it is exactly two entries, both test-only surface:
+code. That static gap is *described* rather than closed: `featureWitness.measurementDelta` lists,
+for the compatible revision, every package whose features differ between the measurement build and
+the shipped one. Today it is exactly two entries:
 
 ```
 candle-gen v0.0.0 (crates/media/candle-gen/candle-gen): measured [cuda,default,testkit] shipped [cuda,default]
 sceneworks-gen-core-testkit v0.1.0 (crates/contracts/gen-core-testkit): measured only
 ```
 
-Both are the other face of the accepted false positive below — the audited binary is a test binary —
-and the point of measuring it is that the list is now a fact rather than an assumption. No *shipped*
-package resolves differently under the measurement build than under the bundle; if a dev-dependency
-ever widened one, this is where it would appear.
+Both are the other face of the accepted false positive below — the audited binary is a test binary,
+so it turns on `candle-gen/testkit` and links a testkit crate that never ships. `candle-gen` **is**
+a shipped package: the measurement build compiles it with one feature the bundle does not. That is
+additive test-support code, and the point of the field is that this is now a list you can read
+rather than an assumption; if a dev-dependency ever widened a shipped package's features further,
+this is where it would appear.
+
+Two caveats on the field itself, so it is not read as more than it is. It is **descriptive, not
+gated**: it is outside the hashed text (folding it in would make a dev-dependency edit demand a
+re-capture) and neither validator checks it — for the shipped record it is pinned by
+`sc-15833-flux2-evidence.test.mjs`, and a future record's is not. And the tool reports a *change* in
+it across the window only when the shipped witness held still: the delta is `measured − shipped`, so
+widening the shipped side widens the delta too, and reporting it there put the primary finding under
+the wrong name. Either way the record is still written and the run still exits 1.
 
 One boundary stays open, and it is the same one the **Scope note** above draws for the lockfile and
 the toolchain: this is the resolution inside the *inference* workspace. SceneWorks consumes
