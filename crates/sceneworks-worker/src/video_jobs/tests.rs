@@ -729,7 +729,6 @@ fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
             assert_eq!(dir.parent().unwrap(), root);
         }
     });
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// A complete tier with NO shared co-requisite must NOT resolve. The T5/tokenizer/VAE are a
@@ -758,7 +757,6 @@ fn resolve_mochi_model_dir_requires_the_shared_corequisite() {
             "must error rather than resolve an unloadable tier"
         );
     });
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// A half-downloaded tier (manifest without weights, or weights without the manifest) must fall
@@ -781,7 +779,6 @@ fn mochi_tier_subdir_skips_an_incomplete_tier() {
         Some(root.join("q4")),
         "a torn q8 must fall through to the complete q4, never half-load"
     );
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// The quant marker rides the RESOLVED tier's own `split_model.json` — the same manifest the
@@ -801,7 +798,6 @@ fn mochi_tier_quant_reads_the_tier_manifest() {
     assert_eq!(mochi_tier_quant(&root.join("bf16")), None);
     // A manifest-less dir is dense-by-absence, never a guess.
     assert_eq!(mochi_tier_quant(&root.join("nope")), None);
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// `mochi_1` is the engine id on BOTH backends — no `_distilled`-style split, unlike LTX. (The
@@ -1210,7 +1206,6 @@ fn mochi_preflight_coerces_the_frame_count_on_mochis_lattice_by_model_id() {
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "512", || {
         mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
     });
-    std::fs::remove_dir_all(root).ok();
 
     let preflight = out.expect("a 151-frame clip fits a 512 GB budget");
     assert_eq!(
@@ -1253,7 +1248,6 @@ fn mochi_preflight_rejects_the_5s_default_on_a_64gb_mac() {
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 150, 848, 480)
     });
-    std::fs::remove_dir_all(root).ok();
 
     let message = out
             .expect_err(
@@ -1283,7 +1277,6 @@ fn mochi_preflight_admits_a_short_clip_on_the_same_64gb_mac() {
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_preflight("mochi_1", "mochi_1", &root.join("q4"), 19, 848, 480)
     });
-    std::fs::remove_dir_all(root).ok();
 
     let preflight = out.expect(
         "19 frames (the engine's own DEFAULT_FRAMES) needs 18.73 + 9.32 + 2 = 30.1 GiB, which \
@@ -1336,7 +1329,6 @@ fn mochi_vram_preflight_rejects_the_5s_default_on_an_rtx_5090() {
         "0",
         rtx_5090(),
     );
-    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .expect_err(
@@ -1375,7 +1367,6 @@ fn mochi_vram_preflight_admits_a_short_clip_on_the_same_rtx_5090() {
     let root = root_guard.path();
     // 7 frames: 18.73 weights + 4.66 decode + 2 headroom ≈ 25.4 GB, which fits 32 GB.
     let out = mochi_vram_preflight("mochi_1", &root.join("q4"), 7, 848, 480, "0", rtx_5090());
-    std::fs::remove_dir_all(root).ok();
 
     let preflight = out.expect(
         "a 7-frame clip needs ~25 GB and FITS a 32 GB card — a gate that refuses this has \
@@ -1431,7 +1422,6 @@ fn mochi_vram_preflight_coerces_the_frame_count_on_the_candle_lane() {
         mochi_vram_preflight("mochi_1", &tier, frames, 848, 480, "0", card_48).is_err(),
         "the 5 s default does not fit the SAME 48 GB card — the gate must see the frame count"
     );
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// sc-12344: the Wan weights-floor gate is keyed on the ENGINE id, and [`wan_vram_preflight`] is
@@ -1546,7 +1536,6 @@ fn mochi_vram_preflight_no_ops_without_a_budget_or_weight_signal() {
         "0",
         crate::vram_gate::apply_vram_cap(None, Some(4.0)),
     );
-    std::fs::remove_dir_all(root).ok();
     assert!(out.is_ok(), "unmeasurable weights ⇒ no signal ⇒ admit");
 }
 
@@ -1579,7 +1568,6 @@ fn mochi_vram_preflight_folds_the_shared_siblings_on_the_candle_lane() {
         "0",
         crate::vram_gate::apply_vram_cap(None, Some(20.0)),
     );
-    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_err(),
         "a tier-only scan would admit this job on a 20 GB card and then OOM on the T5 + VAE"
@@ -1619,7 +1607,6 @@ fn candle_mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() 
         "0",
         rtx_5090(),
     );
-    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .expect_err(
@@ -1673,7 +1660,6 @@ fn candle_mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_card()
         "0",
         card_64,
     );
-    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_err(),
         "the shared T5 + VAE (~9.73 GiB) push the total to ~72 GB, over the 64 GB card — a \
@@ -1702,7 +1688,6 @@ fn candle_mochi_precheck_admits_a_short_clip_on_the_same_rtx_5090() {
         "0",
         rtx_5090(),
     );
-    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_ok(),
         "a 7-frame clip fits a 32 GB card — refusing it here would block the download for a job \
@@ -1723,7 +1708,6 @@ fn candle_mochi_precheck_admits_without_a_signal() {
     );
 
     let root_guard = mochi_root_shared_only("candle_nosignal");
-
     let root = root_guard.path();
     let tier_dir = root.join("bf16");
     // A real floor, but no budget ⇒ admit.
@@ -1741,7 +1725,6 @@ fn candle_mochi_precheck_admits_without_a_signal() {
         .is_ok(),
         "no budget signal ⇒ admit — the pre-check refuses only against a real reading"
     );
-    std::fs::remove_dir_all(root).ok();
 }
 
 // -----------------------------------------------------------------------------------------
@@ -2003,7 +1986,6 @@ fn generate_mochi_using_hands_the_engine_the_mochi_lattice_frame_count() {
     let probe = ArmProbe::default();
     // A budget no clip can overflow, so the fit gate cannot be what fails this test.
     let out = drive_mochi_arm(root, "512", &probe, &mochi_request(json!({})));
-    std::fs::remove_dir_all(root).ok();
 
     let (decoded, raw_settings) = out.expect("a 151-frame clip fits a 512 GB budget");
     assert_eq!(
@@ -2074,7 +2056,6 @@ fn generate_mochi_using_refuses_an_over_budget_clip_before_loading_the_engine() 
     let root = root_guard.path();
     let probe = ArmProbe::default();
     let out = drive_mochi_arm(root, "64", &probe, &mochi_request(json!({})));
-    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .err()
@@ -2175,7 +2156,6 @@ fn generate_mochi_using_refuses_after_the_fetch_when_the_precheck_floor_admitted
     );
 
     let out = drive_mochi_arm(root, "64", &probe, &request);
-    std::fs::remove_dir_all(root).ok();
 
     let message = out
         .err()
@@ -2294,7 +2274,6 @@ fn generate_mochi_using_refuses_before_paying_for_the_tier_download() {
                 ))
         },
     );
-    std::fs::remove_dir_all(hub).ok();
 
     let message = out
         .err()
@@ -2357,7 +2336,6 @@ fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() 
                 ))
         },
     );
-    std::fs::remove_dir_all(root).ok();
 
     let (_decoded, adapter, _raw_settings) = out.expect("the candle mochi arm runs to completion");
     assert_eq!(
@@ -2435,7 +2413,6 @@ fn generate_candle_video_using_refuses_before_paying_for_the_tier_download() {
                 ))
         },
     );
-    std::fs::remove_dir_all(hub).ok();
 
     let message = out
         .err()
@@ -2511,7 +2488,6 @@ fn mochi_precheck_refuses_the_5s_default_before_any_tier_is_downloaded() {
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_precheck("mochi_1", "mochi_1", Some(&tier_dir), 150, 848, 480)
     });
-    std::fs::remove_dir_all(root).ok();
 
     let message = out
             .expect_err(
@@ -2560,7 +2536,6 @@ fn mochi_precheck_needs_the_shared_weights_floor_to_catch_the_64gb_default() {
             480,
         )
     });
-    std::fs::remove_dir_all(root).ok();
     assert!(
         out.is_err(),
         "the shared co-requisites (~9.73 GiB) are already on disk before any tier fetch, and \
@@ -2580,7 +2555,6 @@ fn mochi_precheck_admits_a_short_clip_on_the_same_64gb_mac() {
     let out = temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64", || {
         mochi_precheck("mochi_1", "mochi_1", Some(&root.join("bf16")), 19, 848, 480)
     });
-    std::fs::remove_dir_all(root).ok();
 
     out.expect(
         "19 frames needs 9.73 floor + 9.32 decode + 2 OS = 21.1 GiB — it fits, so the pre-check \
@@ -2637,7 +2611,6 @@ fn mochi_precheck_dir_names_the_requested_tier_not_the_installed_fallback() {
         // bf16 requested; only q4 is on disk.
         mochi_precheck_dir(&settings, &mochi_request(json!({ "mlxQuantize": 16 })))
     });
-    std::fs::remove_dir_all(root).ok();
 
     assert_eq!(
         dir.as_deref(),
@@ -2692,7 +2665,6 @@ fn mochi_available_is_text_to_video_only() {
             "a payload with no mode defaults to i2v and must NOT reach the t2v-only engine"
         );
     });
-    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
@@ -2772,7 +2744,6 @@ fn mochi_routes_to_the_mochi_engine_and_never_degrades_to_a_fake_video() {
             "the error must name the model and tell the user what to do: {message}"
         );
     });
-    std::fs::remove_dir_all(root).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -2999,7 +2970,6 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
             "the error must name the model and tell the user what to do: {message}"
         );
     });
-    std::fs::remove_dir_all(model_dir).ok();
 }
 
 /// The caller-side mapping pin: drives `generate_krea_realtime_using` end to end (through the
@@ -3085,7 +3055,6 @@ fn krea_realtime_using_hands_the_engine_the_mapped_t2v_request() {
     );
 
     drop(seen);
-    std::fs::remove_dir_all(model_dir).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -3177,7 +3146,6 @@ fn krea_realtime_passes_selected_loras_to_the_engine_load_spec() {
     );
 
     drop(seen);
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// The per-job LoRA cap is enforced on the krea arm too, and it is enforced BEFORE the tier fetch —
@@ -3251,7 +3219,6 @@ fn krea_realtime_rejects_more_loras_than_the_cap_before_loading_anything() {
         probe.spec.lock().unwrap().is_none(),
         "an over-cap job must be refused before any engine load"
     );
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// Coverage comes only from the engine's actual report. A fully-applied lightx2v-shaped file must not
@@ -3395,7 +3362,6 @@ fn krea_realtime_arm_stamps_the_report_returned_by_the_loaded_generator() {
             "totalKeys": 2,
         })]
     );
-    std::fs::remove_dir_all(root).ok();
 }
 
 /// 🔴 The hard-error class a real user hits: an I2V-family Wan LoRA targets `cross_attn.k_img` /
@@ -3973,7 +3939,6 @@ fn krea_realtime_flat_snapshot_takes_the_q4_dense_video_default() {
     assert_eq!(spec_weights_dir(spec), flat);
 
     drop(seen);
-    std::fs::remove_dir_all(flat).ok();
 }
 
 /// A resolved TIER reaches the engine as the tier DIR with `quantize: None` — the loadability half of
@@ -7135,8 +7100,6 @@ fn lora_path_outside_app_managed_root_is_rejected() {
         .tempdir()
         .expect("temp dir");
     let outside = outside_guard.path();
-    std::fs::create_dir_all(data_dir).unwrap();
-    std::fs::create_dir_all(outside).unwrap();
     let evil = outside.join("evil.safetensors");
     write_lora_fixture(&evil, None);
 
@@ -8619,11 +8582,15 @@ fn generate_ltx_validates_and_stages_the_selector_before_side_effects() {
 ))]
 #[test]
 fn ltx_gemma_completeness_requires_config_and_all_shards() {
+    // The traversal case below plants a decoy at `root.parent()`, so the guard has to own the
+    // PARENT as well — handing back the guard's own directory would put that decoy straight in the
+    // shared temp root, where only a trailing `remove_file` (skipped on panic) took it away.
     let root_guard = tempfile::Builder::new()
         .prefix("sw_gemma_ok_")
         .tempdir()
         .expect("temp dir");
-    let root = root_guard.path();
+    let root_owned = root_guard.path().join("gemma");
+    let root = root_owned.as_path();
     write_complete_gemma_dir(root);
     assert!(ltx_gemma_dir_is_complete(root));
 
@@ -8717,8 +8684,6 @@ fn ltx_gemma_completeness_requires_config_and_all_shards() {
     );
     write_tiny_safetensors(&single.join("model.safetensors"));
     assert!(ltx_gemma_dir_is_complete(single));
-
-    let _ = std::fs::remove_file(&outside);
 }
 
 /// sc-14377: filtered HF downloads can split one managed bundle across revisions. The selected

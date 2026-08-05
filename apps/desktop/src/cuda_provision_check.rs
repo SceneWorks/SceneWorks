@@ -108,8 +108,8 @@ mod tests {
     /// case-insensitive prefix (so a CUDA point-release still resolves).
     #[test]
     fn dir_has_dll_exact_and_prefix() {
-        let scratch_dir = scratch("has-dll");
-        let dir = scratch_dir.path();
+        let scratch_guard = scratch("has-dll");
+        let dir = scratch_guard.path();
         touch(dir, &["cudart64_13.dll", "onnxruntime.dll", "notes.txt"]);
 
         // Exact name (ends in .dll).

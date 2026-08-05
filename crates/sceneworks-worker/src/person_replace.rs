@@ -554,8 +554,13 @@ mod tests {
 
     #[test]
     fn person_track_masks_errors_without_frames_or_selection() {
-        let dir = std::env::temp_dir();
+        // A guard rather than the bare temp root: the callee returns before touching the
+        // filesystem TODAY, but that is a fact about `person_track_masks`, not about this test —
+        // a future pre-flight `create_dir_all` there would start writing into shared %TEMP%
+        // (sc-17707).
+        let dir_guard = tempfile::tempdir().expect("temp dir");
+        let dir = dir_guard.path();
         let track = json!({ "frames": [] });
-        assert!(person_track_masks(&dir, &track, 32, 32, 1).is_err());
+        assert!(person_track_masks(dir, &track, 32, 32, 1).is_err());
     }
 }

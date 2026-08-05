@@ -6909,7 +6909,6 @@ mod krea_turbo_memory_route_tests {
             (false, None),
             "missing byte evidence must retain the count-based fail-closed fallback"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -6264,7 +6264,6 @@ mod tests {
         )
         .expect("a non-adopting provider preserves the legacy whole-spec estimate");
         assert_eq!(legacy.context.predicted_peak_bytes, legacy_total_peak);
-        std::fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
     #[test]
@@ -6433,7 +6432,6 @@ mod tests {
             .is_err(),
             "mutation guard: zero adapter bytes must restore the refusal"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
