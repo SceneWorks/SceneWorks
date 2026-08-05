@@ -6634,10 +6634,12 @@
         // SC-15831: the provider-owned implementation is shared by the base, KV, and True V2
         // catalog entries because all three resolve to the same Candle engine. Evidence remains
         // entry-specific: only an exact artifact/tier/mode calibration may activate a candidate.
+        // Klein's 1024/1 decode tuple is intentionally full-edge: smaller tile domains fail the
+        // provider's real-weight RGB parity contract because the VAE tail contains spatial GroupNorm.
         "supportsSequentialOffload": true,
         "memoryStrategyCapabilities": {
           "bounded_decode": {
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
             "overlays": ["none"]
           },
           "bounded_attention": {
@@ -6798,7 +6800,7 @@
         "supportsSequentialOffload": true,
         "memoryStrategyCapabilities": {
           "bounded_decode": {
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
             "overlays": ["none"]
           },
           "bounded_attention": {
@@ -6928,7 +6930,7 @@
         "supportsSequentialOffload": true,
         "memoryStrategyCapabilities": {
           "bounded_decode": {
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+            "parameters": { "decodeTileEdge": 1024, "decodeOverlap": 1 },
             "overlays": ["none"]
           },
           "bounded_attention": {

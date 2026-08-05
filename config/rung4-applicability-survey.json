@@ -1190,7 +1190,7 @@
           "evidence": [
             {
               "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs",
-              "reason": "At pinned inference revision 41464d57, the Klein-specific contract publishes bounded decode, bounded attention, and a one-block DiT window over the exact 8 + 24 block domain with its own calibration fingerprint."
+              "reason": "At pinned inference revision fbb00d6b, the Klein-specific contract publishes parity-preserving full-edge bounded decode, bounded attention, and a one-block DiT window over the exact 8 + 24 block domain with its own calibration fingerprint."
             },
             {
               "source": "inference:crates/media/candle-gen/candle-gen-flux2/src/block_stream.rs",
