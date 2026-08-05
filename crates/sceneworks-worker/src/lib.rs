@@ -308,6 +308,12 @@ mod smoke_support;
     )
 ))]
 mod pinned_engine_geometry;
+// sc-17607: the COMPOSITION half of the SC-15833 FLUX.2 audit — is `flux2_dev` still registered by
+// `candle-gen-flux2` in the bundle the worker links? A codegen digest cannot answer that, because
+// the measurement binary links neither `runtime-cuda` nor `candle-gen-catalog`. Test-only and
+// candle-only: the composition under test IS the CUDA bundle, so there is no neutral version.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod flux2_composition_audit;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
 // in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]

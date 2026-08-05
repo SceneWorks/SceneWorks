@@ -48,10 +48,12 @@ const RUNGS = [
 // digest is frozen HERE, in source, so the checked-in record cannot authorize itself.
 //
 // `adjudicates` is the other half, and it is not optional. A digest speaks only for the paths the
-// audited binary can answer for: `runtime-cuda` depends on `candle-gen-flux2`, not the reverse, so
-// a commit into the CUDA bundle leaves the measurement binary byte-identical. Pinning the
-// adjudicable set here keeps an unchanged digest from being read as proof over a path it never
-// compiled.
+// audited binary can answer for, and pinning that set here keeps an unchanged digest from being
+// read as proof over a path it never compiled. Since sc-17607 every closure path IS one the binary
+// compiles — `crates/bundles/runtime-cuda` was the exception and it left the closure, because a
+// crate that sits ABOVE the provider raises a composition question (which provider is registered
+// under `flux2_dev`) that no digest can answer in either direction. That question is asked of the
+// linked bundle instead, in `crates/sceneworks-worker/src/flux2_composition_audit.rs`.
 //
 // sc-17524: the set also carries the four workspace build inputs (`Cargo.toml`, `Cargo.lock`,
 // `rust-toolchain.toml`, `.cargo/config.toml`), which earn their place differently — not "compiled into the binary" but
@@ -85,18 +87,45 @@ export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
       "crates/media/candle-gen/vendor/candle-kernels",
     ]),
   }),
-  // sc-17524: `Cargo.lock` and `rust-toolchain.toml` join the seven crate trees. They are build
-  // INPUTS rather than packages — cargo's `compiler-artifact` stream can never name them — but they
-  // feed every one of those builds, and the lockfile had already moved inside the authorized window
-  // while all seven trees stayed byte-identical. Leaving them out meant the free path could report
+  // sc-17606: the resolved-feature witness, frozen here for the same reason the digest is — a
+  // record that supplies its own expectations authorizes itself.
+  //
+  // It answers what neither layer above can. The audited binary is built `-p candle-gen-flux2`,
+  // which unifies features over a strictly smaller graph than the shipped `-p runtime-cuda` bundle;
+  // a crate outside FLUX.2's closure can enable a feature on a dependency FLUX.2 SHARES and change
+  // what it executes in the shipped runtime. Features are not recorded in `Cargo.lock`, so every
+  // closure object, and the artifact digest, stay byte-identical while that happens — the change
+  // arrives exclusively on the free path. Hence a witness that is required on EVERY record, not
+  // only the ones that carry a build.
+  //
+  // `digest` is over the bundle-resolved feature set of the packages FLUX.2 links (`cargo tree`, no
+  // compile). Scoping it to those packages rather than to the whole bundle is what keeps it from
+  // becoming the ~50-crate false-positive trigger sc-17524 measured and rejected.
+  featureWitness: Object.freeze({
+    digest: "sha256:321625ed01f837fd0682b2020d92cde068e8792db103d4e8ba3bf3ff8bff500b",
+    shippedPackage: "runtime-cuda",
+    scopeRoot: "candle-gen-flux2",
+    scopeFeatures: "cuda",
+    target: "x86_64-pc-windows-msvc",
+    edges: "normal,build",
+  }),
+  // sc-17524: `Cargo.lock` and `rust-toolchain.toml` join the crate trees. They are build INPUTS
+  // rather than packages — cargo's `compiler-artifact` stream can never name them — but they feed
+  // every one of those builds, and the lockfile had already moved inside the authorized window
+  // while every tree stayed byte-identical. Leaving them out meant the free path could report
   // "no build needed" over a `cargo update` that moved a dependency the measured binary links.
+  //
+  // sc-17607: `crates/bundles/runtime-cuda` left. Every entry below is now a path the measurement
+  // binary actually compiles (or an input to that compile), so a move here always has an answer
+  // that is not a re-capture. The two crates above the provider — the bundle and
+  // `candle-gen-catalog` between it and `candle-gen-flux2` — are named in `COMPOSITION_ONLY_CRATES`
+  // (`scripts/inference-artifact-audit.mjs`) and checked as composition, not as codegen.
   auditedObjects: Object.freeze({
     "Cargo.toml": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
     "Cargo.lock": "8ab01e00f01607a99845d875ed60275ae033450c",
     "rust-toolchain.toml": "ae829f875c68c03c367ce92cc05e041036a92d0a",
     ".cargo/config.toml": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
     "crates/contracts/gen-core": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
-    "crates/bundles/runtime-cuda": "aba807f775872760e72fd98f28a5a0d2853cf00f",
     "crates/media/candle-gen/candle-gen": "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
     "crates/media/candle-gen/candle-gen-pid": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
     "crates/media/candle-gen/candle-gen-flux2": "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
@@ -1280,10 +1309,11 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-const AUDIT_SCHEMA_VERSION = 3;
-const V3_AUDIT_METHOD =
-  "compiled artifact identity for changed paths, git object identity for unchanged paths, across " +
-  "the complete Candle FLUX.2 runtime dependency closure and its workspace build inputs";
+const AUDIT_SCHEMA_VERSION = 5;
+const V5_AUDIT_METHOD =
+  "compiled artifact identity for changed paths, git object identity for unchanged paths, and " +
+  "shipped-bundle resolved-feature identity, across the Candle FLUX.2 measurement binary's " +
+  "compile closure and its workspace build inputs";
 
 /**
  * sc-17497: object identity is the cheap layer; the compiled-artifact layer is required exactly when
@@ -1291,18 +1321,26 @@ const V3_AUDIT_METHOD =
  * closure path moves, and it must agree with the digest frozen in `FLUX2_COMPATIBILITY_AUDIT`.
  * Freezing it in source is what stops the checked-in record from authorizing itself.
  *
- * sc-17524: only v3 is accepted. v1 and v2 describe sc-15833's SEVEN-path closure, which omits
- * `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; re-grading it against the ten-path
- * expectations would read it as evidence about two inputs it never looked at. The closure-identity
- * check below would reject them on size anyway — this is the loud version of the same refusal.
+ * sc-17607: only v5 is accepted. v1/v2 describe sc-15833's SEVEN-path closure, which omits
+ * `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; v3 describes the ten-path one but
+ * never looked at the shipped feature resolution. Re-grading either would read it as evidence about
+ * inputs it did not audit. v4 is the opposite case and is refused just as firmly: it audited
+ * `crates/bundles/runtime-cuda`, a path this schema stopped asking about, so accepting one means
+ * dropping an entry out of someone else's record to make it fit — the same unearned re-reading by
+ * subtraction. The closure-identity check below would reject v1/v2/v4 on size anyway; this is the
+ * loud version of the same refusal, and the only thing that catches v3.
  *
- * Only the PROOF is injectable, and only so the tests can exercise the ACCEPTING side of the artifact
- * layer while the shipped constant still carries `artifactProof: null` — a validator exercised solely
- * against its own default is a false green. Everything else (story, both revisions, the captured
- * closure) is read from the frozen constant and cannot be overridden, so a test cannot accidentally
- * grade a record against expectations derived from that same record.
+ * Only the PROOF and the WITNESS are injectable, and only so the tests can exercise the ACCEPTING
+ * side of each layer independently of what is frozen — a validator exercised solely against its own
+ * default is a false green. Everything else (story, both revisions, the captured closure) is read
+ * from the frozen constant and cannot be overridden, so a test cannot accidentally grade a record
+ * against expectations derived from that same record.
  */
-export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMPATIBILITY_AUDIT.artifactProof) {
+export function validatedInferenceCompatibility(
+  body,
+  expectedProof = FLUX2_COMPATIBILITY_AUDIT.artifactProof,
+  expectedWitness = FLUX2_COMPATIBILITY_AUDIT.featureWitness,
+) {
   const expected = FLUX2_COMPATIBILITY_AUDIT;
   const audit = JSON.parse(body);
   if (
@@ -1310,7 +1348,7 @@ export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMP
     audit.story !== expected.story ||
     audit.capturedInferenceRevision !== expected.capturedInferenceRevision ||
     audit.compatibleInferenceRevision !== expected.compatibleInferenceRevision ||
-    audit.method !== V3_AUDIT_METHOD ||
+    audit.method !== V5_AUDIT_METHOD ||
     typeof audit.command !== "string" ||
     !Array.isArray(audit.auditedObjects)
   ) {
@@ -1341,7 +1379,48 @@ export function validatedInferenceCompatibility(body, expectedProof = FLUX2_COMP
     throw new Error("SC-15833 inference compatibility audit closure is incomplete or unrecognized");
   }
   validatedCompatibilityArtifact(audit, changed, expectedProof);
+  validatedCompatibilityFeatureWitness(audit, expectedWitness);
   return expected;
+}
+
+/**
+ * The compiled-artifact half of a v5 record.
+ * The resolved-feature half of a v5 record (sc-17606).
+ *
+ * Unconditional, unlike the artifact half. The gap it closes — a crate outside FLUX.2's closure
+ * enabling a feature on a dependency FLUX.2 shares — moves no closure object, so it reaches this
+ * validator exclusively through records whose `changedClosurePaths` is empty. A witness that were
+ * only required alongside a build would have been checked on precisely the runs where the change
+ * could not be present.
+ *
+ * `packages` is required to be a positive integer for one specific false green: a witness computed
+ * over an EMPTY resolution hashes to a perfectly stable digest that is identical at every revision.
+ * The emitting script refuses to produce one; this refuses to accept a hand-written one.
+ */
+function validatedCompatibilityFeatureWitness(audit, expectedWitness) {
+  const witness = audit.featureWitness;
+  if (
+    !witness ||
+    expectedWitness === null ||
+    expectedWitness === undefined ||
+    !/^sha256:[0-9a-f]{64}$/.test(witness.capturedDigest ?? "") ||
+    witness.capturedDigest !== witness.compatibleDigest ||
+    witness.capturedDigest !== expectedWitness.digest ||
+    // The resolution IS the question. A witness taken over another bundle, another target triple or
+    // with dev edges folded in answers something else, and its digest would compare on equal terms.
+    witness.shippedPackage !== expectedWitness.shippedPackage ||
+    witness.scopeRoot !== expectedWitness.scopeRoot ||
+    // `cuda`, not `metal`: the provider's own feature selection is half of which code the bundle
+    // compiles for it, and it is inside the hashed text — but a record may declare anything, and an
+    // ungraded declaration next to a graded digest reads as though both were checked.
+    witness.scopeFeatures !== expectedWitness.scopeFeatures ||
+    witness.target !== expectedWitness.target ||
+    witness.edges !== expectedWitness.edges ||
+    !Number.isInteger(witness.packages) ||
+    witness.packages <= 0
+  ) {
+    throw new Error("SC-15833 inference compatibility audit resolved-feature witness is invalid");
+  }
 }
 
 /**
