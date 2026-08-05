@@ -1,5 +1,5 @@
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
 use sceneworks_core::contracts::{
@@ -72,6 +72,14 @@ impl Deref for TestStore {
     }
 }
 
+/// Empty, but load-bearing: a `Drop` impl makes `TestStore` non-destructurable, so no
+/// caller can write `store("name").store` and move the `JobsStore` out on its own. That
+/// would drop the directory guard at the end of the statement and delete the database
+/// out from under a still-live connection.
+impl Drop for TestStore {
+    fn drop(&mut self) {}
+}
+
 fn store(name: &str) -> TestStore {
     let db = temp_db(name);
     let store = JobsStore::new(db.path());
@@ -106,30 +114,69 @@ fn register_image_worker(store: &JobsStore) {
         .expect("worker registers");
 }
 
+/// Assert a guarded directory is gone once its guard has dropped.
+///
+/// `TempDir::drop` removes the directory and SWALLOWS any failure, so a one-shot
+/// `exists()` here would itself be a flake — in the very suite this story de-flaked.
+/// A bounded wait costs nothing when cleanup worked (the first look succeeds) and
+/// still fails loudly when it did not: a genuinely leaked directory stays forever,
+/// not for a second.
+fn assert_removed(directory: &Path) {
+    for _ in 0..40 {
+        if !directory.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!(
+        "temp database directory outlived its guard: {}",
+        directory.display()
+    );
+}
+
+/// Rows currently in a store's `jobs` table, read through a fresh connection.
+fn job_count(store: &JobsStore) -> i64 {
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads")
+}
+
 #[test]
-fn temp_db_paths_are_unique_per_call_not_per_process() {
-    // The old scheme keyed uniqueness on `std::process::id()`, so a run that landed
-    // on a recycled PID reopened an earlier run's path — inheriting whatever `-wal`
-    // that run had stranded there. Uniqueness has to come from the call site.
-    let first = temp_db("uniqueness");
-    let second = temp_db("uniqueness");
+fn same_named_stores_are_independent_databases() {
+    // The old scheme keyed uniqueness on `std::process::id()`, so two same-named
+    // databases in one process WERE one file, and a run landing on a recycled PID
+    // reopened an earlier run's path — inheriting whatever `-wal` it had stranded
+    // there. Assert the behaviour rather than just the names: separate paths are only
+    // interesting because the stores cannot see each other's rows.
+    let first = store("uniqueness");
+    let second = store("uniqueness");
     assert_ne!(
-        first.path(),
-        second.path(),
-        "two temp_db calls with the same name must not share a path"
+        first.db_path(),
+        second.db_path(),
+        "two stores with the same name must not share a path"
+    );
+
+    register_image_worker(&first);
+    first
+        .create_job(image_job(object(
+            json!({ "prompt": "only in the first store" }),
+        )))
+        .expect("job creates");
+
+    assert_eq!(job_count(&first), 1, "the first store holds its own job");
+    assert_eq!(
+        job_count(&second),
+        0,
+        "a same-named store must be a separate database, not the same file reopened"
     );
 }
 
 #[test]
 fn temp_db_guard_removes_the_database_and_its_wal_siblings() {
-    let directory;
-    {
+    let directory = {
         let db = temp_db("guard-cleanup");
         let path = db.path();
-        directory = path
-            .parent()
-            .expect("database sits in its own directory")
-            .to_path_buf();
 
         let store = JobsStore::new(path.clone());
         store.initialize().expect("store initializes");
@@ -140,19 +187,32 @@ fn temp_db_guard_removes_the_database_and_its_wal_siblings() {
             )))
             .expect("job creates");
 
-        // WAL mode parks `-wal`/`-shm` next to the database while a connection is
-        // open. The old cleanup unlinked only the `.db`, stranding exactly these.
-        assert!(
-            path.with_extension("db-wal").exists(),
-            "expected a -wal sibling while the write connection is open"
-        );
-    }
+        // WAL mode parks `-wal`/`-shm` next to the database while a connection is open,
+        // and the old cleanup unlinked only the `.db`, stranding exactly those. Enabling
+        // WAL is explicitly allowed to fail (sc-4275 / F-CORE-16), in which case there is
+        // no sidecar to strand — so only demand the siblings when WAL actually took.
+        let connection = Connection::open(&path).expect("db opens");
+        let journal_mode: String = connection
+            .query_row("pragma journal_mode", [], |row| row.get(0))
+            .expect("journal mode reads");
+        drop(connection);
+        if journal_mode.eq_ignore_ascii_case("wal") {
+            assert!(
+                path.with_extension("db-wal").exists(),
+                "expected a -wal sibling while the write connection is open"
+            );
+            assert!(
+                path.with_extension("db-shm").exists(),
+                "expected a -shm sibling while the write connection is open"
+            );
+        }
 
-    assert!(
-        !directory.exists(),
-        "temp database directory outlived its guard: {}",
-        directory.display()
-    );
+        path.parent()
+            .expect("database sits in its own directory")
+            .to_path_buf()
+    };
+
+    assert_removed(&directory);
 }
 
 #[test]
@@ -172,14 +232,12 @@ fn store_helper_removes_its_directory_after_closing_the_connection() {
             .to_path_buf()
     };
 
-    // Windows refuses to unlink a file that still has an open handle, so a
-    // directory that is gone here also proves the store's long-lived write
-    // connection was closed before the guard removed it.
-    assert!(
-        !directory.exists(),
-        "store() directory outlived its guard: {}",
-        directory.display()
-    );
+    // On WINDOWS this also pins the drop ORDER of `TestStore`'s fields: the OS refuses to
+    // unlink a file that still has an open handle, so a directory that is gone here proves
+    // the store's long-lived write connection closed before the guard removed it. On Unix
+    // `remove_dir_all` succeeds against an open descriptor, so there this checks only that
+    // cleanup happened at all — the ordering guarantee is Windows-verified.
+    assert_removed(&directory);
 }
 
 #[test]
