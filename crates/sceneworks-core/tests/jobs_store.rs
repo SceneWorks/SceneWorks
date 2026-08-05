@@ -11,6 +11,7 @@ use sceneworks_core::jobs_store::{
     DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
     WorkerHeartbeat, MAC_NOT_AVAILABLE_LABEL, MAX_JOB_ATTEMPTS,
 };
+use sceneworks_core::time::now_unix_seconds;
 use serde_json::{json, Map, Value};
 
 fn temp_db(name: &str) -> PathBuf {
@@ -7027,6 +7028,108 @@ fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
         .expect("the owner may retry the same terminal state");
     assert!(!retry.applied);
     assert!(retry.side_effects_pending);
+}
+
+/// Pin the durable retry schedule that keeps a poison side-effect handoff from
+/// monopolizing the recovery batch: a fresh handoff is due immediately, each
+/// failure defers it by an exponentially growing delay, and the count backing
+/// that growth survives a process restart.
+///
+/// The rust-api fairness test
+/// (`terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation`)
+/// covers the batch-rotation behavior, but is deliberately written to hold for
+/// *any* positive delay so it cannot race the wall clock. The delays themselves
+/// are therefore pinned here, next to the code that computes them (sc-17640).
+#[test]
+fn terminal_side_effect_retry_backoff_doubles_and_survives_restart() {
+    // Keep the path so the store can be reopened; `store()` wipes the file.
+    let path = temp_db("terminal-side-effect-backoff");
+    let store = JobsStore::new(path.clone());
+    store.initialize().expect("store initializes");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    store
+        .update_job_progress_with_outcome(
+            &created.id,
+            ProgressUpdate {
+                status: JobStatus::Completed,
+                stage: ProgressStage::Completed,
+                progress: 1.0,
+                message: "done".to_owned(),
+                error: None,
+                result: Some(object(json!({ "assetWrites": [] }))),
+                eta_seconds: None,
+                peak_gpu_memory_pct: None,
+                peak_gpu_load_pct: None,
+                backend: None,
+                worker_id: Some("worker-1".to_owned()),
+            },
+        )
+        .expect("terminal progress is accepted");
+
+    // An accepted handoff carries no backoff at all: its deadline is 0. That
+    // exactly-known deadline is what lets the scan's boundary be pinned to the
+    // second — a row is due once its deadline has ARRIVED (`<=`), not only
+    // strictly after it (`<`), so a one-second-late retry cannot creep in.
+    let due_as_of = |store: &JobsStore, as_of: i64| {
+        store
+            .pending_terminal_progress_side_effect_job_ids_as_of(as_of, 128)
+            .expect("recovery queue scans")
+    };
+    assert_eq!(
+        due_as_of(&store, 0),
+        vec![created.id.clone()],
+        "a row is due AT its deadline, not one second later"
+    );
+    assert!(
+        due_as_of(&store, -1).is_empty(),
+        "and is not due before its deadline"
+    );
+
+    // Each failed attempt brackets the row's new deadline. `defer` stamps
+    // `now + delay` at some instant in `before..=after`, so the deadline lands
+    // in `before + delay ..= after + delay`: it is never due at
+    // `before + delay - 1`, and always due at `after + delay`. Both bounds hold
+    // for any machine speed, so this cannot flake; together they pin `delay`
+    // whenever the two reads fall in the same second, which is the norm for a
+    // single sub-millisecond write.
+    let defer_and_bracket = |store: &JobsStore, delay: i64, what: &str| {
+        let before = now_unix_seconds();
+        assert!(
+            store
+                .defer_pending_terminal_progress_side_effects(&created.id)
+                .expect("a pending row defers"),
+            "{what}: the row is still pending, so it defers"
+        );
+        let after = now_unix_seconds();
+        assert!(
+            due_as_of(store, before + delay - 1).is_empty(),
+            "{what}: must not be due before {delay}s have passed"
+        );
+        assert_eq!(
+            due_as_of(store, after + delay),
+            vec![created.id.clone()],
+            "{what}: must be due once {delay}s have passed"
+        );
+    };
+
+    defer_and_bracket(&store, 5, "first failure");
+    defer_and_bracket(&store, 10, "second failure doubles the delay");
+
+    // Reopen the same database: the retry COUNT is durable, not process state,
+    // so the third failure continues the progression at 20s rather than
+    // restarting it at the 5s base. A worker that crash-loops the API cannot
+    // reset its own backoff.
+    drop(store);
+    let restarted = JobsStore::new(path);
+    restarted.initialize().expect("restarted store initializes");
+    defer_and_bracket(&restarted, 20, "third failure after restart");
 }
 
 #[test]

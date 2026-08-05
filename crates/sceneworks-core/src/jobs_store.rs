@@ -2356,13 +2356,35 @@ impl JobsStore {
         }
     }
 
-    /// Return a bounded batch of terminal jobs whose API-owned side effects
-    /// still need recovery. The API drains this durable queue at startup and on
-    /// a background cadence, so recovery does not depend on a worker repeating
-    /// a terminal progress report after it already observed the committed
-    /// terminal state.
+    /// The batch that is due *now* — the shape production recovery wants.
+    /// Resolving the instant here, rather than inside the query, is what lets
+    /// [`Self::pending_terminal_progress_side_effect_job_ids_as_of`] be driven
+    /// from a fixed instant; see it for the behavior and for why.
     pub fn pending_terminal_progress_side_effect_job_ids(
         &self,
+        limit: usize,
+    ) -> JobsStoreResult<Vec<String>> {
+        self.pending_terminal_progress_side_effect_job_ids_as_of(now_unix_seconds(), limit)
+    }
+
+    /// Return a bounded batch of terminal jobs whose API-owned side effects
+    /// still need recovery, judging dueness as of `as_of` (Unix seconds)
+    /// instead of the wall clock. The API drains this durable queue at startup
+    /// and on a background cadence, so recovery does not depend on a worker
+    /// repeating a terminal progress report after it already observed the
+    /// committed terminal state. A row is due once its deadline has *arrived*,
+    /// so a row whose `progress_side_effects_retry_at` equals `as_of` is
+    /// included.
+    ///
+    /// Production always passes `now`. Tests pass a *frozen* instant so that an
+    /// assertion about which rows are due describes the durable retry schedule
+    /// rather than how long the test itself took to run: with the wall clock,
+    /// a slow pass could let the 5-second first-failure backoff expire between
+    /// deferring a row and scanning for it, and rows that were correctly
+    /// deferred would legitimately come back due (sc-17640).
+    pub fn pending_terminal_progress_side_effect_job_ids_as_of(
+        &self,
+        as_of: i64,
         limit: usize,
     ) -> JobsStoreResult<Vec<String>> {
         let connection = self.open_connection()?;
@@ -2377,7 +2399,7 @@ impl JobsStore {
         )?;
         let ids = statement
             .query_map(
-                params![now_unix_seconds(), i64::try_from(limit).unwrap_or(i64::MAX)],
+                params![as_of, i64::try_from(limit).unwrap_or(i64::MAX)],
                 |row| row.get(0),
             )?
             .collect::<Result<Vec<_>, _>>()?;
