@@ -37,23 +37,51 @@
 //!    download primitive equals [`DOWNLOAD_SITES`], **exactly**. Not `⊆`: a migration slice that
 //!    removes a site must ratchet the list down in the same commit.
 //! 2. [`cache_destinations_match_the_allow_list`] — the set of `<data_dir>/cache/<subdir>`
-//!    destinations across the worker, the rust-api, sceneworks-core and the desktop shell equals
+//!    destinations across every workspace crate that can see the data dir equals
 //!    [`CACHE_DESTINATIONS`], exactly, each entry classified and commented.
-//! 3. [`parameterized_cache_root_helpers_are_registered`] — a helper that takes its cache subdir as a
-//!    *parameter* is the one shape a literal-keyed allow-list cannot see through, so every such
-//!    helper must be registered in [`PARAMETERIZED_CACHE_HELPERS`] and its call sites are scanned for
-//!    the literal they pass. A new one appearing unregistered is red.
-//! 4. The `scanner_*` tests below run the detection functions over hand-written snippets — a fake new
-//!    call site, a fake new wrapper, a fake new destination, plus doc-comment/`use`/string-literal
-//!    negatives. A guard that silently matches nothing passes forever; these are what stop that.
+//! 3. [`downloads_fetch_surface_is_registered`] — [`DOWNLOAD_PRIMITIVES`] is not a hand-written list
+//!    of four names. The whole externally-visible fetching surface of `downloads.rs` is rediscovered
+//!    structurally and must equal `DOWNLOAD_PRIMITIVES` plus a commented [`NON_WEIGHT_FETCHERS`]
+//!    list, so a *new* primitive cannot appear without a decision about which side it belongs on.
+//! 4. [`http_client_construction_is_confined`] — the next regrowth shape after "do not call the
+//!    helpers" is "do not call anything": `reqwest::Client::new().get(url).send()` written inline in
+//!    a lane. Building a client or sending a request is confined to [`HTTP_CLIENT_FILES`].
+//! 5. [`parameterized_cache_root_helpers_are_registered`] and [`cache_root_producers_are_registered`]
+//!    — a helper that takes its cache subdir as a *parameter*, and a function that hands out the bare
+//!    cache root, are the two shapes a literal-keyed allow-list cannot see through. Both registries
+//!    are rediscovered structurally and both sets of call sites are scanned for what they pass.
+//! 6. The `scanner_*` tests below run the detection functions over hand-written snippets — a fake new
+//!    call site, a fake new wrapper, a fake new destination, an aliased cache root, an inline HTTP
+//!    client, plus doc-comment/`use`/string-literal negatives. A guard that silently matches nothing
+//!    passes forever; these are what stop that.
 //!
-//! ## What it deliberately does not do
+//! ## How far it chases the call graph
 //!
-//! It does not chase the call graph past one hop. Full transitive reachability converges on
-//! `run_worker_loop` and flags 73 of 133 production files, which is not a gate, it is a census. One
-//! hop is what the real hazard needs: `image_jobs/pulid.rs` reaches Hugging Face **only** through
-//! `ensure_instantid_file`, a wrapper defined in `instantid.rs`, so it appears in no grep for either
-//! helper name and a naive gate is defeated by code already on `main`.
+//! Full transitive reachability converges on `run_worker_loop` and flags 73 of 133 production files,
+//! which is not a gate, it is a census. One hop, on the other hand, is defeated by two lines: add
+//! `fn forward(c) { ensure_instantid_file(c) }` to a file already on [`DOWNLOAD_SITES`], then call
+//! `forward` from a new lane, and nothing anywhere names a primitive, a known wrapper or a
+//! `DownloadContext`.
+//!
+//! So the walk is a closure that grows only through functions defined in files that are already
+//! `JobTime` entries on [`DOWNLOAD_SITES`] — see [`download_wrappers`] for why that loses nothing and
+//! why the `Installer` dispatchers are excluded. It converges, and finding the fixpoint added
+//! sixteen files the one-hop scan could not see (`kps_jobs.rs`, `face_analysis_jobs.rs`,
+//! `catalog_semantic_jobs.rs` and the rest reach weights through two hops, not one).
+//!
+//! Matching is restricted to **free-function** calls. Method calls have to be excluded or the walk is
+//! worthless: `load`, `build` and `detect` are `impl` methods on a dozen unrelated types, and one of
+//! them touching a primitive would put `.load(` on the watch list and flag a third of the crate.
+//!
+//! ## What it still cannot see
+//!
+//! * A cache root arriving as a *parameter* (`fn f(root: &str, sub: &str) -> d.join(root).join(sub)`)
+//!   labels as `{root}` rather than `cache`. Registering the subdir-parameter helpers
+//!   ([`PARAMETERIZED_CACHE_HELPERS`]) covers the shape that exists; a root-parameter helper would be
+//!   a new one, and its callers would still have to pass a literal `"cache"` from somewhere the scan
+//!   does see.
+//! * A download wrapper that is a *method* rather than a free function. The file defining it is
+//!   flagged on its own, so the escape needs the method's receiver type in a second file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -123,9 +151,10 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("image_jobs/flux_ipadapter.rs", DownloadRole::JobTime),
     ("image_jobs/kolors_ipadapter.rs", DownloadRole::JobTime),
     ("image_jobs/sdxl_ipadapter.rs", DownloadRole::JobTime),
-    // Identity stacks. `pulid.rs` holds NO download-helper text of its own — it reaches Hugging Face
-    // only through `instantid.rs`'s `ensure_instantid_file` wrapper, which is why this gate resolves
-    // one-hop wrappers instead of grepping two function names.
+    // Identity stacks. `pulid.rs` builds a `DownloadContext` literal of its own, so it is caught
+    // without any wrapper resolution; `image_jobs/kolors.rs`, `sdxl.rs` and `sensenova.rs` are the
+    // files that genuinely need it — they name no primitive and no context, reaching Hugging Face
+    // only through `image_jobs/base.rs`'s `stage_likeness`.
     ("image_jobs/instantid.rs", DownloadRole::JobTime),
     ("image_jobs/pulid.rs", DownloadRole::JobTime),
     ("image_jobs/pulid_candle.rs", DownloadRole::JobTime),
@@ -140,7 +169,42 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     // Real-ESRGAN / SeedVR2 upscaler checkpoints.
     ("upscale_jobs.rs", DownloadRole::JobTime),
     ("video_jobs/seedvr2.rs", DownloadRole::JobTime),
+    // -- Job-time: added by the transitive wrapper walk (sc-17637). These reach a download through a
+    // wrapper more than one hop away, which the original one-hop scan could not see. -------------
+    // Catalog/dataset image acquisition: fetches remote source URLs into the catalog at job time.
+    ("catalog_image_fetch.rs", DownloadRole::JobTime),
+    ("catalog_semantic_jobs.rs", DownloadRole::JobTime),
+    ("dataset_parquet_jobs.rs", DownloadRole::JobTime),
+    // Analyzer lanes that stage the InstantID face stack or the DWPose weights mid-job.
+    ("control_training_jobs.rs", DownloadRole::JobTime),
+    ("face_analysis_jobs.rs", DownloadRole::JobTime),
+    ("face_likeness_compare_jobs.rs", DownloadRole::JobTime),
+    ("kps_jobs.rs", DownloadRole::JobTime),
+    // Identity likeness staging shared by the SDXL-family lanes (`image_jobs/base.rs`).
+    ("image_jobs/kolors.rs", DownloadRole::JobTime),
+    ("image_jobs/sdxl.rs", DownloadRole::JobTime),
+    ("image_jobs/sensenova.rs", DownloadRole::JobTime),
+    (
+        "image_jobs/zimage_identity_candle.rs",
+        DownloadRole::JobTime,
+    ),
+    // Bernini tier staging, reached from the image lane as well as the video one.
+    ("image_jobs/bernini.rs", DownloadRole::JobTime),
+    // The candle video dispatcher stages Mochi/Wan tiers.
+    ("video_jobs/candle.rs", DownloadRole::JobTime),
+    // The two module-level dispatchers. They contain no download of their own; they call the lane
+    // entry points above, which do. They leave this list when the lanes they route to are migrated.
+    ("image_jobs.rs", DownloadRole::JobTime),
+    ("video_jobs/mod.rs", DownloadRole::JobTime),
 ];
+
+/// How many [`DownloadSites`](DOWNLOAD_SITES) entries are still `JobTime` — epic 17625's
+/// remaining-work number, pinned so a role cannot be quietly changed to `Installer` to keep the
+/// population looking flat.
+///
+/// **Only ever goes down.** Each migration slice deletes its entry and lowers this in the same
+/// commit.
+const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 46;
 
 /// What a `<data_dir>/cache/<subdir>` destination holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +493,14 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ("desktop", "setup.rs", "huggingface", CacheRole::HfCache),
 ];
 
+/// How many [`CACHE_DESTINATIONS`] entries hold model weights — the population epic 17625 migrates
+/// onto the app-managed Hugging Face cache, pinned so a new one cannot be smuggled in under a
+/// cheaper role.
+///
+/// **Only ever goes down.** Each migration slice deletes its destination and lowers this in the same
+/// commit.
+const WEIGHTS_CACHE_DESTINATIONS_REMAINING: usize = 25;
+
 /// Helpers that build a `<data_dir>/cache/<subdir>` root from a **parameter**, as
 /// `(function name, zero-based index of the subdir parameter)`.
 ///
@@ -462,28 +534,128 @@ const PARAMETERIZED_CACHE_HELPERS: &[(&str, usize)] = &[
     ("sweep_stale_uploads_cancellable", 1),
 ];
 
-/// The download primitives. Everything that actually opens a socket for model bytes bottoms out in
-/// one of these four; the first three are the helpers sc-17637 names, and
-/// `download_snapshot_into_cache` is their peer for whole-snapshot fetches — the one two job-time
-/// Lightning-LoRA sites (`image_jobs/qwen.rs`, `image_jobs/qwen_edit_candle.rs`) use, which is why a
-/// gate limited to the two named helpers would have missed them.
+/// Functions that hand out the **bare** `<data_dir>/cache` root, as `(crate label, file, fn name)`.
+///
+/// # Why this is called out separately
+///
+/// [`CACHE_DESTINATIONS`] is keyed on `(crate, file, subdir)`, so every site that produces the root
+/// itself collapses onto one `<cache-root>` entry per file. That is fine as a description and useless
+/// as a gate: a brand-new `pub fn cache_root(data_dir) -> data_dir.join("cache")` added to
+/// `app_paths.rs` — the natural home for such an accessor, and the file that already owns the only
+/// `<cache-root>` entry — is absorbed into the existing entry and changes nothing. A lane can then
+/// write `cache_root(d).join("new-weights")`, name no cache literal of its own, and stay green.
+///
+/// So the producers are registered by **function**, [`cache_root_producers_are_registered`]
+/// rediscovers them structurally, and their call sites contribute whatever they join onto the root —
+/// the same two-sided treatment [`PARAMETERIZED_CACHE_HELPERS`] gets.
+const CACHE_ROOT_PRODUCERS: &[(&str, &str, &str)] = &[
+    // The repo-relative fallback used when no home directory is available: `data/cache`.
+    ("core", "app_paths.rs", "repo_relative_paths"),
+    // The per-platform defaults. Only the Windows body names `cache` as a final segment
+    // (`%LOCALAPPDATA%\SceneWorks\cache`); the scan is textual, so all three `cfg`-gated definitions
+    // share the one name and the one entry.
+    ("core", "app_paths.rs", "platform_default_paths"),
+];
+
+/// The byte-fetching entry points a job lane could call. Everything that opens a socket for model
+/// bytes bottoms out in one of these.
+///
+/// **This list is not hand-maintained.** [`downloads_fetch_surface_is_registered`] rediscovers the
+/// whole fetching surface of [`crate::downloads`] structurally — every externally-visible `fn` whose
+/// body transitively reaches an outbound HTTP request — and requires the discovered set to equal this
+/// list plus [`NON_WEIGHT_FETCHERS`]. A fifth (or fifteenth) primitive therefore cannot appear in
+/// `downloads.rs` without a deliberate, reviewed decision about which of the two lists it belongs in.
 const DOWNLOAD_PRIMITIVES: &[&str] = &[
+    // The three helpers sc-17637 names, plus their whole-snapshot peers.
     "ensure_cached_file",
     "ensure_cached_file_verified",
     "ensure_hf_cached_file",
     "download_snapshot_into_cache",
+    // `download_snapshot_into_cache`'s inner half: fetches a whole HF snapshot into an arbitrary
+    // caller-chosen directory. The two job-time Lightning-LoRA sites use the `_into_cache` wrapper,
+    // but this one is `pub(crate)` and equally callable from a lane.
+    "download_snapshot",
+    // The `sourceUrl` fetchers behind the LoRA/model importers. `download_lora_source_url` and
+    // `download_model_source_url` are thin role wrappers over `download_source_url`; all three write
+    // remote bytes to a caller-chosen path, which is exactly the shape AC9 forbids in a render.
+    "download_source_url",
+    "download_lora_source_url",
+    "download_model_source_url",
+    // Fetches a public URL into memory with a byte cap. Takes NO `DownloadContext`, so neither the
+    // context scan nor the wrapper scan would see a lane calling it — the reason it is named here.
+    "fetch_public_source_url_bytes",
+    "fetch_public_source_url_bytes_with_options",
 ];
 
-/// The crates whose `src/` trees are scanned, as `(label, path from the repo root, crate root file)`.
+/// Externally-visible functions in `downloads.rs` that reach the network but are **not** a way to
+/// pull model bytes into a job. Each one is here because of what it does, not because listing it was
+/// convenient.
+///
+/// This is the escape hatch for [`downloads_fetch_surface_is_registered`], and it is deliberately
+/// small: everything else discovered by that test has to go in [`DOWNLOAD_PRIMITIVES`], where the
+/// reachability scan covers it.
+const NON_WEIGHT_FETCHERS: &[&str] = &[
+    // The two HTTP client factories. They return a `reqwest::Client` — configured with the download
+    // timeouts — and transfer nothing themselves. What a caller then DOES with the client is confined
+    // by `http_client_construction_is_confined`, which is the gate that covers this shape.
+    "streaming_download_client",
+    "build_source_url_client",
+    // A `HEAD`/range probe for the size of a `sourceUrl`. Returns a `u64`; writes nothing.
+    "lora_source_content_length",
+    // `HfSnapshot::resolve` — an `impl` method that pages the HF *file listing* API for a repo. It
+    // returns metadata (names, sizes, SHAs), never file bytes, and it needs a `reqwest::Client`
+    // handed to it, which `http_client_construction_is_confined` independently confines. Kept out of
+    // DOWNLOAD_PRIMITIVES because the bare name `resolve` would match unrelated `.resolve(` calls
+    // across the crate and make the reachability scan meaningless.
+    "resolve",
+];
+
+/// The crates whose `src/` trees are scanned, as
+/// `(label, path from the repo root, crate root file, minimum production files)`.
 ///
 /// The download gate covers only the worker: the primitives are `pub(crate)`, so no other crate can
-/// reach them. The cache gate covers all four, because a new weight destination could be introduced
-/// anywhere that can see `data_dir`.
-const SCANNED_CRATES: &[(&str, &str, &str)] = &[
-    ("worker", "crates/sceneworks-worker/src", "lib.rs"),
-    ("rust-api", "apps/rust-api/src", "lib.rs"),
-    ("core", "crates/sceneworks-core/src", "lib.rs"),
-    ("desktop", "apps/desktop/src", "main.rs"),
+/// reach them. The cache gate covers **every** crate in the workspace that can see the app data dir,
+/// because a new weight destination could be introduced in any of them. The minimum is a
+/// "the walk found nothing" floor, per crate because `apps/rust-worker` is a single `main.rs` and a
+/// shared floor would either miss a broken walk elsewhere or fail on that one.
+const SCANNED_CRATES: &[(&str, &str, &str, usize)] = &[
+    ("worker", "crates/sceneworks-worker/src", "lib.rs", 100),
+    ("rust-api", "apps/rust-api/src", "lib.rs", 5),
+    ("core", "crates/sceneworks-core/src", "lib.rs", 5),
+    ("desktop", "apps/desktop/src", "main.rs", 5),
+    ("rust-worker", "apps/rust-worker/src", "main.rs", 1),
+    ("mcp", "crates/sceneworks-mcp/src", "lib.rs", 2),
+    (
+        "image-quality",
+        "crates/sceneworks-image-quality/src",
+        "lib.rs",
+        2,
+    ),
+    (
+        "memory-adapter",
+        "crates/sceneworks-memory-adapter/src",
+        "lib.rs",
+        1,
+    ),
+];
+
+/// Worker files allowed to construct an HTTP client or issue an HTTP request directly.
+///
+/// The gate one level below this — "did a lane call a download primitive" — is defeated by simply
+/// not calling one: `reqwest::Client::new().get(url).send()` written inline in a job lane fetches
+/// weights while naming nothing on any allow-list. So the ability to *make an HTTP request at all*
+/// is confined here, and a new file that wants one has to say why out loud.
+const HTTP_CLIENT_FILES: &[(&str, &str)] = &[
+    (
+        "downloads.rs",
+        "owns every download primitive and every HTTP client factory in the crate; this is the file \
+         the confinement exists to concentrate network access into",
+    ),
+    (
+        "api_client.rs",
+        "the worker's client for the LOCAL SceneWorks API (job claim, progress, completion). It \
+         talks to 127.0.0.1, never to a model host, and fetches no weights",
+    ),
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -608,6 +780,26 @@ fn skip_char(bytes: &[u8], start: usize) -> usize {
 /// the name, not a paren. Path-qualified calls do match, which is required —
 /// `crate::downloads::ensure_hf_cached_file(…)` is how four lanes spell it.
 fn invokes(code: &str, name: &str) -> bool {
+    invokes_matching(code, name, |_, _| true)
+}
+
+/// [`invokes`], restricted to **free-function** calls: `f(…)` and `path::f(…)`, never `value.f(…)`.
+///
+/// Every download primitive is a free function reachable through the crate-root glob, and so is every
+/// wrapper worth chasing. Method calls have to be excluded or the wrapper walk is worthless: names
+/// like `load`, `build` and `detect` are defined as `impl` methods in a dozen unrelated types, and
+/// one of them calling a primitive would otherwise put `.load(` on the watch list and flag a third of
+/// the crate. (The residual shape — a *method* that wraps a download and is called on a receiver from
+/// a new file — needs the receiver's type in scope, and the file that defines that method is flagged
+/// on its own.)
+fn invokes_free_function(code: &str, name: &str) -> bool {
+    invokes_matching(code, name, |code, start| {
+        let before = code[..start].trim_end();
+        !(before.ends_with('.') && !before.ends_with(".."))
+    })
+}
+
+fn invokes_matching(code: &str, name: &str, accept: impl Fn(&str, usize) -> bool) -> bool {
     let bytes = code.as_bytes();
     let name_bytes = name.as_bytes();
     let mut index = 0usize;
@@ -620,6 +812,9 @@ fn invokes(code: &str, name: &str) -> bool {
             .map(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
             .unwrap_or(false);
         if preceded_by_ident {
+            continue;
+        }
+        if !accept(code, start) {
             continue;
         }
         if bytes
@@ -645,12 +840,65 @@ fn invokes(code: &str, name: &str) -> bool {
     false
 }
 
-/// One `fn` item: its name, its parameter names in order, and its body text.
+/// One `fn` item: its name, its parameter names in order, its return-type text and its body text,
+/// plus whether it is visible outside its own module.
 #[derive(Debug, Clone)]
 struct FnItem {
     name: String,
     params: Vec<String>,
     body: String,
+    /// `pub`, `pub(crate)`, `pub(super)`, `pub(in …)`. A private `fn` in `downloads.rs` cannot be
+    /// named by a job lane at all, which is what lets the fetch-surface registry stay small.
+    is_public: bool,
+}
+
+/// Strip `kw` from the end of `code` when it is a whole token there.
+///
+/// `strip_suffix("async")` alone would also fire on `fn_async`, silently mis-reading the modifier
+/// chain in front of a `fn` and reporting a `pub` item as private.
+fn strip_trailing_keyword<'a>(code: &'a str, kw: &str) -> Option<&'a str> {
+    let rest = code.strip_suffix(kw)?;
+    let boundary = rest
+        .chars()
+        .next_back()
+        .map(|c| !(c == '_' || c.is_ascii_alphanumeric()))
+        .unwrap_or(true);
+    boundary.then_some(rest)
+}
+
+/// Whether the `fn` whose keyword starts at `fn_keyword` carries a `pub…` visibility.
+///
+/// Walks back over the modifier chain rustfmt can put between the visibility and the keyword
+/// (`pub(crate) async unsafe extern "C" fn`), then checks for `pub` or `pub(…)`.
+fn item_is_public(code: &str, fn_keyword: usize) -> bool {
+    let mut before = code[..fn_keyword].trim_end();
+    loop {
+        if let Some(rest) = strip_trailing_keyword(before, "async")
+            .or_else(|| strip_trailing_keyword(before, "unsafe"))
+            .or_else(|| strip_trailing_keyword(before, "const"))
+            .or_else(|| strip_trailing_keyword(before, "extern"))
+        {
+            before = rest.trim_end();
+            continue;
+        }
+        // `extern "C"` — drop the ABI string, then the keyword on the next turn.
+        if let Some(head) = before.strip_suffix('"') {
+            if let Some(open) = head.rfind('"') {
+                if strip_trailing_keyword(head[..open].trim_end(), "extern").is_some() {
+                    before = head[..open].trim_end();
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    if let Some(head) = before.strip_suffix(')') {
+        let Some(open) = head.rfind('(') else {
+            return false;
+        };
+        return strip_trailing_keyword(head[..open].trim_end(), "pub").is_some();
+    }
+    strip_trailing_keyword(before, "pub").is_some()
 }
 
 /// Every `fn NAME(params) … { body }` in `code`, with string literals and char literals respected
@@ -760,6 +1008,7 @@ fn fn_items(code: &str) -> Vec<FnItem> {
         }
         let body_end = index.saturating_sub(1);
         items.push(FnItem {
+            is_public: item_is_public(code, keyword),
             name,
             params,
             body: slice_lossy(bytes, body_start.min(body_end), body_end),
@@ -856,6 +1105,101 @@ fn cfg_is_test_only(predicate: &str) -> bool {
     members.iter().any(|member| cfg_is_test_only(member))
 }
 
+/// Whether what follows a `#[cfg(…)]` attribute is a Rust *item* (which owns a `{ … }` or ends in
+/// `;`) rather than a struct field or a struct-literal field (which ends at a comma).
+fn attribute_precedes_an_item(rest: &str) -> bool {
+    const ITEM_KEYWORDS: &[&str] = &[
+        "pub",
+        "fn",
+        "mod",
+        "impl",
+        "struct",
+        "enum",
+        "union",
+        "trait",
+        "use",
+        "const",
+        "static",
+        "type",
+        "async",
+        "unsafe",
+        "extern",
+        "macro_rules",
+        "let",
+    ];
+    let rest = rest.trim_start();
+    // A further attribute, or a block expression, still resolves to the item walk.
+    if rest.starts_with('#') || rest.starts_with('{') {
+        return true;
+    }
+    let word: String = rest
+        .chars()
+        .take_while(|c| *c == '_' || c.is_ascii_alphanumeric())
+        .collect();
+    ITEM_KEYWORDS.contains(&word.as_str())
+}
+
+/// Index just past the non-item thing a `#[cfg(test)]` at `start` applies to.
+///
+/// Three shapes reach here and they end differently, which is the whole reason this exists: a struct
+/// field or struct-literal field ends at a `,`, a statement ends at a `;`, and a block-tailed
+/// statement (`if let … { … }`) ends at its closing brace. Taking whichever comes first at depth zero
+/// keeps the deletion tight; the previous "scan on to the next `{` or `;`" walk ran past a field's
+/// comma and swallowed the following *function*, and with it any download that function performed.
+fn end_of_cfg_member(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    let mut depth = 0i32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = skip_string(bytes, index);
+                continue;
+            }
+            b'\'' => {
+                index = skip_char(bytes, index);
+                continue;
+            }
+            b'{' if depth == 0 => {
+                let mut braces = 0i32;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'"' => {
+                            index = skip_string(bytes, index);
+                            continue;
+                        }
+                        b'\'' => {
+                            index = skip_char(bytes, index);
+                            continue;
+                        }
+                        b'{' => braces += 1,
+                        b'}' => {
+                            braces -= 1;
+                            if braces == 0 {
+                                return index + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                return index;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    // The last field before an enclosing closing brace carries no trailing comma.
+                    return index;
+                }
+                depth -= 1;
+            }
+            b',' | b';' if depth == 0 => return index + 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    index
+}
+
 /// Remove `#[cfg(test)]`-only items (attribute plus the item that follows) from comment-stripped
 /// source.
 ///
@@ -901,6 +1245,14 @@ fn strip_cfg_test_items(code: &str) -> String {
         if !cfg_is_test_only(predicate) {
             out.extend_from_slice(attribute.as_bytes());
             index = scan;
+            continue;
+        }
+        // A `#[cfg(test)]` on a struct FIELD or a struct-literal field is not an item: there is no
+        // `{ … }` or `;` of its own, so the item walk below would run on to the NEXT item and delete
+        // that instead — swallowing whole functions, and with them any download call they made. Those
+        // end at a comma, so handle them separately.
+        if !attribute_precedes_an_item(&code[scan.min(code.len())..]) {
+            index = end_of_cfg_member(bytes, scan);
             continue;
         }
         // Drop the item this attribute applies to: everything through its `{ … }` block, or through
@@ -1083,39 +1435,176 @@ fn resolve_module(
 // Gate 1 — download reachability
 // ---------------------------------------------------------------------------------------------
 
-/// One-hop wrappers: functions whose own body calls a [`DOWNLOAD_PRIMITIVES`] member.
+/// Wrappers: functions that reach a [`DOWNLOAD_PRIMITIVES`] member, directly or through other
+/// wrappers.
 ///
 /// Computed across the whole crate, not per file, because the wrapper and its callers routinely live
 /// apart — `ensure_instantid_file` is defined in `image_jobs/instantid.rs` and called twelve times
 /// from there and `image_jobs/pulid.rs`.
-fn download_wrappers(files: &[SourceFile]) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for file in files {
-        for item in fn_items(&file.code) {
-            if DOWNLOAD_PRIMITIVES.contains(&item.name.as_str()) {
-                continue;
-            }
-            let body = code_without_comments_or_literals(&item.body);
-            if DOWNLOAD_PRIMITIVES
-                .iter()
-                .any(|primitive| invokes(&body, primitive))
-            {
-                out.insert(item.name);
-            }
+///
+/// # Why this is a closure and not one hop
+///
+/// One hop is defeated by two lines: add `fn forward(c) { ensure_instantid_file(c) }` to a file
+/// **already on** [`DOWNLOAD_SITES`], then call `forward` from a new lane. The new lane names no
+/// primitive, no known wrapper and no `DownloadContext`, and the gate stays green.
+///
+/// # Why the closure does not become a census
+///
+/// The full transitive closure converges on `run_worker_loop` and flags 73 of 133 production files.
+/// The fix is to grow the closure only **through functions defined in files that are already on
+/// [`DOWNLOAD_SITES`]** — with one exception, the first hop, which is taken from anywhere.
+///
+/// That loses nothing. A wrapper defined in an unlisted file makes *that* file a new download site on
+/// its own, because its body invokes a primitive; the gate is already red there. So the only
+/// forwarders worth chasing are the ones hiding inside files the allow-list has already accepted, and
+/// those are exactly the ones this walks.
+///
+/// [`DOWNLOAD_SITES`] members that are `Installer` plumbing (`lib.rs`, `model_jobs.rs`) are excluded
+/// from the closure past the first hop: they are the dispatch layer, so following them is what
+/// produces the census — `run_model_download_job` → the job-loop match arm → `run_worker_loop` →
+/// every file that starts a worker. The Model Manager path is *supposed* to download; it is job lanes
+/// that must not, and no job lane calls the installer dispatchers.
+fn download_wrappers(files: &[SourceFile]) -> BTreeMap<String, String> {
+    let primitives: BTreeSet<&str> = DOWNLOAD_PRIMITIVES.iter().copied().collect();
+    let closure_files: BTreeSet<&str> = DOWNLOAD_SITES
+        .iter()
+        .filter(|(_, role)| *role == DownloadRole::JobTime)
+        .map(|(rel, _)| *rel)
+        .collect();
+
+    // (may the closure grow through this fn, defining file, name, literal-blanked body)
+    let items: Vec<(bool, String, String, String)> = files
+        .iter()
+        .flat_map(|file| {
+            let in_closure = closure_files.contains(file.rel.as_str());
+            let rel = file.rel.clone();
+            fn_items(&file.code).into_iter().map(move |item| {
+                let body = code_without_comments_or_literals(&item.body);
+                (in_closure, rel.clone(), item.name, body)
+            })
+        })
+        .collect();
+
+    // Hop one, from anywhere: a function whose own body calls a primitive.
+    let mut wrappers: BTreeMap<String, String> = BTreeMap::new();
+    for (_, rel, name, body) in &items {
+        if primitives.contains(name.as_str()) || wrappers.contains_key(name) {
+            continue;
+        }
+        if primitives
+            .iter()
+            .any(|primitive| invokes_free_function(body, primitive))
+        {
+            wrappers.insert(name.clone(), rel.clone());
         }
     }
-    out
+
+    // Remaining hops, confined. `frontier` keeps each pass proportional to what actually changed.
+    let mut frontier: Vec<String> = wrappers.keys().cloned().collect();
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for (in_closure, rel, name, body) in &items {
+            if !in_closure || primitives.contains(name.as_str()) || wrappers.contains_key(name) {
+                continue;
+            }
+            if frontier
+                .iter()
+                .any(|callee| invokes_free_function(body, callee))
+            {
+                wrappers.insert(name.clone(), rel.clone());
+                next.push(name.clone());
+            }
+        }
+        frontier = next;
+    }
+    wrappers
+}
+
+/// Textual markers for "this expression performs an outbound HTTP request".
+///
+/// Every reqwest request terminates in `.send()`; `reqwest::get` is the one-shot free function. A
+/// body that contains neither cannot itself put bytes on the wire.
+const NETWORK_TERMINALS: &[&str] = &[".send()", "reqwest::get("];
+
+/// Markers for "this expression obtains an HTTP client of its own".
+const HTTP_CLIENT_CONSTRUCTORS: &[&str] = &[
+    "reqwest::Client::new",
+    "reqwest::Client::builder",
+    "reqwest::ClientBuilder",
+    "reqwest::blocking",
+];
+
+/// Every externally-visible `fn` in `downloads.rs` whose body transitively reaches an outbound HTTP
+/// request.
+///
+/// This is what makes [`DOWNLOAD_PRIMITIVES`] a derived list rather than a hand-maintained one. A
+/// private `fn` is excluded because `downloads` is a module: a job lane cannot name it, however much
+/// network it touches. Everything else discovered here is callable, unqualified, from any file in the
+/// crate — `lib.rs` does `use downloads::*;` — so it has to be classified.
+fn downloads_fetch_surface(downloads: &SourceFile) -> BTreeSet<String> {
+    let items = fn_items(&downloads.code);
+    let bodies: Vec<String> = items
+        .iter()
+        .map(|item| code_without_comments_or_literals(&item.body))
+        .collect();
+
+    let mut reaching: BTreeSet<String> = BTreeSet::new();
+    for (item, body) in items.iter().zip(&bodies) {
+        if NETWORK_TERMINALS
+            .iter()
+            .chain(HTTP_CLIENT_CONSTRUCTORS)
+            .any(|marker| body.contains(marker))
+        {
+            reaching.insert(item.name.clone());
+        }
+    }
+    loop {
+        let mut grew = false;
+        for (item, body) in items.iter().zip(&bodies) {
+            if reaching.contains(&item.name) {
+                continue;
+            }
+            if reaching.iter().any(|callee| invokes(body, callee)) {
+                reaching.insert(item.name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    items
+        .iter()
+        .filter(|item| item.is_public && reaching.contains(&item.name))
+        .map(|item| item.name.clone())
+        .collect()
+}
+
+/// Why a file counts as making HTTP requests of its own.
+///
+/// Deliberately the two ends of a request and nothing in between: building a client that did not come
+/// from `downloads.rs`'s timeout-configured factories, and terminating a request. A lane may still
+/// *hold* a `&reqwest::Client` — the download primitives take one — but the moment it constructs one
+/// or sends with one, it has left the sanctioned path.
+fn http_client_reach(code_without_literals: &str) -> Vec<String> {
+    HTTP_CLIENT_CONSTRUCTORS
+        .iter()
+        .chain(NETWORK_TERMINALS)
+        .filter(|marker| code_without_literals.contains(**marker))
+        .map(|marker| (*marker).to_owned())
+        .collect()
 }
 
 /// Why a file counts as reaching a download: the primitive/wrapper names it invokes, plus a
 /// `DownloadContext` literal if it builds one.
 ///
 /// Takes the already-blanked code so a mention inside a string literal or a doc comment cannot count.
-fn download_reach(code_without_literals: &str, watch: &BTreeSet<String>) -> Vec<String> {
+fn download_reach(code_without_literals: &str, watch: &BTreeMap<String, String>) -> Vec<String> {
     let mut reasons: Vec<String> = watch
         .iter()
-        .filter(|name| invokes(code_without_literals, name))
-        .cloned()
+        .filter(|(name, _)| invokes_free_function(code_without_literals, name))
+        .map(|(name, definer)| format!("{name} <- {definer}"))
         .collect();
     if constructs_download_context(code_without_literals) {
         reasons.push("DownloadContext { … }".to_owned());
@@ -1197,14 +1686,39 @@ fn string_constants(files: &[SourceFile]) -> BTreeMap<String, String> {
     out
 }
 
-/// Render one `.join(…)` argument as an allow-list subdirectory name.
+/// The value of a Rust string literal, including the raw forms.
 ///
-/// A literal becomes itself; a `const` resolves through [`string_constants`]; anything else becomes a
-/// braced marker (`{cache_dir}`, `{expr}`) so an opaque destination is loud rather than absent.
+/// `r"cache"` and `r#"cache"#` are the same destination as `"cache"` to the filesystem and a
+/// different byte sequence to a naive scan, which is exactly how a literal-keyed gate gets walked
+/// past. One function so every place that reads a literal agrees.
+fn string_literal_value(argument: &str) -> Option<String> {
+    let argument = argument.trim();
+    if let Some(rest) = argument.strip_prefix('r') {
+        let hashes = "#".repeat(rest.len() - rest.trim_start_matches('#').len());
+        return rest
+            .strip_prefix(&format!("{hashes}\""))?
+            .strip_suffix(&format!("\"{hashes}"))
+            .map(str::to_owned);
+    }
+    argument
+        .strip_prefix('"')?
+        .strip_suffix('"')
+        .map(str::to_owned)
+}
+
+/// Render one `.join(…)` argument as an allow-list directory name.
+///
+/// A literal (plain or raw) becomes itself; a `const` resolves through [`string_constants`]; anything
+/// else becomes a braced marker (`{cache_dir}`, `{expr}`) so an opaque destination is loud rather
+/// than absent.
+///
+/// This is applied to the **root** segment as well as the subdir. `const ROOT: &str = "cache";
+/// d.join(ROOT).join("weights")` and `d.join(r"cache").join("weights")` are the two cheapest ways to
+/// spell a cache root that a `find(".join(\"cache\")")` scan cannot see, and both resolve here.
 fn subdir_label(argument: &str, constants: &BTreeMap<String, String>) -> String {
     let argument = argument.trim().trim_start_matches('&').trim();
-    if let Some(literal) = argument.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
-        return literal.to_owned();
+    if let Some(literal) = string_literal_value(argument) {
+        return literal;
     }
     if !argument.is_empty()
         && argument
@@ -1219,31 +1733,100 @@ fn subdir_label(argument: &str, constants: &BTreeMap<String, String>) -> String 
     "{expr}".to_owned()
 }
 
-/// Every `<data_dir>/cache/<subdir>` destination named in `code`.
+/// The balanced first argument of the call whose `(` sits at `open`, and the index just past the
+/// matching `)`.
+fn balanced_first_argument(bytes: &[u8], open: usize) -> Option<(String, usize)> {
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut index = open;
+    let mut argument_end: Option<usize> = None;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = skip_string(bytes, index);
+                continue;
+            }
+            b'\'' => {
+                index = skip_char(bytes, index);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = argument_end.unwrap_or(index);
+                    return Some((slice_lossy(bytes, open + 1, end), index + 1));
+                }
+            }
+            b',' if depth == 1 && argument_end.is_none() => argument_end = Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// If `code` continues at `at` (after whitespace/newlines) with `.join(…)` or `.push(…)`, the
+/// argument and the index past the call.
+fn next_path_segment(code: &str, at: usize) -> Option<(String, usize)> {
+    let bytes = code.as_bytes();
+    let mut index = at;
+    while index < bytes.len() && (bytes[index] as char).is_whitespace() {
+        index += 1;
+    }
+    let rest = &code[index.min(code.len())..];
+    let method = if rest.starts_with(".join(") {
+        ".join("
+    } else if rest.starts_with(".push(") {
+        ".push("
+    } else {
+        return None;
+    };
+    balanced_first_argument(bytes, index + method.len() - 1)
+}
+
+/// Every `.join(…)` / `.push(…)` in `code`, as `(argument, index past the call)`.
+fn path_segment_calls(code: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < code.len() {
+        let Some(offset) = code[cursor..].find('.') else {
+            break;
+        };
+        let dot = cursor + offset;
+        cursor = dot + 1;
+        let Some((argument, end)) = next_path_segment(code, dot) else {
+            continue;
+        };
+        out.push((argument, end));
+    }
+    out
+}
+
+/// The `<data_dir>/cache/<subdir>` destinations named in `code`, plus whether it produces the bare
+/// cache root.
 ///
-/// Two spellings, both live in the tree today:
-/// * `.join("cache").join(<subdir>)` (and the `.push` variant), and
+/// Three spellings, all live in the tree today:
+/// * `.join(<root>).join(<subdir>)` (and the `.push` variant), where `<root>` is anything that
+///   *resolves* to `cache` — a plain literal, a raw literal, or a `const`;
+/// * `.join(<root>)` with nothing after it, which yields `<cache-root>`; and
 /// * a combined `"cache/<subdir>/…"` path literal — `model_jobs.rs`'s `CONVERSION_LOCKS_DIR` and the
 ///   three legacy person/pose roots use this one, and a scanner that only looked for `.join("cache")`
 ///   would miss all four.
 fn cache_destinations(code: &str, constants: &BTreeMap<String, String>) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for opener in [".join(\"cache\")", ".push(\"cache\")"] {
-        let mut cursor = 0usize;
-        while let Some(offset) = code[cursor..].find(opener) {
-            let start = cursor + offset + opener.len();
-            cursor = start;
-            let rest = code[start..].trim_start();
-            let next = rest
-                .strip_prefix(".join(")
-                .or_else(|| rest.strip_prefix(".push("));
-            match next.and_then(|arg| arg.find([',', ')']).map(|end| &arg[..end])) {
-                Some(argument) => {
-                    out.insert(subdir_label(argument, constants));
-                }
-                None => {
-                    out.insert("<cache-root>".to_owned());
-                }
+    for (argument, end) in path_segment_calls(code) {
+        if subdir_label(&argument, constants) != "cache" {
+            continue;
+        }
+        match next_path_segment(code, end) {
+            Some((subdir, _)) => {
+                out.insert(subdir_label(&subdir, constants));
+            }
+            None => {
+                out.insert("<cache-root>".to_owned());
             }
         }
     }
@@ -1268,28 +1851,95 @@ fn cache_destinations(code: &str, constants: &BTreeMap<String, String>) -> BTree
 ///
 /// Rediscovered structurally rather than listed, so [`PARAMETERIZED_CACHE_HELPERS`] cannot silently
 /// fall behind a new helper.
-fn discover_parameterized_helpers(files: &[SourceFile]) -> BTreeMap<String, usize> {
+fn discover_parameterized_helpers(
+    files: &[SourceFile],
+    constants: &BTreeMap<String, String>,
+) -> BTreeMap<String, usize> {
     let mut out = BTreeMap::new();
     for file in files {
         for item in fn_items(&file.code) {
-            for opener in [".join(\"cache\")", ".push(\"cache\")"] {
-                let mut cursor = 0usize;
-                while let Some(offset) = item.body[cursor..].find(opener) {
-                    let start = cursor + offset + opener.len();
-                    cursor = start;
-                    let rest = item.body[start..].trim_start();
-                    let Some(argument) = rest
-                        .strip_prefix(".join(")
-                        .or_else(|| rest.strip_prefix(".push("))
-                        .and_then(|arg| arg.find([',', ')']).map(|end| &arg[..end]))
-                    else {
-                        continue;
-                    };
-                    let argument = argument.trim().trim_start_matches('&').trim();
-                    if let Some(index) = item.params.iter().position(|p| p == argument) {
-                        out.insert(item.name.clone(), index);
-                    }
+            for (argument, end) in path_segment_calls(&item.body) {
+                if subdir_label(&argument, constants) != "cache" {
+                    continue;
                 }
+                let Some((subdir, _)) = next_path_segment(&item.body, end) else {
+                    continue;
+                };
+                let subdir = subdir.trim().trim_start_matches('&').trim();
+                if let Some(index) = item.params.iter().position(|p| p == subdir) {
+                    out.insert(item.name.clone(), index);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Functions whose body hands out the **bare** cache root, as file-relative `(file, fn name)` pairs.
+///
+/// The counterpart of [`discover_parameterized_helpers`] for the root rather than the subdir: a
+/// function that ends a path expression at `cache` is producing the root for somebody else to join
+/// onto, and [`CACHE_ROOT_PRODUCERS`] has to name it.
+fn discover_cache_root_producers(
+    files: &[SourceFile],
+    constants: &BTreeMap<String, String>,
+) -> BTreeSet<(String, String)> {
+    let mut out = BTreeSet::new();
+    for file in files {
+        for item in fn_items(&file.code) {
+            for (argument, end) in path_segment_calls(&item.body) {
+                if subdir_label(&argument, constants) != "cache" {
+                    continue;
+                }
+                if next_path_segment(&item.body, end).is_none() {
+                    out.insert((file.rel.clone(), item.name.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What each call to a registered [`CACHE_ROOT_PRODUCERS`] function joins onto the root it returns.
+///
+/// `cache_root(data_dir).join("new-weights")` names a destination while containing no `cache`
+/// literal of its own; this attributes it to the calling file.
+fn cache_root_producer_destinations(
+    code: &str,
+    producers: &BTreeSet<&str>,
+    constants: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let bytes = code.as_bytes();
+    let mut out = BTreeSet::new();
+    for producer in producers {
+        let mut cursor = 0usize;
+        while let Some(offset) = code[cursor..].find(*producer) {
+            let start = cursor + offset;
+            let end = start + producer.len();
+            cursor = end;
+            let preceded_by_ident = start
+                .checked_sub(1)
+                .map(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
+                .unwrap_or(false);
+            if preceded_by_ident {
+                continue;
+            }
+            let mut open = end;
+            while open < bytes.len() && (bytes[open] as char).is_whitespace() {
+                open += 1;
+            }
+            if bytes.get(open) != Some(&b'(') {
+                continue;
+            }
+            let before = code[..start].trim_end();
+            if strip_trailing_keyword(before, "fn").is_some() {
+                continue;
+            }
+            let Some((_, past)) = balanced_first_argument(bytes, open) else {
+                continue;
+            };
+            if let Some((subdir, _)) = next_path_segment(code, past) {
+                out.insert(subdir_label(&subdir, constants));
             }
         }
     }
@@ -1394,26 +2044,47 @@ fn call_arguments(code: &str, name: &str) -> Vec<Vec<String>> {
 // ---------------------------------------------------------------------------------------------
 
 fn worker_sources() -> Vec<SourceFile> {
-    let (_, src, root) = SCANNED_CRATES[0];
+    let (_, src, root, _) = SCANNED_CRATES[0];
     production_sources(&repo_root().join(src), root)
+}
+
+fn worker_file(files: &[SourceFile], rel: &str) -> SourceFile {
+    files
+        .iter()
+        .find(|file| file.rel == rel)
+        .unwrap_or_else(|| panic!("the worker's production tree must contain {rel}"))
+        .clone()
 }
 
 /// The production sources of every scanned crate, as `(label, files)`.
 fn all_production_sources() -> Vec<(&'static str, Vec<SourceFile>)> {
     SCANNED_CRATES
         .iter()
-        .map(|(label, src, root)| {
+        .map(|(label, src, root, minimum)| {
             let files = production_sources(&repo_root().join(src), root);
             // A floor, not a census: this catches "the walk found nothing", which is the only way a
-            // set-equality gate can silently pass. Deliberately well below every crate's real count
-            // (the smallest, `apps/desktop/src`, has 10) so ordinary refactors do not trip it.
+            // set-equality gate can silently pass. Deliberately well below each crate's real count so
+            // ordinary refactors do not trip it.
             assert!(
-                files.len() >= 5,
-                "{label}: scanned only {} production files — the walk is broken, not the crate",
+                files.len() >= *minimum,
+                "{label}: scanned only {} production files, expected at least {minimum} — the walk \
+                 is broken, not the crate",
                 files.len()
             );
             (*label, files)
         })
+        .collect()
+}
+
+/// One `string_constants` map spanning every scanned crate.
+///
+/// `POSE_UPLOADS_CACHE_DIR` and `KEYPOINT_UPLOADS_CACHE_DIR` are declared in sceneworks-core and used
+/// by the worker AND the rust-api, so a per-crate map would leave four real destinations reading as
+/// opaque `{CONST}`.
+fn all_string_constants(crates: &[(&'static str, Vec<SourceFile>)]) -> BTreeMap<String, String> {
+    crates
+        .iter()
+        .flat_map(|(_, files)| string_constants(files))
         .collect()
 }
 
@@ -1436,14 +2107,14 @@ fn job_time_download_sites_match_the_allow_list() {
 
     let wrappers = download_wrappers(&files);
     assert!(
-        wrappers.contains("ensure_instantid_file"),
+        wrappers.contains_key("ensure_instantid_file"),
         "the one-hop wrapper resolver found no `ensure_instantid_file`, so `image_jobs/pulid.rs` — \
          which reaches Hugging Face ONLY through it — would be invisible. Wrapper detection is \
          broken."
     );
-    let mut watch: BTreeSet<String> = DOWNLOAD_PRIMITIVES
+    let mut watch: BTreeMap<String, String> = DOWNLOAD_PRIMITIVES
         .iter()
-        .map(|s| (*s).to_owned())
+        .map(|s| ((*s).to_owned(), "downloads.rs".to_owned()))
         .collect();
     watch.extend(wrappers);
 
@@ -1490,24 +2161,22 @@ fn job_time_download_sites_match_the_allow_list() {
         migrated.join("\n  ")
     );
 
-    // Every reaching file must carry a role, so the two classes account for the whole set. This is
-    // what makes the roles load-bearing rather than decoration: a new entry cannot be slipped in
-    // unclassified, and the `JobTime` count is the epic's remaining-work number.
-    let installers = allowed
-        .values()
-        .filter(|role| **role == DownloadRole::Installer)
-        .count();
+    // The epic's remaining-work number, pinned. Set equality above already forces the allow-list to
+    // describe the tree; what it CANNOT see is a role. Classifying a genuine job-time download as
+    // `Installer` would otherwise be a silent way to keep the population flat while it grows. Pinning
+    // the count means every role edit is a deliberate one-line diff a reviewer must agree with.
+    //
+    // **This number only ever goes DOWN.** Each migration slice deletes its entry and lowers it in
+    // the same commit; raising it is the thing AC9 forbids.
     let job_time = allowed
         .values()
         .filter(|role| **role == DownloadRole::JobTime)
         .count();
     assert_eq!(
-        installers + job_time,
-        found.len(),
-        "every download-reaching file must be classified `Installer` (the Model Manager path) or \
-         `JobTime` (the population epic 17625 is migrating); found {} reaching files against \
-         {installers} installer + {job_time} job-time entries",
-        found.len()
+        job_time, JOB_TIME_DOWNLOAD_SITES_REMAINING,
+        "the number of job-time download sites changed. If a migration slice removed one, lower \
+         JOB_TIME_DOWNLOAD_SITES_REMAINING in the same commit. If this went UP, epic 17625 just \
+         regressed — see the AC9 note on DOWNLOAD_SITES."
     );
 }
 
@@ -1516,12 +2185,10 @@ fn job_time_download_sites_match_the_allow_list() {
 #[test]
 fn cache_destinations_match_the_allow_list() {
     let crates = all_production_sources();
-    // One constant map across all four crates: `POSE_UPLOADS_CACHE_DIR` and
-    // `KEYPOINT_UPLOADS_CACHE_DIR` are declared in sceneworks-core and used by the worker AND the
-    // rust-api, so a per-crate map would leave four real destinations reading as opaque `{CONST}`.
-    let constants: BTreeMap<String, String> = crates
+    let constants = all_string_constants(&crates);
+    let producers: BTreeSet<&str> = CACHE_ROOT_PRODUCERS
         .iter()
-        .flat_map(|(_, files)| string_constants(files))
+        .map(|(_, _, name)| *name)
         .collect();
 
     let mut found: BTreeSet<(String, String, String)> = BTreeSet::new();
@@ -1531,6 +2198,9 @@ fn cache_destinations_match_the_allow_list() {
         for file in files {
             let mut subdirs = cache_destinations(&file.code, &constants);
             subdirs.extend(parameterized_call_destinations(&file.code, &constants));
+            subdirs.extend(cache_root_producer_destinations(
+                &file.code, &producers, &constants,
+            ));
             for subdir in subdirs {
                 found.insert(((*label).to_owned(), file.rel.clone(), subdir));
             }
@@ -1538,7 +2208,7 @@ fn cache_destinations_match_the_allow_list() {
     }
     assert!(
         scanned > 200,
-        "expected the four production trees, scanned only {scanned} files"
+        "expected every scanned production tree, scanned only {scanned} files"
     );
 
     let allowed: BTreeMap<(String, String, String), CacheRole> = CACHE_DESTINATIONS
@@ -1584,16 +2254,142 @@ fn cache_destinations_match_the_allow_list() {
         removed.join("\n  ")
     );
 
-    // A cache gate whose `Weights` class emptied out silently would still pass the equality above
-    // while proving nothing, so pin the shape too: this is the population epic 17625 migrates.
+    // Set equality above cannot see a ROLE. A new weights destination classified `Scratch` would
+    // otherwise slip through as an ordinary allow-list edit, so the weights population is pinned to a
+    // literal: any change to it, in either direction, is a diff a reviewer has to agree with.
+    //
+    // **This number only ever goes DOWN.** Each migration slice deletes its destination and lowers it
+    // in the same commit; raising it is precisely the regression AC9 forbids.
     let weights = allowed
         .values()
         .filter(|role| **role == CacheRole::Weights)
         .count();
+    assert_eq!(
+        weights, WEIGHTS_CACHE_DESTINATIONS_REMAINING,
+        "the number of `Weights` destinations under `<data_dir>/cache` changed. If a migration slice \
+         removed one, lower WEIGHTS_CACHE_DESTINATIONS_REMAINING in the same commit. If this went UP, \
+         a new weight destination just landed outside the app-managed Hugging Face cache, which is \
+         what AC9 forbids."
+    );
+}
+
+/// **AC9, the surface the other two gates stand on.** [`DOWNLOAD_PRIMITIVES`] must name the whole
+/// externally-visible fetching surface of `downloads.rs`, minus an explicitly-classified
+/// [`NON_WEIGHT_FETCHERS`] list.
+///
+/// Without this the primitive list is four hand-written strings, and a fifth fetcher added to
+/// `downloads.rs` — or three that already existed — is invisible to the reachability scan no matter
+/// how many lanes call it.
+#[test]
+fn downloads_fetch_surface_is_registered() {
+    let files = worker_sources();
+    let downloads = worker_file(&files, "downloads.rs");
+
+    let discovered = downloads_fetch_surface(&downloads);
     assert!(
-        weights >= 1,
-        "no `Weights` destinations left in CACHE_DESTINATIONS. If epic 17625 finished, say so here \
-         deliberately rather than letting the class vanish."
+        discovered.contains("ensure_hf_cached_file") && discovered.contains("ensure_cached_file"),
+        "the fetch-surface walk did not rediscover the helpers sc-17637 names, so it is broken and \
+         proving nothing: {discovered:?}"
+    );
+
+    let registered: BTreeSet<String> = DOWNLOAD_PRIMITIVES
+        .iter()
+        .chain(NON_WEIGHT_FETCHERS)
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        DOWNLOAD_PRIMITIVES.len() + NON_WEIGHT_FETCHERS.len(),
+        registered.len(),
+        "a name appears in both DOWNLOAD_PRIMITIVES and NON_WEIGHT_FETCHERS"
+    );
+
+    let unregistered: Vec<&String> = discovered.difference(&registered).collect();
+    let stale: Vec<&String> = registered.difference(&discovered).collect();
+    assert!(
+        unregistered.is_empty(),
+        "`downloads.rs` grew externally-visible function(s) that reach the network and are on \
+         neither list:\n  {unregistered:?}\n\nEvery one of these is callable, unqualified, from any \
+         file in the crate (`lib.rs` does `use downloads::*;`). Put it in DOWNLOAD_PRIMITIVES so the \
+         reachability scan covers it, or — if it genuinely cannot pull model bytes into a job — in \
+         NON_WEIGHT_FETCHERS with a comment saying what it does instead."
+    );
+    assert!(
+        stale.is_empty(),
+        "name(s) registered as part of the `downloads.rs` fetch surface that no longer reach the \
+         network there:\n  {stale:?}\n\nRemove the entry in the same commit, so the list keeps \
+         stating the real surface."
+    );
+}
+
+/// **The next regrowth shape.** A lane that writes `reqwest::Client::new().get(url).send()` inline
+/// fetches weights while naming nothing on any allow-list, so the ability to make an HTTP request at
+/// all is confined to [`HTTP_CLIENT_FILES`].
+#[test]
+fn http_client_construction_is_confined() {
+    let files = worker_sources();
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for file in &files {
+        let reasons = http_client_reach(&file.code_without_literals());
+        if !reasons.is_empty() {
+            found.insert(file.rel.clone(), reasons);
+        }
+    }
+
+    let allowed: BTreeMap<&str, &str> = HTTP_CLIENT_FILES.iter().copied().collect();
+    let added: Vec<String> = found
+        .iter()
+        .filter(|(rel, _)| !allowed.contains_key(rel.as_str()))
+        .map(|(rel, reasons)| format!("{rel}  ({})", reasons.join(", ")))
+        .collect();
+    let stale: Vec<&str> = allowed
+        .keys()
+        .filter(|rel| !found.contains_key(**rel))
+        .copied()
+        .collect();
+
+    assert!(
+        added.is_empty(),
+        "file(s) outside the confinement now build an HTTP client or issue a request:\n  {}\n\nA job \
+         lane that opens its own socket bypasses every download allow-list in this module — it is \
+         the same regression as a job-time download, spelled differently. Resolve declared weights \
+         with `crate::downloads::resolve_hf_component_file` instead. If a file genuinely needs an \
+         HTTP client for something that is not weights, add it to HTTP_CLIENT_FILES with a comment \
+         saying what it talks to.",
+        added.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "file(s) allow-listed for HTTP-client construction that no longer build one:\n  {}\n\nRatchet \
+         the list down in the same commit.",
+        stale.join("\n  ")
+    );
+}
+
+/// A function that hands out the bare `<data_dir>/cache` root must be registered, or a new one is
+/// silently absorbed into an existing file's `<cache-root>` entry and becomes a way to reach a new
+/// destination without naming it.
+#[test]
+fn cache_root_producers_are_registered() {
+    let crates = all_production_sources();
+    let constants = all_string_constants(&crates);
+
+    let mut discovered: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for (label, files) in &crates {
+        for (rel, name) in discover_cache_root_producers(files, &constants) {
+            discovered.insert(((*label).to_owned(), rel, name));
+        }
+    }
+    let registered: BTreeSet<(String, String, String)> = CACHE_ROOT_PRODUCERS
+        .iter()
+        .map(|(label, rel, name)| ((*label).to_owned(), (*rel).to_owned(), (*name).to_owned()))
+        .collect();
+    assert_eq!(
+        discovered, registered,
+        "the set of functions that hand out a bare `<data_dir>/cache` root changed. A new one is a \
+         hole: CACHE_DESTINATIONS keys on (crate, file, subdir), so a second producer in an \
+         already-listed file changes nothing there, and its callers can then join a brand-new weight \
+         destination onto the root without spelling `cache` at all. Register it as \
+         (crate label, file, fn name), which also makes its call sites contribute what they join."
     );
 }
 
@@ -1601,9 +2397,11 @@ fn cache_destinations_match_the_allow_list() {
 /// literal-keyed allow-list gets bypassed, so the registry of those helpers is itself checked.
 #[test]
 fn parameterized_cache_root_helpers_are_registered() {
+    let crates = all_production_sources();
+    let constants = all_string_constants(&crates);
     let mut discovered: BTreeMap<String, usize> = BTreeMap::new();
-    for (_, files) in all_production_sources() {
-        discovered.extend(discover_parameterized_helpers(&files));
+    for (_, files) in &crates {
+        discovered.extend(discover_parameterized_helpers(files, &constants));
     }
     let registered: BTreeMap<String, usize> = PARAMETERIZED_CACHE_HELPERS
         .iter()
@@ -1630,7 +2428,7 @@ fn parameterized_cache_root_helpers_are_registered() {
 /// gates would be permanently, unfixably red.
 #[test]
 fn the_guard_module_is_excluded_from_its_own_scan() {
-    let (_, src, root) = SCANNED_CRATES[0];
+    let (_, src, root, _) = SCANNED_CRATES[0];
     let tree = read_tree(&repo_root().join(src));
     let test_only = test_only_files(&tree, root);
     assert!(
@@ -1659,9 +2457,9 @@ fn the_guard_module_is_excluded_from_its_own_scan() {
 /// it would pass just as happily with the detection ripped out.
 #[test]
 fn scanner_detects_a_new_direct_call_site() {
-    let watch: BTreeSet<String> = DOWNLOAD_PRIMITIVES
+    let watch: BTreeMap<String, String> = DOWNLOAD_PRIMITIVES
         .iter()
-        .map(|s| (*s).to_owned())
+        .map(|s| ((*s).to_owned(), "downloads.rs".to_owned()))
         .collect();
     let detect = |source: &str| {
         download_reach(
@@ -1673,7 +2471,7 @@ fn scanner_detects_a_new_direct_call_site() {
     // Unqualified — the crate-root glob (`use downloads::*;`) puts the helpers in scope everywhere.
     assert_eq!(
         detect("async fn new_lane(c: &DownloadContext<'_>) { ensure_hf_cached_file(c, r, v, f, d).await; }"),
-        vec!["ensure_hf_cached_file".to_owned()]
+        vec!["ensure_hf_cached_file <- downloads.rs".to_owned()]
     );
     // Fully qualified — four lanes already spell it this way.
     assert!(!detect("fn f() { crate::downloads::ensure_cached_file(c, u, t, l, s); }").is_empty());
@@ -1727,17 +2525,17 @@ fn scanner_detects_a_new_wrapper_and_its_remote_caller() {
 
     let wrappers = download_wrappers(&files);
     assert!(
-        wrappers.contains("stage_weight"),
+        wrappers.contains_key("stage_weight"),
         "a function whose body calls a primitive is a wrapper: {wrappers:?}"
     );
     assert!(
-        !wrappers.contains("run"),
+        !wrappers.contains_key("run"),
         "wrapper resolution must stop after one hop; chasing the call graph flags the whole crate"
     );
 
-    let mut watch: BTreeSet<String> = DOWNLOAD_PRIMITIVES
+    let mut watch: BTreeMap<String, String> = DOWNLOAD_PRIMITIVES
         .iter()
-        .map(|s| (*s).to_owned())
+        .map(|s| ((*s).to_owned(), "downloads.rs".to_owned()))
         .collect();
     watch.extend(wrappers);
     assert!(
@@ -1820,11 +2618,254 @@ fn scanner_detects_a_new_cache_weight_destination() {
             .to_owned(),
     };
     assert_eq!(
-        discover_parameterized_helpers(&[helper]).get("confine"),
+        discover_parameterized_helpers(&[helper], &constants).get("confine"),
         Some(&2usize),
         "a new helper that joins `cache` with its own parameter must be discovered, at the right \
          parameter index"
     );
+}
+
+/// The three cheapest ways to spell a `<data_dir>/cache` root that a literal scan cannot see, and the
+/// registry that catches the fourth.
+///
+/// Every one of these was a live escape before sc-17637's review: a `const`, a raw literal, and an
+/// accessor handing out the bare root from the very file that already owns the only `<cache-root>`
+/// allow-list entry.
+#[test]
+fn scanner_sees_through_an_aliased_cache_root() {
+    let mut constants = BTreeMap::new();
+    constants.insert("M4_ROOT".to_owned(), "cache".to_owned());
+    constants.insert("UNRELATED".to_owned(), "models".to_owned());
+
+    // A `const` that resolves to `cache`.
+    assert!(cache_destinations(
+        "let d = data_dir.join(M4_ROOT).join(\"brand-new-weights\");",
+        &constants
+    )
+    .contains("brand-new-weights"));
+    // Raw literals, both hash flavours.
+    assert!(cache_destinations(
+        "let d = data_dir.join(r\"cache\").join(\"brand-new-weights\");",
+        &constants
+    )
+    .contains("brand-new-weights"));
+    assert_eq!(
+        string_literal_value("r#\"cache\"#").as_deref(),
+        Some("cache")
+    );
+    assert_eq!(string_literal_value("\"cache\"").as_deref(), Some("cache"));
+    assert_eq!(string_literal_value("CACHE_DIR"), None);
+    // A constant that resolves to something else is NOT a cache root.
+    assert!(cache_destinations(
+        "let d = data_dir.join(UNRELATED).join(\"brand-new-weights\");",
+        &constants
+    )
+    .is_empty());
+
+    // A function that ends a path expression at `cache` is a root producer, and one that keeps going
+    // is not — that one is an ordinary destination.
+    let producer = SourceFile {
+        rel: "fake_app_paths.rs".to_owned(),
+        code: "pub fn m8_cache_root(d: &Path) -> PathBuf { d.join(\"cache\") }\n\
+               pub fn destination(d: &Path) -> PathBuf { d.join(\"cache\").join(\"uploads\") }"
+            .to_owned(),
+    };
+    let discovered = discover_cache_root_producers(&[producer], &constants);
+    assert!(discovered.contains(&("fake_app_paths.rs".to_owned(), "m8_cache_root".to_owned())));
+    assert!(!discovered.contains(&("fake_app_paths.rs".to_owned(), "destination".to_owned())));
+
+    // ...and a lane that joins onto a registered producer's result is attributed the destination,
+    // even though it contains no `cache` text of its own.
+    let producers: BTreeSet<&str> = ["m8_cache_root"].into_iter().collect();
+    let caller = "let d = app_paths::m8_cache_root(data_dir).join(\"brand-new-weights\");";
+    assert!(cache_destinations(caller, &constants).is_empty());
+    assert!(
+        cache_root_producer_destinations(caller, &producers, &constants)
+            .contains("brand-new-weights")
+    );
+}
+
+/// A fake NEW fetcher added to `downloads.rs` must be rediscovered, and a private one must not
+/// (a job lane cannot name it).
+#[test]
+fn scanner_rediscovers_the_downloads_fetch_surface() {
+    let module = SourceFile {
+        rel: "downloads.rs".to_owned(),
+        code: "pub(crate) async fn m17_fetch(client: &reqwest::Client, url: &str) -> R { \
+               client.get(url).send().await }\n\
+               pub(crate) async fn m17_indirect(c: &C, u: &str) -> R { m17_fetch(c, u).await }\n\
+               async fn m17_private(c: &C, u: &str) -> R { m17_fetch(c, u).await }\n\
+               pub(crate) fn m17_offline(path: &Path) -> R { std::fs::read(path) }"
+            .to_owned(),
+    };
+    let discovered = downloads_fetch_surface(&module);
+    assert!(
+        discovered.contains("m17_fetch"),
+        "a new fn that sends a request must be discovered: {discovered:?}"
+    );
+    assert!(
+        discovered.contains("m17_indirect"),
+        "reachability is transitive inside the module: {discovered:?}"
+    );
+    assert!(
+        !discovered.contains("m17_private"),
+        "a private fn cannot be named by a job lane, so it is not part of the surface"
+    );
+    assert!(
+        !discovered.contains("m17_offline"),
+        "a fn that touches no network is not part of the fetch surface"
+    );
+
+    // Visibility parsing is what draws that line, so pin it directly.
+    let items = fn_items(
+        "pub(crate) async fn a() {}\n pub fn b() {}\n async fn c() {}\n pub(super) unsafe fn d() {}",
+    );
+    let public: Vec<(&str, bool)> = items
+        .iter()
+        .map(|item| (item.name.as_str(), item.is_public))
+        .collect();
+    assert_eq!(
+        public,
+        vec![("a", true), ("b", true), ("c", false), ("d", true)]
+    );
+}
+
+/// The M18 shape: a lane that opens its own socket, naming nothing on any download allow-list.
+#[test]
+fn scanner_detects_an_inline_http_client() {
+    let detect = |source: &str| {
+        http_client_reach(&code_without_comments_or_literals(&code_without_comments(
+            source,
+        )))
+    };
+
+    assert!(
+        !detect("async fn f(u: &str) { reqwest::Client::new().get(u).send().await; }").is_empty()
+    );
+    assert!(!detect("fn f() { let c = reqwest::Client::builder().build(); }").is_empty());
+    assert!(
+        !detect("async fn f(c: &reqwest::Client, u: &str) { c.get(u).send().await; }").is_empty()
+    );
+    // Holding a client is not the same as building one or sending with it: every download primitive
+    // takes a `&reqwest::Client`, so a parameter of that type must stay quiet.
+    assert!(detect(
+        "async fn f(client: &reqwest::Client) -> R { ensure_cached_file(client).await }"
+    )
+    .is_empty());
+    // Comments and string literals naming the constructor are not constructions.
+    assert!(detect("/// never call reqwest::Client::new() here\nfn f() {}").is_empty());
+    assert!(detect(r#"fn f() { log("reqwest::Client::new() is banned"); }"#).is_empty());
+}
+
+/// The M2 shape: a forwarder inside an allow-listed file, called from a file that is not.
+#[test]
+fn scanner_resolves_wrappers_past_one_hop() {
+    // `image_jobs/instantid.rs` is a `JobTime` entry, so the closure grows through it.
+    let listed = DOWNLOAD_SITES
+        .iter()
+        .any(|(rel, role)| *rel == "image_jobs/instantid.rs" && *role == DownloadRole::JobTime);
+    assert!(
+        listed,
+        "this test's premise is that instantid.rs is a JobTime site"
+    );
+
+    let definer = SourceFile {
+        rel: "image_jobs/instantid.rs".to_owned(),
+        code: "async fn stage(c: &DownloadContext<'_>) -> R { ensure_hf_cached_file(c).await }\n\
+               async fn m2_forward(c: &DownloadContext<'_>) -> R { stage(c).await }"
+            .to_owned(),
+    };
+    // NOT on DOWNLOAD_SITES, and it names no primitive, no context and no first-hop wrapper.
+    let new_lane = SourceFile {
+        rel: "image_jobs/m2_new_lane.rs".to_owned(),
+        code: "async fn run(c: &Ctx) { m2_forward(c).await; }".to_owned(),
+    };
+
+    let wrappers = download_wrappers(&[definer, new_lane.clone()]);
+    assert!(wrappers.contains_key("stage"), "hop one: {wrappers:?}");
+    assert!(
+        wrappers.contains_key("m2_forward"),
+        "hop two, through a file already on DOWNLOAD_SITES: {wrappers:?}"
+    );
+
+    let mut watch: BTreeMap<String, String> = DOWNLOAD_PRIMITIVES
+        .iter()
+        .map(|s| ((*s).to_owned(), "downloads.rs".to_owned()))
+        .collect();
+    watch.extend(wrappers);
+    assert!(
+        !download_reach(&new_lane.code_without_literals(), &watch).is_empty(),
+        "the two-hop caller must be flagged"
+    );
+
+    // The closure must NOT grow through a file that is not on the list: that file is already red on
+    // its own, and following it is what turns the gate into a 73-file census.
+    let unlisted = SourceFile {
+        rel: "brand_new_file.rs".to_owned(),
+        code: "async fn only_hop_one(c: &C) -> R { ensure_hf_cached_file(c).await }\n\
+               async fn hop_two(c: &C) -> R { only_hop_one(c).await }"
+            .to_owned(),
+    };
+    let wrappers = download_wrappers(&[unlisted]);
+    assert!(wrappers.contains_key("only_hop_one"));
+    assert!(
+        !wrappers.contains_key("hop_two"),
+        "the closure must stop at files that are not JobTime sites: {wrappers:?}"
+    );
+}
+
+/// A `'"'` char literal and a raw string carrying a `"` both flip string parity for the REST OF THE
+/// FILE if the stripper does not step over them — the tail of the file is absorbed into a phantom
+/// literal and silently stops being scanned.
+///
+/// `downloads.rs` contains `.trim_matches('"')` at roughly its midpoint, which is why this is a
+/// regression test and not a hypothetical: everything after it, including
+/// `lora_source_content_length` and `report_download_progress`, was invisible to both gates.
+#[test]
+fn scanner_survives_quote_char_literals_and_raw_strings() {
+    let source = "fn quoting() { let q = '\"'; }\n\
+                  fn hidden(c: &DownloadContext<'_>) { ensure_hf_cached_file(c); }\n";
+    let code = code_without_comments(source);
+    assert!(
+        code.contains("ensure_hf_cached_file"),
+        "a `'\"'` char literal must not swallow the rest of the file: {code}"
+    );
+    assert!(fn_items(&code)
+        .iter()
+        .any(|item| item.name == "hidden" && item.body.contains("ensure_hf_cached_file")));
+
+    let raw = "fn quoting() { let q = r#\"a \"quoted\" fox\"#; }\n\
+               fn hidden() { let d = data_dir.join(\"cache\").join(\"brand-new-weights\"); }\n";
+    let code = code_without_comments(raw);
+    assert!(
+        cache_destinations(&code, &BTreeMap::new()).contains("brand-new-weights"),
+        "a raw string carrying a quote must not swallow the rest of the file: {code}"
+    );
+
+    // And the same for the blanking pass, which the download scan reads.
+    let blanked = code_without_comments_or_literals(source);
+    assert!(blanked.contains("ensure_hf_cached_file"));
+
+    // A `#[cfg(test)]` on a struct FIELD ends at its comma, not at the next item's brace. Getting
+    // this wrong deleted whole functions from the scan.
+    let stripped = strip_cfg_test_items(
+        "struct S {\n    real: u8,\n    #[cfg(test)]\n    probe: u64,\n}\n\
+         fn kept(c: &C) { ensure_hf_cached_file(c); }\n",
+    );
+    assert!(
+        !stripped.contains("probe"),
+        "the cfg'd field must go: {stripped}"
+    );
+    assert!(
+        stripped.contains("fn kept") && stripped.contains("ensure_hf_cached_file"),
+        "the function after it must survive: {stripped}"
+    );
+    // A `#[cfg(test)]` statement still ends at its semicolon.
+    let stripped = strip_cfg_test_items(
+        "fn f() {\n    #[cfg(test)]\n    COUNTER.set(1);\n    ensure_hf_cached_file(c);\n}",
+    );
+    assert!(!stripped.contains("COUNTER"));
+    assert!(stripped.contains("ensure_hf_cached_file"));
 }
 
 /// The supporting parsers, exercised on the shapes they must judge. Each of these silently returning

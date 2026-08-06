@@ -47,9 +47,80 @@ fn documented_job_types() -> Vec<String> {
         .collect()
 }
 
+/// The end of a `'x'` / `'\n'` / `'\u{1F600}'` char literal starting at `start`, or `None` when the
+/// quote opens a lifetime (`'a`, `'_`, `'static`).
+///
+/// Without this, a `'"'` char literal — `downloads.rs`, `session_log.rs`, `jsonc.rs` and four other
+/// scanned files contain one — flips the string-literal parity of everything that follows it in the
+/// file. The consequence is not a false positive but a silent BLIND SPOT: the tail of the file gets
+/// absorbed into a phantom string literal and stops being scanned at all.
+pub(crate) fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+    if bytes.get(start + 1) == Some(&b'\\') {
+        // Escapes run from two bytes (`'\n'`) to ten (`'\u{1F600}'`).
+        return (start + 2..=start + 11)
+            .find(|index| bytes.get(*index) == Some(&b'\''))
+            .map(|index| index + 1);
+    }
+    // A plain char is one code point wide; UTF-8 makes that one to four bytes.
+    (start + 2..=start + 5)
+        .find(|index| bytes.get(*index) == Some(&b'\''))
+        .map(|index| index + 1)
+}
+
+/// A raw string literal (`r"…"`, `r#"…"#`, `br#"…"#`) whose `r`/`b` prefix starts at `start`, as
+/// `(number of hashes, index just past the whole literal)`.
+///
+/// A raw string can contain unescaped `"` — `ideogram_caption.rs` has `r#"a "quoted" fox"#` — which
+/// the plain-string walk closes early on, flipping parity exactly as a `'"'` char literal does.
+pub(crate) fn raw_string_parts(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+    if bytes.get(index) == Some(&b'b') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'r') {
+        return None;
+    }
+    index += 1;
+    let hash_start = index;
+    while bytes.get(index) == Some(&b'#') {
+        index += 1;
+    }
+    let hashes = index - hash_start;
+    if bytes.get(index) != Some(&b'"') {
+        return None;
+    }
+    index += 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"'
+            && bytes[index + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|byte| **byte == b'#')
+                .count()
+                == hashes
+        {
+            return Some((hashes, index + 1 + hashes));
+        }
+        index += 1;
+    }
+    Some((hashes, bytes.len()))
+}
+
+/// Whether the byte at `index` could START an `r"…"` / `b"…"` prefix rather than continue an
+/// identifier (`for r in …` must not read `r` as a raw-string prefix, but `let x = r"…"` must).
+fn starts_a_token(bytes: &[u8], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .map(|previous| !(bytes[previous] == b'_' || bytes[previous].is_ascii_alphanumeric()))
+        .unwrap_or(true)
+}
+
 /// Remove comments — and nothing else — before inspecting Rust syntax. Understands nested block
-/// comments and skips over quoted strings, so a `//` inside a URL literal is not mistaken for the
-/// start of a comment.
+/// comments and steps over quoted strings, raw strings and char literals, so a `//` inside a URL
+/// literal is not mistaken for the start of a comment and a `'"'` does not open a phantom string.
 ///
 /// String literal CONTENTS survive, which is what separates this from
 /// [`code_without_comments_or_literals`]. [`crate::job_time_download_guard`] (sc-17637) needs both:
@@ -62,6 +133,22 @@ pub(crate) fn code_without_comments(source: &str) -> String {
     let mut index = 0;
 
     while index < bytes.len() {
+        // Char literals and raw strings first: both can carry a `"` that must not open a string.
+        if bytes[index] == b'\'' {
+            if let Some(end) = char_literal_end(bytes, index) {
+                output.extend_from_slice(&bytes[index..end.min(bytes.len())]);
+                index = end.min(bytes.len());
+                continue;
+            }
+        }
+        if (bytes[index] == b'r' || bytes[index] == b'b') && starts_a_token(bytes, index) {
+            if let Some((_, end)) = raw_string_parts(bytes, index) {
+                let end = end.min(bytes.len());
+                output.extend_from_slice(&bytes[index..end]);
+                index = end;
+                continue;
+            }
+        }
         match (bytes[index], bytes.get(index + 1).copied()) {
             (b'/', Some(b'/')) => {
                 index += 2;
@@ -136,6 +223,30 @@ pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
     let mut index = 0;
 
     while index < bytes.len() {
+        // A char literal is kept verbatim — callers look for `'{'` — but it must be *stepped over*,
+        // or the `"` in a `'"'` literal opens a phantom string that blanks the rest of the file.
+        if bytes[index] == b'\'' {
+            if let Some(end) = char_literal_end(bytes, index) {
+                let end = end.min(bytes.len());
+                output.extend_from_slice(&bytes[index..end]);
+                index = end;
+                continue;
+            }
+        }
+        // A raw string keeps its delimiter shape and loses its contents, like a plain one.
+        if (bytes[index] == b'r' || bytes[index] == b'b') && starts_a_token(bytes, index) {
+            if let Some((hashes, end)) = raw_string_parts(bytes, index) {
+                if bytes[index] == b'b' {
+                    output.push(b'b');
+                }
+                output.push(b'r');
+                output.extend(std::iter::repeat(b'#').take(hashes));
+                output.extend_from_slice(b"\"\"");
+                output.extend(std::iter::repeat(b'#').take(hashes));
+                index = end.min(bytes.len());
+                continue;
+            }
+        }
         match bytes[index] {
             b'"' => {
                 output.push(b'"');
