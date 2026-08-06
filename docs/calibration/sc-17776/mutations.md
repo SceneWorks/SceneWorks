@@ -20,8 +20,15 @@ driver applies them with `git apply` and resets the worktree between cases.
 
 `M-rms`, `M-devfp` and `M-safety` are three independent live changes, deliberately on three different
 surfaces — the transformer numerics, the calibration identity, and the admission guard — so that a
-unit which happens to link one of them cannot pass by luck. `M-rms` and `M-gencore` are the two-sided
-control and both are load-bearing. `M-gencore` is the only
+unit which happens to link one of them cannot pass by luck.
+
+The **two-sided control is per unit**, because the units differ in what they can see. `M-gencore` is
+the only row expecting `identical` on every unit, so it catches a stuck-DIFFER instrument anywhere.
+On the far side it depends which unit is being checked: the code units are held by `M-rms`, the
+ladder-scoped digest by `M-devfp` and `M-safety` (it is blind to `M-rms`), and the behaviour witness
+by `M-devfp` alone (it is blind to both `M-rms` and `M-safety`). Every unit reported in
+`docs/calibration-invalidation-unit-sc-17776.md` is exercised in both directions; none of them is
+absolving or refusing everything. `M-gencore` is the only
 row that expects `identical`, so it fails if the mechanism absolves nothing; `M-rms` and `M-devfp`
 are the only rows that are semantically genuine invalidations, so they fail if it absolves
 everything. `M-klein`, `M-editprov` and `M-cfgtest` discriminate nothing on their own — they are the
@@ -76,3 +83,9 @@ sed -i '365s/if context.geometry.batch != 1 {/if context.geometry.batch > 2 {/' 
 
 `M-klein`, `M-devfp` and `M-safety` all edit `memory_strategy.rs` and are applied separately, never
 together.
+
+**Comparing with sc-17775.** `M-klein` and `M-devfp` reproduce that survey's M1 and M3 digests
+exactly (`73fe78d5…` and `eb9a6ead…`), and `M-gencore` reproduces its M4 (`fee1c2de…`, i.e. the
+unmutated binary). `M-cfgtest` does **not** reproduce its M2 (`0b101ed9…` here against `750a0cfe…`
+there) and should not: both append a trivial `#[cfg(test)] mod`, but not the same text, and the
+digest is of the compiled result rather than of the description.

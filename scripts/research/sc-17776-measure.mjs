@@ -232,7 +232,7 @@ export function buildExample({ workdir, cargoTargetDir, lane, example }) {
   };
 }
 
-export function measure({ workdir, revision, cargoTargetDir, lane, patch, label, example, explain }) {
+export function measure({ workdir, revision, cargoTargetDir, lane, patch, label, example, explain, dumpScope }) {
   const { executable, shippedExecutable, objects, linkInputs: inputs } = buildWithObjects({
     workdir,
     revision,
@@ -240,7 +240,7 @@ export function measure({ workdir, revision, cargoTargetDir, lane, patch, label,
     lane,
     patch,
   });
-  const result = probe({ inputs: [...new Set([...inputs, ...objects])], explain });
+  const result = probe({ inputs: [...new Set([...inputs, ...objects])], explain, dumpScope });
   const exampleArtifact = example ? buildExample({ workdir, cargoTargetDir, lane, example }) : null;
   return {
     exampleBinary: exampleArtifact?.digest ?? null,
@@ -284,6 +284,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         label,
         example: value("--example"),
         explain: value("--explain") ? new RegExp(value("--explain")) : null,
+        dumpScope: value("--dump-scope"),
       });
     });
   const text = JSON.stringify({ workdir, results }, null, 2);

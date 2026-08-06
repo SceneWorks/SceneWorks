@@ -319,6 +319,25 @@ export function sectionFingerprint(graph, node) {
   return hash.digest("hex");
 }
 
+/**
+ * Every reachable section as `<defining symbol> <fingerprint>`, sorted — so two runs can be diffed
+ * to see WHICH sections moved rather than only that the digest did.
+ *
+ * Without this, "the digest moved" and "the digest moved for a reason worth a re-capture" are the
+ * same observation, which is the confusion this whole story is about.
+ */
+export function dumpSections(graph, ids) {
+  const lines = [];
+  for (const id of ids) {
+    const node = graph.nodes.get(id);
+    if (!node) continue;
+    lines.push(
+      `${node.section.canonical} ${sectionSymbols(graph, id).sort()[0]} ${sectionFingerprint(graph, node)}`,
+    );
+  }
+  return lines.sort();
+}
+
 export function digestOf(graph, ids, { executableOnly = false } = {}) {
   const fingerprints = [];
   let bytes = 0;
@@ -367,7 +386,7 @@ export function loadObjects(files) {
       }
     }
   }
-  return { objects, failures, archives: inputs.length };
+  return { objects, failures, inputFiles: inputs.length };
 }
 
 export function rootsMatching(graph, pattern) {
@@ -402,12 +421,12 @@ export const SCOPES = Object.freeze({
   ladder: /candle_gen_flux2.*(provider_contract|registered_safety_check)/,
 });
 
-export function probe({ inputs, scopes = SCOPES, explain = null }) {
-  const { objects, failures, archives } = loadObjects(inputs);
+export function probe({ inputs, scopes = SCOPES, explain = null, dumpScope = null }) {
+  const { objects, failures, inputFiles } = loadObjects(inputs);
   const graph = buildGraph(objects);
   const all = [...graph.nodes.keys()];
   const result = {
-    inputs: { archives, objects: objects.length, parseFailures: failures },
+    inputs: { inputFiles, objects: objects.length, parseFailures: failures },
     duplicateDefinitions: graph.duplicateDefinitions,
     linkedAll: digestOf(graph, all),
     linkedText: digestOf(graph, all, { executableOnly: true }),
@@ -429,6 +448,7 @@ export function probe({ inputs, scopes = SCOPES, explain = null }) {
       all: digestOf(graph, reachable),
       text: digestOf(graph, reachable, { executableOnly: true }),
     };
+    if (dumpScope === name) result.sectionDump = dumpSections(graph, reachable);
     if (explain) {
       const hits = [...reachable].filter((id) =>
         sectionSymbols(graph, id).some((symbol) => explain.test(symbol)),

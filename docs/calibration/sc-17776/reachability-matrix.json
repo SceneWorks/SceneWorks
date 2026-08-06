@@ -4,7 +4,7 @@
   "lane": "cuda",
   "host": "RTX PRO 6000 Blackwell Max-Q, Windows 11, rustc 1.96.0, MSVC 14.44.35207, nvcc 12.9",
   "workdir": "D:/repos/inference-audit/sc-17524",
-  "note": "Research record for sc-17776. NOT an audit record: no consumer reads it and no validator accepts it.",
+  "note": "Research record for sc-17776. NOT an audit record: no consumer reads it and no validator accepts it. inputs.inputFiles counts every file handed to the walk (rlibs plus the audited crate loose objects), not archives alone.",
   "results": [
     {
       "exampleBinary": "sha256:8fd614b0db80d5bf758e63374b07a18cc686aff654c60ab5d7f866818655f2c3",
@@ -15,9 +15,9 @@
       "probeUnit": "sha256:029c3e3a0bddc4d23a85074ce5fcd466982566ebce8a931b51e2e40a412d7945",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -96,9 +96,9 @@
       "probeUnit": "sha256:029c3e3a0bddc4d23a85074ce5fcd466982566ebce8a931b51e2e40a412d7945",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -169,6 +169,84 @@
       }
     },
     {
+      "exampleBinary": "sha256:8fd614b0db80d5bf758e63374b07a18cc686aff654c60ab5d7f866818655f2c3",
+      "label": "fbb0-c",
+      "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+      "patch": null,
+      "shippedUnit": "sha256:fee1c2de14fbabd0a08120b9afeabaf4dcac85e3a328976faeac60ef7fef14dd",
+      "probeUnit": "sha256:029c3e3a0bddc4d23a85074ce5fcd466982566ebce8a931b51e2e40a412d7945",
+      "auditedObjects": 17,
+      "inputs": {
+        "objects": 886,
+        "parseFailures": [],
+        "inputFiles": 150
+      },
+      "duplicateDefinitions": 7429,
+      "linkedAll": {
+        "digest": "sha256:46c25cce74e2235d04a64832ea4d7aa826c84c030b1bf5440364367e7e9ba066",
+        "sections": 204470,
+        "bytes": 78124169
+      },
+      "linkedText": {
+        "digest": "sha256:43756b46c889ad9ff0547c4cc14f51fe34965eecbec3ed0cef377f2c713a3022",
+        "sections": 49307,
+        "bytes": 28086319
+      },
+      "scopes": {
+        "measured": {
+          "roots": [
+            "_ZN16candle_gen_flux25tests40flux2_dev_probed_generate_for_offload_ab17hb77ffe44870f396eE"
+          ],
+          "all": {
+            "digest": "sha256:aaa1297d673f00f49f749055522fdc251646c6ad38ef5f602db7de805938e2f7",
+            "sections": 35800,
+            "bytes": 44854083
+          },
+          "text": {
+            "digest": "sha256:65b438e5a74d4fa2479edb07c8cfa829a1665a42868ac8e1a01ab83c086ed89f",
+            "sections": 11299,
+            "bytes": 10225152
+          }
+        },
+        "ladder": {
+          "roots": [
+            "$cppxdata$_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186",
+            "$cppxdata$_ZN16candle_gen_flux215memory_strategy23registered_safety_check17hd961bc810aea9e17E",
+            "$ip2state$_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186",
+            "$ip2state$_ZN16candle_gen_flux215memory_strategy23registered_safety_check17hd961bc810aea9e17E",
+            "$stateUnwindMap$_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186",
+            "$stateUnwindMap$_ZN16candle_gen_flux215memory_strategy23registered_safety_check17hd961bc810aea9e17E",
+            "?dtor$45@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$49@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$53@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$58@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$5@?0?_ZN16candle_gen_flux215memory_strategy23registered_safety_check17hd961bc810aea9e17E@4HA",
+            "?dtor$64@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$65@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$68@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$71@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$74@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "?dtor$75@?0?_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186@4HA",
+            "_ZN16candle_gen_flux215memory_strategy17provider_contract17h7911bf2ec56ed3deE",
+            "_ZN16candle_gen_flux215memory_strategy21provider_contract_for17h722cbf4903ccd36eE.llvm.15178270987596298186",
+            "_ZN16candle_gen_flux215memory_strategy23klein_provider_contract17hc7f62a1e227b5531E",
+            "_ZN16candle_gen_flux215memory_strategy23registered_safety_check17hd961bc810aea9e17E"
+          ],
+          "all": {
+            "digest": "sha256:924a6b1b656c080e5585d5c45c4740ce607bd096c05cf9bde41eb4c09609d534",
+            "sections": 1256,
+            "bytes": 186257
+          },
+          "text": {
+            "digest": "sha256:39dc577083fcc2b43ab3c31dad263f851aa79dc8ecbdd5a8823c2e9494a290be",
+            "sections": 495,
+            "bytes": 156985
+          }
+        }
+      },
+      "note": "Same revision as fbb0-a/b, run in a SEPARATE session hours later with the worktree re-created. The cross-process reproducibility control."
+    },
+    {
       "exampleBinary": "sha256:1ffa3084f31871de10e25f8cd9e2281edba2e68a877cdfec8bed33245f885fca",
       "label": "captured-5ffd",
       "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
@@ -177,9 +255,9 @@
       "probeUnit": "sha256:14bb240565eed42aeafa5ca464d2e5bf9f935d82988734a483be41ab236b48a0",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7402,
       "linkedAll": {
@@ -256,9 +334,9 @@
       "probeUnit": "sha256:14bb240565eed42aeafa5ca464d2e5bf9f935d82988734a483be41ab236b48a0",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7402,
       "linkedAll": {
@@ -335,9 +413,9 @@
       "probeUnit": "sha256:463a2abed6a85a39ce0ff520f5d0fb56c268cf33392bf82a8dfa77a24fddd29d",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7428,
       "linkedAll": {
@@ -416,9 +494,9 @@
       "probeUnit": "sha256:68bf91bb6d3997383db166fff17c15c2752e30025101ed7e7174c3560ce626b8",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -497,9 +575,9 @@
       "probeUnit": "sha256:ff954989c537f422d7841f20678a9fad10016c3859516f89ac832d38d5a13832",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -578,9 +656,9 @@
       "probeUnit": "sha256:9a20295c95284f970bbb5abcceb9a0de85956b4ea0e1a0d841ecef86bcc7714d",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -659,9 +737,9 @@
       "probeUnit": "sha256:2b78fa8a71574c7184334648da7f471f837ab1b16dbbd875d310ede4f9c2f9a0",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -740,9 +818,9 @@
       "probeUnit": "sha256:029c3e3a0bddc4d23a85074ce5fcd466982566ebce8a931b51e2e40a412d7945",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -821,9 +899,9 @@
       "probeUnit": "sha256:265b7032a7e709424331bc9dd00e5e2fba91e960502a01dcb09ff418f4427c3d",
       "auditedObjects": 17,
       "inputs": {
-        "archives": 150,
         "objects": 886,
-        "parseFailures": []
+        "parseFailures": [],
+        "inputFiles": 150
       },
       "duplicateDefinitions": 7429,
       "linkedAll": {
@@ -889,5 +967,15 @@
         }
       }
     }
-  ]
+  ],
+  "cfgtestSectionDiff": {
+    "note": "Reachable-set diff for M-cfgtest against the same revision unmutated, scope=measured. Establishes the SIZE of the perturbation; the mechanism (CGU repartitioning) remains inferred.",
+    "sections": 35800,
+    "bytesBase": 44854083,
+    "bytesMutated": 44854083,
+    "sectionsMoved": 33,
+    "sectionsAdded": 0,
+    "sectionsRemoved": 0,
+    "movedAreAnonymous": true
+  }
 }
