@@ -101,9 +101,13 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/workflows/macos-mlx.yml"
+  # NO `paths:` FILTER, deliberately (sc-17014). `macos-checks` below is a REQUIRED status check,
+  # and GitHub leaves a path-filtered workflow's check **Pending** forever rather than passing it —
+  # so a filter here would block every PR that does not touch these paths. The `changes` gate job
+  # replaces it: a job skipped by `if:` reports Success, which a required check accepts. The `push:`
+  # trigger above keeps its filter, since nothing gates on main pushes.
   pull_request:
     branches: [main]
-    paths: *mlx_paths
   workflow_dispatch:
     inputs:
       run_memory_calibration:
@@ -221,33 +225,10 @@ jobs:
   # push / pull_request runs reach this job already path-filtered by the triggers, so it re-answers
   # `true` for them; that is a couple of cheap seconds to keep one code path rather than two.
   changes:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      relevant: ${{ steps.gate.outputs.run }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The diff below spans the whole merge group, which can be several commits behind the
-          # checked-out head; a shallow clone would not contain its base. The pack is ~130 MB.
-          fetch-depth: 0
-      - name: Decide whether this change can affect the macOS/MLX build
-        id: gate
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "merge_group" ]; then
-            base="${{ github.event.merge_group.base_sha }}"
-            head="${{ github.event.merge_group.head_sha }}"
-          else
-            # Non-merge-group events already passed the trigger's own path filter.
-            echo "${{ github.event_name }} is path-filtered by its trigger; running the lane."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # An empty diff falls through to the script, which runs the lane conservatively.
-          git diff --name-only "$base" "$head" |
-            node scripts/merge-group-relevance.mjs \
-              --workflow .github/workflows/macos-mlx.yml --anchor mlx_paths
+    uses: ./.github/workflows/changed-paths.yml
+    with:
+      lane: .github/workflows/macos-mlx.yml
+      anchor: mlx_paths
 
   # THE HOSTED HALF. Everything on this lane that does not need Apple matrix-unit silicon.
   #
@@ -392,7 +373,14 @@ jobs:
     # asserts a property of the M5 matrix-unit kernels, not of how two PRs compose, so it is a poor
     # fit for the class the merge queue exists to catch. It still runs on every PR and on the
     # post-merge main push, which is where a NAX regression would surface anyway.
-    if: ${{ github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    #
+    # `needs: changes` IS LOAD-BEARING HERE, not just an optimisation. sc-17014 dropped the
+    # `paths:` filter from this workflow's pull_request trigger so `macos-checks` could become a
+    # required check — which means that without this gate, EVERY pull request in the repo would
+    # wake this job on the two-Mac `nax` pool, including docs-only ones. The trigger filter used to
+    # be what protected that pool; this is now.
+    needs: changes
+    if: ${{ github.event_name != 'merge_group' && needs.changes.outputs.relevant == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     # The PR/main path needs only `nax`. The workflow_dispatch calibration paths
     # additionally need the HF snapshots, and those are HOST STATE that does not travel
     # with a label — the same defect class this repo just fixed for release.yml's signing
