@@ -1192,6 +1192,23 @@
           "key": "yolo11-agpl"
         }
       ]
+    },
+    {
+      "id": "seedvr2",
+      "models": [
+        "seedvr2_upscaler"
+      ],
+      "name": "SeedVR2-3B",
+      "publisher": "ByteDance Seed",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/ByteDance-Seed/SeedVR2-3B",
+      "usage": "One-step diffusion super-resolution (utility model) behind the SeedVR2 image-upscale engine and video upscaling; installed from the Model Manager. The 3B fp16 DiT + VAE pair is downloaded from the third-party ComfyUI repackaging numz/SeedVR2_comfyUI, which mirrors ByteDance Seed's Apache-2.0 SeedVR2-3B release; SceneWorks does not re-host it. The Apache 2.0 text here is the standard license, matching the apache-2.0 declared by both the upstream and the mirror.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "seedvr2-apache"
+        }
+      ]
     }
   ]
 }

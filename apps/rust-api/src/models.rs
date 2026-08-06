@@ -4427,9 +4427,15 @@ mod model_size_concurrency_tests {
         // and `person_detector` (one platform-scoped row each, so exactly one survives
         // `retain_downloads_for_os` per OS). macOS +3 → 85, windows/linux +2 → 82. `real_esrgan`
         // swapped its repo rather than adding one, so it does not move these counts.
+        //
+        // sc-17632 then declared `seedvr2_upscaler`, the last of that same class: a job-time
+        // auto-download with no catalog entry, fetched TWICE into two `<data_dir>/cache` subtrees.
+        // One download row, no `platforms` scoping (both the image and video SeedVR2 lanes run on
+        // macOS and on the off-Mac candle lane), so every OS gains exactly one: macOS 85 → 86,
+        // windows/linux 82 → 83.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 85_usize), ("windows", 82), ("linux", 82)]
+            [("macos", 86_usize), ("windows", 83), ("linux", 83)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

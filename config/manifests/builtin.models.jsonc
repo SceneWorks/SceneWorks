@@ -12001,6 +12001,71 @@
       }
     },
     {
+      // sc-17632 (epic 17625) — the OTHER upscaler, and the same story as SAM3 below: SeedVR2 had
+      // no install-flow representation at all. Its repo and pinned revision lived only as
+      // hardcoded constants in worker source, DUPLICATED across the two lanes that load it — the
+      // `image_upscale` job (`upscale_jobs.rs`) and the `video_upscale` job
+      // (`video_jobs/seedvr2.rs`) — and each lane downloaded the SAME ~7.3 GB checkpoint mid-render
+      // into its OWN destination (`<data_dir>/cache/upscale/seedvr2/` and
+      // `<data_dir>/cache/seedvr2-mlx/`), where the Models screen can neither size nor delete it.
+      //
+      // The loader half landed with this entry: both lanes now call ONE cache-only resolver,
+      // `upscale_jobs::require_seedvr2_checkpoint_dir`. Declaring the repo WITHOUT that change
+      // would have been worse than leaving it alone — install state keys on the declared repo, so
+      // the entry would have flipped every existing install to "not installed", prompted a 7.3 GB
+      // download the loaders ignored, and then still fetched the same bytes inside the next render.
+      //
+      // Migration: an existing install keeps working from EITHER legacy root, so nothing
+      // re-downloads. Those bytes are now orphaned — never written to again, and not reachable from
+      // this entry's artifact paths. Reclaiming them is tracked on sc-17636 (S11), which owns
+      // delete/size coverage.
+      //
+      // The revision is byte-for-byte the worker's own `SEEDVR2_REVISION` (`upscale_jobs.rs`,
+      // sc-8879), and the files are the upstream names verbatim — the engine loads them unrenamed,
+      // straight out of the HF snapshot dir. They MUST agree: `SEEDVR2_REVISION` is a 40-hex pin,
+      // so the resolver reads that EXACT `snapshots/<sha>/` with no fall-through to `refs/main`,
+      // and a manifest installing a different one would report "installed" while every SeedVR2 job
+      // failed with "not installed". `manifest_declares_the_same_seedvr2_pin_the_loader_reads`
+      // (upscale_jobs/tests.rs) fails if either side drifts.
+      "id": "seedvr2_upscaler",
+      "name": "SeedVR2 Upscaler",
+      "family": "seedvr2",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Third-party mirror of ByteDance-Seed's SeedVR2-3B (Apache-2.0), in the raw ComfyUI
+          // layout both engines convert in-memory at load. `numz/SeedVR2_comfyUI` also hosts 7B and
+          // fp8 variants this build does not load, so the file allow-list is what keeps the install
+          // to the 3B fp16 pair (~7.3 GB) rather than the whole repo.
+          "provider": "huggingface",
+          "repo": "numz/SeedVR2_comfyUI",
+          "revision": "09ced71023636e9bc8cdf9cdecfb2625d1e691e8",
+          "files": ["seedvr2_ema_3b_fp16.safetensors", "ema_vae_fp16.safetensors"],
+          "estimatedSizeBytes": 7284343622
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/numz/SeedVR2_comfyUI"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SeedVR2 Upscaler",
+        // No `promptGuide`: `type: "utility"` entries are exempt (`promptGuideRequiredForModel`)
+        // because they never reach a Studio prompt-guide surface, and the three utilities sc-17627
+        // declared carry none either. Pointing this at Real-ESRGAN's guide would satisfy the gate
+        // while describing a different upscaler. Provenance lives on the About→Licenses `seedvr2`
+        // component instead.
+        "description": "One-step diffusion super-resolution behind the SeedVR2 image-upscale engine and video upscaling. Larger and slower than Real-ESRGAN, and generative rather than pixel-faithful; install it only if you want that engine.",
+        "recommendedFor": ["image_upscale", "video_upscale"]
+      }
+    },
+    {
       // sc-17627 / sc-17629 — SAM3 was a JOB-TIME auto-download with no install-flow
       // representation at all: the repo and its pinned revision existed only as hardcoded
       // constants in `person_segment_sam3_common.rs`, and the weights landed in

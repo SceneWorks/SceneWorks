@@ -217,10 +217,13 @@ const MAX_JOB_LORAS: usize = 5;
 use crate::engines::{mlx_model, ResolvedModel};
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
+///
+/// Takes no `reqwest::Client`: its only use was forwarding one to the inline-upscale post-pass, and
+/// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
+/// handler still triggers builds its own context inside `image_jobs/base.rs`.
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let request = ImageRequest::from_payload(&job.payload);
@@ -1159,7 +1162,6 @@ pub(crate) async fn run_image_generate_job(
         apply_inline_upscale(
             api,
             settings,
-            http_client,
             job,
             &plan,
             &project_path,
@@ -1168,11 +1170,6 @@ pub(crate) async fn run_image_generate_job(
         )
         .await?;
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
-    let _ = http_client;
 
     update_job(
         api,
@@ -2165,9 +2162,10 @@ fn normalize_upscale_engine(engine: &str) -> &'static str {
 
 /// Inline upscale post-pass (sc-8091): upscale every base image the generation produced and append a
 /// second "(Nx upscaled)" asset, mirroring the Python worker. Reuses the same in-memory upscalers as the
-/// standalone `image_upscale` job — Real-ESRGAN via `ort`, SeedVR2 via the registry generator — provisioning
-/// weights on first use. Runs after the base images have already been streamed (so they persist even if a
-/// late upscale step errors and fails the job).
+/// standalone `image_upscale` job — Real-ESRGAN via `ort`, SeedVR2 via the registry generator — both of
+/// which now RESOLVE already-installed weights instead of provisioning them on first use (sc-17633 /
+/// sc-17632), which is why this pass needs no HTTP client. Runs after the base images have already been
+/// streamed (so they persist even if a late upscale step errors and fails the job).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2176,7 +2174,6 @@ fn normalize_upscale_engine(engine: &str) -> &'static str {
 async fn apply_inline_upscale(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     plan: &ImagePlan,
     project_path: &Path,
@@ -2245,7 +2242,6 @@ async fn apply_inline_upscale(
         let upscaled = crate::upscale_jobs::upscale_image_in_memory(
             api,
             settings,
-            http_client,
             job,
             &manifest,
             engine_id,
