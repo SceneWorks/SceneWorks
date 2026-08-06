@@ -869,6 +869,21 @@
                         "bounded_transformer_residency"
                       ]
                     },
+                    "engagedRungs": {
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "enum": [
+                          "resident",
+                          "staged_residency",
+                          "bounded_decode",
+                          "bounded_attention",
+                          "bounded_transformer_residency"
+                        ]
+                      },
+                      "description": "Rungs the measured request actually engaged, matching the receipt's strategy.engagedRungs. Omitted means the shared cost-order default. Declaring it is how a provider that implements rung 4 with rungs 2 and 3 Missing binds evidence for the cheaper composition it verified (sc-17728)."
+                    },
                     "parameters": {
                       "type": "object",
                       "additionalProperties": false,
@@ -881,7 +896,7 @@
                           "enum": ["dit", "text_encoder", "both"]
                         }
                       },
-                      "description": "Exact closed strategy parameters used to select one evidence-contract cell; the Rust reader enforces rung-specific required and forbidden keys."
+                      "description": "Exact closed strategy parameters used to select one evidence-contract cell; the Rust reader enforces the required and forbidden keys of the ENGAGED composition, not of the selected rung's ordinal."
                     }
                   }
                 },
