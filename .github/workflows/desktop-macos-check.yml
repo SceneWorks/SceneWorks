@@ -95,7 +95,16 @@ jobs:
 
   check-macos:
     needs: changes
-    if: ${{ needs.changes.outputs.relevant == 'true' }}
+    # FAIL OPEN. `!cancelled()` and the `result != 'success'` clause are BOTH load-bearing, and
+    # neither is decoration: in GitHub Actions a job whose `needs:` FAILED is skipped, and a
+    # skipped job reports **Success**, which satisfies a required status check. So without this,
+    # a broken gate — a checkout failure, a dead runner, a syntax error in the reusable workflow —
+    # would silently skip this lane and turn its required check green without running a thing.
+    # That is the exact false-green shape this whole story exists to remove, reintroduced one
+    # level up. A gate that did not succeed must therefore RUN the lane, matching
+    # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
+    # `needs.changes.outputs.relevant == 'true'`.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     runs-on: macos-15
     env:
       CARGO_NET_OFFLINE: "true"
