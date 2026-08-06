@@ -98,6 +98,10 @@ import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?r
 import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?raw";
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?raw";
 import seedvr2Apache20 from "../../../desktop/licenses/seedvr2/Apache-2.0.txt?raw";
+// DWPose (sc-17634): mmpose's OWN LICENSE file, not the stock Apache text — it carries the
+// "Copyright 2018-2020 Open-MMLab. All rights reserved." notice, which is the attribution that has
+// to travel with the two ONNX graphs SceneWorks re-hosts at SceneWorks/dwpose-onnx.
+import dwposeApache20 from "../../../desktop/licenses/dwpose/Apache-2.0.txt?raw";
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?raw";
@@ -173,6 +177,7 @@ const DOCUMENT_TEXT = {
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
   "seedvr2-apache": seedvr2Apache20,
+  "dwpose-apache": dwposeApache20,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,

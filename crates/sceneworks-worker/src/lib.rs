@@ -1700,7 +1700,7 @@ async fn run_utility_job(
             // routing gate keeps it on a candle worker (or the linked mlx build), the stub fails loudly
             // elsewhere.
             JobType::ControlTraining => {
-                control_training_jobs::run_control_training_job(api, settings, http_client, &job)
+                control_training_jobs::run_control_training_job(api, settings, &job)
                     .await
                     .map_err(|error| ("ControlNet training failed.", error))
             }
@@ -1777,7 +1777,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
+            JobType::PoseDetect => run_pose_detect_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Pose detection failed.", error)),
             // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle

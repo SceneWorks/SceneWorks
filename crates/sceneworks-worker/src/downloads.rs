@@ -245,6 +245,19 @@ mod download_lock {
 // off-Mac InstantID provider stages its SCRFD/ArcFace/IP-Adapter/ControlNet files via this same
 // download-on-first-use path, so it broadened from macOS-only. (All helpers it calls — download_file,
 // DownloadProgress, DownloadContext, HuggingFaceSnapshot — already build on every platform.)
+//
+// **No production caller since sc-17634**, and that is the epic landing rather than a leftover.
+// This is the arbitrary-URL primitive — the one fetcher that does NOT go through Hugging Face — and
+// DWPose's openmmlab `.zip` bundles were its last job-lane consumer. It is deliberately NOT deleted:
+// `job_time_download_guard`'s `downloads_fetch_surface_is_registered` rediscovers this module's
+// fetch surface structurally and requires `ensure_cached_file` to be among the names it finds, so
+// removing the function would blind that self-check rather than simplify anything.
+//
+// The `allow` is UNCONDITIONAL, not `cfg_attr(not(test), …)`: the only remaining caller is
+// `ensure_cached_file_tests`, which is `#[cfg(all(test, target_os = "macos"))]`, so on the candle
+// (Linux) lane the function is dead in the test build too. Gating the allow on `not(test)` compiles
+// on this Mac and fails `rust:check:candle` with `-D dead-code` — which is exactly what it did.
+#[allow(dead_code)]
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

@@ -1209,6 +1209,23 @@
           "key": "seedvr2-apache"
         }
       ]
+    },
+    {
+      "id": "dwpose",
+      "models": [
+        "dwpose_pose_detector"
+      ],
+      "name": "DWPose (RTMW + YOLOX, OpenMMLab mmpose)",
+      "publisher": "OpenMMLab",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/open-mmlab/mmpose",
+      "usage": "Whole-body pose and keypoint detection (utility model) behind the Pose Library, OpenPose control conditioning, ControlNet pose training and catalog pose analysis; installed from the Model Manager. The two ONNX graphs are the yolox_m HumanArt person detector and the RTMW-x COCO-WholeBody cocktail14 pose model, extracted verbatim from OpenMMLab's published ONNX SDK archives and re-hosted by SceneWorks at SceneWorks/dwpose-onnx with no modification. The Apache 2.0 text here is mmpose's own LICENSE file, including its Copyright 2018-2020 Open-MMLab notice. Note that mmpose's LICENSE covers the OpenMMLab project and does not itself assert terms for the HumanArt and COCO-WholeBody datasets these particular checkpoints were trained on, which carry their own terms from their own publishers.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "dwpose-apache"
+        }
+      ]
     }
   ]
 }
