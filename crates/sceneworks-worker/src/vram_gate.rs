@@ -363,7 +363,6 @@ pub(crate) const KREA_TURBO_SCENEWORKS_REVISION: &str = "sc-15449-contract-v1";
 // range is a single commit whose diff against BOTH `candle-gen-krea` and `gen-core/src/memory_strategy.rs`
 // is empty - the measured path and the calibration identity (ABI 3, fingerprint, deferred load shape) are
 // byte-for-byte unchanged, so the captures remain valid rather than merely re-stamped.
-pub(crate) const KREA_TURBO_INFERENCE_REVISION: &str = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
 
 #[derive(Clone, Debug)]
 pub(crate) struct KreaRuntimeEvidenceContext {
@@ -654,6 +653,14 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         },
         component_precision_floors: &[],
     };
+    let measured_closure_digest = turbo_fit
+        .get("inferenceClosureDigest")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let live_closure_digest =
+        sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
+            .unwrap_or_default();
     let request = RequestScope {
         resolved_route: "krea_2_turbo",
         backend: "candle",
@@ -661,7 +668,8 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         mode: "text_to_image",
         overlay: (!allow_streamed_blocks).then_some("adapter"),
         geometry,
-        expected_inference_revision: KREA_TURBO_INFERENCE_REVISION,
+        // sc-17774: one mechanism, read not frozen.
+        expected_closure_digest: &live_closure_digest,
     };
     let resident_peak_gb = manifest_entry
         .get("candle")?
@@ -766,24 +774,34 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                     revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
         };
+        // sc-17774: `compatibleInferenceRevision` is gone. It was a per-record hand-declared "this
+        // capture is also valid at revision X" claim — the same one-shot hatch `flux2_dev` had, in a
+        // second spelling. Compatibility is now decided by the lane's closure digest below.
         let historical_compatible = valid_commit("sceneWorksCommit")
             && valid_commit("inferenceCommit")
             && evidence_record
                 .and_then(|record| record.get("compatibleSceneWorksRevision"))
                 .and_then(Value::as_str)
-                == Some(KREA_TURBO_SCENEWORKS_REVISION)
-            && evidence_record
-                .and_then(|record| record.get("compatibleInferenceRevision"))
-                .and_then(Value::as_str)
-                == Some(KREA_TURBO_INFERENCE_REVISION);
+                == Some(KREA_TURBO_SCENEWORKS_REVISION);
         let loadability = evidence_record
             .and_then(|record| record.get("loadability"))
             .and_then(Value::as_object);
         let expected_compute_capability = loadability
             .and_then(|loadability| loadability.get("computeCapability"))
             .and_then(json_f64);
+        // sc-17774: the lane's own compile closure, not a frozen inference SHA. `inference_revision`
+        // stays parsed above as capture provenance for the receipt.
         let current_environment = scene_works_revision == KREA_TURBO_SCENEWORKS_REVISION
-            && inference_revision == KREA_TURBO_INFERENCE_REVISION
+            && turbo_fit
+                .get("inferenceClosureDigest")
+                .and_then(Value::as_str)
+                .is_some_and(|declared| {
+                    sceneworks_core::memory_calibration::packaged_closure_digest(
+                        "candle",
+                        "krea_2_turbo",
+                    )
+                    .is_some_and(|live| live == declared)
+                })
             && turbo_fit.get("measured").and_then(Value::as_bool) == Some(true)
             && runtime.is_some_and(|runtime| {
                 !runtime.gpu_id.trim().is_empty()
@@ -985,6 +1003,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         .map(|(selection, evidence)| Candidate {
             selection: *selection,
             evidence,
+            closure_digest: &measured_closure_digest,
         })
         .collect::<Vec<_>>();
     let selection = memory_strategy::select_strategy(
@@ -1670,7 +1689,11 @@ mod tests {
                     "loadShape": "deferred_materialization",
                     "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
                     "sceneWorksRevision": "sc-15449-contract-v1",
-                    "inferenceRevision": KREA_TURBO_INFERENCE_REVISION,
+                    "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+                    // sc-17774: the fixture must carry the LIVE digest for this lane, because that
+                    // is what currency now compares. Reading it from the packaged table rather than
+                    // freezing a literal keeps the fixture honest across a pin bump.
+                    "inferenceClosureDigest": sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo").unwrap_or_default(),
                     "measured": true,
                     "maxMeasuredPixels": 1048576,
                     "evidenceRecords": [{
@@ -1682,7 +1705,6 @@ mod tests {
                         "sceneWorksCommit": "edcab1247988548aeb5b8a5a8eb8b981826c8b8e",
                         "inferenceCommit": "0ef859f947a1bcd108a37e472ef57f6fab7b6a58",
                         "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-                        "compatibleInferenceRevision": KREA_TURBO_INFERENCE_REVISION,
                         "measuredCompositions": {
                             "threeStage": ["resident", "staged_residency"],
                             "tiledVae": ["resident", "staged_residency", "bounded_decode"],
@@ -2002,7 +2024,12 @@ mod tests {
             predicted_peak_bytes: gb_to_bytes(peak_gb),
             cache_state: gen_core::MemoryCacheState::Cold,
             evidence_revision: format!(
-                "{KREA_TURBO_SCENEWORKS_REVISION}@{KREA_TURBO_INFERENCE_REVISION}"
+                "{KREA_TURBO_SCENEWORKS_REVISION}@{}",
+                sceneworks_core::memory_calibration::packaged_closure_digest(
+                    "candle",
+                    "krea_2_turbo"
+                )
+                .unwrap_or_default()
             ),
         };
 

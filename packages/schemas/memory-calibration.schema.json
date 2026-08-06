@@ -16,7 +16,8 @@
       "properties": {
         "revision": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
         "dirty": { "type": "boolean" },
-        "matrixSourceRevision": { "type": "string", "pattern": "^source-tree:[0-9a-f]+$" }
+        "matrixSourceRevision": { "type": "string", "pattern": "^source-tree:[0-9a-f]+$" },
+        "closureDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "hardwareBase": {
@@ -194,7 +195,12 @@
                 { "required": ["matrixSourceRevision"] }
               ]
             },
-            "inference": { "$ref": "#/$defs/gitState" }
+            "inference": {
+              "allOf": [
+                { "$ref": "#/$defs/gitState" },
+                { "required": ["closureDigest"] }
+              ]
+            }
           }
         },
         "hardware": {

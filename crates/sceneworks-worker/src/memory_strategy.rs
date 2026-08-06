@@ -200,7 +200,13 @@ pub struct RequestScope<'a> {
     pub mode: &'a str,
     pub overlay: Option<&'a str>,
     pub geometry: MemoryGeometry,
-    pub expected_inference_revision: &'a str,
+    /// The live compile-closure digest of the provider being admitted (sc-17774).
+    ///
+    /// Read from `sceneworks_core::memory_calibration::packaged_closure_digest`. It replaces
+    /// `expected_inference_revision`, which every lane satisfied with its OWN frozen constant — four
+    /// separate per-model mechanisms doing the same job differently, none of which could tell a
+    /// change to its own model from a change to somebody else's.
+    pub expected_closure_digest: &'a str,
 }
 
 /// A provider estimate submitted to the selector. Cost is intentionally absent: strategy order is
@@ -209,6 +215,13 @@ pub struct RequestScope<'a> {
 pub struct Candidate<'a> {
     pub selection: MemorySelection,
     pub evidence: &'a MemoryEvidence,
+    /// The provider closure digest this candidate's evidence was MEASURED under (sc-17774).
+    ///
+    /// It sits on `Candidate` rather than on `evidence` only because `MemoryEvidence` is a gen-core
+    /// type owned by the inference repository, which SceneWorks pins by SHA; the field cannot move
+    /// there without an inference change and a pin bump. The comparison itself is unaffected and is
+    /// applied to every lane identically.
+    pub closure_digest: &'a str,
 }
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -330,7 +343,10 @@ fn candidate_exclusion(
     {
         return Some(MemoryEvidenceVerdict::OutOfEnvelope);
     }
-    if candidate.evidence.inference_revision != request.expected_inference_revision {
+    // sc-17774: the provider's own compiled closure, not an inference revision. `evidence
+    // .inference_revision` stays as capture provenance and is deliberately not compared — comparing
+    // it is what let a commit to one model stale every other model's measurements.
+    if candidate.closure_digest != request.expected_closure_digest {
         return Some(MemoryEvidenceVerdict::Stale);
     }
     if contract.validate_selection(&candidate.selection).is_err() {
@@ -491,6 +507,8 @@ mod tests {
     const FP: &str = "provider-formula-v1";
     const SW: &str = "sc-15449-contract-v1";
     const INF: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
+    /// A closure digest that is deliberately NOT the request's, for candidates a test needs stale.
+    const STALE_CLOSURE: &str = "stale-closure-digest";
 
     fn tier() -> MemoryNumericTier {
         MemoryNumericTier {
@@ -633,7 +651,7 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
-            expected_inference_revision: INF,
+            expected_closure_digest: INF,
         }
     }
 
@@ -662,6 +680,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &source_only_change,
+            closure_digest: INF,
         };
 
         assert!(matches!(
@@ -697,6 +716,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &exact,
+            closure_digest: INF,
         };
 
         assert!(matches!(
@@ -735,6 +755,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
+                closure_digest: INF,
             },
             Candidate {
                 selection: MemorySelection {
@@ -743,6 +764,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &resident,
+                closure_digest: INF,
             },
         ];
         let mut provider = contract();
@@ -802,6 +824,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         assert_eq!(
             select_strategy(
@@ -837,6 +860,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         assert_eq!(
             select_strategy(
@@ -874,6 +898,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         assert_eq!(
             select_strategy(
@@ -903,6 +928,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &captured,
+            closure_digest: INF,
         };
         let mut changed_contract = contract();
         changed_contract.additional_prerequisites.push((
@@ -957,6 +983,10 @@ mod tests {
     #[test]
     fn excluded_cheaper_rung_does_not_block_a_verified_deeper_fit() {
         let mut stale_staged = evidence(MemoryStrategy::StagedResidency);
+        // sc-17774: staleness is a CLOSURE mismatch now, so the candidate below carries a digest
+        // that is not the request's. Mutating `inference_revision` no longer stales anything — that
+        // field is capture provenance — and leaving this test written that way would have quietly
+        // stopped exercising the excluded-rung path at all.
         stale_staged.inference_revision = "1111111111111111111111111111111111111111".into();
         let mut bounded_decode = evidence(MemoryStrategy::BoundedDecode);
         bounded_decode.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
@@ -983,6 +1013,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &stale_staged,
+                closure_digest: STALE_CLOSURE,
             },
             Candidate {
                 selection: MemorySelection {
@@ -991,6 +1022,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &bounded_decode,
+                closure_digest: INF,
             },
         ];
         assert!(matches!(
@@ -1031,6 +1063,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &resident,
+                closure_digest: INF,
             },
             Candidate {
                 selection: MemorySelection {
@@ -1039,6 +1072,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
+                closure_digest: INF,
             },
         ];
         let mut provider = contract();
@@ -1100,6 +1134,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         let mut scope = request();
         scope.mode = "character_image";
@@ -1164,6 +1199,7 @@ mod tests {
         let candidate = Candidate {
             selection,
             evidence: &staged,
+            closure_digest: INF,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1185,6 +1221,7 @@ mod tests {
                 &[Candidate {
                     selection,
                     evidence: &staged,
+                    closure_digest: INF,
                 }],
             ),
             Selection::Selected {
@@ -1207,6 +1244,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1233,6 +1271,7 @@ mod tests {
                 &[Candidate {
                     selection: candidate.selection,
                     evidence: &wrong_backend,
+                    closure_digest: INF,
                 }],
             ),
             Selection::Unverified {
@@ -1278,6 +1317,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &high,
+            closure_digest: INF,
         };
         let low_candidate = Candidate {
             evidence: &low,
@@ -1288,6 +1328,7 @@ mod tests {
         let high_candidate = Candidate {
             selection: high_selection,
             evidence: &high,
+            closure_digest: INF,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1324,6 +1365,7 @@ mod tests {
                 Candidate {
                     selection: high_selection,
                     evidence: &tied_high,
+                    closure_digest: INF,
                 },
             ],
         );
@@ -1647,6 +1689,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: record,
+                closure_digest: INF,
             })
             .collect::<Vec<_>>();
         let provider = contract();
@@ -1708,11 +1751,14 @@ mod tests {
         // 4. The caveat, asserted rather than asserted-away: excluding a cheaper rung's evidence does
         //    NOT stop the walk, so rung 4 is reachable while rung 3's peak still fits. The alternative
         //    is `Unverified` — still no render — which is why the conclusion survives. Stale is the
-        //    realistic trigger: every inference pin bump invalidates evidence by `inference_revision`.
+        //    realistic trigger: a change to THIS provider's compile closure invalidates its evidence
+        //    (sc-17774 — it used to be every inference pin bump, for every provider at once).
         let mut stale_attention = evidences[3].clone();
+        // sc-17774: as above — the stale candidate is marked by its closure digest, not its revision.
         stale_attention.inference_revision = "0000000000000000000000000000000000000000".into();
         let mut with_stale = candidates.clone();
         with_stale[3].evidence = &stale_attention;
+        with_stale[3].closure_digest = STALE_CLOSURE;
         let selection = select_strategy(
             request(),
             &provider,
@@ -1780,6 +1826,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &record,
+            closure_digest: INF,
         }];
         let select = |provider: &MemoryProviderContract| {
             select_strategy(
@@ -1889,6 +1936,7 @@ mod tests {
                         tier: tier(),
                     },
                     evidence: record,
+                    closure_digest: INF,
                 })
                 .collect::<Vec<_>>();
 

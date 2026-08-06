@@ -2564,7 +2564,10 @@ fn krea_evidence_revision() -> String {
     format!(
         "{}@{}",
         crate::vram_gate::KREA_TURBO_SCENEWORKS_REVISION,
-        crate::vram_gate::KREA_TURBO_INFERENCE_REVISION
+        // sc-17774: the lane's compile-closure digest replaced the frozen inference SHA here too, so
+        // the traced receipt names the same thing the selector actually compared.
+        sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
+            .unwrap_or_default()
     )
 }
 

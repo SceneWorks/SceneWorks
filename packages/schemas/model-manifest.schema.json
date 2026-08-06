@@ -808,6 +808,7 @@
                     "sceneWorksRevision",
                     "matrixSourceRevision",
                     "inferenceRevision",
+                    "inferenceClosureDigest",
                     "provider",
                     "tier",
                     "mode",
@@ -836,10 +837,10 @@
                     "sceneWorksRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
                     "matrixSourceRevision": { "type": "string", "minLength": 1 },
                     "inferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-                    "compatibleInferenceRevision": {
+                    "inferenceClosureDigest": {
                       "type": "string",
-                      "pattern": "^[0-9a-f]{40}$",
-                      "description": "Optional exact later runtime revision admitted only after a checked-in provider dependency-closure audit proves the captured implementation unchanged. It never rewrites inferenceRevision, which remains capture provenance."
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "Digest of THIS PROVIDER'S inference compile closure at inferenceRevision (sc-17774). Currency compares it against the live digest for the same provider in config/inference-provider-closures.json, so a change to another model's code path can no longer demote this calibration. inferenceRevision remains capture provenance and is never compared. Derivation and known gaps: scripts/inference-closure-digest.mjs."
                     },
                     "provider": { "type": "string", "minLength": 1 },
                     "tier": { "type": "string", "minLength": 1 },

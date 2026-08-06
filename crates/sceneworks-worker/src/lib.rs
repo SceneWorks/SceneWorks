@@ -144,10 +144,6 @@ use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
 mod fit_gate;
-// sc-17497: compiled under `test` on every platform too, so the audit validator is not a candle-lane
-// blind spot. Not compiled at all in a non-candle release build, so nothing is dead there.
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-mod inference_compatibility_audit;
 pub mod memory_strategy;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
