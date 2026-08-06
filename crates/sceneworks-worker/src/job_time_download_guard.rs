@@ -99,6 +99,25 @@
 //!   and `concat!` initialisers both resolve; nothing in production source uses another form.
 //! * A download wrapper that is a *method* rather than a free function. The file defining it is
 //!   flagged on its own, so the escape needs the method's receiver type in a second file.
+//! * **A sub-12-character wrapper name, BOUND AS A VALUE rather than called.**
+//!   [`value_references`] applies [`MIN_VALUE_REFERENCE_NAME_LEN`] to discovered wrappers, so a short
+//!   wrapper added to a file the allow-list already accepts, and then bound (`let grab = stage;`)
+//!   rather than called from a new lane, is invisible — demonstrated with a four-character `grab` in
+//!   `image_jobs/instantid.rs`. Calling it is still caught; only the value binding escapes. The floor
+//!   is kept deliberately: unfloored, a realistic five-character name (`stage`) false-positived six
+//!   unrelated production files, and a gate that cries wolf gets deleted by whoever hits it next.
+//!   **Empty today** — the only two sub-floor names in the 123-entry watch map are `ensure_one`
+//!   (`pose_jobs.rs`) and `resolve_one` (`image_jobs/pulid_candle.rs`), both *private*, so no new
+//!   lane can name either.
+//! * **A `type Dest = Path;` alias in `downloads.rs`**, used to give a [`NON_WEIGHT_FETCHERS`] member
+//!   a destination parameter the signature scan cannot see. The scan reads signature TEXT, so an
+//!   alias defeats it; resolving aliases needs a type resolver, which this is not. The two shapes
+//!   that do not need a resolver — a `Path` bound hiding in a where clause, and a raw-bytes return
+//!   type — are both checked.
+//! * **[`invokes_free_function`] cries wolf on a one- or two-character wrapper name.** It matches
+//!   `name(` rather than a bare word, so it takes a very short name to bite; a one-character probe
+//!   wrapper `f` falsely flagged `person_track.rs` and `segment_jobs.rs`. Pre-existing, noisy rather
+//!   than blind, and outside this story's delta — recorded here rather than fixed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -919,6 +938,9 @@ struct FnItem {
     params: Vec<String>,
     /// The parameter list verbatim, types included — `params` keeps only the names.
     params_raw: String,
+    /// Everything between the parameter list and the body brace: the `-> T` and any `where` clause.
+    /// A generic bound like `P: AsRef<Path>` lives here, not in `params_raw`.
+    ret: String,
     body: String,
     /// `pub`, `pub(crate)`, `pub(super)`, `pub(in …)`. A private `fn` in `downloads.rs` cannot be
     /// named by a job lane at all, which is what lets the fetch-surface registry stay small.
@@ -1044,6 +1066,7 @@ fn fn_items(code: &str) -> Vec<FnItem> {
         let params_raw = slice_lossy(bytes, params_start, index);
         let params = split_params(&params_raw);
         // Return type / where clause, then the body brace.
+        let ret_start = index;
         while index < bytes.len() && bytes[index] != b'{' {
             match bytes[index] {
                 b';' => break,
@@ -1061,6 +1084,7 @@ fn fn_items(code: &str) -> Vec<FnItem> {
         if bytes.get(index) != Some(&b'{') {
             continue;
         }
+        let ret = slice_lossy(bytes, ret_start, index);
         let body_start = index + 1;
         let mut braces = 1i32;
         index = body_start;
@@ -1086,6 +1110,7 @@ fn fn_items(code: &str) -> Vec<FnItem> {
             name,
             params,
             params_raw,
+            ret,
             body: slice_lossy(bytes, body_start.min(body_end), body_end),
         });
         cursor = body_start;
@@ -2013,35 +2038,45 @@ fn subdir_label(argument: &str, constants: &BTreeMap<String, String>) -> String 
     // `join("cache".to_string())` are all the same path segment as `join("cache")`. Matching the
     // wrapper on a bare prefix left the `::`-qualified spelling and the owned-conversion spelling as
     // one-token bypasses, so the qualifier goes first and the conversion suffix last.
-    let unqualified = argument
-        .rsplit_once("::")
-        .filter(|(_, tail)| tail.starts_with("new(") || tail.starts_with("from("))
-        .map(|(_, tail)| tail)
-        .unwrap_or(argument);
-    let argument = ["new(", "from("]
+    // Looped to a fixpoint, and conversion BEFORE wrapper: `Path::new("cache").to_owned()` wears
+    // both at once, and stripping the wrapper first would take the conversion's closing paren as the
+    // wrapper's.
+    let mut argument = argument;
+    loop {
+        let stripped = [
+            "to_string()",
+            "to_owned()",
+            "as_str()",
+            "as_ref()",
+            "into()",
+        ]
         .iter()
-        .find_map(|wrapper| {
-            unqualified
-                .strip_prefix(*wrapper)
-                .and_then(|rest| rest.strip_suffix(')'))
+        .find_map(|conversion| {
+            argument
+                .strip_suffix(*conversion)
+                .and_then(|rest| rest.strip_suffix('.'))
         })
         .map(str::trim)
         .unwrap_or(argument);
-    let argument = [
-        "to_string()",
-        "to_owned()",
-        "as_str()",
-        "as_ref()",
-        "into()",
-    ]
-    .iter()
-    .find_map(|conversion| {
-        argument
-            .strip_suffix(*conversion)
-            .and_then(|rest| rest.strip_suffix('.'))
-    })
-    .map(str::trim)
-    .unwrap_or(argument);
+        let unqualified = stripped
+            .rsplit_once("::")
+            .filter(|(_, tail)| tail.starts_with("new(") || tail.starts_with("from("))
+            .map(|(_, tail)| tail)
+            .unwrap_or(stripped);
+        let unwrapped = ["new(", "from("]
+            .iter()
+            .find_map(|wrapper| {
+                unqualified
+                    .strip_prefix(*wrapper)
+                    .and_then(|rest| rest.strip_suffix(')'))
+            })
+            .map(str::trim)
+            .unwrap_or(stripped);
+        if unwrapped == argument {
+            break;
+        }
+        argument = unwrapped;
+    }
     if let Some(literal) = string_literal_value(argument) {
         return literal;
     }
@@ -2634,27 +2669,81 @@ fn downloads_fetch_surface_is_registered() {
         "a name appears in both DOWNLOAD_PRIMITIVES and NON_WEIGHT_FETCHERS"
     );
 
-    // A fetcher that takes a filesystem destination can write remote bytes wherever the caller
-    // says. That is a download primitive by definition, whatever the comment beside it claims.
+    // Two ways a NON_WEIGHT_FETCHERS entry could still put the bytes in a job lane's hands: it takes
+    // a filesystem destination and writes there, or it RETURNS the bytes and lets the caller write
+    // them. The signature scan covers the parameter list AND the return type and where clause
+    // together, because `fn probe<P>(…, dest: P) where P: AsRef<Path>` keeps the giveaway in the
+    // where clause rather than in the parameter list.
     let items = fn_items(&downloads.code);
     let smuggled: Vec<String> = NON_WEIGHT_FETCHERS
         .iter()
         .filter_map(|name| {
             let item = items.iter().find(|item| item.name == *name)?;
-            let types = item.params_raw.replace(char::is_whitespace, "");
-            (types.contains("Path") || types.contains("PathBuf"))
-                .then(|| format!("{name}{}", item.params_raw.trim()))
+            let signature =
+                format!("{}{}", item.params_raw, item.ret).replace(char::is_whitespace, "");
+            let returned = item.ret.replace(char::is_whitespace, "");
+            let reason = if signature.contains("Path") {
+                "takes a filesystem destination"
+            } else if ["Vec<u8>", "Bytes", "[u8]"]
+                .iter()
+                .any(|shape| returned.contains(shape))
+            {
+                "returns raw bytes to its caller"
+            } else {
+                return None;
+            };
+            Some(format!("{name}{} — {reason}", item.params_raw.trim()))
         })
         .collect();
     assert!(
         smuggled.is_empty(),
-        "NON_WEIGHT_FETCHERS member(s) that take a filesystem destination:\n  {}\n\nEvery entry on \
-         that list is there because it CANNOT write remote bytes to a caller-chosen path — that is \
-         the entire criterion. A function that takes one is a download primitive however it is \
-         described, so move it to DOWNLOAD_PRIMITIVES where the reachability scan covers its \
+        "NON_WEIGHT_FETCHERS member(s) that can put remote bytes in a caller's hands:\n  {}\n\nEvery \
+         entry on that list is there because it CANNOT — that is the entire criterion. A function \
+         that takes a destination path, or that hands back the body, is a download primitive however \
+         it is described, so move it to DOWNLOAD_PRIMITIVES where the reachability scan covers its \
          callers.",
         smuggled.join("\n  ")
     );
+
+    // The two signature shapes the machine check has to see through, pinned on synthetic input so
+    // the check itself cannot rot into a default-value assertion.
+    let synthetic = SourceFile {
+        rel: "downloads.rs".to_owned(),
+        code:
+            "pub(crate) async fn zz_generic<P>(c: &C, u: &str, dest: P) -> R where P: AsRef<Path> \
+               { c.get(u).send().await }\n\
+               pub(crate) async fn zz_bytes(c: &C, u: &str) -> WorkerResult<Vec<u8>> { \
+               c.get(u).send().await }\n\
+               pub(crate) async fn zz_clean(c: &C, u: &str) -> WorkerResult<u64> { \
+               c.get(u).send().await }"
+                .to_owned(),
+    };
+    let synthetic_items = fn_items(&synthetic.code);
+    let shape = |name: &str| {
+        let item = synthetic_items
+            .iter()
+            .find(|item| item.name == name)
+            .expect("fixture fn");
+        let signature = format!("{}{}", item.params_raw, item.ret).replace(char::is_whitespace, "");
+        let returned = item.ret.replace(char::is_whitespace, "");
+        (
+            signature.contains("Path"),
+            ["Vec<u8>", "Bytes", "[u8]"]
+                .iter()
+                .any(|s| returned.contains(s)),
+        )
+    };
+    assert_eq!(
+        shape("zz_generic"),
+        (true, false),
+        "a `where P: AsRef<Path>` bound lives in the return/where text, not the parameter list"
+    );
+    assert_eq!(
+        shape("zz_bytes"),
+        (false, true),
+        "returning the body is the same capability as writing it"
+    );
+    assert_eq!(shape("zz_clean"), (false, false));
 
     let unregistered: Vec<&String> = discovered.difference(&registered).collect();
     let stale: Vec<&String> = registered.difference(&discovered).collect();
@@ -3378,18 +3467,24 @@ fn literal_partition_shape(code: &str) -> (i64, i64, i64, usize) {
 ///   absorbed into a phantom literal takes its delimiters with it. All 240 files balance exactly
 ///   with the walkers correct, and `core/session_log.rs` goes to `braces=-1` with them broken.
 /// * **COUNT of multi-line literals — the same "many short" fact, used as the detector instead of
-///   treated as an obstacle.** Real multi-line literals are few and long: the maximum anywhere is 54
-///   (`core/jobs_store.rs`), then 52, 38, 38, 30. Broken `media_jobs.rs` produces **207** — four
-///   times the highest legitimate count in the tree.
+///   treated as an obstacle.** Real multi-line literals are few and long. Measured by this test's own
+///   walk over all 328 scanned files: 128 contain one at all, only 9 exceed 30, and only 3 exceed
+///   50 — 60 (`core/catalog_store.rs`), 54 (`core/jobs_store.rs`), 52 (`worker/video_jobs/tests.rs`),
+///   then 46, 39, 38, 37, 32, 31, 30. Broken `media_jobs.rs` produces **207**, three and a half times
+///   the highest legitimate count in the tree.
+///
+///   THIS module is currently fifth-highest at 39 and has grown every round, its fixtures being
+///   multi-line source snippets. The failure message reports the real worst offender rather than
+///   trusting the number written here, so the ceiling can be re-judged from output instead of prose.
 ///
 /// Measured deliberately BEFORE [`strip_cfg_test_items`], over every `.rs` file rather than only the
 /// production ones: `rustc` guarantees the whole file's shape, so keeping cfg-stripping out of the
 /// comparison leaves this a statement about the literal walkers alone.
 #[test]
 fn the_literal_walkers_partition_every_scanned_file_correctly() {
-    // Legitimate maximum is 54; the observed failure is 207. Sitting between them at roughly double
-    // the real maximum leaves room for a genuinely fixture-heavy new file without leaving room for
-    // an inversion.
+    // Legitimate maximum is 60; the observed failure is 207. Sitting between them leaves 1.67x of
+    // room for a genuinely fixture-heavy new file — this module itself is at 39 and still growing —
+    // without leaving room for an inversion.
     const MAX_MULTILINE_LITERALS: usize = 100;
     let mut broken: Vec<String> = Vec::new();
     let mut scanned = 0usize;
@@ -3593,6 +3688,12 @@ fn scanner_sees_the_remaining_cache_spellings() {
         &constants
     )
     .contains("zz-owned2"));
+    // Both wrappers at once — one pass of each leaves this unresolved, so the strips loop.
+    assert!(cache_destinations(
+        "let p = d.join(Path::new(\"cache\").to_owned()).join(\"zz-both\");",
+        &constants
+    )
+    .contains("zz-both"));
 
     // NEGATIVE: an unrelated path that merely contains the word.
     assert!(
