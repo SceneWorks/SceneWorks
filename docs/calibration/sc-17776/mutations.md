@@ -28,11 +28,11 @@ On the far side it depends which unit is being checked: the code units are held 
 ladder-scoped digest by `M-devfp` and `M-safety` (it is blind to `M-rms`), and the behaviour witness
 by `M-devfp` alone (it is blind to both `M-rms` and `M-safety`). Every unit reported in
 `docs/calibration-invalidation-unit-sc-17776.md` is exercised in both directions; none of them is
-absolving or refusing everything. `M-gencore` is the only
-row that expects `identical`, so it fails if the mechanism absolves nothing; `M-rms` and `M-devfp`
-are the only rows that are semantically genuine invalidations, so they fail if it absolves
-everything. `M-klein`, `M-editprov` and `M-cfgtest` discriminate nothing on their own — they are the
-over-triggers under test, and a broken unit returns `DIFFER` for them too.
+absolving or refusing everything.
+
+`M-klein`, `M-editprov` and `M-cfgtest` discriminate nothing on their own — they are the
+over-triggers under test, and a broken unit returns `DIFFER` for them too. Their value is in which
+unit absolves them, not in the verdict itself.
 
 ## Reproducing the edits
 

@@ -32,7 +32,12 @@ All runs on the RTX PRO 6000 box, 2026-08-05. Mutations are applied on top of `f
 | `M-klein` | `5b3dd71f…979129` | identical |
 | `M-rms` | `5b3dd71f…979129` | identical — **false green** |
 | `M-safety` | `5b3dd71f…979129` | identical — **false green in this probe**, see below |
+| `M-editprov` | `5b3dd71f…979129` | identical |
+| `M-cfgtest` | `5b3dd71f…979129` | identical |
+| `M-gencore` | `5b3dd71f…979129` | identical |
 | `M-devfp` | `3aa8c73e…79438b` | DIFFER |
+
+`results.json` carries the same nine runs machine-readably, with full digests and byte counts.
 
 The `M-devfp` delta is exactly the rendered
 `MemoryCalibrationIdentity { fingerprint: "…blocks-v2" → "…blocks-v3" }`, in all six spec rows.

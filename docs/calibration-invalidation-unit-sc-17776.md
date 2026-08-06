@@ -17,7 +17,8 @@ from [Method](#method); the raw records are in `docs/calibration/sc-17776/`.
 
 ## The finding that reframes the epic
 
-**The epic's worked example is an over-trigger, and no digest of compiled code can see that it is.**
+**Every code-based unit refuses the epic's worked example, and the one unit that can tell a refactor
+from a behaviour change says the ladder did not move.**
 
 The window it is built on — `5ffd7612 → fbb00d6b`, where `flux2_dev`'s `CALIBRATION_FINGERPRINT` is
 untouched — moves every code-based unit measured here, down to the memory-ladder subgraph alone:
@@ -27,8 +28,15 @@ untouched — moves every code-based unit measured here, down to the memory-ladd
 | shipped whole test binary | `d80844f2…` | `fee1c2de…` | DIFFER |
 | non-test example binary | `1ffa3084…` | `8fd614b0…` | DIFFER |
 | reachable from the measured test | `1c40ed58…` | `aaa1297d…` | DIFFER |
-| reachable from the memory ladder alone | `35706634…` | `924a6b1b…` | DIFFER |
+| reachable from the memory ladder alone¹ | `35706634…` | `924a6b1b…` | DIFFER |
 | **the ladder `flux2_dev` declares** | `5b3dd71f…` | `5b3dd71f…` | **IDENTICAL** |
+
+¹ Not a like-for-like comparison, and it is the one row here that is not. The ladder scope roots on
+symbols matching `provider_contract|registered_safety_check`, and sc-15831 renamed the entry point:
+at `5ffd7612` that resolves to `provider_contract`, at `fbb00d6b` to `provider_contract_for` **plus**
+`klein_provider_contract`, which did not exist before. Part of that DIFFER is the scope definition
+moving, not the code. The row is kept because the two dev-rooted rows above it are like-for-like and
+say the same thing; nothing below rests on it.
 
 The last row is a [behaviour witness](#candidate-5--a-behaviour-witness-run-the-ladder-instead-of-hashing-it):
 the registered provider contract rendered over a grid of load specs — every rung's support level and
@@ -48,13 +56,29 @@ Two supporting facts, both checkable in seconds:
   returns exactly the five values the old dev-only body used inline — which is *why* the witness does
   not move.
 
-**What this means for sc-17760.** The evidence now points away from the re-capture, not toward it.
-It is not a proof: the witness covers the *declared* ladder, and a code change could in principle
-move realised VRAM while leaving the declaration alone (`M-rms` below is exactly that shape). But no
-numerics file moved and the declaration is byte-identical, which is a materially different position
-from a bare `ARTIFACTS DIFFER`. Whether that is enough to skip a ~47.6 GB capture is a policy call
-this research story does not have the authority to make — it is put on the record so the call can be
-made on evidence.
+**What this means for sc-17760.** The evidence points away from the re-capture rather than toward it,
+and it is **not a proof** — the two are worth keeping apart, because the previous draft of this
+document got the direction wrong by treating a code digest as a behaviour measurement, and the
+opposite error is just as available.
+
+The witness has two blind spots and this window exercises both of them:
+
+- **Realised VRAM.** It covers the *declared* ladder. A code change can move realised VRAM while
+  leaving the declaration alone — `M-rms` is exactly that shape. Mitigated here, not closed, by the
+  fact that no numerics file moved.
+- **Admission.** The probe renders `provider_contract` and stops, so it does not exercise
+  `validate_context` or `route_is_supported` — and this window edits both. Reading the diff, the
+  dev-side changes there are message reformatting plus a `provider_id == FLUX2_DEV_ID` guard that is
+  true for dev, so they look semantics-preserving. **That is a reading, not a measurement**, and it
+  is exactly the kind of reading this document argues against elsewhere. A witness that drove the
+  admission probes (see [the admission gap](#the-admission-gap-a-limit-of-the-probe-not-of-the-idea))
+  would settle it; this one does not.
+
+So the honest statement is: the declared ladder is byte-identical, no numerics file moved, and one
+surface the window touches remains unmeasured. That is a materially different position from a bare
+`ARTIFACTS DIFFER`, and it is materially short of authorization. Whether it is enough to skip a
+~47.6 GB capture is a policy call this research story does not have the authority to make — it is put
+on the record so the call can be made on evidence rather than on the absence of any.
 
 **This sharpens sc-17775 rather than contradicting it.** That survey deliberately declined to call
 row A a false positive — *"pretending otherwise would be reasoning dressed as measurement"*
@@ -74,7 +98,7 @@ through six candidate units. ✅ = the unit gives the answer a sound gate should
 | `M-gencore` — unreferenced `gen-core` fn | identical | identical ✅ | identical ✅ | identical ✅ | identical ✅ | identical ✅ | identical ✅ |
 | `M-editprov` — klein-edit provider edit | identical | DIFFER ❌ | **identical ✅** | **identical ✅** | identical ✅ | identical ✅ | identical ✅ |
 | `M-cfgtest` — a `#[cfg(test)] mod` | identical | DIFFER ❌ | **identical ✅** | DIFFER ❌ | DIFFER ❌ | identical ✅ | identical ✅ |
-| `M-klein` — klein fingerprint bump | identical | DIFFER ❌ | DIFFER ❌ | DIFFER ❌ | identical | DIFFER ❌ | **identical ✅** |
+| `M-klein` — klein fingerprint bump | identical | DIFFER ❌ | DIFFER ❌ | DIFFER ❌ | identical ✅ | DIFFER ❌ | **identical ✅** |
 
 ¹ A gap in the probe, not in the idea — see [the admission gap](#the-admission-gap-a-limit-of-the-probe-not-of-the-idea).
 
@@ -151,9 +175,15 @@ node scripts/research/sc-17776-measure.mjs \
   --out docs/calibration/sc-17776/reachability-matrix.json
 ```
 
+`--dump-scope measured` additionally records every reachable section as `<kind> <symbol> <fingerprint>`,
+which is how the `#[cfg(test)]` residue below was counted; two such runs are diffed as multisets.
+
 Each `--cases` entry is `label=revision[+patchfile]`. The patch files are **not** checked in — the
 `patch` paths recorded in the JSON are scratch paths from the measuring session and will not exist
-for a re-runner. `docs/calibration/sc-17776/mutations.md` reproduces every edit as a `sed`/append
+for a re-runner. `reachability-matrix.json` is likewise a *curated* record rather than raw tool
+output: it merges the cases from three sessions, strips the per-case executable paths, and adds the
+provenance header and the `cfgtestSectionDiff` block. Re-running the command above produces the same
+digests, not the same file. `docs/calibration/sc-17776/mutations.md` reproduces every edit as a `sed`/append
 recipe against `fbb00d6b`; regenerate the patches from it with `git diff > <name>.patch`. `M-safety`'s
 recipe is line-addressed and is only valid at that pin.
 
@@ -203,7 +233,7 @@ instrument.
 
 1. **The object graph is noisier than the linked image, and the noise control is partial.** One
    source (`.llvm.<n>`) was found and removed. The control that says whether any remain is the
-   certified-identical window `5ffd7612 → a4f409ae`, on which all eight measured digests agree — but
+   certified-identical window `5ffd7612 → a4f409ae`, on which all nine recorded digests agree — but
    that window's closure delta is `Cargo.lock` plus `candle-gen`, and it **never touches
    `candle-gen-flux2`**. It therefore does not bound *in-crate* noise, which is precisely what the
    `M-cfgtest` result turns on. `M-editprov` is a partial in-crate control and a genuinely
@@ -246,7 +276,7 @@ Hash only the sections reachable from `tests::flux2_dev_probed_generate_for_offl
 | same revision built twice (`fbb0-a` / `fbb0-b`) | every digest identical |
 | same revision, **separate session**, re-created worktree (`fbb0-c`) | identical on the shipped unit, the example binary and the object-level reachable digest |
 | shipped unit reproduces the frozen records | `d80844f2…` at `5ffd7612` (= `FLUX2_COMPATIBILITY_AUDIT.artifactProof`), `fee1c2de…` at `fbb00d6b` (= sc-17760's record) |
-| the certified-identical window `5ffd7612 → a4f409ae` | identical on **all eight** digests, object-level included |
+| the certified-identical window `5ffd7612 → a4f409ae` | identical on **all nine** recorded digests — both whole binaries, both whole-object controls, both scopes' code+data and `.text` digests, and the probe-build binary |
 | `M-gencore` (link-time-DCE control) | identical — reproduces sc-17775's M4 on the shipped unit too |
 | sc-17775's M1/M3 shipped digests | `73fe78d5…` / `eb9a6ead…` reproduce exactly |
 | rlib parse failures | 0 across 133 rlibs + 17 loose objects (886 COFF objects) |
@@ -367,8 +397,9 @@ calibration validity. Measured state of that discipline:
   string; neither fails when a provider's compiled surface moves without its fingerprint.
 - The one declared-vs-observed comparison that exists is **capture-side and in SceneWorks**
   (`scripts/sc-15833-flux2-evidence.mjs:403-412`), and its "observed" side is
-  `MEMORY_EXPECTED_FINGERPRINT` — an environment variable the operator sets. It proves the operator
-  and the provider agree at capture time. It proves nothing about a later revision.
+  `MEMORY_EXPECTED_FINGERPRINT`, which the capture script populates from its own frozen
+  `EXPECTED_CALIBRATION_FINGERPRINT` constant (`sc-15833-flux2-evidence.mjs:230`) — so both sides are
+  SceneWorks copies, compared at capture time. It proves nothing about a later revision.
 
 **What would make it reliable, if someone wanted to go that way.** The check that would earn the
 fingerprint real authority is upstream and does not exist: a test in inference that fails when a
@@ -443,8 +474,10 @@ sc-17497 chose the test binary deliberately — it is the one that produced the 
 move here has to answer that. It also has to answer a question sc-17497 never faced: nothing but the
 test harness drives the measured route, so what would the replacement be?
 
-**It already exists.** `candle-gen-flux2` ships `examples/flux2-txt2img.rs`, a real dev txt2img driver
-compiled with no `#[cfg(test)]` code. On the same seven mutations it is the best-performing *code*
+**It already exists.** `candle-gen-flux2` ships `examples/flux2-txt2img.rs`, a real txt2img driver
+compiled with no `#[cfg(test)]` code. It is not dev-only — it takes `--variant` and links both, which
+is part of why `M-klein` moves it; a production version of this candidate would want a target that
+drives the dev route specifically, which is the same assertion obligation as (2) below. On the same seven mutations it is the best-performing *code*
 unit: it absolves `M-cfgtest` and `M-editprov`, and it catches `M-rms`, `M-devfp` and `M-safety`.
 
 Those three catches are the load-bearing part, and they are deliberately on three different surfaces
@@ -495,7 +528,7 @@ rung's support level and parameters, decode tile edges and overlaps, transformer
 calibration identity, the resolved numeric tier — over a grid of load specs.
 
 This was built and run, not reasoned about. The probe
-(`docs/calibration/sc-17776/behaviour-witness/sc17776-witness.rs`, 43 lines) is an `examples/` file
+(`docs/calibration/sc-17776/behaviour-witness/sc17776-witness.rs`, 44 lines) is an `examples/` file
 applied to a scratch worktree by `git apply` and never committed to inference — the same status as the
 mutation patches. It needs no weights, no GPU work and no device allocation. It is comparable across
 the window by construction: `MemoryProviderContract` derives `Debug`, and
@@ -511,6 +544,9 @@ the window by construction: `MemoryProviderContract` derives `Debug`, and
 | `M-devfp` | `3aa8c73e…` | DIFFER ✅ — the rendered `MemoryCalibrationIdentity.fingerprint` moves |
 | `M-rms` | `5b3dd71f…` | **identical ❌ false green** |
 | `M-safety` | `5b3dd71f…` | **identical ❌** — see below |
+
+All nine runs are recorded in `docs/calibration/sc-17776/behaviour-witness/results.json`, with the
+reference rendering alongside it.
 
 **It cannot be the gate.** `M-rms` is a production numerics change on the measured path and the
 witness cannot see it, because the contract table is the *declared* ladder while the calibration
