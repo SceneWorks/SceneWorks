@@ -288,12 +288,24 @@ jobs:
   # on a persistent box — harmless on an ephemeral hosted runner, which is what this is.
   macos-checks:
     name: macOS build, lint and workspace tests (hosted)
-    # Same-repo only, but for a DIFFERENT reason than `nax-worker` below. Nothing here
-    # touches a self-hosted box, so untrusted code is not the concern; the "Fetch the
-    # pinned inference release" step reads the private SceneWorks/inference repo, and a
-    # fork PR has neither the secret nor a `github.token` that can see it. Without this
-    # guard such a PR would fail at `cargo fetch` with an authentication error that looks
-    # nothing like its actual cause.
+    # NO same-repo guard, deliberately — it was removed once its premise proved false. It read:
+    # "the 'Fetch the pinned inference release' step reads the PRIVATE SceneWorks/inference repo,
+    # and a fork PR has neither the secret nor a `github.token` that can see it."
+    #
+    # SceneWorks/inference is PUBLIC and was never intended to be private. Verified two ways:
+    # the pinned rev fetches with no token, no credential helper and no HOME; and the same fetch
+    # succeeds with the EMPTY token a fork PR would supply. So the guard protected nothing.
+    #
+    # It also became actively harmful when `macos-checks` was made a required status check
+    # (sc-17014): a fork PR matched the guard, this job was SKIPPED, and a skipped job reports
+    # Success — so the required macOS check went green having validated nothing. That is the same
+    # false-green class the fail-open work removed one level down, and it was reachable, not
+    # theoretical.
+    #
+    # This job is HOSTED and ephemeral, so running fork code here is ordinary CI. The two
+    # SELF-HOSTED jobs — `nax-worker` below and windows-candle.yml's `candle-worker` — KEEP their
+    # guards: there the concern is untrusted code on a persistent box, which repo visibility has
+    # nothing to do with. Do not "restore symmetry" by adding one back here.
     #
     # THE MERGE-QUEUE GATE runs through here: `changes` supplies the path filter the `merge_group`
     # trigger cannot carry. On push / pull_request it always answers `true` (those triggers are
@@ -309,7 +321,7 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     runs-on: macos-26
     env:
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
