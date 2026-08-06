@@ -204,9 +204,9 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("image_jobs/sdxl_imported.rs", DownloadRole::JobTime),
     // DWPose preprocessor weights (`ensure_cached_file`, the non-HF primitive).
     ("pose_jobs.rs", DownloadRole::JobTime),
-    // Real-ESRGAN / SeedVR2 upscaler checkpoints.
-    ("upscale_jobs.rs", DownloadRole::JobTime),
-    ("video_jobs/seedvr2.rs", DownloadRole::JobTime),
+    // `upscale_jobs.rs` and `video_jobs/seedvr2.rs` left this list in sc-17633 + sc-17632: the
+    // Real-ESRGAN ONNX and the SeedVR2 checkpoint are declared in the catalog and resolved with
+    // `resolve_hf_component_file`, and neither file reaches any download primitive any more.
     // -- Job-time: added by the transitive wrapper walk (sc-17637). These reach a download through a
     // wrapper more than one hop away, which the original one-hop scan could not see. -------------
     // Catalog/dataset image acquisition: fetches remote source URLs into the catalog at job time.
@@ -242,7 +242,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
 ///
 /// **Only ever goes down.** Each migration slice deletes its entry and lowers this in the same
 /// commit.
-const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 46;
+const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 44;
 
 /// What a `<data_dir>/cache/<subdir>` destination holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,12 +430,15 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ),
     // DWPose preprocessor weights.
     ("worker", "pose_jobs.rs", "dwpose", CacheRole::Weights),
-    // Real-ESRGAN (legacy root) and the SeedVR2 checkpoint under `upscale/seedvr2/`.
+    // The two READ-ONLY legacy upscaler roots, both now consulted from `upscale_jobs.rs` (AC10).
+    // `upscale` covers the Real-ESRGAN ONNX (`cache/upscale/`, sc-17633) and the image lane's old
+    // SeedVR2 copy (`cache/upscale/seedvr2/`); `seedvr2-mlx` is the video lane's old copy of the
+    // SAME checkpoint, which moved here in sc-17632 when the two lanes collapsed onto one resolver.
+    // Nothing writes to either any more; reclaiming the bytes is sc-17636 (S11).
     ("worker", "upscale_jobs.rs", "upscale", CacheRole::Weights),
-    // SeedVR2 video-upscaler weights on the MLX lane.
     (
         "worker",
-        "video_jobs/seedvr2.rs",
+        "upscale_jobs.rs",
         "seedvr2-mlx",
         CacheRole::Weights,
     ),

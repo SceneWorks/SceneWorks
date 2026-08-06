@@ -97,6 +97,7 @@ import controlnetTileSdxlApache20 from "../../../desktop/licenses/controlnet-til
 import pidNVIDIALicense from "../../../desktop/licenses/pid/NVIDIA-License.txt?raw";
 import realEsrganBSD3Clause from "../../../desktop/licenses/real-esrgan/BSD-3-Clause.txt?raw";
 import qwen3VlCaptionApache20 from "../../../desktop/licenses/qwen3-vl-caption/Apache-2.0.txt?raw";
+import seedvr2Apache20 from "../../../desktop/licenses/seedvr2/Apache-2.0.txt?raw";
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?raw";
@@ -171,6 +172,7 @@ const DOCUMENT_TEXT = {
   "pid-nvidia-license": pidNVIDIALicense,
   "real-esrgan-bsd-3-clause": realEsrganBSD3Clause,
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
+  "seedvr2-apache": seedvr2Apache20,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
