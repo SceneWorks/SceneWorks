@@ -101,7 +101,16 @@ jobs:
     # Both events, not just pull_request: this is the required check, so it has to actually run
     # against the speculative merge rather than skip into a free Success.
     needs: changes
-    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.relevant == 'true' }}
+    # FAIL OPEN. `!cancelled()` and the `result != 'success'` clause are BOTH load-bearing, and
+    # neither is decoration: in GitHub Actions a job whose `needs:` FAILED is skipped, and a
+    # skipped job reports **Success**, which satisfies a required status check. So without this,
+    # a broken gate — a checkout failure, a dead runner, a syntax error in the reusable workflow —
+    # would silently skip this lane and turn its required check green without running a thing.
+    # That is the exact false-green shape this whole story exists to remove, reintroduced one
+    # level up. A gate that did not succeed must therefore RUN the lane, matching
+    # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
+    # `needs.changes.outputs.relevant == 'true'`.
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     # windows-2022 ships VS2022 with an MSVC 14.4x toolset (matches the desktop
     # crate's expectations); pinned rather than windows-latest per sc-3676.
     runs-on: windows-2022
