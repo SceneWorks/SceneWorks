@@ -15,7 +15,8 @@ them). Only macOS compiles MLX from source.
   kernels). The app's runtime floor is pinned at cutover (sc-3032).
 - **Full Xcode + the Metal Toolchain** (`xcode-select -p` must point at Xcode, not
   the Command Line Tools; `xcrun --find metal` must resolve).
-- A recent stable Rust toolchain (`rust-toolchain.toml` pins `stable`).
+- A Rust toolchain via rustup (`rust-toolchain.toml` pins a concrete version, sc-17717;
+  rustup auto-installs it on the first in-repo cargo run).
 - **CMake** (`brew install cmake`). MLX is a CMake project and `pmetal-mlx-sys`'s
   build.rs invokes `cmake` by name, so without it the build dies at "failed to run
   custom build command for `pmetal-mlx-sys`" — a message that points at the dependency,

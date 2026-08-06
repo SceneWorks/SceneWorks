@@ -168,8 +168,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-# Rust toolchain. The default rustup profile ships rustfmt+clippy, satisfying
-# rust-toolchain.toml (stable + those components).
+# Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
+# rust-toolchain.toml (a pinned concrete version + those components) is what any
+# in-repo cargo actually resolves, auto-installed by rustup on first use.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 ENV CUDA_PATH=/usr/local/cuda

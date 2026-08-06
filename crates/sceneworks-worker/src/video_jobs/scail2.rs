@@ -318,18 +318,10 @@ pub(super) async fn resolve_scail2_conditioning(
     )
     .await?;
 
-    // SAM3 segmenter weights (download-on-first-use), shared by both segmentation passes.
-    let client = crate::downloads::streaming_download_client();
-    let context = crate::downloads::DownloadContext {
-        api,
-        client: &client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "SCAIL-2 canceled while fetching the SAM3 segmenter weights.",
-        fresh_download: false,
-    };
+    // SAM3 segmenter weights, resolved from the Model Manager install (sc-17629), shared by both
+    // segmentation passes.
     let (sam_model, sam_tokenizer) =
-        crate::person_segment_sam3::ensure_segmenter_weights(settings, &context).await?;
+        crate::person_segment_sam3::require_segmenter_weights(settings)?;
 
     // Segment + paint via the shared orchestrator (sc-8830). Animation keeps the reference's world
     // (ref bg white) and drops the driving world (driving bg black); the native SAM3 module is the
@@ -494,17 +486,8 @@ pub(super) async fn resolve_scail2_replace_conditioning(
 
     // The reference color mask: a fresh native-SAM3 pass on the reference image → the primary person
     // painted blue on a black background (replacement discards the reference's surrounding world).
-    let client = crate::downloads::streaming_download_client();
-    let context = crate::downloads::DownloadContext {
-        api,
-        client: &client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "SCAIL-2 canceled while fetching the SAM3 segmenter weights.",
-        fresh_download: false,
-    };
     let (sam_model, sam_tokenizer) =
-        crate::person_segment_sam3::ensure_segmenter_weights(settings, &context).await?;
+        crate::person_segment_sam3::require_segmenter_weights(settings)?;
     // Heartbeat keepalive + user cancel across the cold SAM3 parse + single-frame propagate
     // (sc-8390 / sc-8807), via the shared blocking-segment helper (sc-8830).
     let ref_mask = scail2_segment_blocking(

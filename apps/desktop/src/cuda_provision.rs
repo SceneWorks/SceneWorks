@@ -694,12 +694,18 @@ mod tests {
         }
     }
 
-    /// A fresh, unique temp dir for a test (offline; cleaned by the caller).
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("sw-offline-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create scratch");
-        dir
+    /// A fresh, unique temp dir for a test (offline), removed when the guard drops.
+    ///
+    /// The `temp_dir()/sw-offline-{tag}-{pid}` path this replaces was cleaned by a
+    /// trailing line in each test, which a panicking test — exactly the one whose
+    /// leftovers matter — skipped, and keyed uniqueness on the PROCESS, so a run landing
+    /// on a recycled PID started from whatever an unrelated earlier run had stranded
+    /// there (sc-17707). Callers hold the guard and read `.path()`.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("sw-offline-{tag}-"))
+            .tempdir()
+            .expect("create scratch")
     }
 
     /// Drop empty files named `names` into `dir` (stand-ins for the real DLLs).
@@ -732,7 +738,8 @@ mod tests {
     /// missing even one component (here cuDNN) is rejected, unlike the one-DLL probes.
     #[test]
     fn is_staged_complete_requires_full_set() {
-        let root = scratch("complete");
+        let root_guard = scratch("complete");
+        let root = root_guard.path();
         let cuda = root.join("cuda");
         let ort = root.join("onnxruntime");
         touch(&cuda, STAGED_CUDA_DLLS);
@@ -744,29 +751,26 @@ mod tests {
         fs::remove_file(cuda.join("cudnn64_9.dll")).expect("rm cudnn");
         assert!(cuda.join("cudart64_12.dll").is_file());
         assert!(!is_staged_complete(&cuda, &ort));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// `install_from_staged` copies a well-formed `cuda\` + `onnxruntime\` source into
     /// the provisioned dirs and reports complete.
     #[test]
     fn install_from_staged_copies_full_set() {
-        let src = scratch("stage-src");
+        let src_guard = scratch("stage-src");
+        let src = src_guard.path();
         touch(&src.join("cuda"), STAGED_CUDA_DLLS);
         touch(&src.join("onnxruntime"), STAGED_ORT_DLLS);
 
-        let dest = scratch("stage-dest");
+        let dest_guard = scratch("stage-dest");
+        let dest = dest_guard.path();
         let cuda = dest.join("cuda");
         let ort = dest.join("onnxruntime");
 
-        install_from_staged(&src, &cuda, &ort).expect("install succeeds");
+        install_from_staged(src, &cuda, &ort).expect("install succeeds");
         assert!(cuda.join("cudart64_12.dll").is_file());
         assert!(ort.join("onnxruntime_providers_cuda.dll").is_file());
         assert!(is_staged_complete(&cuda, &ort));
-
-        let _ = fs::remove_dir_all(&src);
-        let _ = fs::remove_dir_all(&dest);
     }
 
     /// A source missing the `cuda\`/`onnxruntime\` subdirs, or missing a component, is
@@ -774,10 +778,12 @@ mod tests {
     #[test]
     fn install_from_staged_rejects_bad_source() {
         // No cuda/onnxruntime subdirs at all.
-        let flat = scratch("stage-flat");
-        touch(&flat, STAGED_CUDA_DLLS);
-        let dest = scratch("stage-flat-dest");
-        let error = install_from_staged(&flat, &dest.join("cuda"), &dest.join("onnxruntime"))
+        let flat_guard = scratch("stage-flat");
+        let flat = flat_guard.path();
+        touch(flat, STAGED_CUDA_DLLS);
+        let dest_guard = scratch("stage-flat-dest");
+        let dest = dest_guard.path();
+        let error = install_from_staged(flat, &dest.join("cuda"), &dest.join("onnxruntime"))
             .expect_err("must reject a source without cuda/onnxruntime subdirs");
         assert!(
             error.contains("subdirectories"),
@@ -785,7 +791,8 @@ mod tests {
         );
 
         // Subdirs present but incomplete (cuDNN missing).
-        let partial = scratch("stage-partial");
+        let partial_guard = scratch("stage-partial");
+        let partial = partial_guard.path();
         let incomplete: Vec<&str> = STAGED_CUDA_DLLS
             .iter()
             .copied()
@@ -793,14 +800,11 @@ mod tests {
             .collect();
         touch(&partial.join("cuda"), &incomplete);
         touch(&partial.join("onnxruntime"), STAGED_ORT_DLLS);
-        let dest2 = scratch("stage-partial-dest");
-        let error = install_from_staged(&partial, &dest2.join("cuda"), &dest2.join("onnxruntime"))
+        let dest2_guard = scratch("stage-partial-dest");
+        let dest2 = dest2_guard.path();
+        let error = install_from_staged(partial, &dest2.join("cuda"), &dest2.join("onnxruntime"))
             .expect_err("must reject an incomplete source");
         assert!(error.contains("incomplete"), "unexpected error: {error}");
-
-        for dir in [&flat, &dest, &partial, &dest2] {
-            let _ = fs::remove_dir_all(dir);
-        }
     }
 
     /// End-to-end smoke of the download → sha256 → unzip path on the SMALLEST pinned
@@ -817,9 +821,9 @@ mod tests {
             .find(|c| c.label == "CUDA runtime")
             .expect("CUDA runtime component present");
 
-        let tmp = std::env::temp_dir().join(format!("sw-cuda-smoke-{}", std::process::id()));
+        let tmp_guard = scratch("cuda-smoke");
+        let tmp = tmp_guard.path();
         let dest = tmp.join("cuda");
-        let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&dest).expect("create dest");
 
         // Download (async reqwest) + verify sha256 + unzip — exercising the same code
@@ -854,7 +858,5 @@ mod tests {
             dest.join("cudart64_12.dll").exists(),
             "cudart64_12.dll must be present after extraction"
         );
-
-        let _ = fs::remove_dir_all(&tmp);
     }
 }

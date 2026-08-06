@@ -3462,15 +3462,22 @@ mod linux_candle_tests {
     };
     use std::path::{Path, PathBuf};
 
-    fn runtime_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sceneworks-sc-10375-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ))
+    /// An isolated runtime root that does NOT exist yet, under a guard that removes the
+    /// whole tree on drop.
+    ///
+    /// The `temp_dir()/sceneworks-sc-10375-{label}-{pid}-{nanos}` path this replaces was
+    /// removed by a trailing line in each test, which a panicking test skips (sc-17707).
+    /// The returned path is an uncreated CHILD of the guard rather than the guard's own
+    /// directory, because `linux_runtime_gate_requires_ort_cuda_and_cudnn` asserts the
+    /// pre-provision (root-absent) state stays dormant — handing back an already-created
+    /// directory would silently weaken that to "present but empty".
+    fn runtime_root(label: &str) -> (tempfile::TempDir, PathBuf) {
+        let guard = tempfile::Builder::new()
+            .prefix(&format!("sceneworks-sc-10375-{label}-"))
+            .tempdir()
+            .expect("create isolated test runtime");
+        let root = guard.path().join("runtime");
+        (guard, root)
     }
 
     fn touch(path: &Path) {
@@ -3492,7 +3499,7 @@ mod linux_candle_tests {
 
     #[test]
     fn linux_runtime_gate_requires_ort_cuda_and_cudnn() {
-        let root = runtime_root("presence");
+        let (_guard, root) = runtime_root("presence");
         assert!(
             resolve_linux_candle_runtime(&root).is_none(),
             "pre-provision state must stay dormant"
@@ -3533,8 +3540,6 @@ mod linux_candle_tests {
                 root.join("cuda/lib64"),
             ]
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated test runtime");
     }
 
     #[test]
@@ -3638,7 +3643,7 @@ mod linux_candle_tests {
 
     #[test]
     fn linux_descendants_include_children_spawned_by_non_leader_threads() {
-        let proc_root = runtime_root("proc");
+        let (_guard, proc_root) = runtime_root("proc");
         // PID 100's leader spawned 200, while Tokio-style worker TID 101
         // spawned 300. PID 200 in turn spawned 400 from its own worker thread.
         write_proc_children(&proc_root, 100, 100, "200\n");
@@ -3653,8 +3658,6 @@ mod linux_candle_tests {
             vec![400, 200, 300],
             "post-order discovery must include every task's recursively spawned children"
         );
-
-        std::fs::remove_dir_all(proc_root).expect("remove isolated fake proc tree");
     }
 }
 

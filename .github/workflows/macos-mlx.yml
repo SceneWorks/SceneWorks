@@ -29,6 +29,20 @@ name: macOS MLX worker
 # deleted; epic work now branches off and PRs into main (sc-4177 re-pointed the
 # lane after it sat dead on the deleted branch).
 on:
+  # THE MERGE QUEUE'S SPECULATIVE MERGE. Without this trigger the queue's `gh-readonly-queue/main/**`
+  # ref is validated only by check.yml's hosted Linux jobs, and this lane — the ONLY compiler of
+  # `cfg(target_os = "macos")` code anywhere in CI — never sees it. Two individually-green PRs whose
+  # merge does not compile under that cfg would merge, exactly the shape that broke `main` in
+  # e71b932f.
+  #
+  # NOTE THE ASYMMETRY WITH THE TWO TRIGGERS BELOW: they are path-filtered and this one CANNOT BE.
+  # GitHub supports no `paths:` / `paths-ignore:` filter on `merge_group` (community discussion
+  # 45899, still open), so a bare trigger here would wake this lane for a README-only queue entry.
+  # The filter therefore moves into the `changes` gate job, which reads the SAME anchor below and
+  # skips the build when nothing it watches changed. Do not "simplify" that job away.
+  #
+  # Only the hosted half runs here. See the `merge_group` note on `nax-worker`.
+  merge_group:
   push:
     branches: [main]
     paths: &mlx_paths
@@ -66,13 +80,34 @@ on:
       # both lanes. Path filters match DELETES and ADDS too, so a restamp, delete or re-add of this
       # file still triggers the lane.
       - "config/engine-capabilities/capabilities.mlx.json"
+      # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
+      # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
+      # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
+      #
+      # sc-17665 narrowed the entry above from `config/engine-capabilities/**` to a single filename,
+      # and that landed while sc-17593 was in flight. The two are individually correct and combine
+      # badly: the audio verification was added to a step whose trigger paths had just stopped
+      # matching the audio file. Demonstrated on `97a7655a9`, an audio-only re-dump that woke neither
+      # stage-1 lane -- declared but unreachable, for exactly the edit the step exists to catch.
+      - "config/engine-capabilities/audio/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
+      # sc-17703 (Michael's call — a deliberate under-trigger fix): rust-toolchain.toml
+      # governs which toolchain cargo resolves, so a bump changes what this lane
+      # compiles with — and nothing else here would trigger on it. The channel is a
+      # concrete version, never floating `stable` (sc-17717), and both jobs' dtolnay
+      # `toolchain:` inputs carry the same version (contract-test enforced), so a
+      # toolchain change is always an edit that wakes this lane.
+      - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/workflows/macos-mlx.yml"
+  # NO `paths:` FILTER, deliberately (sc-17014). `macos-checks` below is a REQUIRED status check,
+  # and GitHub leaves a path-filtered workflow's check **Pending** forever rather than passing it —
+  # so a filter here would block every PR that does not touch these paths. The `changes` gate job
+  # replaces it: a job skipped by `if:` reports Success, which a required check accepts. The `push:`
+  # trigger above keeps its filter, since nothing gates on main pushes.
   pull_request:
     branches: [main]
-    paths: *mlx_paths
   workflow_dispatch:
     inputs:
       run_memory_calibration:
@@ -177,6 +212,24 @@ concurrency:
 # the default `<workspace>/target` is correct precisely because it is what rust-cache stores.
 
 jobs:
+  # THE PATH FILTER THE `merge_group` TRIGGER CANNOT HAVE. See the note on that trigger: GitHub
+  # supports no `paths:` filter for merge-queue events, so this hosted job re-derives the same
+  # verdict the other two triggers get for free, by parsing THIS FILE'S OWN `mlx_paths` anchor and
+  # diffing the merge group. Reading the anchor rather than copying it is the point — a copy would
+  # rot in the silent direction, where a newly watched path this job did not know about reads as
+  # "not relevant" and skips the lane on a green-looking merge group.
+  #
+  # ~15s on a hosted runner, and it only gates the hosted `macos-checks` job. `nax-worker` never
+  # runs on a merge group at all, so it does not need this.
+  #
+  # push / pull_request runs reach this job already path-filtered by the triggers, so it re-answers
+  # `true` for them; that is a couple of cheap seconds to keep one code path rather than two.
+  changes:
+    uses: ./.github/workflows/changed-paths.yml
+    with:
+      lane: .github/workflows/macos-mlx.yml
+      anchor: mlx_paths
+
   # THE HOSTED HALF. Everything on this lane that does not need Apple matrix-unit silicon.
   #
   # This job did not exist because it could not: the workspace `/.cargo/config.toml` pins
@@ -241,7 +294,13 @@ jobs:
     # fork PR has neither the secret nor a `github.token` that can see it. Without this
     # guard such a PR would fail at `cargo fetch` with an authentication error that looks
     # nothing like its actual cause.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    #
+    # THE MERGE-QUEUE GATE runs through here: `changes` supplies the path filter the `merge_group`
+    # trigger cannot carry. On push / pull_request it always answers `true` (those triggers are
+    # already filtered), so this only ever subtracts merge-group runs for diffs this lane cannot
+    # be affected by.
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: macos-26
     env:
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
@@ -253,7 +312,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       # Keyed by job + rustc version + lockfile by default, which is what we want: the MLX pin
       # moves with `Cargo.lock`, so a pin bump invalidates the native build rather than
@@ -300,7 +359,28 @@ jobs:
 
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    #
+    # AND NEVER ON A MERGE GROUP, deliberately. The pool is two hand-registered Macs, one of them a
+    # developer's daily driver, and PR runs there already compete with real-weight jobs for unified
+    # memory badly enough to have produced six jetsam kills on 2026-08-04. A merge group is an
+    # ADDITIONAL run per queued batch on top of the PR run and the main-push run, and the queue can
+    # build several speculative groups at once (`max_entries_to_build`), so this would be the
+    # heaviest new consumer of the scarcest hardware in the fleet.
+    #
+    # What that costs is bounded and specific: `nax_16bit_sdpa_is_correct`, the one test the hosted
+    # job skips. Everything else this lane proves — the whole workspace suite, both clippy scopes,
+    # the MLX-linked build — is `macos-checks` above, which DOES gate the queue. And `nax_guard`
+    # asserts a property of the M5 matrix-unit kernels, not of how two PRs compose, so it is a poor
+    # fit for the class the merge queue exists to catch. It still runs on every PR and on the
+    # post-merge main push, which is where a NAX regression would surface anyway.
+    #
+    # `needs: changes` IS LOAD-BEARING HERE, not just an optimisation. sc-17014 dropped the
+    # `paths:` filter from this workflow's pull_request trigger so `macos-checks` could become a
+    # required check — which means that without this gate, EVERY pull request in the repo would
+    # wake this job on the two-Mac `nax` pool, including docs-only ones. The trigger filter used to
+    # be what protected that pool; this is now.
+    needs: changes
+    if: ${{ github.event_name != 'merge_group' && needs.changes.outputs.relevant == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     # The PR/main path needs only `nax`. The workflow_dispatch calibration paths
     # additionally need the HF snapshots, and those are HOST STATE that does not travel
     # with a label — the same defect class this repo just fixed for release.yml's signing
@@ -347,7 +427,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       - name: Fetch the pinned inference release
         env:

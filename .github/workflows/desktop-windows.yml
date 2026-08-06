@@ -11,7 +11,7 @@ name: Desktop (Windows)
 #     the desktop crate, so this is the only lane that exercises it
 #     (epic 1330 Phase 3 / sc-1356).
 #
-#   package-windows  (push:main + workflow_dispatch, SELF-HOSTED cuda box) — the full
+#   package-windows  (push:main + workflow_dispatch, SELF-HOSTED `cuda` pool) — the full
 #     candle/CUDA sidecar build + NSIS/MSI packaging, as an UNSIGNED smoke so a
 #     packaging break (NSIS's ~2 GB datablock limit, Tauri bundling) surfaces the
 #     moment it lands on main — before a release tag, not during one. Runs on the same
@@ -36,7 +36,23 @@ name: Desktop (Windows)
 # desktop-candle-windows.yml lane.)
 
 on:
+  # THE MERGE QUEUE'S SPECULATIVE MERGE (sc-17014). `build-windows` is a REQUIRED status check, and
+  # the queue evaluates the same required set against `gh-readonly-queue/main/**` — without a run
+  # for that ref the check stays pending until the group times out and its entries are EVICTED.
+  #
+  # READ THE TWO JOB-LEVEL `if:`s BELOW BEFORE TOUCHING THIS. They split on `pull_request`, so a
+  # bare `merge_group:` would have done exactly the wrong thing on both sides: skipped the cheap
+  # hosted `build-windows` (reporting Success with no coverage — a required check that validates
+  # nothing) while waking `package-windows`, the ~13-17m candle/CUDA packaging job, on the
+  # self-hosted `cuda` pool for every queued entry. Both conditions are now explicit about
+  # merge_group rather than inferring it from "not a pull request".
+  merge_group:
+  # NO `paths:` FILTER, deliberately (sc-17014) — see the `changes` gate job. A path-filtered
+  # workflow's required check stays Pending forever instead of passing.
   pull_request:
+  push:
+    branches:
+      - main
     paths: &desktop_paths
       - "apps/desktop/**"
       - "apps/web/**"
@@ -55,17 +71,13 @@ on:
       - "package.json"
       - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/desktop-windows.yml"
-  push:
-    branches:
-      - main
-    paths: *desktop_paths
   workflow_dispatch:
 
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
 # windows-candle.yml (sc-12399). `package-windows` below is non-PR-only, so main is
 # the ONLY place the full candle/CUDA desktop package is built before a release tag;
-# cancelling it pushes packaging breaks to release time. It also shares the one
-# `cuda` box with windows-candle.yml, so it is part of the same queue.
+# cancelling it pushes packaging breaks to release time. It also shares the `cuda`
+# runner pool with windows-candle.yml, so it is part of the same queue.
 #
 # Main must key on `github.sha`, not `github.ref`: GitHub keeps at most ONE pending
 # run per group and evicts it when a newer run queues, so a shared main group still
@@ -76,9 +88,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # PR gate — cheap desktop-crate checks on a hosted runner. No candle/CUDA/packaging.
+  # Supplies the path filter the triggers above gave up so `build-windows` could become a required
+  # check. See .github/workflows/changed-paths.yml for why a required check cannot carry one.
+  changes:
+    uses: ./.github/workflows/changed-paths.yml
+    with:
+      lane: .github/workflows/desktop-windows.yml
+      anchor: desktop_paths
+
+  # PR + MERGE-QUEUE gate — cheap desktop-crate checks on a hosted runner. No candle/CUDA/packaging.
   build-windows:
-    if: ${{ github.event_name == 'pull_request' }}
+    # Both events, not just pull_request: this is the required check, so it has to actually run
+    # against the speculative merge rather than skip into a free Success.
+    needs: changes
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.relevant == 'true' }}
     # windows-2022 ships VS2022 with an MSVC 14.4x toolset (matches the desktop
     # crate's expectations); pinned rather than windows-latest per sc-3676.
     runs-on: windows-2022
@@ -102,7 +125,7 @@ jobs:
         run: npm --prefix apps/desktop test
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
       - name: Fetch the private inference release
@@ -142,7 +165,11 @@ jobs:
   # only (never PRs). Same box as windows-candle.yml; see the header for why it lives
   # here (off the 10 GB Actions cache).
   package-windows:
-    if: ${{ github.event_name != 'pull_request' }}
+    # main + workflow_dispatch ONLY. `!= 'pull_request'` used to mean exactly that; with a
+    # merge_group trigger it no longer does, and this is the heavy candle/CUDA package on the
+    # self-hosted `cuda` pool. Deliberately NOT a required check either: it never runs on a PR, so
+    # requiring it would strand every PR on a check that cannot report.
+    if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
     runs-on: [self-hosted, Windows, X64, cuda]
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
@@ -154,14 +181,14 @@ jobs:
       CARGO_NET_OFFLINE: "true"
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
     # default (sc-10420). This is the full candle/CUDA sidecar build + NSIS/MSI
-    # packaging on the SOLE self-hosted cuda box (shared with windows-candle.yml),
-    # so a wedge here holds that box and starves every queued PR/main run on it
+    # packaging on the self-hosted `cuda` pool (shared with windows-candle.yml), so a
+    # wedge here holds a box and starves queued PR/main runs behind it
     # (sc-13603). Well above the healthy ~13-17 min warm package — a cold candle
     # rebuild fits.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # sc-13166: same self-hosted cuda box as windows-candle.yml — point this lane at
+      # sc-13166: same self-hosted `cuda` pool as windows-candle.yml — point this lane at
       # the real rustup toolchain bin (prepended to PATH) so it never dispatches through
       # the fragile %USERPROFILE%\.cargo\bin proxies that go dangling on rustup
       # self-update/deletion and fail with ERROR_NO_ASSOCIATION. package-windows is
