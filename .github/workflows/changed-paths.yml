@@ -1,0 +1,108 @@
+name: Changed paths
+
+# THE PATH FILTER A REQUIRED CHECK IS ALLOWED TO HAVE.
+#
+# Background, because the constraint is not obvious and the naive fix is a trap:
+#
+# GitHub treats the two ways a check can fail to appear COMPLETELY differently
+# (docs: "Troubleshooting required status checks"):
+#
+#   * a JOB skipped by an `if:` condition reports **Success** and satisfies a required check;
+#   * a WORKFLOW skipped by a `paths:` filter reports nothing and stays **Pending** forever.
+#
+# So a `paths:`-filtered lane can never simply be added to the required set — a PR that does not
+# touch its paths would be blocked permanently. And the merge queue makes it worse rather than
+# better: it evaluates the SAME required set against its speculative `gh-readonly-queue/main/**`
+# ref, so a lane with no `merge_group:` trigger leaves its check pending until
+# `check_response_timeout_minutes` expires and the queued entries are EVICTED — which silently
+# re-orders the queue instead of failing loudly.
+#
+# The fix is to stop filtering at the trigger and start filtering at the job: every candidate lane
+# triggers unconditionally, calls this workflow, and gates its real jobs on the answer. Skipped
+# jobs then satisfy the required check, and no expensive box is woken for an irrelevant diff.
+#
+# `merge_group` additionally supports NO `paths:` / `paths-ignore:` filter at all (community
+# discussion 45899, still open), so for that event this is the only filtering mechanism available.
+#
+# WHY THIS READS THE LANE'S OWN ANCHOR instead of taking a path list as an input: the anchor is
+# already the single source of truth for the `push:` trigger, and
+# scripts/platform-review-contracts.test.mjs already forces newly-watched paths into it. Passing a
+# duplicate list here would rot in the SILENT direction — a path this workflow did not know about
+# reads as "not relevant", skips the lane, and shows up as a green required check rather than as a
+# hole.
+
+on:
+  workflow_call:
+    inputs:
+      lane:
+        description: "Path to the workflow file whose `paths:` anchor defines relevance."
+        required: true
+        type: string
+      anchor:
+        description: "Name of the YAML anchor inside that file (e.g. mlx_paths)."
+        required: true
+        type: string
+    outputs:
+      relevant:
+        description: "'true' when the change can affect this lane; 'false' when it provably cannot."
+        value: ${{ jobs.decide.outputs.relevant }}
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    # Hosted, and ~20s in practice — this must stay far cheaper than the lane it gates or it defeats
+    # its own purpose. The cap is a guardrail against a wedged checkout, not a target.
+    timeout-minutes: 10
+    outputs:
+      relevant: ${{ steps.gate.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The diff spans a whole merge group or a whole PR, either of which can reach further back
+          # than a shallow clone contains. The pack is ~130 MB, which costs a few seconds here and
+          # saves a ~24m self-hosted run when the answer is "not relevant".
+          fetch-depth: 0
+      - name: Decide whether this change can affect ${{ inputs.lane }}
+        id: gate
+        env:
+          LANE: ${{ inputs.lane }}
+          ANCHOR: ${{ inputs.anchor }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          case "${GITHUB_EVENT_NAME}" in
+            merge_group)
+              # Two-dot: the merge group ref is built directly on base_sha, so this is exactly the
+              # set of changes the queue is about to land.
+              range=("${MERGE_GROUP_BASE}" "${MERGE_GROUP_HEAD}")
+              ;;
+            pull_request|pull_request_target)
+              # Three-dot: diff against the MERGE BASE, not the base branch tip, so commits that
+              # landed on main since the PR opened are not counted as this PR's changes. This is
+              # what GitHub's own `paths:` filter does for a pull request.
+              range=("${PR_BASE}...${PR_HEAD}")
+              ;;
+            *)
+              # push / workflow_dispatch / anything else: not a gated event. Those triggers keep
+              # their own `paths:` filters, and a dispatch is a deliberate human request.
+              echo "${GITHUB_EVENT_NAME} is not a gated event; running the lane."
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          # A failure here must not silently skip a lane, so the diff is captured and its exit
+          # status checked explicitly rather than piped straight into the decider (a pipeline would
+          # report only the LAST command's status). An empty or failed diff falls through to the
+          # script, which runs the lane conservatively.
+          if ! changed=$(git diff --name-only "${range[@]}" 2>&1); then
+            echo "::warning title=Path gate fell back to running the lane::git diff failed: ${changed}"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf '%s\n' "${changed}" |
+            node scripts/merge-group-relevance.mjs --workflow "${LANE}" --anchor "${ANCHOR}"
