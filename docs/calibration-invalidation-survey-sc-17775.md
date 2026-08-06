@@ -29,6 +29,7 @@ single calibration's semantics, which is the behaviour to preserve.
 | Bound calibrations demoted to `historical` today | **20** |
 | Providers with **any** mechanism to extend a capture past a pin bump | **1 of 6** (`flux2_dev`) |
 | …and that mechanism is **already spent**: it authorizes one revision, and the pin has moved past it | ✅ |
+| Candle providers registered in inference but **not admitted by the worker selector** | **4 of 14** (§9) |
 
 **Two populations, do not conflate them.** "Bound calibrations" above are the 31 entries in
 `models/<id>/<backend>/calibrations` in `config/manifests/builtin.models.jsonc` — the *declarations*
@@ -38,10 +39,19 @@ semantically `current` and 11 are both `current` and binding-eligible — which 
 `summary.currentCalibrationRuns: 11` reports. That the two "11"s coincide is a coincidence of this
 snapshot, not the same number counted twice.
 
-The epic's framing — "invalidation over-triggers" — is one of two exposures, and it is the smaller
-one. It is visible only because `flux2_dev` is the single provider that has a relief mechanism at
-all. The other five have no extension path of any kind: a pin bump demotes them permanently and the
-only remedy on offer is a fresh capture at the new pin.
+The epic's framing — "invalidation over-triggers" — is one of **three** exposures, and it is the
+smallest. It is visible only because `flux2_dev` is the single provider that has a relief mechanism
+at all.
+
+| | exposure | providers | what it costs |
+| --- | --- | --- | --- |
+| **1** | captured, then invalidated (over-triggering) | `flux2_dev` | a re-capture that may be unnecessary |
+| **2** | captured, no mechanism to extend | the other five | a re-capture, permanently, on every pin bump |
+| **3** | **registered upstream, not admitted downstream** | **4 candle providers** | the ladder never runs, and nothing reports it |
+
+Exposures 1 and 2 are covered in §§2–8. **Exposure 3 is §9**, and it is the one where a measured
+ladder produces no runtime benefit at all — capturing evidence for those providers today would
+change nothing, because the worker's selector rejects them before evidence is consulted.
 
 **The sharpest single number in this survey:** `flux1_dev` and `flux1_schnell` hold 10 bound
 calibrations, demoted by a window of **40 non-merge commits, exactly zero of which touched
@@ -490,6 +500,19 @@ otherwise uniformly over-triggering.
 | `current` today, **no** relief mechanism | `qwen_image`, `krea_2_turbo_control` | **11** | demoted by the next pin bump, whatever it contains |
 | **Total** | 6 | **31** | |
 
+Exposure 3 is counted separately because its unit is providers, not calibrations — those providers
+have no calibrations to count, which is part of the point:
+
+| Exposure 3 | Providers | Status |
+| --- | --- | --- |
+| Registered in inference, **not** admitted by the worker selector | `krea_2_turbo`, `lens`, `lens_turbo` | ladder never runs; capturing evidence today changes nothing |
+| Admitted only through a bespoke third mechanism | `krea_2_turbo_control` (candle lane) | runs, but outside both gates in §2 (§9.4) |
+
+Prioritisation note: exposure 3 is the cheapest to fix and the most wasteful to leave — `lens` /
+`lens_turbo` already have a measured five-rung ladder that produces zero runtime benefit today, and
+`krea_2_turbo`'s admission wiring is already tracked as **sc-15829**, upstream of sc-15913's
+certification.
+
 Relevance of the demoting windows:
 
 | Provider | Commits in the window | …touching its own crate | …touching `gen-core` |
@@ -542,3 +565,122 @@ node scripts/inference-artifact-audit.mjs --repo D:/repos/inference \
 
 Related: `docs/inference-artifact-audit-sc-17497.md`, sc-17760 (extend the FLUX.2 audit to the live
 pin), sc-17776 (recommend an invalidation unit that tracks behaviour).
+
+---
+
+## 9. Exposure 3 — registered upstream, not admitted downstream
+
+A provider can carry a complete, GPU-measured ladder in inference and never run it, because the
+worker's selector turns it away before evidence is consulted. Nothing reports this: no test fails,
+no cell turns red, the matrix reads `Implemented/unverified` exactly as it would for a provider that
+simply has not been captured yet.
+
+This costs no builds to establish — it is a source-level cross-reference at the pin.
+
+### 9.1 The gate
+
+`crates/sceneworks-worker/src/candle_memory_strategy.rs:571-586`, the first statement of
+`evaluate_shared_image_inner`:
+
+```rust
+if !matches!(
+    engine_id,
+    "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control"
+        | "qwen_image" | "qwen_image_edit"
+        | "flux1_schnell" | "flux1_dev"
+        | "flux2_dev" | "flux2_klein_9b"
+) && contract_override.is_none()
+{
+    return Ok(None);
+}
+```
+
+It returns before tier, budget, contract or evidence are read. The only bypass is
+`contract_override`, supplied by `evaluate_shared_bespoke_image`, whose **sole** caller in the whole
+worker is `crates/sceneworks-worker/src/image_jobs/pulid_candle.rs:468`.
+
+The allowlist is genuinely load-bearing, not vestigial: the shared txt2img path at
+`crates/sceneworks-worker/src/image_jobs/base.rs:7787` passes `engine_id` **generically**, so every
+candle image engine reaches this function. The allowlist alone decides who gets past line one.
+
+### 9.2 Who is registered, and who is admitted
+
+Candle memory registrations at the pin (`git grep -A2 "MemoryRegistration {" fbb00d6b -- 'crates/media/candle-gen/*/src/*.rs'`),
+cross-referenced against the allowlist:
+
+| Provider | Registered in inference | In the allowlist | Bespoke override | Ladder in force? |
+| --- | --- | --- | --- | --- |
+| `z_image`, `z_image_turbo`, `z_image_control`, `z_image_turbo_control` | ✅ | ✅ | – | yes |
+| `qwen_image`, `qwen_image_edit` | ✅ | ✅ | – | yes |
+| `flux1_dev`, `flux1_schnell` | ✅ | ✅ | – | yes |
+| `flux2_dev`, `flux2_klein_9b` | ✅ | ✅ | – | yes |
+| **`krea_2_turbo`** | ✅ `TURBO_MEMORY_REGISTRATION` + behaviour + fitted `krea-turbo-cuda-phase-curves-v1` | ❌ | ❌ | **NO** |
+| **`krea_2_turbo_control`** | ✅ `CONTROL_MEMORY_REGISTRATION` (composed) | ❌ | ❌ | **not via the shared path** — see §9.4 |
+| **`lens`** | ✅ `MODEL_ID_BASE` registration | ❌ | ❌ | **NO** |
+| **`lens_turbo`** | ✅ `MODEL_ID_TURBO` registration | ❌ | ❌ | **NO** |
+
+**4 of 14 registered candle providers are unreachable through the shared selector.**
+
+### 9.3 `lens` / `lens_turbo` — the members the story did not know about
+
+The story named `krea_2_turbo`. The cross-reference turns up two more, and they are the more
+striking case because the work is not merely registered but **measured and documented**:
+`docs/lens-candle-memory-ladder-sc-15819.md` records the full five-rung CUDA implementation for both
+ids, fingerprint `lens-candle-cuda-shared-ladder-device-format-blocks-v1`, captured on GPU 0 against
+the shipped `SceneWorks/lens-turbo-mlx` q4 snapshot `d3f485c3…` at 1024², seed 15819.
+
+Both ids are real, routed worker engines (`crates/sceneworks-worker/src/engines.rs:527`, `:535`), so
+they reach `evaluate_shared_image_inner` through the generic `base.rs` call and are rejected at line
+one. A complete measured ladder, shipped in inference, documented in SceneWorks, and dead at runtime.
+
+### 9.4 `krea_2_turbo_control` — the open question, answered
+
+The story flagged this as unverified: does its packaged evidence have a runtime consumer at all?
+
+**It does — but not through either shared entry point, and not through the two gates in §2.** The
+candle control lane has a *third*, entirely bespoke invalidation mechanism in
+`crates/sceneworks-worker/src/krea_control_fit.rs`, reached from
+`image_jobs/krea_control_candle.rs:785`. It carries its own hardcoded constants:
+
+```rust
+const KREA_CONTROL_INFERENCE_REVISION: &str = "1899a7228deb99b65535745d09d4a5f5524565c4";
+const KREA_CONTROL_CALIBRATION: &str = "sc-16013-krea-control-direct-1024-v1";
+```
+
+and its currency test is neither a fingerprint comparison nor a revision comparison but two **manual
+manifest flags** (`krea_control_fit.rs:243-249`):
+
+```rust
+control.get("measured").and_then(Value::as_bool) == Some(true)
+    && control.get("supersededBy").is_none()
+```
+
+So there is a third invalidation mechanism in the codebase that this survey's two-gate model does
+not describe, gated on hand-maintained booleans rather than on anything derived from the code. It is
+recorded here rather than assessed: characterising it properly is its own piece of work, and it is
+**not** in scope for sc-17775's acceptance criteria.
+
+Note also that `krea_2_turbo_control`'s *bound* calibration in the manifest is the **mlx** one
+(`krea-control-mlx-full-ladder-…-v2`, §3), which is a different backend from the candle constants
+above. The two lanes of one route are calibrated and invalidated independently.
+
+### 9.5 The MLX side has no equivalent exposure
+
+`crates/sceneworks-worker/src/mlx_fit_gate.rs` has **no hardcoded engine allowlist**. Its
+`evidence_admission_route` matches on `binding.provider == plan.engine_id` (`:979`, `:1150`), i.e.
+admission is data-driven from the packaged bindings. Exposure 3 is a candle-side structural issue
+only, which is why all three calibrated MLX providers are unaffected by it.
+
+### 9.6 Why this class is invisible
+
+Exposures 1 and 2 are at least *legible* — a cell reads `historical` and someone can go and look.
+Exposure 3 produces no signal anywhere:
+
+- the matrix reads `Implemented/unverified`, which is also what an uncaptured provider reads;
+- no test asserts that a registered memory provider is admitted downstream;
+- the selector's `Ok(None)` is indistinguishable from "this provider has nothing to say".
+
+**The check that would close it is mechanical**: for every `MemoryRegistration` in inference, assert
+the provider id is either in the allowlist or reached by a `contract_override` call site. That is a
+generated-artifact-style cross-repo assertion of exactly the kind this repo already runs for
+manifest wiring, and it would have caught all four members the day they were registered.
