@@ -199,6 +199,42 @@ on:
 #   * pool size = `gh api repos/{owner}/{repo}/actions/runners`. It is NOT fixed: two of
 #     the four boxes above were no longer online hours after this measurement, so quote
 #     the pool size and date together or the utilization figure means nothing.
+#
+# WHERE THE ~24m ACTUALLY GOES, and why the obvious saving is not one (sc-17820).
+# Step-level `started_at` -> `completed_at` from the jobs API, five runs on 2026-08-05/06
+# (31055081046, 31057684283, 31058077337, 31059604369, 31060918014):
+#
+#   Fetch the private inference release          3.5 - 8.8m
+#   Test the candle GPU worker (backend-candle)  3.6 - 5.6m
+#   Check the candle sidecar builds (rust-api)   2.5 - 3.9m
+#   Check and test the candle memory adapter     4.5 - 6.7m
+#   Clippy (candle worker)                       0.5 - 1.0m
+#   Verify capabilities.candle.json              0.7 - 0.9m
+#
+# IT IS ALL COMPILATION AND FETCHING. Inside the test step the split is stark and stable
+# across all five runs -- `Finished test profile in 3m 23s .. 5m 15s`, then:
+#
+#   running 1317 tests ... test result: ok. 1274 passed; 43 ignored; finished in 7.6s
+#
+# So `cargo test -p sceneworks-worker --features backend-candle` spends 3-5 MINUTES
+# building and 7.6 SECONDS running. sc-17820 proposed narrowing the PR invocation to the
+# ~127 candle-exclusive tests on the grounds that the other ~92% are covered by `parity`
+# and `macos-checks`. REJECTED, on three measured counts:
+#   1. A test filter changes nothing about what cargo builds. The crate, all its targets
+#      and the whole candle graph still compile; the saving is bounded above by that 7.6s,
+#      i.e. ~0.5% of the job. The lane would still be ~24m.
+#   2. It therefore does NOT make sc-17014 option (B) -- require this lane on the merge
+#      queue -- viable. That was the story's actual prize, and the arithmetic (p90 18.0m
+#      queue + p90 31.9m run vs the 60m `check_response_timeout_minutes`) is untouched.
+#   3. The "redundant" tests are not redundant, they are the same test NAMES compiled
+#      under a different cfg. `image_jobs/base.rs` alone carries 207 `#[cfg]` attributes
+#      splitting macOS from `backend-candle`; `macos-checks` runs the macOS bodies and
+#      `parity` does not compile the file at all. Feature unification makes the rest of
+#      the crate differ too. Narrowing here would drop real, uncovered configurations to
+#      buy back seconds.
+# If this lane needs to get cheaper, the levers are the FETCH step (a job-local CARGO_HOME
+# under RUNNER_TEMP is re-downloaded every run -- see "Isolate Cargo dependency checkout")
+# and the three separate compile graphs, not the test filter.
 concurrency:
   group: windows-candle-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
