@@ -195,8 +195,10 @@ jobs:
   # `all(not(target_os = "macos"), feature = "backend-candle")` — `vram_gate`, `krea_control_fit`,
   # the candle-control image modules, `generate_candle_video` and its Mochi fit gates. Until this job
   # existed the ONLY compiler of that cfg anywhere in CI was windows-candle.yml, which runs on the
-  # fleet's single `cuda` box, takes ~28 min, and has no `merge_group:` trigger — so a candle-side
-  # semantic conflict merged green and broke `main` for everyone behind it.
+  # self-hosted `cuda` pool at a ~24m median (p90 32m, measured 2026-08-05 over 85 runs) and has no
+  # `merge_group:` trigger — so a candle-side semantic conflict merged green and broke `main` for
+  # everyone behind it. This job is ~4m and hosted, which is what makes it affordable per merge
+  # group where that lane is not.
   #
   # It does not need a GPU. `scripts/check-candle-build.mjs` (sc-12356) writes a stub `nvcc` that
   # satisfies the three build scripts that shell out to the CUDA toolkit, and `cargo clippy`/`check`

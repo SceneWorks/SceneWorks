@@ -6,8 +6,8 @@
 // GitHub's `merge_group` event supports NO `paths:` / `paths-ignore:` filter — only `branches:`
 // (community discussion 45899; still open). Every other trigger on the backend lanes is path-gated,
 // and those filters are not decoration: `macos-mlx.yml` runs on a hand-registered pool of two Macs,
-// one of them a developer's daily driver, and `windows-candle.yml` runs on the fleet's single `cuda`
-// box. A bare `merge_group:` would wake them for a README-only queue entry.
+// one of them a developer's daily driver, and `windows-candle.yml` runs on the self-hosted `cuda`
+// pool at a ~24m median per job. A bare `merge_group:` would wake them for a README-only queue entry.
 //
 // So the filter moves from the trigger into a hosted gate job, and this script is that gate.
 //
