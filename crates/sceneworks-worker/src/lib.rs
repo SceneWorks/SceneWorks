@@ -2011,6 +2011,15 @@ mod architecture_tests;
 #[cfg(test)]
 mod candle_preview_wiring_tests;
 
+// The epic-17625 regression gate (sc-17637, AC9): no new job-time download, no new
+// `<data_dir>/cache` weight destination. Deliberately NOT cfg-gated for the same reason as the guard
+// above, only more so — every download helper and all of its call sites are gated
+// `macos || backend-candle`, so on the required ubuntu/default-features `parity` lane none of that
+// code is compiled at all and a gate inheriting those cfgs would never run. This one reads source
+// text, so it fires on every platform and every PR.
+#[cfg(test)]
+mod job_time_download_guard;
+
 // Pinned-snapshot provisioning helpers + the install-layout smokes (sc-13797/sc-13810). Compiled on
 // EVERY platform — the download/layout code is platform-agnostic; only the live-network smoke inside
 // carries `#[cfg(target_os = "macos")]` for lane confinement.

@@ -1,0 +1,1897 @@
+//! The regression gate for epic 17625: **no new job-time download, no new `<data_dir>/cache`
+//! weight destination** (sc-17637, AC9 inherited from sc-17598).
+//!
+//! ## Why this exists
+//!
+//! Job-time weight fetching was never designed in. It was added incrementally, one plausible call
+//! site at a time, until 24 of them existed across 19 files. Every one of those commits was locally
+//! reasonable; the pattern is only visible in aggregate. A rule that lives in a comment regrows the
+//! same way, so the rule lives here, as a test that reads the source.
+//!
+//! ## Why a source scanner and not the type system
+//!
+//! The obvious design — "make the resolver take no `DownloadContext`, and the compiler is the gate"
+//! — does not work in this crate, for three independent reasons:
+//!
+//! 1. [`crate::downloads`] is glob-imported at the crate root (`use downloads::*;`), so
+//!    `ensure_hf_cached_file`, `ensure_cached_file`, `ensure_cached_file_verified` and
+//!    [`crate::downloads::DownloadContext`] are in scope, unqualified, in **every** module. Any new
+//!    file can also spell them `crate::downloads::…`; several already do.
+//! 2. `DownloadContext` is a plain struct with public-in-crate fields and no privileged constructor.
+//!    Job-time sites build it as an inline literal. Removing a parameter from one seam does not
+//!    remove the ability to construct the context at another.
+//! 3. Decisively: the download helpers and all of their call sites are gated
+//!    `any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle"))`. The
+//!    required `parity` CI lane is ubuntu-latest with default features, so **none of that code is
+//!    even compiled there**, and the `candle` lane runs `cargo check`/clippy but never `cargo test`.
+//!    A gate that inherits those cfgs never fires on any required check.
+//!
+//! So the gate is plain `#[cfg(test)]` and reads source **text**. It compiles and runs on Linux with
+//! default features, on macOS, and on Windows — on every PR. Precedent is
+//! [`crate::candle_preview_wiring_tests`], which exists for the same reason, and whose comment
+//! stripper this reuses.
+//!
+//! ## What it asserts
+//!
+//! 1. [`job_time_download_sites_match_the_allow_list`] — the set of production files that reach a
+//!    download primitive equals [`DOWNLOAD_SITES`], **exactly**. Not `⊆`: a migration slice that
+//!    removes a site must ratchet the list down in the same commit.
+//! 2. [`cache_destinations_match_the_allow_list`] — the set of `<data_dir>/cache/<subdir>`
+//!    destinations across the worker, the rust-api, sceneworks-core and the desktop shell equals
+//!    [`CACHE_DESTINATIONS`], exactly, each entry classified and commented.
+//! 3. [`parameterized_cache_root_helpers_are_registered`] — a helper that takes its cache subdir as a
+//!    *parameter* is the one shape a literal-keyed allow-list cannot see through, so every such
+//!    helper must be registered in [`PARAMETERIZED_CACHE_HELPERS`] and its call sites are scanned for
+//!    the literal they pass. A new one appearing unregistered is red.
+//! 4. The `scanner_*` tests below run the detection functions over hand-written snippets — a fake new
+//!    call site, a fake new wrapper, a fake new destination, plus doc-comment/`use`/string-literal
+//!    negatives. A guard that silently matches nothing passes forever; these are what stop that.
+//!
+//! ## What it deliberately does not do
+//!
+//! It does not chase the call graph past one hop. Full transitive reachability converges on
+//! `run_worker_loop` and flags 73 of 133 production files, which is not a gate, it is a census. One
+//! hop is what the real hazard needs: `image_jobs/pulid.rs` reaches Hugging Face **only** through
+//! `ensure_instantid_file`, a wrapper defined in `instantid.rs`, so it appears in no grep for either
+//! helper name and a naive gate is defeated by code already on `main`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use crate::architecture_tests::{code_without_comments, code_without_comments_or_literals};
+
+// ---------------------------------------------------------------------------------------------
+// Allow-lists
+// ---------------------------------------------------------------------------------------------
+
+/// What a download-reaching file is *for*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadRole {
+    /// The Model Manager install path and its plumbing. Epic 17625 makes this the **only** thing
+    /// that fetches weights, so these entries are permanent.
+    Installer,
+    /// A job-time weight fetch. Epic 17625 is migrating every one of these onto
+    /// [`crate::downloads::resolve_hf_component_file`] (cache-only, no `DownloadContext`), so this
+    /// population only ever shrinks. Each migration slice deletes its entry here.
+    JobTime,
+}
+
+/// Every production file under `crates/sceneworks-worker/src/` that reaches a download primitive —
+/// directly, through a one-hop local wrapper, or by constructing a `DownloadContext`.
+///
+/// Keyed on the path relative to `src/`, with no line numbers: line numbers rot on the first edit,
+/// and `architecture_tests` already refuses them for the capability matrix.
+///
+/// **Adding an entry to this list is the thing epic 17625 exists to stop.** If a lane needs weights,
+/// declare them in the model manifest and resolve them with
+/// [`crate::downloads::resolve_hf_component_file`]; a missing component becomes an actionable
+/// "install it from the Model Manager" error rather than a silent multi-gigabyte fetch inside a
+/// render.
+const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
+    // -- Installer: the Model Manager path. Permanent. ------------------------------------------
+    // The primitives themselves (`ensure_cached_file`, `ensure_cached_file_verified`,
+    // `ensure_hf_cached_file`, `download_snapshot_into_cache`) and their shared plumbing.
+    ("downloads.rs", DownloadRole::Installer),
+    // Dispatches `run_model_download_job` / `run_lora_download_job` from the job loop.
+    ("lib.rs", DownloadRole::Installer),
+    // The Model Manager executor: model + LoRA installs, tier fetches, conversions.
+    ("model_jobs.rs", DownloadRole::Installer),
+    // -- Job-time: the population epic 17625 is migrating. Only ever shrinks. --------------------
+    // Video/image tier fetches via `model_jobs::ensure_hf_files_cached` at generation time.
+    ("image_jobs/base.rs", DownloadRole::JobTime),
+    ("video_jobs/bernini.rs", DownloadRole::JobTime),
+    ("video_jobs/krea_realtime.rs", DownloadRole::JobTime),
+    ("video_jobs/ltx.rs", DownloadRole::JobTime),
+    ("video_jobs/mochi.rs", DownloadRole::JobTime),
+    ("video_jobs/scail2.rs", DownloadRole::JobTime),
+    ("video_jobs/wan.rs", DownloadRole::JobTime),
+    // Depth-Anything-V2 preprocessor, fetched through `strict_control::ensure_depth_estimator_dir`.
+    ("image_jobs/candle_strict_control.rs", DownloadRole::JobTime),
+    ("image_jobs/strict_control.rs", DownloadRole::JobTime),
+    ("image_jobs/zimage.rs", DownloadRole::JobTime),
+    // ControlNet weights, one lane per family.
+    ("image_jobs/flux1_control.rs", DownloadRole::JobTime),
+    ("image_jobs/flux1_control_candle.rs", DownloadRole::JobTime),
+    ("image_jobs/flux2.rs", DownloadRole::JobTime),
+    ("image_jobs/flux2_control_candle.rs", DownloadRole::JobTime),
+    ("image_jobs/kolors_control.rs", DownloadRole::JobTime),
+    ("image_jobs/krea_control.rs", DownloadRole::JobTime),
+    ("image_jobs/krea_control_candle.rs", DownloadRole::JobTime),
+    ("image_jobs/qwen_control.rs", DownloadRole::JobTime),
+    ("image_jobs/zimage_control.rs", DownloadRole::JobTime),
+    // IP-Adapter bundles.
+    ("image_jobs/flux_ipadapter.rs", DownloadRole::JobTime),
+    ("image_jobs/kolors_ipadapter.rs", DownloadRole::JobTime),
+    ("image_jobs/sdxl_ipadapter.rs", DownloadRole::JobTime),
+    // Identity stacks. `pulid.rs` holds NO download-helper text of its own — it reaches Hugging Face
+    // only through `instantid.rs`'s `ensure_instantid_file` wrapper, which is why this gate resolves
+    // one-hop wrappers instead of grepping two function names.
+    ("image_jobs/instantid.rs", DownloadRole::JobTime),
+    ("image_jobs/pulid.rs", DownloadRole::JobTime),
+    ("image_jobs/pulid_candle.rs", DownloadRole::JobTime),
+    // Lightning distill LoRA, fetched mid-render via `download_snapshot_into_cache`. Neither of
+    // these appears in a grep for `ensure_hf_cached_file`/`ensure_cached_file`.
+    ("image_jobs/qwen.rs", DownloadRole::JobTime),
+    ("image_jobs/qwen_edit_candle.rs", DownloadRole::JobTime),
+    // Imported-SDXL tokenizer/text-encoder components.
+    ("image_jobs/sdxl_imported.rs", DownloadRole::JobTime),
+    // DWPose preprocessor weights (`ensure_cached_file`, the non-HF primitive).
+    ("pose_jobs.rs", DownloadRole::JobTime),
+    // Real-ESRGAN / SeedVR2 upscaler checkpoints.
+    ("upscale_jobs.rs", DownloadRole::JobTime),
+    ("video_jobs/seedvr2.rs", DownloadRole::JobTime),
+];
+
+/// What a `<data_dir>/cache/<subdir>` destination holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheRole {
+    /// Model weights outside the Hugging Face cache. **This is the class AC9 forbids growing.**
+    /// Every entry here is either a job-time destination epic 17625 is migrating, or a read-only
+    /// legacy root kept so an existing install keeps working without re-downloading (AC10).
+    Weights,
+    /// The sanctioned destination: the app-managed Hugging Face hub cache
+    /// (`<data_dir>/cache/huggingface/hub`), which the Model Manager installs into.
+    HfCache,
+    /// Derived, regenerable job output. Deleting it costs compute, never a download.
+    Scratch,
+    /// User-supplied bytes staged by the API before a job consumes them.
+    Upload,
+    /// App runtime state (the jobs database, cross-process lock files).
+    Runtime,
+    /// Code that constructs the cache root itself rather than a destination inside it.
+    CacheRoot,
+    /// The subdirectory arrives as a **parameter**, so the destination is not visible at this site.
+    /// See [`PARAMETERIZED_CACHE_HELPERS`] for how the callers are covered.
+    Parameterized,
+}
+
+/// Every `<data_dir>/cache/<subdir>` destination in production source across the four crates that
+/// can write under the app data dir, as `(crate label, path relative to that crate's src/, subdir,
+/// role)`.
+///
+/// The subdir is the *destination name*, not a line number, so two sites in one function collapse to
+/// one entry and a genuinely new destination inside an already-listed file is still a new entry.
+/// `const` names are resolved to their string values, so `POSE_UPLOADS_CACHE_DIR` reads as
+/// `pose-uploads` and renaming the constant does not churn this list.
+///
+/// The rust-api / core / desktop crates are covered so a new **weight** destination cannot simply be
+/// added outside the worker. None of their current entries is `Weights`, and that is the point: the
+/// day one appears, this list has to say so out loud.
+const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
+    // ---- crates/sceneworks-worker/src ---------------------------------------------------------
+    // Prepared control-training datasets, regenerated from the source images.
+    (
+        "worker",
+        "control_training_jobs.rs",
+        "control-datasets",
+        CacheRole::Scratch,
+    ),
+    // ControlNet weights, one destination per family (sc-17628…sc-17631 migrate these).
+    (
+        "worker",
+        "image_jobs/flux1_control.rs",
+        "controlnet-flux1",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/flux1_control_candle.rs",
+        "controlnet-flux1-candle",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/flux2.rs",
+        "controlnet-flux2",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/flux2_control_candle.rs",
+        "controlnet-flux2",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/kolors_control.rs",
+        "controlnet-kolors",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/krea_control.rs",
+        "controlnet-krea",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/krea_control_candle.rs",
+        "controlnet-krea",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/qwen_control.rs",
+        "controlnet-qwen",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/zimage_control.rs",
+        "controlnet-zimage",
+        CacheRole::Weights,
+    ),
+    // IP-Adapter bundles.
+    (
+        "worker",
+        "image_jobs/flux_ipadapter.rs",
+        "ipadapter-flux",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/kolors_ipadapter.rs",
+        "ipadapter-kolors",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/sdxl_ipadapter.rs",
+        "ipadapter-sdxl",
+        CacheRole::Weights,
+    ),
+    // InstantID: face stack, ControlNet and OpenPose bundles.
+    (
+        "worker",
+        "image_jobs/instantid.rs",
+        "instantid-controlnet",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/instantid.rs",
+        "instantid-mlx",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/instantid.rs",
+        "instantid-openpose",
+        CacheRole::Weights,
+    ),
+    // PuLID identity adapters, MLX and candle lanes.
+    (
+        "worker",
+        "image_jobs/pulid.rs",
+        "pulid-flux-mlx",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "image_jobs/pulid_candle.rs",
+        "pulid-flux",
+        CacheRole::Weights,
+    ),
+    // Tokenizer/text-encoder components staged for an imported SDXL checkpoint.
+    (
+        "worker",
+        "image_jobs/sdxl_imported.rs",
+        "sdxl-imported-components",
+        CacheRole::Weights,
+    ),
+    // Depth-Anything-V2 preprocessor.
+    (
+        "worker",
+        "image_jobs/strict_control.rs",
+        "depth-anything-v2",
+        CacheRole::Weights,
+    ),
+    // Legacy read-only roots the person/pose analyzers still consult so a pre-migration install
+    // keeps working without re-downloading (AC10). Paired with a `models/<same>` root at each site.
+    (
+        "worker",
+        "person_jobs.rs",
+        "person-detect",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "person_segment.rs",
+        "person-segment",
+        CacheRole::Weights,
+    ),
+    (
+        "worker",
+        "person_segment_sam3_common.rs",
+        "person-segment-sam3",
+        CacheRole::Weights,
+    ),
+    // DWPose preprocessor weights.
+    ("worker", "pose_jobs.rs", "dwpose", CacheRole::Weights),
+    // Real-ESRGAN (legacy root) and the SeedVR2 checkpoint under `upscale/seedvr2/`.
+    ("worker", "upscale_jobs.rs", "upscale", CacheRole::Weights),
+    // SeedVR2 video-upscaler weights on the MLX lane.
+    (
+        "worker",
+        "video_jobs/seedvr2.rs",
+        "seedvr2-mlx",
+        CacheRole::Weights,
+    ),
+    // API-staged uploads: the worker re-confines the client-supplied source path to these roots.
+    ("worker", "imports.rs", "lora-uploads", CacheRole::Upload),
+    ("worker", "imports.rs", "model-uploads", CacheRole::Upload),
+    (
+        "worker",
+        "kps_jobs.rs",
+        "keypoint-uploads",
+        CacheRole::Upload,
+    ),
+    ("worker", "model_jobs.rs", "lora-uploads", CacheRole::Upload),
+    (
+        "worker",
+        "model_jobs.rs",
+        "model-uploads",
+        CacheRole::Upload,
+    ),
+    ("worker", "pose_jobs.rs", "pose-uploads", CacheRole::Upload),
+    // Rendered pose-detection previews, regenerated from the source image.
+    ("worker", "pose_jobs.rs", "pose_detect", CacheRole::Scratch),
+    // Cross-process model-conversion locks.
+    (
+        "worker",
+        "model_jobs.rs",
+        "worker-locks",
+        CacheRole::Runtime,
+    ),
+    // The two confinement helpers that take the cache subdir as a parameter. See
+    // `PARAMETERIZED_CACHE_HELPERS`.
+    (
+        "worker",
+        "paths.rs",
+        "{cache_dir}",
+        CacheRole::Parameterized,
+    ),
+    (
+        "worker",
+        "paths.rs",
+        "{upload_cache}",
+        CacheRole::Parameterized,
+    ),
+    // ---- apps/rust-api/src --------------------------------------------------------------------
+    ("rust-api", "assets.rs", "uploads", CacheRole::Upload),
+    ("rust-api", "workflows.rs", "uploads", CacheRole::Upload),
+    (
+        "rust-api",
+        "keypoints.rs",
+        "keypoint-uploads",
+        CacheRole::Upload,
+    ),
+    ("rust-api", "loras.rs", "lora-uploads", CacheRole::Upload),
+    ("rust-api", "models.rs", "model-uploads", CacheRole::Upload),
+    ("rust-api", "poses.rs", "pose-uploads", CacheRole::Upload),
+    // Generated media thumbnails.
+    ("rust-api", "lib.rs", "media-thumbnails", CacheRole::Scratch),
+    // The jobs database.
+    ("rust-api", "server.rs", "jobs.db", CacheRole::Runtime),
+    // Upload-sweep helpers that forward a subdir parameter.
+    (
+        "rust-api",
+        "assets.rs",
+        "{subdir}",
+        CacheRole::Parameterized,
+    ),
+    ("rust-api", "lib.rs", "{subdir}", CacheRole::Parameterized),
+    (
+        "rust-api",
+        "startup.rs",
+        "{subdir}",
+        CacheRole::Parameterized,
+    ),
+    // ---- crates/sceneworks-core/src -----------------------------------------------------------
+    // Constructs `<data_dir>/cache` itself; no destination inside it.
+    ("core", "app_paths.rs", "<cache-root>", CacheRole::CacheRoot),
+    // The app-managed Hugging Face hub cache — the destination epic 17625 migrates everything ONTO.
+    ("core", "hf_home.rs", "huggingface", CacheRole::HfCache),
+    (
+        "core",
+        "project_store.rs",
+        "keypoint-uploads",
+        CacheRole::Upload,
+    ),
+    (
+        "core",
+        "project_store.rs",
+        "pose_detect",
+        CacheRole::Scratch,
+    ),
+    // ---- apps/desktop/src ---------------------------------------------------------------------
+    // Points `HF_HOME` at the app-managed hub cache.
+    ("desktop", "setup.rs", "huggingface", CacheRole::HfCache),
+];
+
+/// Helpers that build a `<data_dir>/cache/<subdir>` root from a **parameter**, as
+/// `(function name, zero-based index of the subdir parameter)`.
+///
+/// # Why this is called out separately
+///
+/// This is the documented way an allow-list keyed on string literals gets bypassed. `paths.rs`'s
+/// `normalize_app_managed_cache_path(settings, raw_path, cache_dir, label)` never mentions a concrete
+/// destination, so scanning for `.join("cache").join("<literal>")` sees nothing at the definition —
+/// and a caller that routes a NEW weight destination through it would be invisible.
+///
+/// The fix is to scan the **call sites**: for each registered helper, the literal (or `const`) passed
+/// in the recorded position is recorded as a cache destination attributed to the *calling* file. That
+/// is why `poses.rs`/`keypoints.rs` appear in [`CACHE_DESTINATIONS`] at all — neither contains the
+/// string `"cache"`.
+///
+/// [`parameterized_cache_root_helpers_are_registered`] keeps this list honest: it rediscovers the
+/// shape structurally (a function whose body joins `"cache"` with one of its own parameters) and
+/// fails if the discovered set differs from this one. A new parameterized helper cannot be added
+/// without registering it.
+///
+/// **Known limitation, stated loudly:** a caller that forwards its *own* parameter through one of
+/// these helpers records the opaque marker `{subdir}` rather than a destination — `rust-api`'s
+/// `sweep_stale_uploads` chain does exactly that. Those are sweep/confinement paths, not write
+/// targets for weights, but the scanner cannot prove that; it can only make the opacity visible in
+/// the allow-list. A second-order forwarder that *did* stage weights would land as a `{…}` entry,
+/// which is still a new entry, and still red.
+const PARAMETERIZED_CACHE_HELPERS: &[(&str, usize)] = &[
+    ("normalize_app_managed_cache_path", 2),
+    ("resolve_import_source_path", 3),
+    ("write_upload_field_to_dir", 2),
+    ("sweep_stale_uploads_cancellable", 1),
+];
+
+/// The download primitives. Everything that actually opens a socket for model bytes bottoms out in
+/// one of these four; the first three are the helpers sc-17637 names, and
+/// `download_snapshot_into_cache` is their peer for whole-snapshot fetches — the one two job-time
+/// Lightning-LoRA sites (`image_jobs/qwen.rs`, `image_jobs/qwen_edit_candle.rs`) use, which is why a
+/// gate limited to the two named helpers would have missed them.
+const DOWNLOAD_PRIMITIVES: &[&str] = &[
+    "ensure_cached_file",
+    "ensure_cached_file_verified",
+    "ensure_hf_cached_file",
+    "download_snapshot_into_cache",
+];
+
+/// The crates whose `src/` trees are scanned, as `(label, path from the repo root, crate root file)`.
+///
+/// The download gate covers only the worker: the primitives are `pub(crate)`, so no other crate can
+/// reach them. The cache gate covers all four, because a new weight destination could be introduced
+/// anywhere that can see `data_dir`.
+const SCANNED_CRATES: &[(&str, &str, &str)] = &[
+    ("worker", "crates/sceneworks-worker/src", "lib.rs"),
+    ("rust-api", "apps/rust-api/src", "lib.rs"),
+    ("core", "crates/sceneworks-core/src", "lib.rs"),
+    ("desktop", "apps/desktop/src", "main.rs"),
+];
+
+// ---------------------------------------------------------------------------------------------
+// Source loading
+// ---------------------------------------------------------------------------------------------
+
+/// One production source file: comments stripped, `#[cfg(test)]`-only items removed, string literals
+/// intact.
+#[derive(Debug, Clone)]
+struct SourceFile {
+    /// Path relative to the crate's `src/`, slash-separated (`image_jobs/flux2.rs`).
+    rel: String,
+    code: String,
+}
+
+impl SourceFile {
+    /// The same text with string literal CONTENTS blanked, for syntax questions where a literal must
+    /// not count (`"…ensure_hf_cached_file(…)"` inside an error message is not a call).
+    fn code_without_literals(&self) -> String {
+        code_without_comments_or_literals(&self.code)
+    }
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("the worker crate lives two levels below the repo root")
+        .to_path_buf()
+}
+
+/// Every `.rs` file under `dir`, as `(path relative to dir, comment-stripped source)`.
+///
+/// Walked by path rather than enumerated, so a NEW file is scanned the day it lands. A hardcoded
+/// file list is how the previous inventory-shaped guards in this repo went stale.
+fn read_tree(dir: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    collect_rs(dir, dir, &mut out);
+    out
+}
+
+fn collect_rs(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_rs(root, &path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let rel = path
+                .strip_prefix(root)
+                .expect("path under root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", e));
+            out.insert(rel, code_without_comments(&source));
+        }
+    }
+}
+
+/// The production files of one crate: the whole `src/` tree minus every file reachable only as test
+/// code, with inline `#[cfg(test)]` items removed from what remains.
+fn production_sources(src_dir: &Path, root_module: &str) -> Vec<SourceFile> {
+    let tree = read_tree(src_dir);
+    let test_only = test_only_files(&tree, root_module);
+    tree.iter()
+        .filter(|(rel, _)| !test_only.contains(rel.as_str()))
+        .map(|(rel, code)| SourceFile {
+            rel: rel.clone(),
+            code: strip_cfg_test_items(code),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pure detection primitives (unit-tested against synthetic input below)
+// ---------------------------------------------------------------------------------------------
+
+/// `bytes[start..end]` as a `String`, clamped to the buffer.
+///
+/// Byte-indexed rather than `&str`-indexed on purpose: the scanners advance byte by byte, and source
+/// text outside comments still carries multi-byte characters (`…` and `—` appear in error strings),
+/// so slicing the `&str` directly can panic on a non-boundary index.
+fn slice_lossy(bytes: &[u8], start: usize, end: usize) -> String {
+    let start = start.min(bytes.len());
+    let end = end.clamp(start, bytes.len());
+    String::from_utf8_lossy(&bytes[start..end]).into_owned()
+}
+
+/// Index just past a `"…"` literal starting at `start`.
+fn skip_string(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+/// Index just past a `'x'` / `'\n'` char literal starting at `start`, or `start + 1` when the quote
+/// is a lifetime (`'a`, `'_`) rather than a literal.
+///
+/// Without this, a `'{'` char literal — eight files in the scanned crates contain one — would throw
+/// off every brace match downstream.
+fn skip_char(bytes: &[u8], start: usize) -> usize {
+    if bytes.get(start + 2) == Some(&b'\'') {
+        return start + 3;
+    }
+    if bytes.get(start + 1) == Some(&b'\\') && bytes.get(start + 3) == Some(&b'\'') {
+        return start + 4;
+    }
+    start + 1
+}
+
+/// Whether `code` contains an *invocation* of `name` — the identifier, at a token boundary, followed
+/// by `(`, and not preceded by `fn` (which would be the definition).
+///
+/// A `use` item never matches: `use super::{advanced, ensure_hf_cached_file, …};` has a comma after
+/// the name, not a paren. Path-qualified calls do match, which is required —
+/// `crate::downloads::ensure_hf_cached_file(…)` is how four lanes spell it.
+fn invokes(code: &str, name: &str) -> bool {
+    let bytes = code.as_bytes();
+    let name_bytes = name.as_bytes();
+    let mut index = 0usize;
+    while let Some(offset) = code[index..].find(name) {
+        let start = index + offset;
+        let end = start + name_bytes.len();
+        index = end;
+        let preceded_by_ident = start
+            .checked_sub(1)
+            .map(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
+            .unwrap_or(false);
+        if preceded_by_ident {
+            continue;
+        }
+        if bytes
+            .get(end)
+            .is_some_and(|b| *b == b'_' || b.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let mut after = end;
+        while after < bytes.len() && (bytes[after] as char).is_whitespace() {
+            after += 1;
+        }
+        if bytes.get(after) != Some(&b'(') {
+            continue;
+        }
+        // `fn NAME(` is the definition, not a call.
+        let before = code[..start].trim_end();
+        if before.ends_with("fn") && before[..before.len() - 2].ends_with(char::is_whitespace) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// One `fn` item: its name, its parameter names in order, and its body text.
+#[derive(Debug, Clone)]
+struct FnItem {
+    name: String,
+    params: Vec<String>,
+    body: String,
+}
+
+/// Every `fn NAME(params) … { body }` in `code`, with string literals and char literals respected
+/// while brace-matching.
+///
+/// Deliberately loose — trait method signatures without bodies are skipped, and a body that
+/// mis-matches would run long rather than short, which over-reports rather than silently passing.
+fn fn_items(code: &str) -> Vec<FnItem> {
+    let bytes = code.as_bytes();
+    let mut items = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find("fn ") {
+        let keyword = cursor + offset;
+        cursor = keyword + 3;
+        // Must be the `fn` keyword, not the tail of an identifier.
+        if keyword
+            .checked_sub(1)
+            .map(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let mut index = keyword + 3;
+        while index < bytes.len() && (bytes[index] as char).is_whitespace() {
+            index += 1;
+        }
+        let name_start = index;
+        while index < bytes.len() && (bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+        {
+            index += 1;
+        }
+        if index == name_start {
+            continue;
+        }
+        let name = code[name_start..index].to_owned();
+        // Skip a generic parameter list before the argument list.
+        while index < bytes.len() && bytes[index] != b'(' {
+            if bytes[index] == b'{' || bytes[index] == b';' {
+                break;
+            }
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'(') {
+            continue;
+        }
+        let params_start = index;
+        let mut depth = 0i32;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'"' => {
+                    index = skip_string(bytes, index);
+                    continue;
+                }
+                b'\'' => {
+                    index = skip_char(bytes, index);
+                    continue;
+                }
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        index += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        let params = split_params(&slice_lossy(bytes, params_start, index));
+        // Return type / where clause, then the body brace.
+        while index < bytes.len() && bytes[index] != b'{' {
+            match bytes[index] {
+                b';' => break,
+                b'"' => {
+                    index = skip_string(bytes, index);
+                    continue;
+                }
+                b'\'' => {
+                    index = skip_char(bytes, index);
+                    continue;
+                }
+                _ => index += 1,
+            }
+        }
+        if bytes.get(index) != Some(&b'{') {
+            continue;
+        }
+        let body_start = index + 1;
+        let mut braces = 1i32;
+        index = body_start;
+        while index < bytes.len() && braces > 0 {
+            match bytes[index] {
+                b'"' => {
+                    index = skip_string(bytes, index);
+                    continue;
+                }
+                b'\'' => {
+                    index = skip_char(bytes, index);
+                    continue;
+                }
+                b'{' => braces += 1,
+                b'}' => braces -= 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        let body_end = index.saturating_sub(1);
+        items.push(FnItem {
+            name,
+            params,
+            body: slice_lossy(bytes, body_start.min(body_end), body_end),
+        });
+        cursor = body_start;
+    }
+    items
+}
+
+/// Parameter names from a `(a: T, b: U)` list, in order.
+///
+/// Splits on top-level commas rather than regex-matching `ident:`, because `target: &std::path::Path`
+/// contains three colons and a naive scan would report three parameters — silently shifting every
+/// index in [`PARAMETERIZED_CACHE_HELPERS`].
+fn split_params(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim().trim_start_matches('(').trim_end_matches(')');
+    let bytes = trimmed.as_bytes();
+    // Byte buffers throughout: a parameter list can carry non-ASCII inside a default string literal,
+    // and slicing a `&str` mid-character panics.
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    let mut current: Vec<u8> = Vec::new();
+    let mut depth = 0i32;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let end = skip_string(bytes, index).min(bytes.len());
+                current.extend_from_slice(&bytes[index..end]);
+                index = end;
+                continue;
+            }
+            b'\'' => {
+                let end = skip_char(bytes, index).min(bytes.len());
+                current.extend_from_slice(&bytes[index..end]);
+                index = end;
+                continue;
+            }
+            b'(' | b'<' | b'[' | b'{' => depth += 1,
+            b')' | b'>' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+                index += 1;
+                continue;
+            }
+            _ => {}
+        }
+        current.push(bytes[index]);
+        index += 1;
+    }
+    parts.push(current);
+    parts
+        .into_iter()
+        .map(|part| String::from_utf8_lossy(&part).into_owned())
+        .filter_map(|part| {
+            let head = part.split(':').next()?.trim().to_owned();
+            let head = head.trim_start_matches("mut ").trim().to_owned();
+            (!head.is_empty() && head.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric()))
+                .then_some(head)
+        })
+        .collect()
+}
+
+/// Whether a `cfg(..)` predicate means "test builds only".
+///
+/// `test` and `all(test, …)` qualify. `any(test, …)` and `not(test)` deliberately do NOT — those
+/// items ARE compiled in production, and removing them would blind the scan to real code.
+fn cfg_is_test_only(predicate: &str) -> bool {
+    let predicate = predicate.trim();
+    if predicate == "test" {
+        return true;
+    }
+    let Some(inner) = predicate
+        .strip_prefix("all(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let mut depth = 0i32;
+    let mut current = String::new();
+    let mut members = Vec::new();
+    for character in inner.chars() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                members.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    members.push(current);
+    members.iter().any(|member| cfg_is_test_only(member))
+}
+
+/// Remove `#[cfg(test)]`-only items (attribute plus the item that follows) from comment-stripped
+/// source.
+///
+/// This is not an escape hatch: production code cannot call a `#[cfg(test)]` item, because it does
+/// not exist in a non-test build. Without it, the `#[cfg(test)] mod tests` blocks inside production
+/// files (real-weight smokes that legitimately download, temp-dir fixtures that legitimately join
+/// `"cache"`) would flood both allow-lists with entries that can never run in production.
+fn strip_cfg_test_items(code: &str) -> String {
+    let bytes = code.as_bytes();
+    // Byte buffer, not a `String`: source outside comments still carries non-ASCII (em dashes in
+    // identifiers-adjacent prose, `…` in error strings), and indexing a `&str` at a byte offset that
+    // lands inside a multi-byte character panics.
+    let mut out: Vec<u8> = Vec::with_capacity(code.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if !bytes[index..].starts_with(b"#[cfg(") {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        // Matching `]` for the attribute.
+        let mut scan = index + 1;
+        let mut depth = 0i32;
+        while scan < bytes.len() {
+            match bytes[scan] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        scan += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            scan += 1;
+        }
+        let attribute = &code[index..scan.min(code.len())];
+        let predicate = attribute
+            .strip_prefix("#[cfg(")
+            .and_then(|rest| rest.strip_suffix(")]"))
+            .unwrap_or("");
+        if !cfg_is_test_only(predicate) {
+            out.extend_from_slice(attribute.as_bytes());
+            index = scan;
+            continue;
+        }
+        // Drop the item this attribute applies to: everything through its `{ … }` block, or through
+        // the `;` when it is a `mod foo;` / `use …;` / `const … ;`.
+        let mut item = scan;
+        while item < bytes.len() && bytes[item] != b'{' && bytes[item] != b';' {
+            match bytes[item] {
+                b'"' => {
+                    item = skip_string(bytes, item);
+                    continue;
+                }
+                b'\'' => {
+                    item = skip_char(bytes, item);
+                    continue;
+                }
+                _ => item += 1,
+            }
+        }
+        match bytes.get(item) {
+            Some(b';') => index = item + 1,
+            Some(b'{') => {
+                let mut braces = 1i32;
+                item += 1;
+                while item < bytes.len() && braces > 0 {
+                    match bytes[item] {
+                        b'"' => {
+                            item = skip_string(bytes, item);
+                            continue;
+                        }
+                        b'\'' => {
+                            item = skip_char(bytes, item);
+                            continue;
+                        }
+                        b'{' => braces += 1,
+                        b'}' => braces -= 1,
+                        _ => {}
+                    }
+                    item += 1;
+                }
+                index = item;
+            }
+            _ => index = scan,
+        }
+    }
+    String::from_utf8(out).expect("dropping whole `#[cfg(test)]` items preserves UTF-8")
+}
+
+/// Every file in `tree` reachable only as test code.
+///
+/// Seeded from `#[cfg(test)] mod NAME;` declarations (detected by diffing the module declarations
+/// before and after [`strip_cfg_test_items`]) and propagated through both `mod NAME;` and
+/// `include!("…")` edges — `src/tests.rs` reaches its four submodules through `include!`, so a
+/// `mod`-only walk would leave them classified as production.
+///
+/// This is what keeps THIS module out of its own scan: it is declared `#[cfg(test)] mod
+/// job_time_download_guard;`, and its synthetic fixtures contain both `ensure_hf_cached_file(` and
+/// `.join("cache")`.
+fn test_only_files(tree: &BTreeMap<String, String>, root_module: &str) -> BTreeSet<String> {
+    let mut children: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut includes: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut seeds: BTreeSet<String> = BTreeSet::new();
+
+    for (rel, code) in tree {
+        let declared = module_declarations(code);
+        let production = module_declarations(&strip_cfg_test_items(code));
+        for name in &declared {
+            if let Some(target) = resolve_module(rel, name, tree, root_module) {
+                children
+                    .entry(rel.as_str())
+                    .or_default()
+                    .push(target.clone());
+                if !production.contains(name) {
+                    seeds.insert(target);
+                }
+            }
+        }
+        for path in include_paths(code) {
+            let base = rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+            let target = if base.is_empty() {
+                path
+            } else {
+                format!("{base}/{path}")
+            };
+            if tree.contains_key(&target) {
+                includes.entry(rel.as_str()).or_default().push(target);
+            }
+        }
+    }
+
+    let mut out = seeds.clone();
+    let mut frontier: Vec<String> = seeds.into_iter().collect();
+    while let Some(current) = frontier.pop() {
+        let downstream = children
+            .get(current.as_str())
+            .into_iter()
+            .chain(includes.get(current.as_str()))
+            .flatten();
+        for target in downstream {
+            if out.insert(target.clone()) {
+                frontier.push(target.clone());
+            }
+        }
+    }
+    out
+}
+
+/// `mod NAME;` declarations in `code` (not `mod NAME { … }`, which needs no file).
+fn module_declarations(code: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let bytes = code.as_bytes();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find("mod ") {
+        let keyword = cursor + offset;
+        cursor = keyword + 4;
+        if keyword
+            .checked_sub(1)
+            .map(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let rest = &code[keyword + 4..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| *c == '_' || c.is_ascii_alphanumeric())
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        if rest[name.len()..].trim_start().starts_with(';') {
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// `include!("…")` paths in `code`.
+fn include_paths(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find("include!(") {
+        let start = cursor + offset + "include!(".len();
+        cursor = start;
+        let rest = code[start..].trim_start();
+        let Some(body) = rest.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = body.find('"') else { continue };
+        out.push(body[..end].to_owned());
+    }
+    out
+}
+
+/// Resolve `mod NAME;` declared in `rel` to a file in `tree`.
+fn resolve_module(
+    rel: &str,
+    name: &str,
+    tree: &BTreeMap<String, String>,
+    root_module: &str,
+) -> Option<String> {
+    let dir = if rel == root_module || rel.ends_with("/mod.rs") {
+        rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
+    } else {
+        rel.strip_suffix(".rs")?
+    };
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    [
+        format!("{prefix}{name}.rs"),
+        format!("{prefix}{name}/mod.rs"),
+    ]
+    .into_iter()
+    .find(|candidate| tree.contains_key(candidate))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 1 — download reachability
+// ---------------------------------------------------------------------------------------------
+
+/// One-hop wrappers: functions whose own body calls a [`DOWNLOAD_PRIMITIVES`] member.
+///
+/// Computed across the whole crate, not per file, because the wrapper and its callers routinely live
+/// apart — `ensure_instantid_file` is defined in `image_jobs/instantid.rs` and called twelve times
+/// from there and `image_jobs/pulid.rs`.
+fn download_wrappers(files: &[SourceFile]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for file in files {
+        for item in fn_items(&file.code) {
+            if DOWNLOAD_PRIMITIVES.contains(&item.name.as_str()) {
+                continue;
+            }
+            let body = code_without_comments_or_literals(&item.body);
+            if DOWNLOAD_PRIMITIVES
+                .iter()
+                .any(|primitive| invokes(&body, primitive))
+            {
+                out.insert(item.name);
+            }
+        }
+    }
+    out
+}
+
+/// Why a file counts as reaching a download: the primitive/wrapper names it invokes, plus a
+/// `DownloadContext` literal if it builds one.
+///
+/// Takes the already-blanked code so a mention inside a string literal or a doc comment cannot count.
+fn download_reach(code_without_literals: &str, watch: &BTreeSet<String>) -> Vec<String> {
+    let mut reasons: Vec<String> = watch
+        .iter()
+        .filter(|name| invokes(code_without_literals, name))
+        .cloned()
+        .collect();
+    if constructs_download_context(code_without_literals) {
+        reasons.push("DownloadContext { … }".to_owned());
+    }
+    reasons
+}
+
+/// Whether `code` builds a `DownloadContext` struct literal.
+///
+/// The type is a plain struct with no privileged constructor, so building one is the actual ticket to
+/// the network — and it is how a lane reaches a download helper it never names. A `use` import or a
+/// `&DownloadContext<'_>` parameter is not a construction and must not count.
+fn constructs_download_context(code: &str) -> bool {
+    let mut cursor = 0usize;
+    let bytes = code.as_bytes();
+    while let Some(offset) = code[cursor..].find("DownloadContext") {
+        let start = cursor + offset;
+        let end = start + "DownloadContext".len();
+        cursor = end;
+        let preceded_by_ident = start
+            .checked_sub(1)
+            .map(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
+            .unwrap_or(false);
+        if preceded_by_ident {
+            continue;
+        }
+        if code[end..].trim_start().starts_with('{') {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 2 — `<data_dir>/cache` destinations
+// ---------------------------------------------------------------------------------------------
+
+/// `const NAME: &str = "value"` / `static NAME: &str = "value"` bindings, so a destination hidden
+/// behind `POSE_UPLOADS_CACHE_DIR` reads as `pose-uploads` in the allow-list rather than as an opaque
+/// constant name that churns when someone renames it.
+fn string_constants(files: &[SourceFile]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for file in files {
+        for keyword in ["const ", "static "] {
+            let mut cursor = 0usize;
+            while let Some(offset) = file.code[cursor..].find(keyword) {
+                let start = cursor + offset + keyword.len();
+                cursor = start;
+                let rest = &file.code[start..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| *c == '_' || c.is_ascii_alphanumeric())
+                    .collect();
+                if name.is_empty() {
+                    continue;
+                }
+                let after = rest[name.len()..].trim_start();
+                let Some(after) = after.strip_prefix(':') else {
+                    continue;
+                };
+                let after = after.trim_start();
+                if !after.starts_with("&str") && !after.starts_with("&'static str") {
+                    continue;
+                }
+                let Some(equals) = after.find('=') else {
+                    continue;
+                };
+                let value = after[equals + 1..].trim_start();
+                let Some(literal) = value.strip_prefix('"') else {
+                    continue;
+                };
+                let Some(end) = literal.find('"') else {
+                    continue;
+                };
+                out.insert(name, literal[..end].to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Render one `.join(…)` argument as an allow-list subdirectory name.
+///
+/// A literal becomes itself; a `const` resolves through [`string_constants`]; anything else becomes a
+/// braced marker (`{cache_dir}`, `{expr}`) so an opaque destination is loud rather than absent.
+fn subdir_label(argument: &str, constants: &BTreeMap<String, String>) -> String {
+    let argument = argument.trim().trim_start_matches('&').trim();
+    if let Some(literal) = argument.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        return literal.to_owned();
+    }
+    if !argument.is_empty()
+        && argument
+            .bytes()
+            .all(|b| b == b'_' || b.is_ascii_alphanumeric())
+    {
+        return constants
+            .get(argument)
+            .cloned()
+            .unwrap_or_else(|| format!("{{{argument}}}"));
+    }
+    "{expr}".to_owned()
+}
+
+/// Every `<data_dir>/cache/<subdir>` destination named in `code`.
+///
+/// Two spellings, both live in the tree today:
+/// * `.join("cache").join(<subdir>)` (and the `.push` variant), and
+/// * a combined `"cache/<subdir>/…"` path literal — `model_jobs.rs`'s `CONVERSION_LOCKS_DIR` and the
+///   three legacy person/pose roots use this one, and a scanner that only looked for `.join("cache")`
+///   would miss all four.
+fn cache_destinations(code: &str, constants: &BTreeMap<String, String>) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for opener in [".join(\"cache\")", ".push(\"cache\")"] {
+        let mut cursor = 0usize;
+        while let Some(offset) = code[cursor..].find(opener) {
+            let start = cursor + offset + opener.len();
+            cursor = start;
+            let rest = code[start..].trim_start();
+            let next = rest
+                .strip_prefix(".join(")
+                .or_else(|| rest.strip_prefix(".push("));
+            match next.and_then(|arg| arg.find([',', ')']).map(|end| &arg[..end])) {
+                Some(argument) => {
+                    out.insert(subdir_label(argument, constants));
+                }
+                None => {
+                    out.insert("<cache-root>".to_owned());
+                }
+            }
+        }
+    }
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find("\"cache/") {
+        let start = cursor + offset + "\"cache/".len();
+        cursor = start;
+        let Some(end) = code[start..].find('"') else {
+            continue;
+        };
+        let segment = code[start..start + end].split('/').next().unwrap_or("");
+        out.insert(if segment.is_empty() {
+            "<cache-root>".to_owned()
+        } else {
+            segment.to_owned()
+        });
+    }
+    out
+}
+
+/// Functions that build a cache root from one of their own parameters, as `(name, parameter index)`.
+///
+/// Rediscovered structurally rather than listed, so [`PARAMETERIZED_CACHE_HELPERS`] cannot silently
+/// fall behind a new helper.
+fn discover_parameterized_helpers(files: &[SourceFile]) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for file in files {
+        for item in fn_items(&file.code) {
+            for opener in [".join(\"cache\")", ".push(\"cache\")"] {
+                let mut cursor = 0usize;
+                while let Some(offset) = item.body[cursor..].find(opener) {
+                    let start = cursor + offset + opener.len();
+                    cursor = start;
+                    let rest = item.body[start..].trim_start();
+                    let Some(argument) = rest
+                        .strip_prefix(".join(")
+                        .or_else(|| rest.strip_prefix(".push("))
+                        .and_then(|arg| arg.find([',', ')']).map(|end| &arg[..end]))
+                    else {
+                        continue;
+                    };
+                    let argument = argument.trim().trim_start_matches('&').trim();
+                    if let Some(index) = item.params.iter().position(|p| p == argument) {
+                        out.insert(item.name.clone(), index);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The literal (or `const`) each call to a registered parameterized helper passes in the subdir
+/// position, so the caller — which may contain no `"cache"` text at all — is attributed the
+/// destination it is really naming.
+fn parameterized_call_destinations(
+    code: &str,
+    constants: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (helper, index) in PARAMETERIZED_CACHE_HELPERS {
+        for args in call_arguments(code, helper) {
+            if let Some(argument) = args.get(*index) {
+                out.insert(subdir_label(argument, constants));
+            }
+        }
+    }
+    out
+}
+
+/// Top-level argument expressions of every call to `name` in `code`.
+fn call_arguments(code: &str, name: &str) -> Vec<Vec<String>> {
+    let bytes = code.as_bytes();
+    let mut calls = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find(name) {
+        let start = cursor + offset;
+        let end = start + name.len();
+        cursor = end;
+        let preceded_by_ident = start
+            .checked_sub(1)
+            .map(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
+            .unwrap_or(false);
+        if preceded_by_ident {
+            continue;
+        }
+        let mut open = end;
+        while open < bytes.len() && (bytes[open] as char).is_whitespace() {
+            open += 1;
+        }
+        if bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        let before = code[..start].trim_end();
+        if before.ends_with("fn") && before[..before.len() - 2].ends_with(char::is_whitespace) {
+            continue;
+        }
+        let mut args: Vec<Vec<u8>> = Vec::new();
+        let mut current: Vec<u8> = Vec::new();
+        let mut depth = 0i32;
+        let mut index = open;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'"' => {
+                    let stop = skip_string(bytes, index).min(bytes.len());
+                    current.extend_from_slice(&bytes[index..stop]);
+                    index = stop;
+                    continue;
+                }
+                b'\'' => {
+                    let stop = skip_char(bytes, index).min(bytes.len());
+                    current.extend_from_slice(&bytes[index..stop]);
+                    index = stop;
+                    continue;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        args.push(std::mem::take(&mut current));
+                        break;
+                    }
+                }
+                b',' if depth == 1 => {
+                    args.push(std::mem::take(&mut current));
+                    index += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            if !(depth == 1 && bytes[index] == b'(') {
+                current.push(bytes[index]);
+            }
+            index += 1;
+        }
+        calls.push(
+            args.into_iter()
+                .map(|arg| String::from_utf8_lossy(&arg).trim().to_owned())
+                .filter(|arg| !arg.is_empty())
+                .collect(),
+        );
+    }
+    calls
+}
+
+// ---------------------------------------------------------------------------------------------
+// The gates
+// ---------------------------------------------------------------------------------------------
+
+fn worker_sources() -> Vec<SourceFile> {
+    let (_, src, root) = SCANNED_CRATES[0];
+    production_sources(&repo_root().join(src), root)
+}
+
+/// The production sources of every scanned crate, as `(label, files)`.
+fn all_production_sources() -> Vec<(&'static str, Vec<SourceFile>)> {
+    SCANNED_CRATES
+        .iter()
+        .map(|(label, src, root)| {
+            let files = production_sources(&repo_root().join(src), root);
+            assert!(
+                files.len() >= 10,
+                "{label}: scanned only {} production files — the walk is broken, not the crate",
+                files.len()
+            );
+            (*label, files)
+        })
+        .collect()
+}
+
+/// **AC9, half one.** The set of production worker files that reach a download primitive must equal
+/// [`DOWNLOAD_SITES`] exactly.
+///
+/// Exact equality, not containment, in both directions on purpose:
+/// * an EXTRA file means a new job-time download landed — the regression this epic exists to stop;
+/// * a MISSING file means a migration slice removed one and did not ratchet the list down, which is
+///   how an allow-list quietly turns back into a wish list.
+#[test]
+fn job_time_download_sites_match_the_allow_list() {
+    let files = worker_sources();
+    assert!(
+        files.len() > 100,
+        "expected the worker's production tree, scanned only {} files — the walk is broken, not the \
+         crate",
+        files.len()
+    );
+
+    let wrappers = download_wrappers(&files);
+    assert!(
+        wrappers.contains("ensure_instantid_file"),
+        "the one-hop wrapper resolver found no `ensure_instantid_file`, so `image_jobs/pulid.rs` — \
+         which reaches Hugging Face ONLY through it — would be invisible. Wrapper detection is \
+         broken."
+    );
+    let mut watch: BTreeSet<String> = DOWNLOAD_PRIMITIVES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    watch.extend(wrappers);
+
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for file in &files {
+        let reasons = download_reach(&file.code_without_literals(), &watch);
+        if !reasons.is_empty() {
+            found.insert(file.rel.clone(), reasons);
+        }
+    }
+
+    let allowed: BTreeMap<&str, DownloadRole> = DOWNLOAD_SITES.iter().copied().collect();
+    assert_eq!(
+        allowed.len(),
+        DOWNLOAD_SITES.len(),
+        "DOWNLOAD_SITES has a duplicate path"
+    );
+
+    let added: Vec<String> = found
+        .iter()
+        .filter(|(rel, _)| !allowed.contains_key(rel.as_str()))
+        .map(|(rel, reasons)| format!("{rel}  ({})", reasons.join(", ")))
+        .collect();
+    let migrated: Vec<&str> = allowed
+        .keys()
+        .filter(|rel| !found.contains_key(**rel))
+        .copied()
+        .collect();
+
+    assert!(
+        added.is_empty(),
+        "NEW job-time download site(s) — epic 17625 (AC9) forbids this:\n  {}\n\nA render must not \
+         fetch weights. Declare the component in the model manifest and resolve it with \
+         `crate::downloads::resolve_hf_component_file` (cache-only, takes no `DownloadContext`), so a \
+         missing install becomes an actionable \"install it from the Model Manager\" error instead of \
+         a silent multi-gigabyte download inside a job.",
+        added.join("\n  ")
+    );
+    assert!(
+        migrated.is_empty(),
+        "site(s) migrated off the download helpers but still listed in DOWNLOAD_SITES:\n  {}\n\nThis \
+         is the ratchet: remove the entry in the same commit that removes the call, so the list \
+         always states the real remaining population.",
+        migrated.join("\n  ")
+    );
+
+    let remaining = allowed
+        .values()
+        .filter(|role| **role == DownloadRole::JobTime)
+        .count();
+    assert_eq!(
+        remaining,
+        found.len() - 3,
+        "the three `Installer` entries (downloads.rs, lib.rs, model_jobs.rs) plus the job-time \
+         population must account for every reaching file"
+    );
+}
+
+/// **AC9, half two.** The set of `<data_dir>/cache/<subdir>` destinations must equal
+/// [`CACHE_DESTINATIONS`] exactly, across all four crates that can write under the data dir.
+#[test]
+fn cache_destinations_match_the_allow_list() {
+    let crates = all_production_sources();
+    // One constant map across all four crates: `POSE_UPLOADS_CACHE_DIR` and
+    // `KEYPOINT_UPLOADS_CACHE_DIR` are declared in sceneworks-core and used by the worker AND the
+    // rust-api, so a per-crate map would leave four real destinations reading as opaque `{CONST}`.
+    let constants: BTreeMap<String, String> = crates
+        .iter()
+        .flat_map(|(_, files)| string_constants(files))
+        .collect();
+
+    let mut found: BTreeSet<(String, String, String)> = BTreeSet::new();
+    let mut scanned = 0usize;
+    for (label, files) in &crates {
+        scanned += files.len();
+        for file in files {
+            let mut subdirs = cache_destinations(&file.code, &constants);
+            subdirs.extend(parameterized_call_destinations(&file.code, &constants));
+            for subdir in subdirs {
+                found.insert(((*label).to_owned(), file.rel.clone(), subdir));
+            }
+        }
+    }
+    assert!(
+        scanned > 200,
+        "expected the four production trees, scanned only {scanned} files"
+    );
+
+    let allowed: BTreeMap<(String, String, String), CacheRole> = CACHE_DESTINATIONS
+        .iter()
+        .map(|(label, rel, subdir, role)| {
+            (
+                ((*label).to_owned(), (*rel).to_owned(), (*subdir).to_owned()),
+                *role,
+            )
+        })
+        .collect();
+    assert_eq!(
+        allowed.len(),
+        CACHE_DESTINATIONS.len(),
+        "CACHE_DESTINATIONS has a duplicate (crate, file, subdir) entry"
+    );
+
+    let added: Vec<String> = found
+        .iter()
+        .filter(|key| !allowed.contains_key(*key))
+        .map(|(label, rel, subdir)| format!("{label}/{rel}  ->  <data_dir>/cache/{subdir}"))
+        .collect();
+    let removed: Vec<String> = allowed
+        .keys()
+        .filter(|key| !found.contains(*key))
+        .map(|(label, rel, subdir)| format!("{label}/{rel}  ->  <data_dir>/cache/{subdir}"))
+        .collect();
+
+    assert!(
+        added.is_empty(),
+        "NEW `<data_dir>/cache` destination(s) — epic 17625 (AC9) forbids a new weight \
+         destination:\n  {}\n\nIf this holds MODEL WEIGHTS, it must not exist: install them into the \
+         app-managed Hugging Face cache through the Model Manager and resolve them with \
+         `resolve_hf_component_file`. If it genuinely holds scratch/upload/runtime state, add it to \
+         CACHE_DESTINATIONS with the matching role and a one-line comment saying what it holds.",
+        added.join("\n  ")
+    );
+    assert!(
+        removed.is_empty(),
+        "destination(s) listed in CACHE_DESTINATIONS that no longer exist in source:\n  {}\n\nRemove \
+         the entry in the same commit that removes the destination, so the list keeps stating the \
+         real population.",
+        removed.join("\n  ")
+    );
+
+    // A cache gate whose `Weights` class emptied out silently would still pass the equality above
+    // while proving nothing, so pin the shape too: this is the population epic 17625 migrates.
+    let weights = allowed
+        .values()
+        .filter(|role| **role == CacheRole::Weights)
+        .count();
+    assert!(
+        weights >= 1,
+        "no `Weights` destinations left in CACHE_DESTINATIONS. If epic 17625 finished, say so here \
+         deliberately rather than letting the class vanish."
+    );
+}
+
+/// A helper that takes its cache subdirectory as a **parameter** is the documented way a
+/// literal-keyed allow-list gets bypassed, so the registry of those helpers is itself checked.
+#[test]
+fn parameterized_cache_root_helpers_are_registered() {
+    let mut discovered: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, files) in all_production_sources() {
+        discovered.extend(discover_parameterized_helpers(&files));
+    }
+    let registered: BTreeMap<String, usize> = PARAMETERIZED_CACHE_HELPERS
+        .iter()
+        .map(|(name, index)| ((*name).to_owned(), *index))
+        .collect();
+    assert_eq!(
+        discovered, registered,
+        "the set of functions that build `<data_dir>/cache/<param>` changed. A helper missing from \
+         PARAMETERIZED_CACHE_HELPERS is a hole: its callers name the real destination and no scan of \
+         string literals can see it. Register it as (name, zero-based index of the subdir parameter), \
+         which makes its call sites contribute their literal to CACHE_DESTINATIONS."
+    );
+    // `paths.rs`'s two confinement helpers are the reason this test exists; losing either means the
+    // registry drifted rather than the code improving.
+    assert!(
+        registered.contains_key("normalize_app_managed_cache_path")
+            && registered.contains_key("resolve_import_source_path"),
+        "the two `paths.rs` confinement helpers must stay registered"
+    );
+}
+
+/// This module must never scan itself: its fixtures contain both `ensure_hf_cached_file(` and
+/// `.join("cache")` on purpose, and if the module-tree walk ever classified it as production the
+/// gates would be permanently, unfixably red.
+#[test]
+fn the_guard_module_is_excluded_from_its_own_scan() {
+    let (_, src, root) = SCANNED_CRATES[0];
+    let tree = read_tree(&repo_root().join(src));
+    let test_only = test_only_files(&tree, root);
+    assert!(
+        test_only.contains("job_time_download_guard.rs"),
+        "the guard module classified itself as production source"
+    );
+    assert!(
+        test_only.contains("tests.rs") && test_only.contains("tests/lora_and_downloads.rs"),
+        "the module walk must follow `include!` edges into src/tests/, or the crate's own download \
+         tests read as production job-time downloads"
+    );
+    assert!(
+        !test_only.contains("downloads.rs") && !test_only.contains("model_jobs.rs"),
+        "production modules must NOT be classified test-only — that would blind both gates"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scanner self-tests — the mutation check
+// ---------------------------------------------------------------------------------------------
+
+/// A fake NEW job-time call site must be detected, in every spelling the tree actually uses; a doc
+/// comment, a `use` item and a string literal that merely NAME a helper must not be.
+///
+/// Without this, `job_time_download_sites_match_the_allow_list` is a test asserting a default value:
+/// it would pass just as happily with the detection ripped out.
+#[test]
+fn scanner_detects_a_new_direct_call_site() {
+    let watch: BTreeSet<String> = DOWNLOAD_PRIMITIVES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let detect = |source: &str| {
+        download_reach(
+            &code_without_comments_or_literals(&code_without_comments(source)),
+            &watch,
+        )
+    };
+
+    // Unqualified — the crate-root glob (`use downloads::*;`) puts the helpers in scope everywhere.
+    assert_eq!(
+        detect("async fn new_lane(c: &DownloadContext<'_>) { ensure_hf_cached_file(c, r, v, f, d).await; }"),
+        vec!["ensure_hf_cached_file".to_owned()]
+    );
+    // Fully qualified — four lanes already spell it this way.
+    assert!(!detect("fn f() { crate::downloads::ensure_cached_file(c, u, t, l, s); }").is_empty());
+    // The snapshot primitive, which a gate limited to the two named helpers would miss.
+    assert!(!detect("fn f() { download_snapshot_into_cache(&c, &d, r, &s, &mut p); }").is_empty());
+    // Line-broken call, as rustfmt writes the real ones.
+    assert!(
+        !detect("fn f() {\n    ensure_hf_cached_file(\n        &context,\n    );\n}").is_empty()
+    );
+
+    // NEGATIVES. ~25 doc comments in this crate name `ensure_hf_cached_file` in files that never
+    // call it; `person_jobs.rs`, `person_segment.rs` and `depth.rs` are three of them.
+    assert!(
+        detect("/// `lfs.oid`, which `ensure_hf_cached_file()` verifies.\nfn f() {}").is_empty()
+    );
+    assert!(detect("// ensure_cached_file(a, b) used to live here\nfn f() {}").is_empty());
+    assert!(detect("/* ensure_hf_cached_file(x) */ fn f() {}").is_empty());
+    // A `use` item brings the name into scope but does not call it.
+    assert!(
+        detect("use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};")
+            .is_empty()
+    );
+    assert!(detect("use crate::downloads::{ensure_cached_file, DownloadContext};").is_empty());
+    // A string literal naming the helper is data, not a call.
+    assert!(detect(r#"fn f() { log("ensure_hf_cached_file(x) failed"); }"#).is_empty());
+    // The definition itself is not a call site.
+    assert!(
+        detect("pub(crate) async fn ensure_hf_cached_file(c: &C) -> R { unimplemented!() }")
+            .is_empty()
+    );
+    // A longer identifier that merely contains the name.
+    assert!(detect("fn f() { my_ensure_hf_cached_file_shim(a); }").is_empty());
+}
+
+/// A fake NEW local wrapper must be resolved, including across files — the `instantid.rs` /
+/// `pulid.rs` shape, which defeats any gate that only greps the primitive names.
+#[test]
+fn scanner_detects_a_new_wrapper_and_its_remote_caller() {
+    let definer = SourceFile {
+        rel: "image_jobs/fake_definer.rs".to_owned(),
+        code: "async fn stage_weight(c: &DownloadContext<'_>, f: &str) -> R { \
+               ensure_hf_cached_file(c, REPO, REV, f, &dst).await }"
+            .to_owned(),
+    };
+    // The caller contains NO download-helper text at all.
+    let caller = SourceFile {
+        rel: "image_jobs/fake_caller.rs".to_owned(),
+        code: "async fn run(c: &Ctx) { stage_weight(c, \"model.safetensors\").await; }".to_owned(),
+    };
+    let files = vec![definer.clone(), caller.clone()];
+
+    let wrappers = download_wrappers(&files);
+    assert!(
+        wrappers.contains("stage_weight"),
+        "a function whose body calls a primitive is a wrapper: {wrappers:?}"
+    );
+    assert!(
+        !wrappers.contains("run"),
+        "wrapper resolution must stop after one hop; chasing the call graph flags the whole crate"
+    );
+
+    let mut watch: BTreeSet<String> = DOWNLOAD_PRIMITIVES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    watch.extend(wrappers);
+    assert!(
+        !download_reach(&caller.code_without_literals(), &watch).is_empty(),
+        "the remote caller must be flagged even though it names no primitive"
+    );
+
+    // A `DownloadContext` literal is its own ticket to the network.
+    assert!(constructs_download_context(
+        "let c = DownloadContext { api, client };"
+    ));
+    assert!(constructs_download_context(
+        "f(&crate::downloads::DownloadContext { api, client })"
+    ));
+    // A parameter of that type, or an import, is not a construction.
+    assert!(!constructs_download_context(
+        "fn f(context: &DownloadContext<'_>) {}"
+    ));
+    assert!(!constructs_download_context(
+        "use crate::downloads::DownloadContext;"
+    ));
+    assert!(!constructs_download_context(
+        "struct MyDownloadContext { a: u8 }"
+    ));
+}
+
+/// A fake NEW `<data_dir>/cache` weight destination must be detected, in each spelling the tree uses;
+/// and the parameterized-helper bypass must be covered from the call site.
+#[test]
+fn scanner_detects_a_new_cache_weight_destination() {
+    let mut constants = BTreeMap::new();
+    constants.insert("NEW_WEIGHTS_DIR".to_owned(), "brand-new-weights".to_owned());
+
+    let chained = "let dst = settings.data_dir.join(\"cache\").join(\"brand-new-weights\");";
+    assert!(cache_destinations(chained, &constants).contains("brand-new-weights"));
+
+    // rustfmt splits the real ones across lines.
+    let split = "let dst = settings\n    .data_dir\n    .join(\"cache\")\n    .join(\"brand-new-weights\")\n    .join(&file);";
+    assert!(cache_destinations(split, &constants).contains("brand-new-weights"));
+
+    // Combined literal — `CONVERSION_LOCKS_DIR` and the three legacy person/pose roots use this.
+    let combined = "for sub in [\"cache/brand-new-weights\", \"models/brand-new-weights\"] {}";
+    assert!(cache_destinations(combined, &constants).contains("brand-new-weights"));
+
+    // A `const` resolves to its value, so renaming the constant does not churn the allow-list.
+    let via_const = "let dst = data_dir.join(\"cache\").join(NEW_WEIGHTS_DIR);";
+    assert!(cache_destinations(via_const, &constants).contains("brand-new-weights"));
+
+    // An unresolvable expression is loud, not absent.
+    let dynamic = "let dst = data_dir.join(\"cache\").join(pick_dir(model));";
+    assert!(cache_destinations(dynamic, &constants).contains("{expr}"));
+
+    // NEGATIVES: neither a doc comment nor an unrelated join is a destination.
+    assert!(
+        cache_destinations(
+            &code_without_comments("/// writes into `<data>/cache/brand-new-weights/`\nfn f() {}"),
+            &constants
+        )
+        .is_empty(),
+        "a doc comment naming a cache path must not register a destination"
+    );
+    assert!(
+        cache_destinations("let p = root.join(\"models\").join(\"x\");", &constants).is_empty()
+    );
+
+    // The parameterized bypass: a caller that contains NO `"cache"` text still names the destination.
+    let caller =
+        "let p = normalize_app_managed_cache_path(settings, raw, \"brand-new-weights\", \"src\")?;";
+    assert!(
+        cache_destinations(caller, &constants).is_empty(),
+        "the literal scan is genuinely blind here — that blindness is what the registry repairs"
+    );
+    assert!(parameterized_call_destinations(caller, &constants).contains("brand-new-weights"));
+
+    // ...and the registry's discovery half sees a NEW parameterized helper appear.
+    let helper = SourceFile {
+        rel: "fake_paths.rs".to_owned(),
+        code: "fn confine(settings: &Settings, raw: &str, cache_dir: &str, label: &str) -> R { \
+               let root = settings.data_dir.join(\"cache\").join(cache_dir); ok(root) }"
+            .to_owned(),
+    };
+    assert_eq!(
+        discover_parameterized_helpers(&[helper]).get("confine"),
+        Some(&2usize),
+        "a new helper that joins `cache` with its own parameter must be discovered, at the right \
+         parameter index"
+    );
+}
+
+/// The supporting parsers, exercised on the shapes they must judge. Each of these silently returning
+/// nothing would make one of the gates above pass forever.
+#[test]
+fn scanner_parsers_recognise_the_shapes_they_must_judge() {
+    // `#[cfg(test)]`-only items are dropped; `any(test, …)` and `not(test)` are NOT — those items are
+    // compiled in production and dropping them would blind the scan to real code.
+    assert!(cfg_is_test_only("test"));
+    assert!(cfg_is_test_only("all(test, target_os = \"macos\")"));
+    assert!(cfg_is_test_only(
+        "all(test, not(target_os = \"macos\"), feature = \"backend-candle\")"
+    ));
+    assert!(!cfg_is_test_only("any(test, doc)"));
+    assert!(!cfg_is_test_only("not(test)"));
+    assert!(!cfg_is_test_only("all(target_os = \"macos\", not(test))"));
+    assert!(!cfg_is_test_only("target_os = \"macos\""));
+
+    let stripped = strip_cfg_test_items(
+        "fn real() { ensure_hf_cached_file(a); }\n\
+         #[cfg(test)]\nmod tests { fn t() { ensure_cached_file(b); } }\n\
+         #[cfg(any(test, doc))]\nfn kept() { download_snapshot_into_cache(c); }\n",
+    );
+    assert!(stripped.contains("fn real"));
+    assert!(stripped.contains("fn kept"));
+    assert!(
+        !stripped.contains("ensure_cached_file(b)"),
+        "a #[cfg(test)] mod must be removed: {stripped}"
+    );
+    assert!(strip_cfg_test_items("#[cfg(test)]\nmod tests;\nfn keep() {}").contains("fn keep"));
+    assert!(!strip_cfg_test_items("#[cfg(test)]\nmod tests;\nfn keep() {}").contains("mod tests"));
+
+    // Parameter splitting must not be fooled by `::` inside a type, which would shift every index in
+    // PARAMETERIZED_CACHE_HELPERS and silently point the scan at the wrong argument.
+    assert_eq!(
+        split_params("(settings: &Settings, target: &std::path::Path, cache_dir: &str)"),
+        vec!["settings", "target", "cache_dir"]
+    );
+    assert_eq!(
+        split_params("(a: HashMap<String, Vec<u8>>, b: impl Fn() -> bool)"),
+        vec!["a", "b"]
+    );
+
+    // A `'{'` char literal must not throw off the brace match — eight files in the scanned crates
+    // contain one, and a body that ran to end-of-file would silently swallow every later item.
+    let items = fn_items("fn a() { let c = '{'; } fn b() { ensure_hf_cached_file(x); }");
+    assert_eq!(
+        items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    assert!(items[1].body.contains("ensure_hf_cached_file"));
+    assert!(!items[0].body.contains("ensure_hf_cached_file"));
+
+    // A brace inside a string literal likewise.
+    let braced = fn_items("fn a() { format!(\"{}\", x); } fn b() { y(); }");
+    assert_eq!(
+        braced.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+
+    // Call-argument extraction: nested calls and string commas must not split an argument.
+    let args = call_arguments(
+        "let p = helper(settings, raw, \"a, b\", label(x, y))?;",
+        "helper",
+    );
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].len(), 4);
+    assert_eq!(args[0][2], "\"a, b\"");
+
+    // Module-tree edges.
+    assert_eq!(
+        module_declarations("#[cfg(test)]\nmod tests;\npub mod real;\nmod inline { }"),
+        ["real", "tests"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        include_paths("include!(\"tests/hf_and_family.rs\");"),
+        vec!["tests/hf_and_family.rs".to_owned()]
+    );
+}

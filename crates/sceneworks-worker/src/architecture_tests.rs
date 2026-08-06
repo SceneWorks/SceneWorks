@@ -47,14 +47,16 @@ fn documented_job_types() -> Vec<String> {
         .collect()
 }
 
-/// Remove comments and literal contents before inspecting Rust syntax. This is intentionally small
-/// (the production source remains compiled by rustc), but it understands nested block comments and
-/// escaped quoted strings so a `JobType::Variant` mention outside code cannot satisfy the guard.
+/// Remove comments — and nothing else — before inspecting Rust syntax. Understands nested block
+/// comments and skips over quoted strings, so a `//` inside a URL literal is not mistaken for the
+/// start of a comment.
 ///
-/// Shared with [`crate::candle_preview_wiring_tests`] (sc-16962), whose guard reads the candle image
-/// lanes' own source: without comment stripping, a doc comment that NAMES the forbidden
-/// `preview: Default::default()` would trip the guard it documents.
-pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
+/// String literal CONTENTS survive, which is what separates this from
+/// [`code_without_comments_or_literals`]. [`crate::job_time_download_guard`] (sc-17637) needs both:
+/// its download-reachability sweep must not let a doc-comment mention of `ensure_hf_cached_file`
+/// count as a call, while its `<data_dir>/cache` sweep is looking for `.join("cache")` — a
+/// destination that only exists *as* a string literal, and which the blanking pass below erases.
+pub(crate) fn code_without_comments(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -89,6 +91,57 @@ pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
                 index += 1;
                 while index < bytes.len() {
                     match bytes[index] {
+                        b'\\' => {
+                            output.push(b'\\');
+                            if let Some(escaped) = bytes.get(index + 1).copied() {
+                                output.push(escaped);
+                            }
+                            index += 2;
+                        }
+                        b'"' => {
+                            output.push(b'"');
+                            index += 1;
+                            break;
+                        }
+                        byte => {
+                            output.push(byte);
+                            index += 1;
+                        }
+                    }
+                }
+            }
+            (byte, _) => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8(output).expect("Rust source outside comments remains UTF-8")
+}
+
+/// Remove comments and literal contents before inspecting Rust syntax. This is intentionally small
+/// (the production source remains compiled by rustc), but it understands nested block comments and
+/// escaped quoted strings so a `JobType::Variant` mention outside code cannot satisfy the guard.
+///
+/// Shared with [`crate::candle_preview_wiring_tests`] (sc-16962), whose guard reads the candle image
+/// lanes' own source: without comment stripping, a doc comment that NAMES the forbidden
+/// `preview: Default::default()` would trip the guard it documents. [`crate::job_time_download_guard`]
+/// (sc-17637) uses it for the same reason — ~25 doc comments name `ensure_hf_cached_file` in files
+/// that never call it.
+pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
+    let comment_free = code_without_comments(source);
+    let bytes = comment_free.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                output.push(b'"');
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
                         b'\\' => index += 2,
                         b'"' => {
                             output.push(b'"');
@@ -99,7 +152,7 @@ pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
                     }
                 }
             }
-            (byte, _) => {
+            byte => {
                 output.push(byte);
                 index += 1;
             }
