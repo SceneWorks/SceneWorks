@@ -645,7 +645,14 @@ false-green questions, and an `adjudicates` re-derivation. The non-test target c
 | A change confined to unwind/EH data | irrelevant to items 1–4 (they hash whole images), but an open false-green question for candidate 1 if it is ever revisited |
 | SceneWorks' own feature unification widening FLUX.2's linked packages | sc-17639, unchanged |
 | A ladder registered upstream but never admitted by the worker selector — sc-17775 §9's exposure 3 | **Nothing here, and nothing here should.** That is an admission bug, not an invalidation one: the calibration is valid and simply never consulted. A reader who takes this recommendation as covering it will be wrong in the expensive direction. |
+| The candle control lane's **third** invalidation mechanism — `krea_control_fit.rs` (sc-17775 §9.4) | **Nothing, and this one *is* an invalidation mechanism**, so the omission matters more than the row above. It carries its own hardcoded `KREA_CONTROL_INFERENCE_REVISION` / `KREA_CONTROL_CALIBRATION` and gates currency on two hand-maintained manifest booleans (`measured`, `supersededBy`) rather than on anything derived from the code. Every item in this recommendation assumes the two gates sc-17775 §2 describes; none of them reaches this path. Item (4) does not either: `krea_2_turbo_control`'s *bound* calibration is the **mlx** one, so asserting bound fingerprints against inference source leaves the candle constants above untouched. Characterising it is its own work — sc-17775 recorded it deliberately unassessed and filed no story for it. |
 | The five providers with no artifact layer at all — 26 of 31 bound calibrations | **Item (4) only**, as a declared-vs-source check. Items (1)–(3) are `flux2_dev`-shaped because the audit record is. Item (2) is the one that *would* generalise — it needs no measurement binary — and that is the strongest argument for building it. |
+
+**Two mechanisms, not one, are outside everything above.** The row immediately above is an
+*admission* gap and correctly out of scope; the one before it is an *invalidation* mechanism and is
+not. This document's whole frame — two gates, one artifact audit bolted to `flux2_dev` — is the frame
+sc-17775 §2 established, and `krea_control_fit.rs` sits outside it. Anyone implementing the
+recommendation should read that section before assuming "calibration invalidation" is one system.
 
 That last row is the one to weigh against the rest. sc-17775 measured the larger exposure as the five
 families that have no relief mechanism at all; items 1–3 improve the one provider that already has
