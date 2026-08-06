@@ -55,9 +55,14 @@ test("SSE parser preserves CRLF framing when the pair is split across chunks", a
  * single iteration. sc-17763 listed that poll as a flake candidate; it has no
  * flake surface here, and this comment is the record of that being checked.
  */
-function startEventOnlyProxy({ heartbeatIntervalMs = 20 } = {}) {
+function startEventOnlyProxy({ heartbeatIntervalMs = 20, jobEventDelayMs = 0 } = {}) {
   const clients = new Set();
   const intervals = new Set();
+  const timers = new Set();
+  // Set when the validator reaches the multipart upload, which this stub deliberately does not
+  // serve. Without it a validator that runs FURTHER than the test expects fails against a bare
+  // `HTTP 404 Not Found` from the catch-all, which says nothing about what actually went wrong.
+  const reached = { upload: false };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
     const isTicketedSse =
@@ -109,8 +114,24 @@ function startEventOnlyProxy({ heartbeatIntervalMs = 20 } = {}) {
       const job = { id: "job-1", status: "queued" };
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify(job));
-      for (const client of clients) {
-        client.write(`event: job.updated\ndata: ${JSON.stringify(job)}\n\n`);
+      // `jobEventDelayMs` makes the OBSERVED latency exceed a ceiling by construction rather than
+      // by hoping the machine is slow. `validateProxy` computes the latency as
+      // `Math.round(now - jobStartedAt)`, so a loopback delivery under 0.5 ms rounds to exactly 0 —
+      // and `0 > 0` is false, so a 0 ms ceiling never fires (sc-17803). A fixed server-side delay
+      // is deterministic in the safe direction: load can only make it larger.
+      const emit = () => {
+        for (const client of clients) {
+          client.write(`event: job.updated\ndata: ${JSON.stringify(job)}\n\n`);
+        }
+      };
+      if (jobEventDelayMs > 0) {
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          emit();
+        }, jobEventDelayMs);
+        timers.add(timer);
+      } else {
+        emit();
       }
       return;
     }
@@ -123,11 +144,15 @@ function startEventOnlyProxy({ heartbeatIntervalMs = 20 } = {}) {
       response.end(JSON.stringify({ id: "job-1", status: "canceled" }));
       return;
     }
+    if (request.method === "POST" && /^\/api\/v1\/projects\/[^/]+\/assets$/.test(url.pathname)) {
+      reached.upload = true;
+    }
     response.writeHead(404).end();
   });
 
   return {
     server,
+    reached,
     async listen() {
       await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
       return `http://127.0.0.1:${server.address().port}`;
@@ -137,6 +162,10 @@ function startEventOnlyProxy({ heartbeatIntervalMs = 20 } = {}) {
         clearInterval(interval);
       }
       intervals.clear();
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+      timers.clear();
       for (const client of clients) {
         client.end();
       }
@@ -361,7 +390,14 @@ test("proxy validator fails when the job event exceeds the latency ceiling", asy
   const tempDir = await mkdtemp(join(tmpdir(), "sceneworks-proxy-test-"));
   const fixture = join(tempDir, "representative.mp4");
   await writeFile(fixture, Buffer.alloc(4096, 0x5a));
-  const proxy = startEventOnlyProxy();
+  // The event is held back a fixed 25 ms so the observed latency clears the ceiling BY
+  // CONSTRUCTION. The previous fixture emitted immediately and relied on "any real delivery
+  // exceeds a 0 ms ceiling" -- which is false: `validateProxy` rounds the latency to whole
+  // milliseconds, a loopback delivery lands under 0.5 ms, and `0 > 0` does not fire. The run then
+  // sailed past the ceiling check into the upload this stub does not serve and failed on the
+  // catch-all 404. Measured 12/12 sub-millisecond in isolation, ~1-in-3 inside the suite, where
+  // concurrent tests add just enough load to sometimes push it over (sc-17803).
+  const proxy = startEventOnlyProxy({ jobEventDelayMs: 25 });
 
   try {
     const rawBaseUrl = await proxy.listen();
@@ -373,13 +409,18 @@ test("proxy validator fails when the job event exceeds the latency ceiling", asy
         minimumUploadBytes: 4096,
         observationSeconds: 10,
         minimumHeartbeats: 2,
-        // Any real delivery exceeds a 0 ms ceiling, so this branch fires
-        // deterministically instead of relying on a loaded box to be slow.
         maximumEventLatencyMs: 0,
         allowNonRunpod: true,
         stopWhenSatisfied: true,
       }),
       /matching job\.updated event took \d+ ms \(limit 0 ms\)/,
+    );
+    // The ceiling must stop the run BEFORE the upload. Asserting this keeps a future regression
+    // legible: without it, falling through surfaces as a bare `HTTP 404 Not Found`.
+    assert.equal(
+      proxy.reached.upload,
+      false,
+      "the latency ceiling must abort the run before the multipart upload is attempted",
     );
   } finally {
     await proxy.close();
