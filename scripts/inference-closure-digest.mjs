@@ -17,16 +17,26 @@
 //            + the workspace inputs that change codegen for everything (`[profile]`, `[patch]`,
 //              `rust-toolchain.toml`, `.cargo/config.toml`)
 //
-// Same 90-day window, same providers, under this unit: 3.7%-7.8% of commits instead of 100%.
+// Same 90-day window, same providers, under this unit: ~9-10.5% of commits instead of 100%.
 //
-// NO BUILD, AND NO INFERENCE CHECKOUT IN CI
+// NO BUILD, AND DERIVED OFFLINE — BUT VERIFIED IN CI
 //
-// Everything here reads `git ls-tree` / `git show` at a revision, so it runs in seconds and needs no
-// toolchain. It still needs an inference clone, which CI does not have — the same constraint
-// `check-license-coverage.mjs:481` already lives under. So digests are computed offline (at pin-bump
-// time), checked into `config/inference-provider-closures.json`, and the consumers compare against
-// that file while gating that its recorded revision matches the live Cargo pin. A stale config is a
-// hard error, never a silent pass.
+// Everything here reads `git ls-tree` / `git show` / `git cat-file` at a revision, so it runs in
+// seconds and needs no toolchain, no GPU and no weights. It does need an inference clone, which a
+// SceneWorks checkout does not contain — so digests are derived at pin-bump time and checked into
+// `config/inference-provider-closures.json`, where a reviewer sees the change in the diff instead of
+// it being conjured at check time. The consumers compare against that file and hard-error when its
+// recorded revision is not the live Cargo pin; a stale config is never a silent pass.
+//
+// Checked in is NOT the same as unverified, and the distinction is load-bearing. An earlier draft of
+// this comment said CI "does not have" an inference clone, citing the framing at
+// `check-license-coverage.mjs:481`. That source says something narrower — inference's sources are not
+// IN a SceneWorks checkout — and the extrapolation was wrong: `SceneWorks/inference` is PUBLIC, and a
+// `--depth=1` fetch of the pinned revision succeeds with no token, no credential helper and no HOME.
+// (#2164 established this after the opposite premise had gone unchallenged long enough to put a
+// same-repo guard on a required CI check, turning it into a vacuous green.) So `check.yml` re-derives
+// every lane's digest against real pinned source on each run — without it the currency term would be
+// checked-in data that nothing grades, which is the same fail-open shape this epic exists to remove.
 //
 // WHAT THIS UNIT DOES NOT SEE — read before trusting it
 //

@@ -10,8 +10,10 @@
 // because silently rewriting a captured digest is how a stale measurement would be laundered into a
 // current one.
 //
-// Needs an inference clone containing every captured revision — CI has none, which is exactly why
-// the result is checked in.
+// Needs an inference clone containing every CAPTURED revision, which is why this runs at capture /
+// pin-bump time rather than in CI: `check.yml` shallow-fetches only the pinned revision, and a
+// record's captured digest is derived at whatever revision it was measured at. The result is checked
+// in and the LIVE half is re-derived in CI (scripts/inference-closure-digest.mjs --check).
 
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -51,10 +53,12 @@ export function digestWorkload(records) {
  * bindings, so a parse/serialise round trip would silently delete them. Each binding is located by
  * its `inferenceRevision` line and paired with the `provider` line inside the same object.
  *
- * `kreaTurboFit` also carries an `inferenceRevision` and is deliberately NOT stamped: it is the
- * separate third invalidation mechanism (`crates/sceneworks-worker/src/krea_control_fit.rs`, survey
- * sc-17775 §9.4), which this change does not reach. Any `inferenceRevision` line with no `provider`
- * in its object is reported rather than skipped quietly.
+ * `kreaTurboFit` also carries an `inferenceRevision` and is not stamped HERE, because it is not a
+ * per-binding calibration: it is a whole-block fit whose `inferenceClosureDigest` sits beside its
+ * `inferenceRevision` and is maintained directly (as is `candle.control`'s, for the Krea control
+ * lane). Both were separate per-model invalidation mechanisms — survey sc-17775 §9.4 — and both are
+ * now on the same closure term as everything else; only the stamping route differs. Any
+ * `inferenceRevision` line with no `provider` in its object is reported rather than skipped quietly.
  */
 export function stampManifest(body, digestFor) {
   const lines = body.split("\n");

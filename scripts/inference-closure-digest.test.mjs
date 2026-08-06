@@ -1,7 +1,9 @@
 // Unit tests for the per-provider closure digest (sc-17774).
 //
-// These run WITHOUT an inference clone — CI has none (check-license-coverage.mjs:481) — so every
-// test drives the module through its injected `runGit` against a synthetic two-provider workspace.
+// These run WITHOUT an inference clone, so they stay fast and hermetic on every lane: each test
+// drives the module through its injected `runGit`/`readBodies` against a synthetic two-provider
+// workspace. The REAL derivation is graded separately, by `check.yml` re-deriving the shipped
+// digests against a shallow fetch of the pinned inference revision.
 //
 // The headline property is the one the epic exists for and it is tested in both directions:
 // a change to one provider's code path must move THAT provider's digest and no other's, and a

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ec43902fe8e30df66556929a1fb152b101311164c7ca9eee068b4f76142e1d1e",
+    "sceneWorksRevision": "source-tree:6e25abcd4145856009ecb8cd76040f0db8fe525821d170bf91cc6b7101f6cf20",
     "matrixRevision": "source-tree:18fbb8cef675d54db26b8c1942aa49b8d8fa2cbdc7dc98187e7569d94f162fd1",
     "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
     "sources": {
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "8e335a08816cdb43ad156e6071bbac7769f91793634167d68a60c2dc5c6de97f"
+        "sha256": "968eb512a8861c5812475b4424ed755a270f847a7f1fa5bd3cdb6a508c2df18f"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",

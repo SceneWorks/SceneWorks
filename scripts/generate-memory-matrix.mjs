@@ -1219,9 +1219,12 @@ function declaredEvidence(model, backend, tier) {
  * one provider, so it was spent the moment the pin moved one commit further, and it generalised to
  * nothing. Every provider now gets the same relief from a derived digest, with no hand audit.
  *
- * The config is derived offline because CI has no inference clone. That makes a stale config the
- * obvious failure mode, so it is a hard error rather than a fallback: a config keyed to an older pin
- * would report currency for closures nobody re-derived.
+ * The config is derived offline so a reviewer sees a digest change in the diff rather than having it
+ * conjured at check time. That makes a stale config the obvious failure mode, so it is a hard error
+ * rather than a fallback: a config keyed to an older pin would report currency for closures nobody
+ * re-derived. Whether the digests are REAL is a separate question, graded in CI — `check.yml`
+ * re-derives them against a shallow fetch of the pinned inference revision, which is possible
+ * because SceneWorks/inference is public.
  */
 export function validatedInferenceClosures(body, pin) {
   const closures = JSON.parse(body);
