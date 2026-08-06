@@ -145,6 +145,45 @@ fn propagate_person_concept(
         })
 }
 
+/// Run a whole SAM3 **video** clip on the dedicated SAM3 thread (sc-11180): build the frame
+/// `Array`s, propagate the concept, and post-process — every MLX touch on the one thread.
+///
+/// `Sam3VideoModel` is `Rc`-backed (`!Send`) and MLX's stream registry is **thread-local**, so
+/// driving it from a `spawn_blocking` pool thread aborts the task with
+/// `There is no Stream(cpu, 0) in current thread` (GH #2114). The single-image smart-select paths
+/// were pinned to this thread by sc-11180; the two video paths were not, and stayed broken until
+/// their mode became reachable (sc-17009).
+///
+/// The thread boundary is therefore plain data in both directions: `frames` crosses as preprocessed
+/// [`input_chw`] f32 planes, and `finish` runs INSIDE, so no `Array`/`VideoFrameOutput` ever
+/// escapes. Callers keep the CPU-bound decode + [`input_chw`] on their own blocking thread so only
+/// the MLX work serializes here.
+fn propagate_person_concept_on_thread<T, F>(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    frames: Vec<Vec<f32>>,
+    cancel: Option<CancelFlag>,
+    progress: Option<SegmentProgress>,
+    finish: F,
+) -> WorkerResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&[VideoFrameOutput]) -> WorkerResult<T> + Send + 'static,
+{
+    run_on_sam3_thread(move || {
+        let tensors: Vec<Array> = frames.iter().map(|chw| chw_tensor(chw)).collect();
+        drop(frames);
+        let outputs = propagate_person_concept(
+            &model_path,
+            &tokenizer_path,
+            &tensors,
+            cancel.as_ref(),
+            progress,
+        )?;
+        finish(&outputs)
+    })
+}
+
 /// Cache key for the smart-select single-image models: the resolved weight path + the quant tier in
 /// effect. A change in either (different model snapshot, `SCENEWORKS_SAM3_QUANT` flip) rebuilds, so a
 /// re-pinned/re-configured worker never serves a stale quantized instance.
@@ -328,10 +367,14 @@ fn build_point_tracker(model_path: &Path, quant: Option<i32>) -> WorkerResult<Sa
     })
 }
 
-/// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear,
-/// matching the processor's fixed-square resize — *not* aspect-preserving), rescale to `[0,1]`,
-/// normalize by mean/std `0.5` to `[-1,1]`, packed NCHW `[1,3,1008,1008]` f32.
-fn input_tensor<I>(img: &I) -> Array
+/// CPU half of [`input_tensor`]: resize to a 1008×1008 square (bilinear, matching the processor's
+/// fixed-square resize — *not* aspect-preserving), rescale to `[0,1]`, normalize by mean/std `0.5`
+/// to `[-1,1]`, packed NCHW `[1,3,1008,1008]` f32.
+///
+/// Split out from the `Array` construction so the VIDEO paths can run this half — pure CPU, no MLX —
+/// on their own `spawn_blocking` thread and hand plain `Vec<f32>` planes to the dedicated SAM3
+/// thread, where the `Array`s are built (see [`propagate_person_concept_on_thread`]).
+fn input_chw<I>(img: &I) -> Vec<f32>
 where
     I: image::GenericImageView<Pixel = image::Rgb<u8>>,
 {
@@ -341,8 +384,23 @@ where
         INPUT_SIZE,
         image::imageops::FilterType::Triangle,
     );
-    let chw = normalize_chw(resized.as_raw(), INPUT_SIZE as usize);
-    Array::from_slice(&chw, &[1, 3, INPUT_SIZE as i32, INPUT_SIZE as i32])
+    normalize_chw(resized.as_raw(), INPUT_SIZE as usize)
+}
+
+/// MLX half of [`input_tensor`]: wrap a preprocessed [`input_chw`] plane as the SAM3 input `Array`.
+/// **Must run on the thread that will consume it** — see [`propagate_person_concept_on_thread`].
+fn chw_tensor(chw: &[f32]) -> Array {
+    Array::from_slice(chw, &[1, 3, INPUT_SIZE as i32, INPUT_SIZE as i32])
+}
+
+/// Preprocess an RGB frame to the SAM3 input tensor. Single-image (smart-select) callers use this
+/// directly because they already run inside [`run_on_sam3_thread`]; the video paths split the two
+/// halves instead.
+fn input_tensor<I>(img: &I) -> Array
+where
+    I: image::GenericImageView<Pixel = image::Rgb<u8>>,
+{
+    chw_tensor(&input_chw(img))
 }
 
 /// Segment the selected person across a clip with the native-MLX SAM3 **text-concept (PCS) video
@@ -393,8 +451,10 @@ pub(crate) fn segment_track_blocking(
         ));
     }
 
-    // Decode every clip frame to RGB8 (shared rendered size) and build the SAM3 input tensors.
-    let mut frames: Vec<Array> = Vec::with_capacity(clip_frame_paths.len());
+    // Decode every clip frame to RGB8 (shared rendered size) and preprocess it. The decode +
+    // resize is pure CPU, so it stays on this `spawn_blocking` thread; only the MLX half runs on
+    // the dedicated SAM3 thread below.
+    let mut frames: Vec<Vec<f32>> = Vec::with_capacity(clip_frame_paths.len());
     let (mut width, mut height) = (0u32, 0u32);
     for path in &clip_frame_paths {
         let img = crate::image_decode::decode_image_any(path)
@@ -407,27 +467,30 @@ pub(crate) fn segment_track_blocking(
                 "person clip frames are not all the same size".into(),
             ));
         }
-        frames.push(input_tensor(&img));
+        frames.push(input_chw(&img));
     }
+    let frame_count = clip_frame_paths.len();
 
-    let outputs = propagate_person_concept(
-        &model_path,
-        &tokenizer_path,
-        &frames,
-        cancel.as_ref(),
+    // Propagate + associate on the SAM3 thread: `VideoFrameOutput` is `!Send`, so the selection and
+    // mask extraction run there and only the finished byte masks cross back.
+    propagate_person_concept_on_thread(
+        model_path,
+        tokenizer_path,
+        frames,
+        cancel,
         progress,
-    )?;
-
-    // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
-    let Some(selected) = select_object(&outputs, &anchors) else {
-        // SAM3 found no "person" overlapping any anchor → no masks (degrade to box fallback).
-        return Ok(vec![Vec::new(); clip_frame_paths.len()]);
-    };
-    let masks = outputs
-        .iter()
-        .map(|frame| frame_mask_for_object(frame, selected, width, height))
-        .collect::<WorkerResult<Vec<_>>>()?;
-    Ok(masks)
+        move |outputs| {
+            // Associate SAM3's identities to the selected track, then emit that object's per-frame mask.
+            let Some(selected) = select_object(outputs, &anchors) else {
+                // SAM3 found no "person" overlapping any anchor → no masks (degrade to box fallback).
+                return Ok(vec![Vec::new(); frame_count]);
+            };
+            outputs
+                .iter()
+                .map(|frame| frame_mask_for_object(frame, selected, width, height))
+                .collect::<WorkerResult<Vec<_>>>()
+        },
+    )
 }
 
 /// Normalize an `[x1, y1, x2, y2]` pixel box (clamped to the image) to SAM3's `[cx, cy, w, h]`
@@ -705,7 +768,9 @@ pub(crate) fn segment_all_persons_in_memory(
             "scail2 segmentation: frames are not all the same size".into(),
         ));
     }
-    let tensors = frames
+    // Preprocess on this `spawn_blocking` thread (pure CPU); the MLX half runs on the dedicated
+    // SAM3 thread below.
+    let planes = frames
         .iter()
         .map(|frame| {
             let view = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
@@ -716,30 +781,31 @@ pub(crate) fn segment_all_persons_in_memory(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("scail2 segmentation: malformed RGB frame".into())
             })?;
-            Ok(input_tensor(&view))
+            Ok(input_chw(&view))
         })
-        .collect::<WorkerResult<Vec<Array>>>()?;
+        .collect::<WorkerResult<Vec<Vec<f32>>>>()?;
 
-    let outputs = propagate_person_concept(
-        model_path,
-        tokenizer_path,
-        &tensors,
-        cancel.as_ref(),
+    propagate_person_concept_on_thread(
+        model_path.to_path_buf(),
+        tokenizer_path.to_path_buf(),
+        planes,
+        cancel,
         progress,
-    )?;
+        move |outputs| {
+            // Paint order + per-frame masks are backend-neutral pure logic shared with the candle
+            // twin via `person_segment_sam3_common` (sc-11191, F-018), so the tie-break and mask
+            // selection stay byte-identical on both platforms.
+            let order = paint_order(outputs);
+            let per_frame = per_frame_masks(outputs, width, height)?;
 
-    // Paint order + per-frame masks are backend-neutral pure logic shared with the candle twin via
-    // `person_segment_sam3_common` (sc-11191, F-018), so the tie-break and mask selection stay
-    // byte-identical on both platforms.
-    let order = paint_order(&outputs);
-    let per_frame = per_frame_masks(&outputs, width, height)?;
-
-    Ok(AllPersonMasks {
-        order,
-        per_frame,
-        width,
-        height,
-    })
+            Ok(AllPersonMasks {
+                order,
+                per_frame,
+                width,
+                height,
+            })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -1077,6 +1143,118 @@ mod tests {
             );
             eprintln!("frame {i}: fg_frac={frac:.3} containment={containment:.3}");
         }
+    }
+
+    /// Real-weights regression smoke for the SCAIL-2 in-memory video path (GH #2114).
+    ///
+    /// [`segment_all_persons_in_memory`] drove `Sam3VideoModel` straight from the caller's
+    /// `spawn_blocking` pool thread instead of the dedicated SAM3 thread. MLX's stream registry is
+    /// thread-local and the model is `Rc`-backed, so the first propagated frame aborted the task
+    /// with `There is no Stream(cpu, 0) in current thread` — SCAIL-2 `animate_character` and
+    /// `replace_person` both failed on every run. sc-11180 had pinned only the single-image
+    /// smart-select paths to that thread; the two video paths were missed and stayed broken until
+    /// sc-17009 made the mode reachable and a user hit it immediately.
+    ///
+    /// Deliberately uses SYNTHETIC frames: the regression is a threading abort that fires before
+    /// any segmentation quality matters, so this needs no curated person photo and asserts shape,
+    /// not content.
+    ///
+    /// **Scope — read before trusting this as the regression gate: it is NOT one.** Mutation-checked
+    /// honestly, and it FAILED that check: reverting
+    /// [`propagate_person_concept_on_thread`] to a direct `propagate_person_concept` call still
+    /// leaves this test green, from `#[test]` *and* from the `spawn_blocking` pool. An in-crate test
+    /// cannot reproduce the abort, because `generator_cache::apply_gpu_memory_limit` — the worker's
+    /// first, main-thread MLX call — is compiled to a no-op stub under `cfg(test)`, so the test
+    /// binary never establishes the MLX runtime state the real worker has when it reaches the
+    /// blocking pool. The same limitation is why the pre-existing
+    /// [`sam3_real_weights_person_smoke`] never caught it either.
+    ///
+    /// So this pins the video path's *contract* — real weights propagate off the blocking pool,
+    /// one mask entry and one progress tick per frame — and nothing more. The regression itself is
+    /// only observable end-to-end in a real worker process (GH #2114 was verified that way: submit
+    /// an `animate_character` job and assert it does not fail).
+    ///
+    /// `#[ignore]`d (needs the 3.2 GB weights + GPU) like its siblings, so it does NOT gate CI:
+    ///   SCENEWORKS_SAM3_WEIGHTS=<SceneWorks/sam3-mlx snapshot dir> \
+    ///   cargo test -p sceneworks-worker --release sam3_video_runs_on_the_sam3_thread -- --ignored --nocapture
+    #[test]
+    #[ignore = "real SAM3 weights + GPU; set SCENEWORKS_SAM3_WEIGHTS"]
+    fn sam3_video_runs_on_the_sam3_thread() {
+        let snap = std::env::var("SCENEWORKS_SAM3_WEIGHTS")
+            .expect("set SCENEWORKS_SAM3_WEIGHTS to a SceneWorks/sam3-mlx snapshot dir");
+        let dir = {
+            let p = PathBuf::from(&snap);
+            if p.is_file() {
+                p.parent().unwrap().to_path_buf()
+            } else {
+                p
+            }
+        };
+
+        // Three 320x240 frames with a moving bright block — enough to exercise the propagate loop
+        // (build → tokenize → per-frame forward → association) without a curated photo.
+        let (w, h) = (320u32, 240u32);
+        let frames: Vec<gen_core::Image> = (0..3u32)
+            .map(|f| {
+                let mut pixels = vec![32u8; (w * h * 3) as usize];
+                for y in 60..180u32 {
+                    for x in (40 + f * 20)..(140 + f * 20) {
+                        let i = ((y * w + x) * 3) as usize;
+                        pixels[i] = 220;
+                        pixels[i + 1] = 190;
+                        pixels[i + 2] = 170;
+                    }
+                }
+                gen_core::Image {
+                    width: w,
+                    height: h,
+                    pixels,
+                }
+            })
+            .collect();
+
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&seen);
+        let frame_count = frames.len();
+        let (model, tokenizer) = (dir.join(MODEL_FILE), dir.join(TOKENIZER_FILE));
+
+        // Drive it exactly the way `scail2_segment_blocking` does — from a tokio blocking-pool
+        // thread. Calling it inline here would NOT reproduce the abort.
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let masks = runtime
+            .block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    segment_all_persons_in_memory(
+                        &model,
+                        &tokenizer,
+                        &frames,
+                        None,
+                        Some(Box::new(move |_frame, _total| {
+                            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        })),
+                    )
+                })
+                .await
+            })
+            .expect("the SCAIL-2 segment task must not abort on the blocking pool (GH #2114)")
+            .expect("segment_all_persons_in_memory");
+
+        assert_eq!(masks.width, w, "mask width tracks the source frame");
+        assert_eq!(masks.height, h, "mask height tracks the source frame");
+        assert_eq!(
+            masks.per_frame.len(),
+            frame_count,
+            "one per-frame mask entry per input frame"
+        );
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::Relaxed),
+            frame_count,
+            "progress must fire once per propagated frame"
+        );
+        eprintln!(
+            "propagated {frame_count} frames, {} tracked object(s)",
+            masks.order.len()
+        );
     }
 
     /// Real-weights smoke for the smart-select box path (sc-6105): preprocess →
