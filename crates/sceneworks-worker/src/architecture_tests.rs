@@ -47,27 +47,44 @@ fn documented_job_types() -> Vec<String> {
         .collect()
 }
 
-/// The end of a `'x'` / `'\n'` / `'\u{1F600}'` char literal starting at `start`, or `None` when the
-/// quote opens a lifetime (`'a`, `'_`, `'static`).
+/// The end of a `'x'` / `'\n'` / `'\''` / `'\u{1F600}'` char literal starting at `start`, or `None`
+/// when the quote opens a lifetime (`'a`, `'_`, `'static`).
 ///
 /// Without this, a `'"'` char literal — `downloads.rs`, `session_log.rs`, `jsonc.rs` and four other
 /// scanned files contain one — flips the string-literal parity of everything that follows it in the
 /// file. The consequence is not a false positive but a silent BLIND SPOT: the tail of the file gets
 /// absorbed into a phantom string literal and stops being scanned at all.
+///
+/// # The two ways to get this wrong, both of which shipped
+///
+/// * **Escapes.** The closing quote of `'\''` is the byte at `start + 3`; the byte at `start + 2` is
+///   the *escaped* quote. Searching from `start + 2` ends the literal one byte early and orphans a
+///   `'`, which then eats the opening `"` of the next string literal and inverts parity for the rest
+///   of the file. `media_jobs.rs:3087` (`.replace('\'', "'\\''")`) put its whole tail out of reach of
+///   both gates that way — strictly worse than the stripper this replaced.
+/// * **Lifetimes.** "a quote somewhere in the next five bytes" reads `Foo<'a, 'b>` as a char literal
+///   spanning `'a, '`, which can again leave the cursor on a `"`. A plain char literal is exactly one
+///   code point wide, so the closing quote must sit *immediately* after it — required here, never
+///   searched for.
 pub(crate) fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes.get(start) != Some(&b'\'') {
         return None;
     }
     if bytes.get(start + 1) == Some(&b'\\') {
-        // Escapes run from two bytes (`'\n'`) to ten (`'\u{1F600}'`).
-        return (start + 2..=start + 11)
+        // The escaped byte is at `start + 2` and is never the terminator. Escapes run from `'\n'`
+        // (4 bytes) to `'\u{1F600}'` (11).
+        return (start + 3..=start + 11)
             .find(|index| bytes.get(*index) == Some(&b'\''))
             .map(|index| index + 1);
     }
-    // A plain char is one code point wide; UTF-8 makes that one to four bytes.
-    (start + 2..=start + 5)
-        .find(|index| bytes.get(*index) == Some(&b'\''))
-        .map(|index| index + 1)
+    let width = match *bytes.get(start + 1)? {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => return None,
+    };
+    (bytes.get(start + 1 + width) == Some(&b'\'')).then_some(start + 2 + width)
 }
 
 /// A raw string literal (`r"…"`, `r#"…"#`, `br#"…"#`) whose `r`/`b` prefix starts at `start`, as

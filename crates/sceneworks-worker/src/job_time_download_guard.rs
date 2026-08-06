@@ -50,10 +50,20 @@
 //!    — a helper that takes its cache subdir as a *parameter*, and a function that hands out the bare
 //!    cache root, are the two shapes a literal-keyed allow-list cannot see through. Both registries
 //!    are rediscovered structurally and both sets of call sites are scanned for what they pass.
-//! 6. The `scanner_*` tests below run the detection functions over hand-written snippets — a fake new
+//! 6. [`http_client_file_fetch_surfaces_are_registered`] — confining WHERE a client may be built says
+//!    nothing about what those files then fetch. A `fetch_weights(url, dest)` added to `api_client.rs`
+//!    is a complete job-time download that every other assertion here would miss, so each
+//!    allow-listed file's network surface is registered too.
+//! 7. [`scanned_crates_cover_the_workspace`] — [`SCANNED_CRATES`] is tied to `[workspace] members`.
+//!    A hand-maintained crate list nobody validates is how the primitive list failed; a new crate
+//!    must be scanned or excluded on purpose.
+//! 8. [`the_stripper_never_opens_a_phantom_string_literal`] — the cheap always-on guard for the class
+//!    of bug where a mis-parsed quote swallows the rest of a file and silently removes it from both
+//!    gates. See its doc: this shipped twice, and only a mutation measurement caught it.
+//! 9. The `scanner_*` tests below run the detection functions over hand-written snippets — a fake new
 //!    call site, a fake new wrapper, a fake new destination, an aliased cache root, an inline HTTP
-//!    client, plus doc-comment/`use`/string-literal negatives. A guard that silently matches nothing
-//!    passes forever; these are what stop that.
+//!    client, an `as` rename, a fn-pointer binding, plus doc-comment/`use`/string-literal negatives.
+//!    A guard that silently matches nothing passes forever; these are what stop that.
 //!
 //! ## How far it chases the call graph
 //!
@@ -75,18 +85,26 @@
 //!
 //! ## What it still cannot see
 //!
+//! Kept honest deliberately: a known hole belongs here, not in silence.
+//!
 //! * A cache root arriving as a *parameter* (`fn f(root: &str, sub: &str) -> d.join(root).join(sub)`)
 //!   labels as `{root}` rather than `cache`. Registering the subdir-parameter helpers
 //!   ([`PARAMETERIZED_CACHE_HELPERS`]) covers the shape that exists; a root-parameter helper would be
 //!   a new one, and its callers would still have to pass a literal `"cache"` from somewhere the scan
 //!   does see.
+//! * A cache root behind a `const` whose initialiser is neither a plain literal nor `concat!` of
+//!   literals — a `const fn` result, an `env!`, an `include_str!`. Those label as `{NAME}`, which is
+//!   loud in [`CACHE_DESTINATIONS`] but does not match `cache`, so the ROOT check misses it. Literal
+//!   and `concat!` initialisers both resolve; nothing in production source uses another form.
 //! * A download wrapper that is a *method* rather than a free function. The file defining it is
 //!   flagged on its own, so the escape needs the method's receiver type in a second file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::architecture_tests::{code_without_comments, code_without_comments_or_literals};
+use crate::architecture_tests::{
+    char_literal_end, code_without_comments, code_without_comments_or_literals,
+};
 
 // ---------------------------------------------------------------------------------------------
 // Allow-lists
@@ -603,10 +621,13 @@ const NON_WEIGHT_FETCHERS: &[&str] = &[
     // A `HEAD`/range probe for the size of a `sourceUrl`. Returns a `u64`; writes nothing.
     "lora_source_content_length",
     // `HfSnapshot::resolve` — an `impl` method that pages the HF *file listing* API for a repo. It
-    // returns metadata (names, sizes, SHAs), never file bytes, and it needs a `reqwest::Client`
-    // handed to it, which `http_client_construction_is_confined` independently confines. Kept out of
-    // DOWNLOAD_PRIMITIVES because the bare name `resolve` would match unrelated `.resolve(` calls
-    // across the crate and make the reachability scan meaningless.
+    // returns metadata (names, sizes, SHAs) and writes nothing; a caller still needs a real primitive
+    // to turn that listing into bytes on disk. It also needs a `reqwest::Client` handed to it, which
+    // `http_client_construction_is_confined` covers independently.
+    //
+    // (An earlier version of this comment said the bare name had to stay out of DOWNLOAD_PRIMITIVES
+    // because it would match unrelated `.resolve(` calls. That was wrong — `invokes_free_function`
+    // already ignores method calls. The reason is the one above.)
     "resolve",
 ];
 
@@ -636,6 +657,48 @@ const SCANNED_CRATES: &[(&str, &str, &str, usize)] = &[
         "crates/sceneworks-memory-adapter/src",
         "lib.rs",
         1,
+    ),
+];
+
+/// Workspace members deliberately NOT scanned, as `(path, why)`.
+///
+/// Empty, and [`scanned_crates_cover_the_workspace`] keeps it honest: a crate added to
+/// `[workspace] members` must either be scanned or be excluded here on purpose. Without that tie a
+/// brand-new crate can hold a brand-new `<data_dir>/cache` weight destination and never be looked
+/// at — which is the same "hand-maintained list nobody validates" failure the primitive list had.
+const UNSCANNED_WORKSPACE_MEMBERS: &[(&str, &str)] = &[];
+
+/// The externally-visible, network-reaching surface of every [`HTTP_CLIENT_FILES`] member **other
+/// than `downloads.rs`**, as `(file, fn name, what it does)`.
+///
+/// # Why this exists
+///
+/// [`HTTP_CLIENT_FILES`] confines *where* a client may be built. On its own that is not enough: the
+/// comment beside `api_client.rs` saying it "talks to 127.0.0.1, never to a model host" is prose, not
+/// a gate. A `pub(crate) async fn fetch_weights(url, dest)` added to `api_client.rs` — build a
+/// client, send, write the bytes to a caller-supplied path — is a complete job-time download that no
+/// other assertion here sees: the file is allow-listed, and the calling lane names no primitive.
+///
+/// So every allow-listed file gets the treatment `downloads.rs` gets from
+/// [`downloads_fetch_surface_is_registered`]: its network-reaching surface is rediscovered
+/// structurally and every member has to be named here.
+const HTTP_CLIENT_FILE_SURFACE: &[(&str, &str, &str)] = &[
+    (
+        "api_client.rs",
+        "new",
+        "builds the worker's client for the LOCAL API with the download timeouts applied; returns \
+         an `ApiClient` and transfers nothing",
+    ),
+    (
+        "api_client.rs",
+        "get_json",
+        "GETs a LOCAL API path and deserializes JSON. Takes a path, not a URL, and returns a typed \
+         value — it cannot write bytes to a caller-chosen destination",
+    ),
+    (
+        "api_client.rs",
+        "post_json",
+        "POSTs JSON to a LOCAL API path and deserializes the JSON reply; same shape as `get_json`",
     ),
 ];
 
@@ -758,19 +821,18 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
     index
 }
 
-/// Index just past a `'x'` / `'\n'` char literal starting at `start`, or `start + 1` when the quote
-/// is a lifetime (`'a`, `'_`) rather than a literal.
+/// Index just past a `'x'` / `'\n'` / `'\''` char literal starting at `start`, or `start + 1` when
+/// the quote is a lifetime (`'a`, `'_`) rather than a literal.
 ///
 /// Without this, a `'{'` char literal — eight files in the scanned crates contain one — would throw
 /// off every brace match downstream.
+///
+/// Delegates to [`char_literal_end`] rather than re-deriving the rule: this function previously
+/// tested `bytes[start + 2] == '\''` *before* the backslash branch, so `'\''` ended at `start + 3`
+/// — on the escaped quote, not the real terminator — and desynchronised every brace, paren and
+/// argument walk in this module on any file containing that literal.
 fn skip_char(bytes: &[u8], start: usize) -> usize {
-    if bytes.get(start + 2) == Some(&b'\'') {
-        return start + 3;
-    }
-    if bytes.get(start + 1) == Some(&b'\\') && bytes.get(start + 3) == Some(&b'\'') {
-        return start + 4;
-    }
-    start + 1
+    char_literal_end(bytes, start).unwrap_or(start + 1)
 }
 
 /// Whether `code` contains an *invocation* of `name` — the identifier, at a token boundary, followed
@@ -1541,8 +1603,8 @@ const HTTP_CLIENT_CONSTRUCTORS: &[&str] = &[
 /// private `fn` is excluded because `downloads` is a module: a job lane cannot name it, however much
 /// network it touches. Everything else discovered here is callable, unqualified, from any file in the
 /// crate — `lib.rs` does `use downloads::*;` — so it has to be classified.
-fn downloads_fetch_surface(downloads: &SourceFile) -> BTreeSet<String> {
-    let items = fn_items(&downloads.code);
+fn network_fetch_surface(file: &SourceFile) -> BTreeSet<String> {
+    let items = fn_items(&file.code);
     let bodies: Vec<String> = items
         .iter()
         .map(|item| code_without_comments_or_literals(&item.body))
@@ -1606,10 +1668,175 @@ fn download_reach(code_without_literals: &str, watch: &BTreeMap<String, String>)
         .filter(|(name, _)| invokes_free_function(code_without_literals, name))
         .map(|(name, definer)| format!("{name} <- {definer}"))
         .collect();
+    reasons.extend(value_references(code_without_literals, watch));
     if constructs_download_context(code_without_literals) {
         reasons.push("DownloadContext { … }".to_owned());
     }
     reasons
+}
+
+/// [`DOWNLOAD_PRIMITIVES`] + [`download_wrappers`] + every `as` rename of anything already in the
+/// map, to a fixpoint.
+fn watch_map(files: &[SourceFile]) -> BTreeMap<String, String> {
+    let mut watch: BTreeMap<String, String> = DOWNLOAD_PRIMITIVES
+        .iter()
+        .map(|name| ((*name).to_owned(), "downloads.rs".to_owned()))
+        .collect();
+    watch.extend(download_wrappers(files));
+    let blanked: Vec<String> = files
+        .iter()
+        .map(|file| file.code_without_literals())
+        .collect();
+    loop {
+        let mut grew = false;
+        for code in &blanked {
+            for (alias, original) in alias_edges(code, &watch) {
+                if let std::collections::btree_map::Entry::Vacant(slot) = watch.entry(alias) {
+                    slot.insert(format!("`as` rename of {original}"));
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    watch
+}
+
+/// Byte ranges of `use …;` items.
+///
+/// A name inside an import is not a use of it — `use crate::downloads::{ensure_cached_file, …};` has
+/// to stay silent, which is the negative [`scanner_detects_a_new_direct_call_site`] pins. Everything
+/// OUTSIDE these ranges that names a primitive without calling it is a real value reference.
+fn use_item_ranges(code: &str) -> Vec<(usize, usize)> {
+    let bytes = code.as_bytes();
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find("use ") {
+        let start = cursor + offset;
+        cursor = start + 4;
+        let boundary = start
+            .checked_sub(1)
+            .map(|index| !(bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric()))
+            .unwrap_or(true);
+        if !boundary {
+            continue;
+        }
+        let mut index = start;
+        let mut depth = 0i32;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                b';' if depth <= 0 => {
+                    index += 1;
+                    break;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        out.push((start, index));
+    }
+    out
+}
+
+/// `… PRIMITIVE as ALIAS …` renames, so `use crate::downloads::ensure_hf_cached_file as fetch_it;`
+/// puts `fetch_it` on the watch list.
+///
+/// An alias is a one-line bypass of any name-based gate, and it need not be spelled in the lane that
+/// uses it — `pub use … as …;` in one file arms a call in another — so this is collected crate-wide
+/// like the wrapper closure, and iterated so an alias of an alias is caught too.
+fn alias_edges(code: &str, watch: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    let bytes = code.as_bytes();
+    let mut out = Vec::new();
+    for name in watch.keys() {
+        let mut cursor = 0usize;
+        while let Some(offset) = code[cursor..].find(name.as_str()) {
+            let start = cursor + offset;
+            let end = start + name.len();
+            cursor = end;
+            let bounded = start
+                .checked_sub(1)
+                .map(|index| !(bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric()))
+                .unwrap_or(true)
+                && !bytes
+                    .get(end)
+                    .is_some_and(|byte| *byte == b'_' || byte.is_ascii_alphanumeric());
+            if !bounded {
+                continue;
+            }
+            let Some(after) = code[end..].trim_start().strip_prefix("as") else {
+                continue;
+            };
+            // `as` must be its own token — `assert_eq!` must not read as a rename.
+            if after.starts_with(|character: char| {
+                character == '_' || character.is_ascii_alphanumeric()
+            }) {
+                continue;
+            }
+            let alias: String = after
+                .trim_start()
+                .chars()
+                .take_while(|character| *character == '_' || character.is_ascii_alphanumeric())
+                .collect();
+            if !alias.is_empty() {
+                out.push((alias, name.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Watched names referenced as VALUES rather than called: `let grab = ensure_hf_cached_file;`
+/// followed by `grab(…)` downloads exactly as much as calling it directly, and matches no `NAME(`
+/// pattern anywhere in the file.
+fn value_references(code: &str, watch: &BTreeMap<String, String>) -> Vec<String> {
+    let bytes = code.as_bytes();
+    let imports = use_item_ranges(code);
+    let mut out = Vec::new();
+    for (name, definer) in watch {
+        let mut cursor = 0usize;
+        while let Some(offset) = code[cursor..].find(name.as_str()) {
+            let start = cursor + offset;
+            let end = start + name.len();
+            cursor = end;
+            if imports
+                .iter()
+                .any(|(from, to)| start >= *from && start < *to)
+            {
+                continue;
+            }
+            let before = code[..start].trim_end();
+            let preceded_by_ident = start
+                .checked_sub(1)
+                .map(|index| bytes[index] == b'_' || bytes[index].is_ascii_alphanumeric())
+                .unwrap_or(false);
+            if preceded_by_ident
+                || bytes
+                    .get(end)
+                    .is_some_and(|byte| *byte == b'_' || byte.is_ascii_alphanumeric())
+                || (before.ends_with('.') && !before.ends_with(".."))
+                || strip_trailing_keyword(before, "fn").is_some()
+            {
+                continue;
+            }
+            // A call is `download_reach`'s job and a rename is `alias_edges`'. What is left — the
+            // name followed by anything else — is the function itself, taken as a value.
+            let next = code[end..].trim_start();
+            if next.starts_with('(')
+                || next.starts_with("as")
+                || next.starts_with('!')
+                || next.starts_with("::")
+            {
+                continue;
+            }
+            out.push(format!("{name} (as a value) <- {definer}"));
+            break;
+        }
+    }
+    out
 }
 
 /// Whether `code` builds a `DownloadContext` struct literal.
@@ -1673,6 +1900,10 @@ fn string_constants(files: &[SourceFile]) -> BTreeMap<String, String> {
                     continue;
                 };
                 let value = after[equals + 1..].trim_start();
+                if let Some(joined) = concat_literal_value(value) {
+                    out.insert(name, joined);
+                    continue;
+                }
                 let Some(literal) = value.strip_prefix('"') else {
                     continue;
                 };
@@ -1706,6 +1937,25 @@ fn string_literal_value(argument: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The value of a `concat!("a", "b")` initialiser, when every argument is a plain literal.
+///
+/// `const ROOT: &str = concat!("ca", "che");` is otherwise an opaque `{ROOT}` to [`subdir_label`],
+/// and therefore a cache root the scan cannot recognise.
+fn concat_literal_value(value: &str) -> Option<String> {
+    let inner = value.trim().strip_prefix("concat!")?.trim_start();
+    let inner = inner.strip_prefix('(')?;
+    let end = inner.find(')')?;
+    let mut joined = String::new();
+    for part in inner[..end].split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        joined.push_str(&string_literal_value(part)?);
+    }
+    Some(joined)
+}
+
 /// Render one `.join(…)` argument as an allow-list directory name.
 ///
 /// A literal (plain or raw) becomes itself; a `const` resolves through [`string_constants`]; anything
@@ -1717,6 +1967,17 @@ fn string_literal_value(argument: &str) -> Option<String> {
 /// spell a cache root that a `find(".join(\"cache\")")` scan cannot see, and both resolve here.
 fn subdir_label(argument: &str, constants: &BTreeMap<String, String>) -> String {
     let argument = argument.trim().trim_start_matches('&').trim();
+    // `join(Path::new("cache"))` and `join(PathBuf::from("cache"))` are the same path segment as
+    // `join("cache")`, and were two more ways to spell a root the literal scan could not see.
+    let argument = ["Path::new(", "PathBuf::from(", "OsStr::new("]
+        .iter()
+        .find_map(|wrapper| {
+            argument
+                .strip_prefix(*wrapper)
+                .and_then(|rest| rest.strip_suffix(')'))
+        })
+        .map(str::trim)
+        .unwrap_or(argument);
     if let Some(literal) = string_literal_value(argument) {
         return literal;
     }
@@ -1830,16 +2091,26 @@ fn cache_destinations(code: &str, constants: &BTreeMap<String, String>) -> BTree
             }
         }
     }
+    // A `cache/<subdir>` segment inside ANY string literal, not only one that starts with it:
+    // `format!("{}/cache/{sub}", data_dir.display())` is the same destination written differently.
+    let bytes = code.as_bytes();
     let mut cursor = 0usize;
-    while let Some(offset) = code[cursor..].find("\"cache/") {
-        let start = cursor + offset + "\"cache/".len();
-        cursor = start;
-        let Some(end) = code[start..].find('"') else {
+    while let Some(offset) = code[cursor..].find("cache/") {
+        let start = cursor + offset;
+        cursor = start + "cache/".len();
+        if !matches!(
+            start.checked_sub(1).map(|index| bytes[index]),
+            Some(b'"') | Some(b'/')
+        ) {
             continue;
-        };
-        let segment = code[start..start + end].split('/').next().unwrap_or("");
+        }
+        let rest = &code[cursor..];
+        let end = rest.find(['"', '/']).unwrap_or(rest.len());
+        let segment = &rest[..end];
         out.insert(if segment.is_empty() {
             "<cache-root>".to_owned()
+        } else if segment.contains(['{', '}']) {
+            "{expr}".to_owned()
         } else {
             segment.to_owned()
         });
@@ -2112,11 +2383,7 @@ fn job_time_download_sites_match_the_allow_list() {
          which reaches Hugging Face ONLY through it — would be invisible. Wrapper detection is \
          broken."
     );
-    let mut watch: BTreeMap<String, String> = DOWNLOAD_PRIMITIVES
-        .iter()
-        .map(|s| ((*s).to_owned(), "downloads.rs".to_owned()))
-        .collect();
-    watch.extend(wrappers);
+    let watch = watch_map(&files);
 
     let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for file in &files {
@@ -2285,7 +2552,7 @@ fn downloads_fetch_surface_is_registered() {
     let files = worker_sources();
     let downloads = worker_file(&files, "downloads.rs");
 
-    let discovered = downloads_fetch_surface(&downloads);
+    let discovered = network_fetch_surface(&downloads);
     assert!(
         discovered.contains("ensure_hf_cached_file") && discovered.contains("ensure_cached_file"),
         "the fetch-surface walk did not rediscover the helpers sc-17637 names, so it is broken and \
@@ -2688,7 +2955,7 @@ fn scanner_sees_through_an_aliased_cache_root() {
 /// A fake NEW fetcher added to `downloads.rs` must be rediscovered, and a private one must not
 /// (a job lane cannot name it).
 #[test]
-fn scanner_rediscovers_the_downloads_fetch_surface() {
+fn scanner_rediscovers_the_network_fetch_surface() {
     let module = SourceFile {
         rel: "downloads.rs".to_owned(),
         code: "pub(crate) async fn m17_fetch(client: &reqwest::Client, url: &str) -> R { \
@@ -2698,7 +2965,7 @@ fn scanner_rediscovers_the_downloads_fetch_surface() {
                pub(crate) fn m17_offline(path: &Path) -> R { std::fs::read(path) }"
             .to_owned(),
     };
-    let discovered = downloads_fetch_surface(&module);
+    let discovered = network_fetch_surface(&module);
     assert!(
         discovered.contains("m17_fetch"),
         "a new fn that sends a request must be discovered: {discovered:?}"
@@ -2868,6 +3135,269 @@ fn scanner_survives_quote_char_literals_and_raw_strings() {
     assert!(stripped.contains("ensure_hf_cached_file"));
 }
 
+/// **MAJOR 4.** [`SCANNED_CRATES`] must cover `[workspace] members`, or a brand-new crate can hold a
+/// brand-new weight destination and never be looked at — round one's M10 in a new hat.
+#[test]
+fn scanned_crates_cover_the_workspace() {
+    let manifest =
+        std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("root Cargo.toml");
+    let members_block = manifest
+        .split_once("\nmembers = [")
+        .expect("the root manifest must declare [workspace] members")
+        .1
+        .split_once(']')
+        .expect("unterminated members list")
+        .0;
+    let members: BTreeSet<String> = members_block
+        .split(',')
+        .filter_map(|entry| string_literal_value(entry.trim()))
+        .collect();
+    assert!(
+        members.len() >= 5,
+        "parsed only {} workspace members — the parser is broken, not the manifest",
+        members.len()
+    );
+
+    let scanned: BTreeSet<String> = SCANNED_CRATES
+        .iter()
+        .map(|(_, src, _, _)| {
+            src.strip_suffix("/src")
+                .unwrap_or_else(|| panic!("{src} must be a crate `src` directory"))
+                .to_owned()
+        })
+        .collect();
+    let excluded: BTreeSet<String> = UNSCANNED_WORKSPACE_MEMBERS
+        .iter()
+        .map(|(path, _)| (*path).to_owned())
+        .collect();
+
+    let unscanned: Vec<&String> = members
+        .iter()
+        .filter(|member| !scanned.contains(*member) && !excluded.contains(*member))
+        .collect();
+    let phantom: Vec<&String> = scanned.difference(&members).collect();
+    assert!(
+        unscanned.is_empty(),
+        "workspace member(s) that no gate in this module looks at:\n  {unscanned:?}\n\nA crate that \
+         can see the app data dir can hold a new `<data_dir>/cache` weight destination. Add it to \
+         SCANNED_CRATES as (label, `<path>/src`, crate root file, minimum file count), or — if it \
+         structurally cannot reach the data dir — to UNSCANNED_WORKSPACE_MEMBERS with the reason."
+    );
+    assert!(
+        phantom.is_empty(),
+        "SCANNED_CRATES names path(s) that are no longer workspace members:\n  {phantom:?}"
+    );
+}
+
+/// **MAJOR 3.** Confining WHERE a client may be built says nothing about what those files fetch, so
+/// each [`HTTP_CLIENT_FILES`] member (other than `downloads.rs`, which
+/// [`downloads_fetch_surface_is_registered`] covers) must have its network-reaching surface
+/// registered in [`HTTP_CLIENT_FILE_SURFACE`].
+#[test]
+fn http_client_file_fetch_surfaces_are_registered() {
+    let files = worker_sources();
+    for (rel, _) in HTTP_CLIENT_FILES {
+        if *rel == "downloads.rs" {
+            continue;
+        }
+        let discovered = network_fetch_surface(&worker_file(&files, rel));
+        assert!(
+            !discovered.is_empty(),
+            "{rel} is allow-listed for HTTP-client construction but the surface walk found nothing \
+             in it, so this assertion would prove nothing"
+        );
+        let registered: BTreeSet<String> = HTTP_CLIENT_FILE_SURFACE
+            .iter()
+            .filter(|(file, _, _)| file == rel)
+            .map(|(_, name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(
+            discovered, registered,
+            "the network-reaching surface of {rel} changed. This file is allow-listed to build an \
+             HTTP client, so a new externally-visible function in it can fetch remote bytes and \
+             write them wherever the caller asks, and no other assertion in this module would see \
+             it. Register it in HTTP_CLIENT_FILE_SURFACE with what it does — and if what it does is \
+             fetch weights, it belongs in `downloads.rs` behind a download primitive instead."
+        );
+    }
+}
+
+/// A phantom string literal — the failure where a mis-parsed quote swallows the rest of a file and
+/// silently removes it from BOTH gates — always shows up as one absurdly long literal.
+///
+/// The longest REAL multi-line literal in the scanned trees is 52 lines (`jobs_store.rs`'s SQL
+/// schema), so the ceiling here sits at more than twice that. When this fires, the fix is in
+/// `architecture_tests`' literal walkers, not in the file it names.
+///
+/// This is the cheap, always-on version of the per-line mutation canary that caught `'\''`: linear,
+/// no mutation needed, and it detects the whole class rather than the spellings known today.
+#[test]
+fn the_stripper_never_opens_a_phantom_string_literal() {
+    const MAX_LITERAL_LINES: usize = 120;
+    let mut worst = (0usize, String::new(), 0usize);
+    for (label, files) in all_production_sources() {
+        for file in files {
+            let bytes = file.code.as_bytes();
+            let mut index = 0usize;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    index = skip_char(bytes, index);
+                    continue;
+                }
+                if (bytes[index] == b'r' || bytes[index] == b'b')
+                    && index
+                        .checked_sub(1)
+                        .map(|i| !(bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()))
+                        .unwrap_or(true)
+                {
+                    if let Some((_, end)) =
+                        crate::architecture_tests::raw_string_parts(bytes, index)
+                    {
+                        index = end.min(bytes.len());
+                        continue;
+                    }
+                }
+                if bytes[index] == b'"' {
+                    let end = skip_string(bytes, index).min(bytes.len());
+                    let lines = bytes[index..end].iter().filter(|b| **b == b'\n').count();
+                    if lines > worst.0 {
+                        worst = (
+                            lines,
+                            format!("{label}/{}", file.rel),
+                            file.code[..index].lines().count(),
+                        );
+                    }
+                    index = end;
+                    continue;
+                }
+                index += 1;
+            }
+        }
+    }
+    assert!(
+        worst.0 <= MAX_LITERAL_LINES,
+        "a string literal spanning {} lines starts at {}:{} — that is a mis-parsed quote, not a real \
+         literal. Everything after it sits inside a phantom string and has stopped being scanned by \
+         BOTH gates. Fix `char_literal_end` / `raw_string_parts` / `skip_string` in \
+         `architecture_tests`, not the file named here.",
+        worst.0,
+        worst.1,
+        worst.2
+    );
+}
+
+/// **MINOR 5.** An `as` rename and a bare fn-pointer binding are one-line bypasses of a name gate.
+#[test]
+fn scanner_sees_through_aliases_and_value_bindings() {
+    let aliased = SourceFile {
+        rel: "image_jobs/zz_alias_lane.rs".to_owned(),
+        code: "use crate::downloads::ensure_hf_cached_file as fetch_it;\n\
+               async fn run(c: &Ctx) { fetch_it(c, r, v, f, d).await; }"
+            .to_owned(),
+    };
+    let watch = watch_map(std::slice::from_ref(&aliased));
+    assert_eq!(
+        watch.get("fetch_it").map(String::as_str),
+        Some("`as` rename of ensure_hf_cached_file"),
+        "an `as` rename must join the watch map: {watch:?}"
+    );
+    assert!(
+        !download_reach(&aliased.code_without_literals(), &watch).is_empty(),
+        "the aliased call must be flagged"
+    );
+
+    // A bare value binding matches no `NAME(` anywhere.
+    let bound = SourceFile {
+        rel: "image_jobs/zz_pointer_lane.rs".to_owned(),
+        code:
+            "async fn run(c: &Ctx) { let grab = ensure_hf_cached_file; grab(c, r, v, f, d).await; }"
+                .to_owned(),
+    };
+    let watch = watch_map(std::slice::from_ref(&bound));
+    let reasons = download_reach(&bound.code_without_literals(), &watch);
+    assert!(
+        reasons.iter().any(|reason| reason.contains("as a value")),
+        "a fn-pointer binding must be flagged: {reasons:?}"
+    );
+
+    // NEGATIVE: an import mentions the name without using it. This is the distinction that makes the
+    // value-reference rule safe rather than a blanket "the name appears" match.
+    let import_only = SourceFile {
+        rel: "image_jobs/zz_import_only.rs".to_owned(),
+        code: "use crate::downloads::{ensure_cached_file, DownloadContext};\n\
+               use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};\n\
+               fn run() {}"
+            .to_owned(),
+    };
+    let watch = watch_map(std::slice::from_ref(&import_only));
+    let reasons = download_reach(&import_only.code_without_literals(), &watch);
+    assert!(
+        reasons.is_empty(),
+        "a `use` item is not a reference: {reasons:?}"
+    );
+    assert_eq!(
+        use_item_ranges("use a::b;\nfn f() { g(); }\nuse c::{d, e};").len(),
+        2
+    );
+}
+
+/// **MINOR 6.** Three more spellings of a cache destination, none of which occurs in production
+/// source today and all of which would have been invisible.
+#[test]
+fn scanner_sees_the_remaining_cache_spellings() {
+    let mut constants = BTreeMap::new();
+    constants.insert("CONCAT_ROOT".to_owned(), "cache".to_owned());
+
+    // A `/cache/<sub>` segment inside a format string rather than at the start of a literal.
+    assert!(cache_destinations(
+        "let p = format!(\"{}/cache/brand-new-weights\", data_dir.display());",
+        &constants
+    )
+    .contains("brand-new-weights"));
+    // ...and an interpolated subdir is loud rather than absent.
+    assert!(cache_destinations(
+        "let p = format!(\"{}/cache/{sub}\", d.display());",
+        &constants
+    )
+    .contains("{expr}"));
+    // `Path::new("cache")` is the same path segment as `"cache"`.
+    assert!(cache_destinations(
+        "let p = d.join(Path::new(\"cache\")).join(\"brand-new-weights\");",
+        &constants
+    )
+    .contains("brand-new-weights"));
+    assert!(cache_destinations(
+        "let p = d.join(PathBuf::from(\"cache\")).join(\"brand-new-weights\");",
+        &constants
+    )
+    .contains("brand-new-weights"));
+    // A `concat!`-built const resolves to its value.
+    assert_eq!(
+        concat_literal_value("concat!(\"ca\", \"che\")").as_deref(),
+        Some("cache")
+    );
+    let concat_const = SourceFile {
+        rel: "zz.rs".to_owned(),
+        code: "const CONCAT_ROOT: &str = concat!(\"ca\", \"che\");".to_owned(),
+    };
+    assert_eq!(
+        string_constants(&[concat_const])
+            .get("CONCAT_ROOT")
+            .map(String::as_str),
+        Some("cache")
+    );
+    assert!(cache_destinations(
+        "let p = d.join(CONCAT_ROOT).join(\"brand-new-weights\");",
+        &constants
+    )
+    .contains("brand-new-weights"));
+
+    // NEGATIVE: an unrelated path that merely contains the word.
+    assert!(
+        cache_destinations("let p = d.join(\"models\").join(\"cachexyz\");", &constants).is_empty()
+    );
+}
+
 /// The supporting parsers, exercised on the shapes they must judge. Each of these silently returning
 /// nothing would make one of the gates above pass forever.
 #[test]
@@ -2908,6 +3438,21 @@ fn scanner_parsers_recognise_the_shapes_they_must_judge() {
         split_params("(a: HashMap<String, Vec<u8>>, b: impl Fn() -> bool)"),
         vec!["a", "b"]
     );
+
+    // `'\''` is the escaped-quote case that shipped broken: the terminator is the FOURTH byte, not
+    // the third. Getting it wrong orphans a quote, which then eats the opening `"` of the next
+    // string literal and hides the rest of the file from both gates.
+    assert_eq!(skip_char(b"'\\''", 0), 4);
+    assert_eq!(skip_char(b"b'\\''", 1), 5);
+    assert_eq!(skip_char(b"'\\n'", 0), 4);
+    assert_eq!(skip_char(b"'\\\\'", 0), 4);
+    assert_eq!(skip_char("'\\u{1F600}'".as_bytes(), 0), 11);
+    assert_eq!(skip_char(b"'\"'", 0), 3);
+    assert_eq!(skip_char(b"'{'", 0), 3);
+    // A lifetime is not a literal, and a lifetime LIST must not read as one spanning both.
+    assert_eq!(skip_char(b"'a>", 0), 1);
+    assert_eq!(skip_char(b"'a, 'b>", 0), 1);
+    assert_eq!(skip_char(b"'static", 0), 1);
 
     // A `'{'` char literal must not throw off the brace match — eight files in the scanned crates
     // contain one, and a body that ran to end-of-file would silently swallow every later item.
