@@ -47,19 +47,125 @@ fn documented_job_types() -> Vec<String> {
         .collect()
 }
 
-/// Remove comments and literal contents before inspecting Rust syntax. This is intentionally small
-/// (the production source remains compiled by rustc), but it understands nested block comments and
-/// escaped quoted strings so a `JobType::Variant` mention outside code cannot satisfy the guard.
+/// The end of a `'x'` / `'\n'` / `'\''` / `'\u{1F600}'` char literal starting at `start`, or `None`
+/// when the quote opens a lifetime (`'a`, `'_`, `'static`).
 ///
-/// Shared with [`crate::candle_preview_wiring_tests`] (sc-16962), whose guard reads the candle image
-/// lanes' own source: without comment stripping, a doc comment that NAMES the forbidden
-/// `preview: Default::default()` would trip the guard it documents.
-pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
+/// Without this, a `'"'` char literal — `downloads.rs`, `session_log.rs`, `jsonc.rs` and four other
+/// scanned files contain one — flips the string-literal parity of everything that follows it in the
+/// file. The consequence is not a false positive but a silent BLIND SPOT: the tail of the file gets
+/// absorbed into a phantom string literal and stops being scanned at all.
+///
+/// # The two ways to get this wrong, both of which shipped
+///
+/// * **Escapes.** The closing quote of `'\''` is the byte at `start + 3`; the byte at `start + 2` is
+///   the *escaped* quote. Searching from `start + 2` ends the literal one byte early and orphans a
+///   `'`, which then eats the opening `"` of the next string literal and inverts parity for the rest
+///   of the file. `media_jobs.rs:3087` (`.replace('\'', "'\\''")`) put its whole tail out of reach of
+///   both gates that way — strictly worse than the stripper this replaced.
+/// * **Lifetimes.** "a quote somewhere in the next five bytes" reads `Foo<'a, 'b>` as a char literal
+///   spanning `'a, '`, which can again leave the cursor on a `"`. A plain char literal is exactly one
+///   code point wide, so the closing quote must sit *immediately* after it — required here, never
+///   searched for.
+pub(crate) fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+    if bytes.get(start + 1) == Some(&b'\\') {
+        // The escaped byte is at `start + 2` and is never the terminator. Escapes run from `'\n'`
+        // (4 bytes) to `'\u{1F600}'` (11).
+        return (start + 3..=start + 11)
+            .find(|index| bytes.get(*index) == Some(&b'\''))
+            .map(|index| index + 1);
+    }
+    let width = match *bytes.get(start + 1)? {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => return None,
+    };
+    (bytes.get(start + 1 + width) == Some(&b'\'')).then_some(start + 2 + width)
+}
+
+/// A raw string literal (`r"…"`, `r#"…"#`, `br#"…"#`) whose `r`/`b` prefix starts at `start`, as
+/// `(number of hashes, index just past the whole literal)`.
+///
+/// A raw string can contain unescaped `"` — `ideogram_caption.rs` has `r#"a "quoted" fox"#` — which
+/// the plain-string walk closes early on, flipping parity exactly as a `'"'` char literal does.
+pub(crate) fn raw_string_parts(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+    if bytes.get(index) == Some(&b'b') {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'r') {
+        return None;
+    }
+    index += 1;
+    let hash_start = index;
+    while bytes.get(index) == Some(&b'#') {
+        index += 1;
+    }
+    let hashes = index - hash_start;
+    if bytes.get(index) != Some(&b'"') {
+        return None;
+    }
+    index += 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"'
+            && bytes[index + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|byte| **byte == b'#')
+                .count()
+                == hashes
+        {
+            return Some((hashes, index + 1 + hashes));
+        }
+        index += 1;
+    }
+    Some((hashes, bytes.len()))
+}
+
+/// Whether the byte at `index` could START an `r"…"` / `b"…"` prefix rather than continue an
+/// identifier (`for r in …` must not read `r` as a raw-string prefix, but `let x = r"…"` must).
+fn starts_a_token(bytes: &[u8], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .map(|previous| !(bytes[previous] == b'_' || bytes[previous].is_ascii_alphanumeric()))
+        .unwrap_or(true)
+}
+
+/// Remove comments — and nothing else — before inspecting Rust syntax. Understands nested block
+/// comments and steps over quoted strings, raw strings and char literals, so a `//` inside a URL
+/// literal is not mistaken for the start of a comment and a `'"'` does not open a phantom string.
+///
+/// String literal CONTENTS survive, which is what separates this from
+/// [`code_without_comments_or_literals`]. [`crate::job_time_download_guard`] (sc-17637) needs both:
+/// its download-reachability sweep must not let a doc-comment mention of `ensure_hf_cached_file`
+/// count as a call, while its `<data_dir>/cache` sweep is looking for `.join("cache")` — a
+/// destination that only exists *as* a string literal, and which the blanking pass below erases.
+pub(crate) fn code_without_comments(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
 
     while index < bytes.len() {
+        // Char literals and raw strings first: both can carry a `"` that must not open a string.
+        if bytes[index] == b'\'' {
+            if let Some(end) = char_literal_end(bytes, index) {
+                output.extend_from_slice(&bytes[index..end.min(bytes.len())]);
+                index = end.min(bytes.len());
+                continue;
+            }
+        }
+        if (bytes[index] == b'r' || bytes[index] == b'b') && starts_a_token(bytes, index) {
+            if let Some((_, end)) = raw_string_parts(bytes, index) {
+                let end = end.min(bytes.len());
+                output.extend_from_slice(&bytes[index..end]);
+                index = end;
+                continue;
+            }
+        }
         match (bytes[index], bytes.get(index + 1).copied()) {
             (b'/', Some(b'/')) => {
                 index += 2;
@@ -89,6 +195,81 @@ pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
                 index += 1;
                 while index < bytes.len() {
                     match bytes[index] {
+                        b'\\' => {
+                            output.push(b'\\');
+                            if let Some(escaped) = bytes.get(index + 1).copied() {
+                                output.push(escaped);
+                            }
+                            index += 2;
+                        }
+                        b'"' => {
+                            output.push(b'"');
+                            index += 1;
+                            break;
+                        }
+                        byte => {
+                            output.push(byte);
+                            index += 1;
+                        }
+                    }
+                }
+            }
+            (byte, _) => {
+                output.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8(output).expect("Rust source outside comments remains UTF-8")
+}
+
+/// Remove comments and literal contents before inspecting Rust syntax. This is intentionally small
+/// (the production source remains compiled by rustc), but it understands nested block comments and
+/// escaped quoted strings so a `JobType::Variant` mention outside code cannot satisfy the guard.
+///
+/// Shared with [`crate::candle_preview_wiring_tests`] (sc-16962), whose guard reads the candle image
+/// lanes' own source: without comment stripping, a doc comment that NAMES the forbidden
+/// `preview: Default::default()` would trip the guard it documents. [`crate::job_time_download_guard`]
+/// (sc-17637) uses it for the same reason — ~25 doc comments name `ensure_hf_cached_file` in files
+/// that never call it.
+pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
+    let comment_free = code_without_comments(source);
+    let bytes = comment_free.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        // A char literal is kept verbatim — callers look for `'{'` — but it must be *stepped over*,
+        // or the `"` in a `'"'` literal opens a phantom string that blanks the rest of the file.
+        if bytes[index] == b'\'' {
+            if let Some(end) = char_literal_end(bytes, index) {
+                let end = end.min(bytes.len());
+                output.extend_from_slice(&bytes[index..end]);
+                index = end;
+                continue;
+            }
+        }
+        // A raw string keeps its delimiter shape and loses its contents, like a plain one.
+        if (bytes[index] == b'r' || bytes[index] == b'b') && starts_a_token(bytes, index) {
+            if let Some((hashes, end)) = raw_string_parts(bytes, index) {
+                if bytes[index] == b'b' {
+                    output.push(b'b');
+                }
+                output.push(b'r');
+                output.extend(std::iter::repeat(b'#').take(hashes));
+                output.extend_from_slice(b"\"\"");
+                output.extend(std::iter::repeat(b'#').take(hashes));
+                index = end.min(bytes.len());
+                continue;
+            }
+        }
+        match bytes[index] {
+            b'"' => {
+                output.push(b'"');
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
                         b'\\' => index += 2,
                         b'"' => {
                             output.push(b'"');
@@ -99,7 +280,7 @@ pub(crate) fn code_without_comments_or_literals(source: &str) -> String {
                     }
                 }
             }
-            (byte, _) => {
+            byte => {
                 output.push(byte);
                 index += 1;
             }
