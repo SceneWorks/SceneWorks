@@ -1404,8 +1404,11 @@ fn all_production_sources() -> Vec<(&'static str, Vec<SourceFile>)> {
         .iter()
         .map(|(label, src, root)| {
             let files = production_sources(&repo_root().join(src), root);
+            // A floor, not a census: this catches "the walk found nothing", which is the only way a
+            // set-equality gate can silently pass. Deliberately well below every crate's real count
+            // (the smallest, `apps/desktop/src`, has 10) so ordinary refactors do not trip it.
             assert!(
-                files.len() >= 10,
+                files.len() >= 5,
                 "{label}: scanned only {} production files — the walk is broken, not the crate",
                 files.len()
             );
@@ -1487,15 +1490,24 @@ fn job_time_download_sites_match_the_allow_list() {
         migrated.join("\n  ")
     );
 
-    let remaining = allowed
+    // Every reaching file must carry a role, so the two classes account for the whole set. This is
+    // what makes the roles load-bearing rather than decoration: a new entry cannot be slipped in
+    // unclassified, and the `JobTime` count is the epic's remaining-work number.
+    let installers = allowed
+        .values()
+        .filter(|role| **role == DownloadRole::Installer)
+        .count();
+    let job_time = allowed
         .values()
         .filter(|role| **role == DownloadRole::JobTime)
         .count();
     assert_eq!(
-        remaining,
-        found.len() - 3,
-        "the three `Installer` entries (downloads.rs, lib.rs, model_jobs.rs) plus the job-time \
-         population must account for every reaching file"
+        installers + job_time,
+        found.len(),
+        "every download-reaching file must be classified `Installer` (the Model Manager path) or \
+         `JobTime` (the population epic 17625 is migrating); found {} reaching files against \
+         {installers} installer + {job_time} job-time entries",
+        found.len()
     );
 }
 
