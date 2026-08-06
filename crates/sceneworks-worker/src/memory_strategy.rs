@@ -4,11 +4,14 @@
 //! owns live-budget arithmetic and the normative strategy order. Optimized candidates are admitted
 //! only through gen-core's canonical evidence validator.
 
+use std::collections::BTreeSet;
+
 use gen_core::{
     MemoryCleanupSemantics, MemoryEvidence, MemoryEvidenceDimension, MemoryEvidenceVerdict,
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryProviderContract, MemorySelection,
     MemoryStrategy, MemoryStrategySupport,
 };
+use sceneworks_core::memory_calibration::StrategyRung;
 
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
@@ -24,6 +27,106 @@ pub(crate) fn load_shape_from_receipt(
             gen_core::LoadShape::DeferredMaterialization
         }
     }
+}
+
+/// Bridge a calibration receipt's rung spelling to the gen-core strategy it names.
+pub(crate) const fn strategy_from_rung(rung: StrategyRung) -> MemoryStrategy {
+    match rung {
+        StrategyRung::Resident => MemoryStrategy::Resident,
+        StrategyRung::StagedResidency => MemoryStrategy::StagedResidency,
+        StrategyRung::BoundedDecode => MemoryStrategy::BoundedDecode,
+        StrategyRung::BoundedAttention => MemoryStrategy::BoundedAttention,
+        StrategyRung::BoundedTransformerResidency => MemoryStrategy::BoundedTransformerResidency,
+    }
+}
+
+/// Canonical label a calibration binding and an evidence receipt both spell a rung with.
+pub(crate) const fn rung_key(rung: StrategyRung) -> &'static str {
+    match rung {
+        StrategyRung::Resident => "resident",
+        StrategyRung::StagedResidency => "staged_residency",
+        StrategyRung::BoundedDecode => "bounded_decode",
+        StrategyRung::BoundedAttention => "bounded_attention",
+        StrategyRung::BoundedTransformerResidency => "bounded_transformer_residency",
+    }
+}
+
+/// Parse one canonical rung label, the inverse of [`rung_key`].
+pub(crate) fn rung_from_key(value: &str) -> Option<StrategyRung> {
+    StrategyRung::ALL
+        .into_iter()
+        .find(|rung| rung_key(*rung) == value)
+}
+
+/// The composition a selection engages when a binding publishes no cheaper verified one.
+///
+/// Read through [`MemoryStrategy::engages`] — the contract's own defeasible cost-order policy seam —
+/// rather than restated here as an ordinal `<=`. Restating it would let the two drift silently, and
+/// the drift decides which strategy parameters a binding is obliged to name.
+pub(crate) fn default_engaged_composition(rung: StrategyRung) -> Vec<StrategyRung> {
+    let selection = strategy_from_rung(rung);
+    StrategyRung::ALL
+        .into_iter()
+        .filter(|candidate| selection.engages(strategy_from_rung(*candidate)))
+        .collect()
+}
+
+/// Validate a binding's declared `engagedRungs`, returning the composition to validate against.
+///
+/// Absent, the shared cost-order default applies, which is byte-identical to the pre-sc-17728
+/// cumulative behaviour. Declared, it is authoritative — that is how a provider which implements
+/// rung 4 while declaring rungs 2 and 3 `Missing` publishes evidence for the composition it actually
+/// ran. The declaration is still closed: it must be canonical and unique, it must contain `resident`
+/// and the selected rung, and it can never engage a rung costlier than the one it selected.
+pub(crate) fn engaged_composition(
+    rung: StrategyRung,
+    declared: Option<&[StrategyRung]>,
+) -> Result<Vec<StrategyRung>, String> {
+    let Some(declared) = declared else {
+        return Ok(default_engaged_composition(rung));
+    };
+    let unique = declared.iter().copied().collect::<BTreeSet<_>>();
+    let canonical = StrategyRung::ALL
+        .into_iter()
+        .filter(|candidate| unique.contains(candidate))
+        .collect::<Vec<_>>();
+    if unique.len() != declared.len() || canonical != declared {
+        return Err("engagedRungs must be a unique set in canonical ladder order".to_owned());
+    }
+    if !unique.contains(&StrategyRung::Resident) || !unique.contains(&rung) {
+        return Err(format!(
+            "engagedRungs must contain resident and the selected rung {}",
+            rung_key(rung)
+        ));
+    }
+    if let Some(costlier) = declared.iter().find(|candidate| **candidate > rung) {
+        return Err(format!(
+            "engagedRungs cannot engage {}, which is costlier than the selected rung {}",
+            rung_key(*costlier),
+            rung_key(rung)
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Numeric strategy parameters an engaged composition must name, with their minimums.
+///
+/// A rung the composition does not engage owns no parameter, so naming one is an error rather than
+/// harmless noise — the same rule gen-core's `validate_selected_parameters` applies to a runtime
+/// selection, keyed on engagement rather than on the selected rung's ordinal.
+pub(crate) fn required_numeric_parameters(engaged: &[StrategyRung]) -> Vec<(&'static str, u32)> {
+    let mut required = Vec::new();
+    if engaged.contains(&StrategyRung::BoundedDecode) {
+        required.push(("decodeTileEdge", 1));
+        required.push(("decodeOverlap", 0));
+    }
+    if engaged.contains(&StrategyRung::BoundedAttention) {
+        required.push(("attentionChunkSize", 1));
+    }
+    if engaged.contains(&StrategyRung::BoundedTransformerResidency) {
+        required.push(("transformerWindowSize", 1));
+    }
+    required
 }
 
 /// Typed [`MemoryMode`] for a canonical worker mode-key label, `as_key(from(key)) == key` for every
