@@ -202,11 +202,13 @@ on:
 #
 # WHERE THE ~24m ACTUALLY GOES, and why the obvious saving is not one (sc-17820).
 # Step-level `started_at` -> `completed_at` from the jobs API, five runs on 2026-08-05/06
-# (31055081046, 31057684283, 31058077337, 31059604369, 31060918014):
+# (31055081046, 31057684283, 31058077337, 31059604369, 31060918014). Those five ran
+# 18.0 - 25.8m end to end; the 24.1m median above is over 85 runs, so do not expect this
+# table to sum to it. Ranges are truncated to 0.1m, which always understates a max.
 #
 #   Fetch the private inference release          3.5 - 8.8m
 #   Test the candle GPU worker (backend-candle)  3.6 - 5.6m
-#   Check the candle sidecar builds (rust-api)   2.5 - 3.9m
+#   Check the candle sidecar builds (rust-api)   2.5 - 4.0m
 #   Check and test the candle memory adapter     4.5 - 6.7m
 #   Clippy (candle worker)                       0.5 - 1.0m
 #   Verify capabilities.candle.json              0.7 - 0.9m
@@ -219,19 +221,36 @@ on:
 # So `cargo test -p sceneworks-worker --features backend-candle` spends 3-5 MINUTES
 # building and 7.6 SECONDS running. sc-17820 proposed narrowing the PR invocation to the
 # ~127 candle-exclusive tests on the grounds that the other ~92% are covered by `parity`
-# and `macos-checks`. REJECTED, on three measured counts:
-#   1. A test filter changes nothing about what cargo builds. The crate, all its targets
-#      and the whole candle graph still compile; the saving is bounded above by that 7.6s,
-#      i.e. ~0.5% of the job. The lane would still be ~24m.
-#   2. It therefore does NOT make sc-17014 option (B) -- require this lane on the merge
+# and `macos-checks`. REJECTED, on four measured counts:
+#   1. A libtest filter changes nothing about what cargo builds. The crate, all its
+#      targets and the whole candle graph still compile; the saving is bounded above by
+#      that 7.6s, i.e. ~0.5% of the job. The lane would still be ~24m.
+#   2. Narrowing by TARGET (`--lib`, or naming individual `--test`s) would drop build
+#      work, but drops the wrong things: the four integration targets cost seconds in
+#      total, and `--lib` would discard `cuda_quant_smoke` (0.18s, the sc-13510 quant-
+#      kernel scar, deliberately un-`#[ignore]`d here) and `candle_kernels_patch_guard`
+#      -- the two targets whose whole reason to exist is that only this box runs them.
+#      For scale: `Clippy (candle worker) --all-targets` costs 31 - 63s warm at the end
+#      of this same job, so the extra targets are not where the minutes are.
+#   3. It therefore does NOT make sc-17014 option (B) -- require this lane on the merge
 #      queue -- viable. That was the story's actual prize, and the arithmetic (p90 18.0m
 #      queue + p90 31.9m run vs the 60m `check_response_timeout_minutes`) is untouched.
-#   3. The "redundant" tests are not redundant, they are the same test NAMES compiled
-#      under a different cfg. `image_jobs/base.rs` alone carries 207 `#[cfg]` attributes
-#      splitting macOS from `backend-candle`; `macos-checks` runs the macOS bodies and
-#      `parity` does not compile the file at all. Feature unification makes the rest of
-#      the crate differ too. Narrowing here would drop real, uncovered configurations to
-#      buy back seconds.
+#   4. The ~92% figure is a static `#[test]` count, and the lanes disagree with it. What
+#      each lane's `sceneworks_worker` lib binary actually reports (runs 31061431547 and
+#      31060918026, same day):
+#
+#        parity (hosted ubuntu, bare `cargo test`)   737 tests
+#        macos-checks (hosted macos-26)             1595 tests
+#        this lane (--features backend-candle)      1317 tests
+#
+#      `parity` runs 737 of this lane's 1317, so at most ~56% can be parity-covered, not
+#      92%. The gap is real code: `include!("image_jobs/base.rs")` is itself cfg-gated on
+#      `any(macos, backend-candle)` (image_jobs.rs), so `parity` never compiles that file,
+#      and its 207 `#[cfg]` attributes split macOS bodies from `backend-candle` ones --
+#      `macos-checks` compiles the macOS arm, nothing but this lane RUNS the candle arm.
+#      (check.yml's hosted `candle` job does compile the candle cfg with `--all-targets`
+#      clippy, but cannot run it -- see scripts/check-candle-build.mjs.) Narrowing here
+#      would drop uncovered configurations to buy back seconds.
 # If this lane needs to get cheaper, the levers are the FETCH step (a job-local CARGO_HOME
 # under RUNNER_TEMP is re-downloaded every run -- see "Isolate Cargo dependency checkout")
 # and the three separate compile graphs, not the test filter.
