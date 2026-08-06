@@ -452,28 +452,67 @@ fn upscale_blocking(
 // ONNX weight provisioning (cache-only since sc-17633; mirrors Python resolution order)
 // ---------------------------------------------------------------------------
 
-/// Resolve one SeedVR2 checkpoint-dir env pin (sc-8911). Unset → `Ok(None)`. Set and holding both
-/// checkpoint files → `Ok(Some(dir))`. Set but incomplete → an `InvalidPayload` error: an operator
-/// who points the worker at a specific checkpoint must not silently get a different one. Testable
-/// without env mutation via the explicit raw value.
+/// What a set-but-INCOMPLETE value means, which differs per key because the two keys did not
+/// historically mean the same thing. See [`SEEDVR2_DIR_PINS`] for the full story.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedVr2Pin {
+    /// The key NAMES a checkpoint, so incomplete is an operator error and fails loudly (sc-8911).
+    NamedCheckpoint,
+    /// The key named a STAGING DESTINATION the worker used to create and download into, so empty
+    /// is a legal state for it and incomplete falls through to the next candidate.
+    StagingDir,
+}
+
+/// Resolve one SeedVR2 checkpoint-dir env pin. Unset → `Ok(None)`. Set and holding both checkpoint
+/// files → `Ok(Some(dir))`. Testable without env mutation via the explicit raw value.
 ///
-/// `key` names which pin is being resolved — see [`SEEDVR2_DIR_PINS`]. Both keys are *pins* now:
-/// since sc-17632 there is no download half for either to stage into.
+/// Set but INCOMPLETE splits on `kind`, and the split is the whole point (sc-17632 review):
+///
+/// * [`SeedVr2Pin::NamedCheckpoint`] → an `InvalidPayload` error naming the key and the files that
+///   are actually missing. This is sc-8911's rule, kept verbatim: an operator who points the worker
+///   at a specific checkpoint must not silently get a different one, and an error they can read and
+///   unset beats loading weights they did not ask for. The message tells them how to fix it.
+/// * [`SeedVr2Pin::StagingDir`] → a loud `warn!` and `Ok(None)`, so resolution continues to the HF
+///   cache. Erroring here would be a regression invented by this story rather than a rule anyone
+///   chose: the key used to be a *download destination*, so an empty one is exactly the state it
+///   was in before first use, and hard-failing on it would let a stale developer export make a
+///   perfectly good installed model unreachable.
 fn resolve_seedvr2_dir_pin(
     key: &str,
+    kind: SeedVr2Pin,
     value: Option<std::ffi::OsString>,
 ) -> WorkerResult<Option<PathBuf>> {
     let Some(value) = value else {
         return Ok(None);
     };
     let dir = PathBuf::from(&value);
-    if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
+    let missing: Vec<&str> = [SEEDVR2_DIT_FILE, SEEDVR2_VAE_FILE]
+        .into_iter()
+        .filter(|file| !dir.join(file).exists())
+        .collect();
+    if missing.is_empty() {
         return Ok(Some(dir));
     }
-    Err(WorkerError::InvalidPayload(format!(
-        "{key} is set to {} but that directory is missing {SEEDVR2_DIT_FILE} and/or {SEEDVR2_VAE_FILE}. Point it at a complete checkpoint dir, or unset it to use the copy installed from the Model Manager.",
-        dir.display()
-    )))
+    // Name the files that are ACTUALLY absent rather than "X and/or Y": with two files, "and/or"
+    // makes the operator check both when we already know which one is wrong.
+    let missing = missing.join(" and ");
+    match kind {
+        SeedVr2Pin::NamedCheckpoint => Err(WorkerError::InvalidPayload(format!(
+            "{key} is set to {} but that directory is missing {missing}. Point it at a complete \
+             checkpoint dir, or unset it to use the copy installed from the Model Manager.",
+            dir.display()
+        ))),
+        SeedVr2Pin::StagingDir => {
+            tracing::warn!(
+                pin = key,
+                dir = %dir.display(),
+                %missing,
+                "ignoring {key}: it names an incomplete SeedVR2 checkpoint dir, falling back to \
+                 the installed copy. Unset it, or populate it, to silence this."
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Resolve the ONNX for `factor`, **cache-only** (sc-17633, epic 17625). Order:
@@ -592,14 +631,40 @@ pub(crate) const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e69
 const SEEDVR2_DIT_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
 const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
 
-/// Operator overrides naming a complete SeedVR2 checkpoint dir, in precedence order.
+/// Operator overrides naming a local SeedVR2 checkpoint dir, in precedence order, each with what a
+/// set-but-INCOMPLETE value means for that key.
 ///
-/// Two keys, one per lane's history: `SCENEWORKS_SEEDVR2_CHECKPOINT` was the image upscaler's,
-/// `SCENEWORKS_SEEDVR2_DIR` the video upscaler's. They always named the same thing — a dir holding
-/// the 3B DiT + VAE — so now that both lanes share one resolver, both keys work on both lanes
-/// rather than each being silently inert on the other. Neither is a staging destination any more
-/// (there is nothing left to stage), so a set-but-incomplete value is a loud error.
-const SEEDVR2_DIR_PINS: &[&str] = &["SCENEWORKS_SEEDVR2_CHECKPOINT", "SCENEWORKS_SEEDVR2_DIR"];
+/// # One knob per lane, now read by both lanes
+///
+/// The two keys are historical siblings, not synonyms someone added for convenience.
+/// `SCENEWORKS_SEEDVR2_CHECKPOINT` was the **image** upscaler's and has always been a *pin*: it
+/// named a checkpoint, and an incomplete one was a loud error (sc-8911). `SCENEWORKS_SEEDVR2_DIR`
+/// was the **video** upscaler's and was a **staging destination** — the pre-sc-17632 code created
+/// that directory and downloaded the DiT + VAE *into* it, so an empty one was the normal state
+/// before first use. Each key was completely INERT on the other lane.
+///
+/// Collapsing the two lanes onto one resolver (sc-17632) means **both keys are now read on both
+/// lanes**, and there is nothing left to stage into — every candidate here is resolve-only. The
+/// consequence a reader needs to know: an export that used to affect only video upscaling now
+/// influences image upscaling too, and vice versa.
+///
+/// # Why the strictness differs
+///
+/// Because the widening is exactly where a hard error would do new damage. Keeping
+/// `SCENEWORKS_SEEDVR2_DIR` strict would mean a stale developer export — legally empty under its
+/// old meaning — could make a correctly installed model unreachable on a lane that export never
+/// touched. So it warns and falls through, while `SCENEWORKS_SEEDVR2_CHECKPOINT` keeps sc-8911's
+/// hard failure: it names a checkpoint, so incomplete means the operator got it wrong, and the
+/// error says which files are missing and that unsetting it uses the installed copy.
+///
+/// The residual, stated rather than hidden: an incomplete `SCENEWORKS_SEEDVR2_CHECKPOINT` now fails
+/// the **video** lane too, which it did not before. That is sc-8911's deliberate rule reaching a
+/// lane that loads the same model from the same repo — not a new rule — and it is loud and
+/// self-describing when it fires.
+const SEEDVR2_DIR_PINS: &[(&str, SeedVr2Pin)] = &[
+    ("SCENEWORKS_SEEDVR2_CHECKPOINT", SeedVr2Pin::NamedCheckpoint),
+    ("SCENEWORKS_SEEDVR2_DIR", SeedVr2Pin::StagingDir),
+];
 
 /// Pre-migration checkpoint roots under `<data_dir>`, read-only (AC10 of sc-17598).
 ///
@@ -647,10 +712,10 @@ pub(crate) fn resolve_seedvr2_checkpoint_dir(settings: &Settings) -> WorkerResul
     let pair_in = |dir: PathBuf| -> Option<PathBuf> {
         (dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists()).then_some(dir)
     };
-    // A set pin must resolve to a dir holding both checkpoint files; if it's set but incomplete,
-    // that's an operator error — fail loudly instead of silently loading something else (sc-8911).
-    for key in SEEDVR2_DIR_PINS {
-        if let Some(dir) = resolve_seedvr2_dir_pin(key, std::env::var_os(key))? {
+    // An operator dir pin wins over anything installed. A set-but-incomplete one is either a loud
+    // error or a warned fall-through depending on which key carried it — see `SEEDVR2_DIR_PINS`.
+    for (key, kind) in SEEDVR2_DIR_PINS {
+        if let Some(dir) = resolve_seedvr2_dir_pin(key, *kind, std::env::var_os(key))? {
             return Ok(Some(dir));
         }
     }
