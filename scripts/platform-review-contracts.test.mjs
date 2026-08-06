@@ -1101,11 +1101,21 @@ test("dropping the PR path filter did not expose the self-hosted pools", async (
   // kept docs-only PRs off the two-Mac `nax` pool and the `cuda` pool; with it gone, ONLY the
   // `changes` gate does. A self-hosted job that forgot `needs: changes` would run on every PR.
   const mlx = await source(".github/workflows/macos-mlx.yml");
+  // Pin the two PROPERTIES, not the spelling: nax-worker must be excluded from merge groups AND
+  // consult the gate. A spelling-exact assertion broke the moment the fail-open clause was added,
+  // which is the wrong kind of brittleness for a guard protecting a developer's daily driver.
+  const naxCondition = [...mlx.matchAll(/^ {4}if: (\$\{\{[^\n]*\}\})$/gm)]
+    .map((match) => match[1])
+    .find((condition) => condition.includes("github.event_name != 'merge_group'"));
+  assert.ok(
+    naxCondition,
+    "nax-worker must stay excluded from merge groups — the two-Mac nax pool is not queue capacity.",
+  );
   assert.match(
-    mlx,
-    /if: \$\{\{ github\.event_name != 'merge_group' && needs\.changes\.outputs\.relevant == 'true'/,
-    "nax-worker must be gated on `changes` AND excluded from merge groups — without the gate, " +
-      "every docs-only PR now wakes the two-Mac nax pool.",
+    naxCondition,
+    /needs\.changes/,
+    "nax-worker must consult the `changes` gate — without it, every docs-only PR now wakes the " +
+      "two-Mac nax pool, because the pull_request path filter that used to do this is gone.",
   );
 
   const desktop = await source(".github/workflows/desktop-windows.yml");
@@ -1150,4 +1160,40 @@ test("the always-on lanes stay unfiltered so they can be required", async () => 
     /paths:/,
     "check.yml must stay unfiltered — web, parity and candle are all required checks",
   );
+});
+
+test("a broken relevance gate runs the lane instead of silently passing its required check", async () => {
+  // The false-green one level up. In GitHub Actions a job whose `needs:` FAILED is skipped, and a
+  // skipped job reports Success — which SATISFIES a required status check. So a gate that dies
+  // (checkout failure, dead runner, a syntax error in the reusable workflow) would skip the lane
+  // and turn its required check green without running anything.
+  //
+  // Every gated job must therefore fail OPEN: `!cancelled()` to survive a failed dependency at all,
+  // plus a `result != 'success'` clause so a non-green gate means RUN rather than skip. This
+  // mirrors merge-group-relevance.mjs's own internal fallback, where an unparseable anchor or a
+  // failed diff also runs the lane.
+  for (const { path } of REQUIRED_LANES) {
+    const lane = await source(path);
+    const conditions = [...lane.matchAll(/^ {4}if: (\$\{\{ [^\n]*needs\.changes[^\n]*\}\})$/gm)].map(
+      (match) => match[1],
+    );
+    assert.ok(
+      conditions.length > 0,
+      `${path}: expected at least one job conditioned on the changes gate`,
+    );
+    for (const condition of conditions) {
+      assert.match(
+        condition,
+        /!cancelled\(\)/,
+        `${path}: gated job must use !cancelled(), or a FAILED gate skips it — and a skipped job ` +
+          "satisfies a required check, so the lane silently never runs.",
+      );
+      assert.match(
+        condition,
+        /needs\.changes\.result != 'success'/,
+        `${path}: gated job must run when the gate did not succeed. A bare ` +
+          "`relevant == 'true'` treats a broken gate as 'not relevant' — a false green.",
+      );
+    }
+  }
 });
