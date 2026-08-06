@@ -1197,3 +1197,35 @@ test("a broken relevance gate runs the lane instead of silently passing its requ
     }
   }
 });
+
+test("hosted required checks do not skip fork PRs into a vacuous green", async () => {
+  // A same-repo guard on a REQUIRED check is a false green: the fork PR matches it, the job is
+  // SKIPPED, and a skipped job reports Success. `macos-checks` carried one justified by
+  // "SceneWorks/inference is private, a fork cannot read it" — which is not true. The repo is
+  // public and was never intended to be private; the pinned rev fetches with no token at all, and
+  // also with the EMPTY token a fork PR supplies.
+  //
+  // Self-hosted jobs are the exception and MUST keep their guards: untrusted code on a persistent
+  // box is a real concern that has nothing to do with repo visibility.
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+  const macosChecks = mlx.slice(mlx.indexOf("  macos-checks:"), mlx.indexOf("  nax-worker:"));
+  assert.ok(macosChecks.length > 0, "macos-checks job not found");
+  assert.doesNotMatch(
+    macosChecks,
+    /head\.repo\.full_name/,
+    "macos-checks is a HOSTED required check — a same-repo guard makes a fork PR skip it, and a " +
+      "skipped job satisfies the required check, so the macOS verdict goes green having run nothing.",
+  );
+  // Positive half, so this never reads as "guards are bad".
+  const nax = mlx.slice(mlx.indexOf("  nax-worker:"));
+  assert.match(
+    nax,
+    /head\.repo\.full_name/,
+    "nax-worker MUST keep its same-repo guard — fork code must not execute on the nax pool.",
+  );
+  assert.match(
+    await source(".github/workflows/windows-candle.yml"),
+    /head\.repo\.full_name/,
+    "candle-worker MUST keep its same-repo guard — fork code must not execute on the cuda pool.",
+  );
+});
