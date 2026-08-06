@@ -45,7 +45,20 @@ name: Desktop (macOS typecheck)
 # nothing here bundles them.
 
 on:
+  # THE MERGE QUEUE'S SPECULATIVE MERGE (sc-17014). A required check MUST report here too: the queue
+  # evaluates the same required set against `gh-readonly-queue/main/**`, and a workflow with no
+  # `merge_group:` trigger never produces a run for that ref, so the check stays pending until the
+  # group times out and its entries are EVICTED. `merge_group` supports no `paths:` filter at all
+  # (community discussion 45899), which is the other reason the filtering moved into `changes`.
+  merge_group:
+  # NO `paths:` FILTER, deliberately (sc-17014). `check-macos` is a REQUIRED status check, and GitHub
+  # leaves a path-filtered workflow's check **Pending** forever rather than passing it — so a filter
+  # here would block every PR that does not touch these paths, and would strand every merge-queue
+  # entry until `check_response_timeout_minutes` evicted it. The `changes` gate job replaces the
+  # filter: a job skipped by `if:` reports Success, which a required check accepts.
   pull_request:
+  push:
+    branches: [main]
     paths: &desktop_macos_check_paths
       - "apps/desktop/**"
       # The only workspace crate apps/desktop depends on.
@@ -59,9 +72,6 @@ on:
       # In-repo cargo auto-selects the pinned toolchain from this file.
       - "rust-toolchain.toml"
       - ".github/workflows/desktop-macos-check.yml"
-  push:
-    branches: [main]
-    paths: *desktop_macos_check_paths
   workflow_dispatch:
 
 # Cancel superseded PR runs, but never cancel a main-push run — the reasoning
@@ -75,7 +85,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Supplies the path filter the triggers above gave up so `check-macos` could become a required check.
+  # See .github/workflows/changed-paths.yml for why a required check cannot carry a `paths:` filter.
+  changes:
+    uses: ./.github/workflows/changed-paths.yml
+    with:
+      lane: .github/workflows/desktop-macos-check.yml
+      anchor: desktop_macos_check_paths
+
   check-macos:
+    needs: changes
+    if: ${{ needs.changes.outputs.relevant == 'true' }}
     runs-on: macos-15
     env:
       CARGO_NET_OFFLINE: "true"
@@ -90,7 +110,7 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
 

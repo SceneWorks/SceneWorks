@@ -2,6 +2,11 @@ name: Check
 
 on:
   pull_request:
+  # The merge queue gates on this workflow's `web` + `parity` jobs, so they must
+  # run against the queue's speculative merge ref too. Without this trigger no
+  # run is ever created for `gh-readonly-queue/main/**`, the required checks stay
+  # pending forever, and every queued PR is evicted on timeout.
+  merge_group:
   push:
     branches:
       - main
@@ -54,7 +59,7 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
       - name: Fetch the private inference release
@@ -179,3 +184,65 @@ jobs:
         env:
           SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
         run: npm run check:docker:rust-api
+
+  # THE CANDLE TYPECHECK, ON A HOSTED BOX. The merge queue's whole job is catching semantic
+  # conflicts — two PRs that are individually green and textually non-overlapping, whose MERGE does
+  # not compile. `main` broke exactly that way today (e71b932f: #2134 written against a `temp_db()`
+  # that #2135 had changed the return type of).
+  #
+  # `parity` above catches that class for code the Linux default-feature build compiles, and it is a
+  # required check, so the queue already gates on it. It does NOT compile anything under
+  # `all(not(target_os = "macos"), feature = "backend-candle")` — `vram_gate`, `krea_control_fit`,
+  # the candle-control image modules, `generate_candle_video` and its Mochi fit gates. Until this job
+  # existed the ONLY compiler of that cfg anywhere in CI was windows-candle.yml, which runs on the
+  # self-hosted `cuda` pool at a ~24m median (p90 32m, measured 2026-08-05 over 85 runs) and has no
+  # `merge_group:` trigger — so a candle-side semantic conflict merged green and broke `main` for
+  # everyone behind it. This job is ~4m and hosted, which is what makes it affordable per merge
+  # group where that lane is not.
+  #
+  # It does not need a GPU. `scripts/check-candle-build.mjs` (sc-12356) writes a stub `nvcc` that
+  # satisfies the three build scripts that shell out to the CUDA toolkit, and `cargo clippy`/`check`
+  # NEVER LINK — so the typecheck itself is entirely real on a GPU-less runner. That script has
+  # shipped since sc-12356 but ran nowhere in CI; it was wired only into the pre-push hook, with
+  # `--allow-skip`. This is its first gate.
+  #
+  # SCOPE, so a green here is not over-read: it TYPECHECKS. It cannot RUN candle tests, because
+  # `cargo test` links and that needs a real libcuda. Candle-gated `#[test]` bodies still execute
+  # for the first time on windows-candle.yml. What this gates is the compile class — E0599, E0277,
+  # a cfg-gated symbol gone missing, dead code under `-D warnings` — which is precisely the class a
+  # speculative merge introduces and the class that broke `main` today.
+  candle:
+    runs-on: ubuntu-latest
+    env:
+      # Same posture as `parity`: fetch the private inference source once with a scoped credential,
+      # then force every build and build.rs process offline so the token is absent from them.
+      CARGO_NET_OFFLINE: "true"
+    # The three cargo invocations are two `check`s and one `clippy`, all warm-cached after the first
+    # run. Sized like `parity` so a wedge fails in minutes rather than riding the 6-hour default
+    # (sc-10420).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          # Kept in lockstep with rust-toolchain.toml by the contract test in
+          # scripts/platform-review-contracts.test.mjs, same as every other lane's input.
+          toolchain: "1.97.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+        with:
+          # A distinct key from `parity`'s: this job compiles the same crates under a different
+          # feature set, so sharing one cache would thrash both.
+          key: candle
+      - name: Fetch the private inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
+          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
+        run: cargo fetch --locked
+      - name: Typecheck the candle backend configuration
+        # No `--allow-skip`: this host is Linux, so `not(target_os = "macos")` holds natively and
+        # there is no cross target to be missing. A "cannot run here" on this runner is a real
+        # failure, not a dev who never opted in.
+        run: npm run rust:check:candle

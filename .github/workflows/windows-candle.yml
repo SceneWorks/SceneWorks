@@ -57,8 +57,8 @@ on:
       # and no candle-gated code, nothing in the workspace depends on it, and
       # nothing this job runs builds it: every cargo invocation below is
       # -p sceneworks-worker, -p sceneworks-rust-api or
-      # -p sceneworks-memory-adapter. Watching it woke this whole job — the
-      # fleet's single cuda box — for zero coverage. The two lanes legitimately
+      # -p sceneworks-memory-adapter. Watching it woke this whole job — a ~24m
+      # median run on the `cuda` pool — for zero coverage. The two lanes legitimately
       # differ: macos-mlx.yml's HOSTED macos-checks job runs the bare
       # workspace-wide `cargo test` / `cargo clippy --all-targets` over every
       # default member, which DOES compile the wrapper, so the entry earns its
@@ -81,7 +81,7 @@ on:
       #
       # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also
       # matched capabilities.mlx.json, so an mlx-only restamp woke this ENTIRE job — every
-      # step below, on the fleet's single `cuda` box — for a file the verify step never
+      # step below, ~24m median on the `cuda` pool — for a file the verify step never
       # opens. Nothing in this lane reads it: no Rust reads the facts directory at all
       # (`default_facts_dir()` only builds the dumper bin's default OUTPUT path; a repo-wide
       # grep finds no reader), and the three consumers that DO glob the whole directory are
@@ -96,6 +96,16 @@ on:
       # ADDS as well as modifications, so a restamp, a delete or a re-add of this file still
       # triggers the lane, and a rename is a delete+add that still matches.
       - "config/engine-capabilities/capabilities.candle.json"
+      # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
+      # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
+      # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
+      #
+      # sc-17665 narrowed the entry above from `config/engine-capabilities/**` to a single filename,
+      # and that landed while sc-17593 was in flight. The two are individually correct and combine
+      # badly: the audio verification was added to a step whose trigger paths had just stopped
+      # matching the audio file. Demonstrated on `97a7655a9`, an audio-only re-dump that woke neither
+      # stage-1 lane -- declared but unreachable, for exactly the edit the step exists to catch.
+      - "config/engine-capabilities/audio/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
       # The toolchain and cargo-config seams (sc-17703, Michael's call — these are
@@ -106,10 +116,13 @@ on:
       # below), so a bump changes what this entire job compiles with. And
       # .cargo/config.toml carries `git-fetch-with-cli = true`, without which
       # cargo's built-in fetch ignores the GIT_CONFIG_* token injection in "Fetch
-      # the private inference release" and the lane cannot fetch at all. NB
-      # `channel = "stable"` is a floating channel — the effective toolchain can
-      # move with NO file changing, which no paths: entry can catch; that residual
-      # gap is tracked as its own story.
+      # the private inference release" and the lane cannot fetch at all. The
+      # channel is a concrete version, never floating `stable` (sc-17717): a
+      # toolchain change is therefore always an edit to that file, which this
+      # entry turns into a run of this lane — and the contract test keeps every
+      # workflow's dtolnay `toolchain:` input in lockstep with the pin. When
+      # bumping, pre-install the new version on this box first; see the bump
+      # recipe in rust-toolchain.toml.
       - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/actions/prepare-rust-runner/**"
@@ -156,11 +169,36 @@ on:
 # own group, where nothing can evict it; runs then serialize on the single
 # self-hosted box instead. Do NOT collapse this back to `group: ...${{ github.ref }}`.
 #
-# Cost is bounded and was measured before landing: the lane is ~4.2m median (p90
-# 4.5m) and the box sits ~12% utilized, so restoring the cancelled main runs adds
-# ~34m of box time per ~37h (≈12% -> ≈13% utilization). `queue: max` would be the
-# other way to do this, but it cannot combine with `cancel-in-progress: true`,
-# which the PR side still wants.
+# COST, re-measured 2026-08-05 over 85 completed `candle-worker` jobs in a 29.5h
+# window. This block previously claimed "~4.2m median (p90 4.5m)" and "the box sits
+# ~12% utilized". Both were wrong by the time anyone read them: duration was ~6x low,
+# and "the box" described a single machine that does not exist.
+#
+#   job duration   median 24.1m   p90 31.9m   max 44.0m   min 8.2m
+#   queue wait     median  0.1m   p90 18.0m   max 55.5m
+#   pool           FOUR runners carried the `cuda` label over that window
+#                  (cuda-windows, -2, -3, -4), load spread evenly across them:
+#                  23/18/22/22 jobs, 516/424/591/537 busy minutes
+#   utilization    ~29% per box
+#
+# THE CONCLUSION IS UNCHANGED — keeping main-push runs uncancelled is affordable, and
+# with more headroom than the old numbers implied. Only the magnitudes were wrong, and
+# they were wrong in both directions at once (each run costs ~6x more than stated; there
+# are ~4x more boxes to absorb it). Do not read the correction as "this lane got cheap".
+#
+# `queue: max` would be the other way to do this, but it cannot combine with
+# `cancel-in-progress: true`, which the PR side still wants.
+#
+# RE-MEASURE; DO NOT TRUST THESE NUMBERS ON SIGHT. They went ~6x stale without anyone
+# noticing, because nothing recomputes them and no test can — they describe fleet state,
+# not repo content. Method, so the next re-measure is comparable:
+#   * duration = repo-scoped jobs API `started_at` -> `completed_at`. Do NOT use
+#     `gh run list`'s createdAt -> updatedAt: that folds queue wait into run time and
+#     reports ~50m for a 24m job, which is how a wrong number gets quoted confidently.
+#   * exclude `cancelled` runs — they truncate low and drag the median down.
+#   * pool size = `gh api repos/{owner}/{repo}/actions/runners`. It is NOT fixed: two of
+#     the four boxes above were no longer online hours after this measurement, so quote
+#     the pool size and date together or the utilization figure means nothing.
 concurrency:
   group: windows-candle-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

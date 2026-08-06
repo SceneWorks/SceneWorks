@@ -18,7 +18,8 @@ use serde_json::{Map as JsonObject, Value};
 
 use crate::inference_compatibility_audit::{
     compatibility_audit_authorizes, FLUX2_AUDIT_ARTIFACT_PROOF, FLUX2_CAPTURED_INFERENCE_REVISION,
-    FLUX2_COMPATIBLE_INFERENCE_REVISION, FLUX2_INFERENCE_COMPATIBILITY_AUDIT,
+    FLUX2_COMPATIBLE_INFERENCE_REVISION, FLUX2_FEATURE_WITNESS,
+    FLUX2_INFERENCE_COMPATIBILITY_AUDIT,
 };
 use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 use crate::vram_gate::VramBudget;
@@ -196,6 +197,7 @@ fn audited_compatible_inference_revision(
     compatibility_audit_authorizes(
         FLUX2_INFERENCE_COMPATIBILITY_AUDIT,
         FLUX2_AUDIT_ARTIFACT_PROOF,
+        &FLUX2_FEATURE_WITNESS,
     )?;
     Some(claimed)
 }

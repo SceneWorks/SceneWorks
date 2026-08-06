@@ -379,7 +379,6 @@ pub(crate) async fn run_frame_extract(
 pub(crate) async fn run_person_detect_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -418,7 +417,7 @@ pub(crate) async fn run_person_detect_job(
         ),
     )
     .await?;
-    let result = run_person_detect(api, settings, http_client, job).await?;
+    let result = run_person_detect(api, settings, job).await?;
     update_job(
         api,
         &job.id,
@@ -461,7 +460,6 @@ fn person_detect_source_timestamp(timestamp: f64, duration: f64) -> f64 {
 pub(crate) async fn run_person_detect(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<JsonObject> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
@@ -537,7 +535,6 @@ pub(crate) async fn run_person_detect(
                     let (boxes, device) = run_yolo11_person_detect(
                         api,
                         settings,
-                        http_client,
                         job,
                         frame.media_path.clone(),
                         confidence,
@@ -642,20 +639,11 @@ pub(crate) async fn run_person_detect(
 async fn run_yolo11_person_detect(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     frame_path: PathBuf,
     confidence: f64,
 ) -> WorkerResult<(Vec<Value>, &'static str)> {
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person detection canceled while fetching detector weights.",
-        fresh_download: false,
-    };
-    let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
+    let weights = crate::person_jobs::require_detector_weights(settings)?;
     let conf = confidence as f32;
     // Keep the worker heartbeat alive across the blocking YOLO11 detect (cold weight load +
     // inference) so a slow detection never trips the API's 90s stale-sweep (sc-8390). Cancel stays
@@ -684,7 +672,6 @@ async fn run_yolo11_person_detect(
 async fn run_yolo11_person_detect(
     _api: &ApiClient,
     _settings: &Settings,
-    _http_client: &reqwest::Client,
     _job: &JobSnapshot,
     _frame_path: PathBuf,
     _confidence: f64,
@@ -822,7 +809,6 @@ struct PersonTrackBackend {
 async fn assemble_real_person_track_shared<F, Fut>(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     project_path: &std::path::Path,
     source_media_path: &std::path::Path,
@@ -842,15 +828,7 @@ where
     use crate::person_track as pt;
 
     let selected_box = pt::NormalizedBox::from_json(detection.get("box").unwrap_or(&Value::Null));
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person tracking canceled while fetching detector weights.",
-        fresh_download: false,
-    };
-    let weights = crate::person_jobs::ensure_detector_weights(settings, &download_context).await?;
+    let weights = crate::person_jobs::require_detector_weights(settings)?;
     let conf = confidence as f32;
     let timestamps = pt::sample_timestamps(duration);
 
@@ -1059,8 +1037,19 @@ pub(crate) struct SegmentClip {
 pub(crate) enum SegmentOutcome {
     /// One binary mask per clip frame (detected + gap), index-aligned with `SegmentClip::clip_paths`.
     Masks(Vec<Vec<u8>>),
-    /// Segmenter unavailable / failed → fall back to box-derived masks at replacement time.
+    /// Segmenter failed (engine error, task join, corrupt weights) → fall back to box-derived masks
+    /// at replacement time. Nothing the user can act on, so it degrades quietly as it always has.
     Degraded,
+    /// The segmenter weights are **not installed** — carries the actionable install message
+    /// (sc-17629 / sc-17635).
+    ///
+    /// Distinct from [`SegmentOutcome::Degraded`] on purpose. Before sc-17629 a missing segmenter
+    /// meant an automatic mid-job download, so "unavailable" was always a genuine failure; now it
+    /// is the ordinary state of a fresh install, and folding it into `Degraded` would silently
+    /// hand the user box masks with nothing anywhere telling them to install SAM3. It still
+    /// degrades rather than failing — a track that already located the person is never failed by
+    /// the mask pass — but the reason reaches the job.
+    Unavailable(String),
     /// The user canceled the job mid-segmentation; terminal for the whole person-track job.
     Canceled(String),
 }
@@ -1184,7 +1173,33 @@ where
         SegmentOutcome::Masks(masks) => masks,
         // The keepalive posted the terminal `Canceled` already; propagate it (job canceled).
         SegmentOutcome::Canceled(message) => return Err(WorkerError::Canceled(message)),
-        // Any other failure (weights unavailable, engine error, task join) degrades to box masks.
+        // The segmenter is not installed. Still degrade to box masks — the track already found the
+        // person and must not be failed by the mask pass — but SAY SO, on the job and in the log.
+        // Otherwise a fresh install silently produces worse masks forever with no hint that
+        // installing "SAM3 Person Segmenter" would fix it (sc-17629).
+        SegmentOutcome::Unavailable(message) => {
+            tracing::warn!(
+                event = "person_track_segmenter_not_installed",
+                track_id,
+                detail = %message
+            );
+            update_job(
+                api,
+                &job.id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Tracking,
+                    0.9,
+                    &format!("Using box masks: {message}"),
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await?;
+            return Ok("degraded");
+        }
+        // Any other failure (engine error, task join) degrades to box masks.
         SegmentOutcome::Degraded => return Ok("degraded"),
     };
 
@@ -1239,18 +1254,9 @@ where
 async fn run_macos_segmenter(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     clip: SegmentClip,
 ) -> SegmentOutcome {
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
-        fresh_download: false,
-    };
     let SegmentClip {
         clip_paths,
         anchors,
@@ -1259,16 +1265,19 @@ async fn run_macos_segmenter(
     let cancel_message = "Person tracking canceled during segmentation.";
     let outcome = match person_segmenter_kind() {
         PersonSegmenter::Sam3 => {
-            let (model, tokenizer) = match crate::person_segment_sam3::ensure_segmenter_weights(
-                settings,
-                &download_context,
-            )
-            .await
-            {
-                Ok(pair) => pair,
-                Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
-                Err(_) => return SegmentOutcome::Degraded,
-            };
+            let (model, tokenizer) =
+                match crate::person_segment_sam3::require_segmenter_weights(settings) {
+                    Ok(pair) => pair,
+                    Err(WorkerError::Canceled(message)) => {
+                        return SegmentOutcome::Canceled(message)
+                    }
+                    // `require_*` reports a missing install as `InvalidPayload` carrying the
+                    // actionable message; anything else is a genuine failure (sc-17629).
+                    Err(WorkerError::InvalidPayload(message)) => {
+                        return SegmentOutcome::Unavailable(message)
+                    }
+                    Err(_) => return SegmentOutcome::Degraded,
+                };
             let flag = cancel.clone();
             run_blocking_with_heartbeat(
                 api,
@@ -1294,16 +1303,14 @@ async fn run_macos_segmenter(
             .await
         }
         PersonSegmenter::Sam2 => {
-            let weights =
-                match crate::person_segment::ensure_segmenter_weights(settings, &download_context)
-                    .await
-                {
-                    Ok(path) => path,
-                    Err(WorkerError::Canceled(message)) => {
-                        return SegmentOutcome::Canceled(message)
-                    }
-                    Err(_) => return SegmentOutcome::Degraded,
-                };
+            let weights = match crate::person_segment::require_segmenter_weights(settings) {
+                Ok(path) => path,
+                Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+                Err(WorkerError::InvalidPayload(message)) => {
+                    return SegmentOutcome::Unavailable(message)
+                }
+                Err(_) => return SegmentOutcome::Degraded,
+            };
             let flag = cancel.clone();
             run_blocking_with_heartbeat(
                 api,
@@ -1345,32 +1352,22 @@ async fn run_macos_segmenter(
 async fn run_candle_segmenter(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     clip: SegmentClip,
 ) -> SegmentOutcome {
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Person segmentation canceled while fetching segmenter weights.",
-        fresh_download: false,
-    };
     let SegmentClip {
         clip_paths,
         anchors,
     } = clip;
-    let (model, tokenizer) = match crate::person_segment_sam3_candle::ensure_segmenter_weights(
-        settings,
-        &download_context,
-    )
-    .await
-    {
-        Ok(pair) => pair,
-        Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
-        Err(_) => return SegmentOutcome::Degraded,
-    };
+    let (model, tokenizer) =
+        match crate::person_segment_sam3_candle::require_segmenter_weights(settings) {
+            Ok(pair) => pair,
+            Err(WorkerError::Canceled(message)) => return SegmentOutcome::Canceled(message),
+            Err(WorkerError::InvalidPayload(message)) => {
+                return SegmentOutcome::Unavailable(message)
+            }
+            Err(_) => return SegmentOutcome::Degraded,
+        };
     let cancel = gen_core::CancelFlag::new();
     let flag = cancel.clone();
     let outcome = run_blocking_with_heartbeat(
@@ -1434,7 +1431,6 @@ fn write_track_mask_pngs(
 async fn assemble_real_person_track(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     project_path: &std::path::Path,
     source_media_path: &std::path::Path,
@@ -1448,7 +1444,6 @@ async fn assemble_real_person_track(
     assemble_real_person_track_shared(
         api,
         settings,
-        http_client,
         job,
         project_path,
         source_media_path,
@@ -1463,7 +1458,7 @@ async fn assemble_real_person_track(
             backend_label: "mlx",
             segmenter_label: || person_segmenter_kind().meta_label(),
         },
-        |clip| run_macos_segmenter(api, settings, http_client, job, clip),
+        |clip| run_macos_segmenter(api, settings, job, clip),
     )
     .await
 }
@@ -1476,7 +1471,6 @@ async fn assemble_real_person_track(
 async fn assemble_real_person_track(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     project_path: &std::path::Path,
     source_media_path: &std::path::Path,
@@ -1490,7 +1484,6 @@ async fn assemble_real_person_track(
     assemble_real_person_track_shared(
         api,
         settings,
-        http_client,
         job,
         project_path,
         source_media_path,
@@ -1505,7 +1498,7 @@ async fn assemble_real_person_track(
             backend_label: "candle",
             segmenter_label: || "sam3",
         },
-        |clip| run_candle_segmenter(api, settings, http_client, job, clip),
+        |clip| run_candle_segmenter(api, settings, job, clip),
     )
     .await
 }
@@ -1515,7 +1508,6 @@ async fn assemble_real_person_track(
 async fn assemble_real_person_track(
     _api: &ApiClient,
     _settings: &Settings,
-    _http_client: &reqwest::Client,
     _job: &JobSnapshot,
     _project_path: &std::path::Path,
     _source_media_path: &std::path::Path,
@@ -1534,7 +1526,6 @@ async fn assemble_real_person_track(
 pub(crate) async fn run_person_track_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -1567,7 +1558,7 @@ pub(crate) async fn run_person_track_job(
         ),
     )
     .await?;
-    let result = run_person_track(api, settings, http_client, job).await?;
+    let result = run_person_track(api, settings, job).await?;
     update_job(
         api,
         &job.id,
@@ -1588,7 +1579,6 @@ pub(crate) async fn run_person_track_job(
 pub(crate) async fn run_person_track(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<JsonObject> {
     let project_id = required_payload_string(&job.payload, "projectId")?;
@@ -1697,7 +1687,6 @@ pub(crate) async fn run_person_track(
         let real = assemble_real_person_track(
             api,
             settings,
-            http_client,
             job,
             &project_path,
             &source_media_path,
@@ -3457,7 +3446,8 @@ mod person_detect_timestamp_tests {
 ///   person_track_e2e -- --ignored --nocapture
 /// ```
 ///
-/// The YOLO11 and SAM2 weights download on first use from the public `SceneWorks/*` HF
+/// The YOLO11 and SAM2 weights must already be installed from the Model Manager (sc-17629); the
+/// smoke resolves them from the public `SceneWorks/*` HF
 /// repos (or pin them with `SCENEWORKS_PERSON_DETECTOR_WEIGHTS` / `SCENEWORKS_SAM2_WEIGHTS`).
 #[cfg(all(test, target_os = "macos"))]
 mod person_track_e2e_tests {
@@ -3498,18 +3488,16 @@ mod person_track_e2e_tests {
     /// identical setup lines the SAM2 and SAM3 E2E tests each carried (sc-8955 / F-153).
     async fn detect_and_assemble(
         settings: &crate::Settings,
-        download_context: &DownloadContext<'_>,
         video: &std::path::Path,
         duration: f64,
         timestamps: &[f64],
     ) -> AssembledClip {
-        let det_weights = crate::person_jobs::ensure_detector_weights(settings, download_context)
-            .await
+        let det_weights = crate::person_jobs::require_detector_weights(settings)
             .expect("yolo11 weights provisioned");
         let mut per_frame: Vec<(f64, Vec<(crate::person_track::NormalizedBox, f64)>)> =
             Vec::with_capacity(timestamps.len());
         let mut frame_paths: Vec<PathBuf> = Vec::with_capacity(timestamps.len());
-        let frames_dir = download_context.settings.data_dir.join("person-e2e-frames");
+        let frames_dir = settings.data_dir.join("person-e2e-frames");
         std::fs::create_dir_all(&frames_dir).expect("frames dir");
         for (index, &timestamp) in timestamps.iter().enumerate() {
             let frame_path = frames_dir.join(format!("frame_{index:04}.png"));
@@ -3644,8 +3632,11 @@ mod person_track_e2e_tests {
         };
 
         // Isolated scratch: a throwaway data dir (weights + frame cache resolve under it).
-        let scratch = std::env::temp_dir().join("sw-person-track-e2e");
-        let _ = std::fs::remove_dir_all(&scratch);
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-person-track-e2e-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
         // `ensure_*_weights` resolve their cache under `settings.data_dir`. Through the crate-wide
         // seam so the value is RESTORED on drop: this used to `set_var` with no restore at all, which
         // leaked the scratch dir into every later `Settings::from_env()` in the process (sc-12380).
@@ -3661,21 +3652,8 @@ mod person_track_e2e_tests {
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
-            let http = reqwest::Client::new();
-            let api = ApiClient::new(&settings);
-            let download_context = DownloadContext {
-                api: &api,
-                client: &http,
-                settings: &settings,
-                job_id: "person-track-e2e",
-                cancel_message: "person track e2e canceled while fetching weights",
-                fresh_download: false,
-            };
-
             // 1-2. Detect + assemble the selected person (shared with the SAM3 E2E, sc-8955).
-            let clip =
-                detect_and_assemble(&settings, &download_context, &video, duration, &timestamps)
-                    .await;
+            let clip = detect_and_assemble(&settings, &video, duration, &timestamps).await;
             let AssembledClip {
                 detected_total,
                 first,
@@ -3690,10 +3668,8 @@ mod person_track_e2e_tests {
 
             // 3. Provision the real SAM2 weights and propagate the person's mask across the
             //    detected span with the video predictor (sc-3715).
-            let seg_weights =
-                crate::person_segment::ensure_segmenter_weights(&settings, &download_context)
-                    .await
-                    .expect("sam2 weights provisioned");
+            let seg_weights = crate::person_segment::require_segmenter_weights(&settings)
+                .expect("sam2 weights provisioned");
             let masks = tokio::task::spawn_blocking(move || {
                 crate::person_segment::propagate_track_blocking(
                     seg_weights,
@@ -3742,8 +3718,6 @@ mod person_track_e2e_tests {
                 "all detected frames masked → maskState=active"
             );
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// SAM3 cutover E2E (sc-4926): the same detect → track → assemble flow as the SAM2 test
@@ -3768,8 +3742,11 @@ mod person_track_e2e_tests {
             );
             return;
         };
-        let scratch = std::env::temp_dir().join("sw-person-track-e2e-sam3");
-        let _ = std::fs::remove_dir_all(&scratch);
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-person-track-e2e-sam3-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
         // Restored on drop — see the twin above (sc-12380).
         let _env = crate::test_env::EnvVars::set(&[(
             "SCENEWORKS_DATA_DIR",
@@ -3782,16 +3759,6 @@ mod person_track_e2e_tests {
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
-            let http = reqwest::Client::new();
-            let api = ApiClient::new(&settings);
-            let download_context = DownloadContext {
-                api: &api,
-                client: &http,
-                settings: &settings,
-                job_id: "person-track-e2e-sam3",
-                cancel_message: "person track e2e (sam3) canceled while fetching weights",
-                fresh_download: false,
-            };
 
             // detect → track → assemble (shared with the SAM2 E2E, sc-8955).
             let AssembledClip {
@@ -3800,14 +3767,13 @@ mod person_track_e2e_tests {
                 last,
                 clip_paths,
                 anchors,
-            } = detect_and_assemble(&settings, &download_context, &video, duration, &timestamps)
+            } = detect_and_assemble(&settings, &video, duration, &timestamps)
                 .await;
             let clip_detected: Vec<bool> = anchors.iter().map(Option::is_some).collect();
 
             // SAM3 text-concept segmentation (no box prompt) — the path under test.
             let (sam3_model, sam3_tok) =
-                crate::person_segment_sam3::ensure_segmenter_weights(&settings, &download_context)
-                    .await
+                crate::person_segment_sam3::require_segmenter_weights(&settings)
                     .expect("sam3 weights provisioned");
             let (cp3, an3) = (clip_paths.clone(), anchors.clone());
             let sam3 = tokio::task::spawn_blocking(move || {
@@ -3841,8 +3807,7 @@ mod person_track_e2e_tests {
             // video-predictor weights needs the download API (or a `SCENEWORKS_SAM2_WEIGHTS` pin);
             // when it is unavailable the comparison is skipped — the SAM3 gate above still holds.
             let sam2_weights =
-                match crate::person_segment::ensure_segmenter_weights(&settings, &download_context)
-                    .await
+                match crate::person_segment::require_segmenter_weights(&settings)
                 {
                     Ok(path) => path,
                     Err(e) => {
@@ -3903,8 +3868,6 @@ mod person_track_e2e_tests {
                 "SAM3 vs SAM2 mean IoU {mean_iou:.3} below the parity floor (0.5)"
             );
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// Extract every `timestamps[i]` two ways for one synthetic `rate`fps × `duration`s clip and
@@ -4154,9 +4117,11 @@ mod person_track_e2e_tests {
     #[test]
     #[ignore = "needs an ffmpeg binary (SCENEWORKS_FFMPEG or ffmpeg on PATH)"]
     fn render_track_frames_honest_guarantee_across_fps_regimes() {
-        let scratch = std::env::temp_dir().join("sw-render-track-frames-verify");
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-render-track-frames-verify-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
 
         // (label, rate, duration): the non-aligned AND frame-ALIGNED high-fps single-pass cases, plus
         // the sub-cadence-fps and frame-starved fallback regimes. `aligned_30fps_8s` is the boundary
@@ -4189,7 +4154,7 @@ mod person_track_e2e_tests {
             // regime (single-pass where dense, per-frame fallback where sparse).
             for &(label, rate, duration) in gated_cases {
                 let Some((cut, reference)) =
-                    extract_both_ways(&scratch, label, rate, duration).await
+                    extract_both_ways(scratch, label, rate, duration).await
                 else {
                     return; // ffmpeg missing → skip the whole test
                 };
@@ -4210,7 +4175,7 @@ mod person_track_e2e_tests {
             // go unnoticed. 1fps@12s is 12 real frames for 24 samples; the forward-only select exhausts
             // the clip and mis-selects the large majority of samples.
             let Some((ungated, reference)) =
-                single_pass_ungated_vs_reference(&scratch, "gate_proof_1fps_12s", "1", 12.0).await
+                single_pass_ungated_vs_reference(scratch, "gate_proof_1fps_12s", "1", 12.0).await
             else {
                 return;
             };
@@ -4227,8 +4192,6 @@ mod person_track_e2e_tests {
                 reference.len()
             );
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// The single pass is an OPTIMIZATION, not a correctness dependency: if this ffmpeg build rejects
@@ -4249,9 +4212,11 @@ mod person_track_e2e_tests {
         use crate::person_track::sample_timestamps;
         use std::os::unix::fs::PermissionsExt;
 
-        let scratch = std::env::temp_dir().join("sw-render-track-frames-fallback");
-        let _ = std::fs::remove_dir_all(&scratch);
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let scratch_guard = tempfile::Builder::new()
+            .prefix("sw-render-track-frames-fallback-")
+            .tempdir()
+            .expect("temp dir");
+        let scratch = scratch_guard.path();
 
         // Resolve the real ffmpeg the wrapper should delegate to (bundled override or PATH default).
         let real_ffmpeg = std::env::var("SCENEWORKS_FFMPEG")
@@ -4357,8 +4322,6 @@ mod person_track_e2e_tests {
                 );
             }
         });
-
-        let _ = std::fs::remove_dir_all(&scratch);
     }
 }
 

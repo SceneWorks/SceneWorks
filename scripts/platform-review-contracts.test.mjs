@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 async function source(path) {
@@ -704,6 +704,37 @@ test("both stage-1 lanes verify their own capability dump, LAST and reachably", 
         .slice(anchorAt, lane.indexOf("pull_request:"))
         .matchAll(/^ {6}- "([^"]+)"$/gm),
     ].map((match) => match[1]);
+    // Every file this lane's verify step actually DIFFS must be watched. Read out of the step body
+    // rather than listed here, because the failure this closes was a step growing a new file while
+    // the filter stayed as it was — a hardcoded list would have been updated by the same edit that
+    // grew the step, or not at all, so it could not have caught it.
+    //
+    // sc-17593 added an audio diff to BOTH lanes' steps; sc-17665 had just narrowed both filters
+    // from `config/engine-capabilities/**` to a single filename. Each is right on its own. Together
+    // they left the audio verification declared but unreachable, which `97a7655a9` — an audio-only
+    // re-dump — demonstrated by waking neither stage-1 lane.
+    const diffed = new Set(
+      [
+        ...lane
+          .slice(verifyAt)
+          .split("\n      - name:")[0]
+          .matchAll(/config[/\\]engine-capabilities[/\\][\w./\\-]*\.json/g),
+      ].map((match) => match[0].replaceAll("\\", "/")),
+    );
+    assert.ok(
+      diffed.size >= 2,
+      `${path}: expected the verify step to diff at least ${file} and the audio dump, found ` +
+        `${JSON.stringify([...diffed])}`,
+    );
+    for (const target of diffed) {
+      assert.ok(
+        declared.some((glob) => matches(glob, target)),
+        `${path}'s verify step diffs ${target}, but no declared path matches it — so an edit to ` +
+          "that file alone never triggers the lane, and the check is declared but unreachable. " +
+          "Add it to the paths anchor.",
+      );
+    }
+
     const own = `config/engine-capabilities/${file}`;
     assert.ok(
       declared.some((glob) => matches(glob, own)),
@@ -729,7 +760,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
   // sc-17703, generalising sc-17665's lesson to the whole trigger surface. `apps/rust-worker/**`
   // sat in windows-candle.yml's paths while no cargo invocation in that job built the package
   // living there (`sceneworks-rust-worker` — a 4-line binary wrapper nothing depends on), so a
-  // wrapper edit woke the fleet's single cuda box for zero coverage. Pin the PROPERTY, not the
+  // wrapper edit woke a ~24m run on the `cuda` pool for zero coverage. Pin the PROPERTY, not the
   // spelling (epic 17702 rule 6): every `crates/`- or `apps/`-shaped `paths:` entry on a
   // self-hosted lane may only wake the lane for workspace members that lane's own cargo
   // invocations build, directly or through the local dependency graph; every other entry must be
@@ -802,6 +833,11 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.candle.json", // the restamp-verify step diffs it
+        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
+        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
+        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
+        // and not symmetry for its own sake.
+        "config/engine-capabilities/audio/capabilities.candle.json",
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
@@ -815,6 +851,11 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.mlx.json", // the restamp-verify step diffs it
+        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
+        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
+        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
+        // and not symmetry for its own sake.
+        "config/engine-capabilities/audio/capabilities.candle.json",
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the MLX revision the whole lane compiles
         "rust-toolchain.toml", // governs the toolchain cargo resolves under the dtolnay install
@@ -916,4 +957,197 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       }
     }
   }
+});
+
+test("the Rust toolchain is pinned to one concrete version, everywhere", async () => {
+  // sc-17717. `channel = "stable"` let the effective toolchain move with NO file changing:
+  // hosted lanes' dtolnay steps installed whatever stable was current at run time while the
+  // self-hosted boxes used whatever was on disk — so lanes could compile the same commit
+  // with DIFFERENT rustcs, and a new stable's clippy lints could red `-D warnings` lanes on
+  // unrelated PRs. Three properties pinned here:
+  //
+  //   1. rust-toolchain.toml's channel is a concrete x.y.z, never a floating channel.
+  //   2. Every workflow's dtolnay `toolchain:` input equals that exact version — a
+  //      straggler left at `stable` double-installs on every hosted job and re-floats the
+  //      persistent Macs. Deriving the expectation from rust-toolchain.toml means a bump
+  //      only has to edit files, never this test.
+  //   3. Every dtolnay step HAS a `toolchain:` input. Omitting it makes the action fall
+  //      back to its tag (the pinned SHA tracks dtolnay's `stable` branch), which
+  //      reintroduces the float without the word "stable" appearing anywhere.
+  //
+  // The rustfmt/clippy components ride along: the self-hosted boxes pre-install the pin
+  // with both (see the bump recipe in rust-toolchain.toml), and clippy lanes assume them.
+  const toolchainFile = await source("rust-toolchain.toml");
+  const channelMatch = toolchainFile.match(/^channel = "([^"]+)"$/m);
+  assert.ok(channelMatch, "rust-toolchain.toml must declare a channel");
+  const pin = channelMatch[1];
+  assert.match(
+    pin,
+    /^\d+\.\d+\.\d+$/,
+    "rust-toolchain.toml must pin a concrete x.y.z version. 'stable' floats: the effective " +
+      "toolchain then changes with no file changing, which no CI trigger can catch (sc-17717).",
+  );
+  assert.match(
+    toolchainFile,
+    /^components = \["rustfmt", "clippy"\]$/m,
+    "the pin must carry rustfmt and clippy — the fmt gate and every -D warnings lane assume them",
+  );
+
+  const workflowFiles = (await readdir(new URL("../.github/workflows/", import.meta.url)))
+    .filter((file) => file.endsWith(".yml") || file.endsWith(".yaml"))
+    .sort();
+  assert.ok(workflowFiles.length > 0, "no workflows found — the audit would be vacuous");
+  let inputsSeen = 0;
+  for (const file of workflowFiles) {
+    const workflow = await source(`.github/workflows/${file}`);
+    const dtolnaySteps = [...workflow.matchAll(/uses: dtolnay\/rust-toolchain@/g)].length;
+    const inputs = [...workflow.matchAll(/^\s+toolchain: (.+)$/gm)].map((entry) => entry[1]);
+    assert.equal(
+      inputs.length,
+      dtolnaySteps,
+      `${file}: every dtolnay/rust-toolchain step needs an explicit toolchain: input — ` +
+        "omitting it falls back to the action tag's floating stable.",
+    );
+    for (const value of inputs) {
+      inputsSeen += 1;
+      assert.equal(
+        value,
+        `"${pin}"`,
+        `${file}: toolchain input ${value} must be "${pin}" (quoted), the version ` +
+          "rust-toolchain.toml pins — one version everywhere, bumped together.",
+      );
+    }
+  }
+  assert.ok(inputsSeen > 0, "no toolchain inputs found anywhere — the lockstep audit is vacuous");
+});
+
+// ---------------------------------------------------------------------------------------------
+// REQUIRED CHECKS AND THE MERGE QUEUE (sc-17014)
+//
+// A check can only be REQUIRED if it reports on every gated event. GitHub distinguishes the two
+// ways a check can go missing, and only one of them is safe:
+//   * job skipped by `if:`            -> Success, satisfies a required check;
+//   * workflow skipped by `paths:`    -> Pending forever, blocks the PR.
+// The merge queue adds a second, louder failure mode: it evaluates the same required set against
+// `gh-readonly-queue/main/**`, so a lane with no `merge_group:` trigger strands the group until
+// `check_response_timeout_minutes` evicts its entries — silently re-ordering the queue.
+//
+// So every required lane must (a) trigger on merge_group, (b) NOT path-filter its pull_request
+// trigger, and (c) gate its expensive jobs on the shared `changes` relevance job instead.
+// ---------------------------------------------------------------------------------------------
+
+/** Lanes whose jobs are (or are intended to be) required status checks. */
+const REQUIRED_LANES = [
+  { path: ".github/workflows/macos-mlx.yml", anchor: "mlx_paths" },
+  { path: ".github/workflows/desktop-windows.yml", anchor: "desktop_paths" },
+  { path: ".github/workflows/desktop-linux-check.yml", anchor: "desktop_linux_check_paths" },
+  { path: ".github/workflows/desktop-macos-check.yml", anchor: "desktop_macos_check_paths" },
+];
+
+test("every required lane reports on the merge queue and drops its PR path filter", async () => {
+  for (const { path } of REQUIRED_LANES) {
+    const lane = await source(path);
+    assert.match(
+      lane,
+      /^ {2}merge_group:$/m,
+      `${path}: a required check with no merge_group: trigger strands every queued entry until ` +
+        "check_response_timeout_minutes evicts it.",
+    );
+    // The pull_request trigger must carry no `paths:` — anchor definition or alias. A filtered
+    // workflow's check sits Pending forever, which is the deadlock this whole restructure exists
+    // to avoid. Scoped to the pull_request block so `push:` keeping its filter stays legal.
+    const prAt = lane.indexOf("\n  pull_request:");
+    assert.ok(prAt > 0, `${path} must declare a pull_request trigger`);
+    const prBlock = lane.slice(prAt + 1).split(/\n {2}(?=[a-z_]+:)/)[0];
+    assert.doesNotMatch(
+      prBlock,
+      /^\s+paths:/m,
+      `${path}: the pull_request trigger must NOT be path-filtered — its check would stay ` +
+        "Pending instead of passing. Filter in the `changes` job instead.",
+    );
+  }
+});
+
+test("every required lane delegates its path filter to the shared gate, with a real anchor", async () => {
+  const { parseWorkflowPaths } = await import("./merge-group-relevance.mjs");
+  for (const { path, anchor } of REQUIRED_LANES) {
+    const lane = await source(path);
+    assert.match(
+      lane,
+      /uses: \.\/\.github\/workflows\/changed-paths\.yml/,
+      `${path} must call the shared changed-paths gate rather than re-implementing it`,
+    );
+    // The gate reads the lane's own anchor at runtime, so a typo in either input silently turns
+    // the filter into a permanent "run everything" — safe, but dead. Pin both against the file.
+    const declared = /lane: (\S+)\s+anchor: (\S+)/.exec(lane);
+    assert.ok(declared, `${path} must pass both lane: and anchor: to the gate`);
+    assert.equal(declared[1], path, `${path}: the gate must be pointed at its own lane file`);
+    assert.equal(declared[2], anchor, `${path}: gate anchor input must be ${anchor}`);
+    assert.ok(
+      parseWorkflowPaths(lane, declared[2]).length > 0,
+      `${path} has no \`paths: &${declared[2]}\` anchor for the gate to read`,
+    );
+    // A gate nothing consumes is decoration.
+    assert.match(
+      lane,
+      /needs\.changes\.outputs\.relevant == 'true'/,
+      `${path}: at least one job must be conditioned on the gate's verdict`,
+    );
+  }
+});
+
+test("dropping the PR path filter did not expose the self-hosted pools", async () => {
+  // This is the hazard the restructure creates. The pull_request `paths:` filter used to be what
+  // kept docs-only PRs off the two-Mac `nax` pool and the `cuda` pool; with it gone, ONLY the
+  // `changes` gate does. A self-hosted job that forgot `needs: changes` would run on every PR.
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+  assert.match(
+    mlx,
+    /if: \$\{\{ github\.event_name != 'merge_group' && needs\.changes\.outputs\.relevant == 'true'/,
+    "nax-worker must be gated on `changes` AND excluded from merge groups — without the gate, " +
+      "every docs-only PR now wakes the two-Mac nax pool.",
+  );
+
+  const desktop = await source(".github/workflows/desktop-windows.yml");
+  // package-windows is main + dispatch only. Before merge_group existed, `!= 'pull_request'`
+  // expressed that; it no longer does, and this job is the heavy candle/CUDA package on the
+  // `cuda` pool. It must exclude merge_group explicitly.
+  assert.match(
+    desktop,
+    /if: \$\{\{ github\.event_name != 'pull_request' && github\.event_name != 'merge_group' \}\}/,
+    "package-windows must exclude merge_group explicitly, or every queued entry wakes the " +
+      "candle/CUDA packaging job on the self-hosted cuda pool.",
+  );
+  // …and its cheap sibling must NOT skip on merge groups, or the required check passes vacuously.
+  assert.match(
+    desktop,
+    /github\.event_name == 'pull_request' \|\| github\.event_name == 'merge_group'/,
+    "build-windows is the required check; it must actually run on the speculative merge rather " +
+      "than skip into a free Success.",
+  );
+});
+
+test("windows-candle stays out of the queue and out of the required set", async () => {
+  // ~24m median, p90 32m (measured 2026-08-05 over 85 runs) against a 60m check-response timeout,
+  // on the self-hosted `cuda` pool. Its merge-time stand-in is check.yml's hosted `candle`
+  // typecheck. Making candle-worker required would force a merge_group: trigger here, and p90
+  // queue wait (18m) + p90 run already reaches ~50m of the 60m budget.
+  assert.doesNotMatch(
+    await source(".github/workflows/windows-candle.yml"),
+    /^ {2}merge_group:$/m,
+    "windows-candle.yml must stay out of the merge queue; check.yml's `candle` job is its " +
+      "merge-time stand-in. See sc-17014 for the (A)/(B)/(C) decision if this changes.",
+  );
+});
+
+test("the always-on lanes stay unfiltered so they can be required", async () => {
+  const check = await source(".github/workflows/check.yml");
+  assert.match(check, /^ {2}merge_group:$/m, "check.yml carries web + parity + candle");
+  // check.yml has never had path filters, and must not grow one: all three of its jobs are
+  // required, and a filter would strand them Pending.
+  assert.doesNotMatch(
+    check.slice(check.indexOf("on:"), check.indexOf("jobs:")),
+    /paths:/,
+    "check.yml must stay unfiltered — web, parity and candle are all required checks",
+  );
 });
