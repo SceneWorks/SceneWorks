@@ -57,9 +57,10 @@
 //! 7. [`scanned_crates_cover_the_workspace`] — [`SCANNED_CRATES`] is tied to `[workspace] members`.
 //!    A hand-maintained crate list nobody validates is how the primitive list failed; a new crate
 //!    must be scanned or excluded on purpose.
-//! 8. [`the_stripper_never_opens_a_phantom_string_literal`] — the cheap always-on guard for the class
-//!    of bug where a mis-parsed quote swallows the rest of a file and silently removes it from both
-//!    gates. See its doc: this shipped twice, and only a mutation measurement caught it.
+//! 8. [`the_literal_walkers_partition_every_scanned_file_correctly`] — the self-check for the class
+//!    of bug where a mis-parsed quote absorbs real code into a phantom literal and silently removes
+//!    it from both gates. Delimiter balance, not a length or share threshold; its doc records the
+//!    measurements that rule those out. This class shipped twice.
 //! 9. The `scanner_*` tests below run the detection functions over hand-written snippets — a fake new
 //!    call site, a fake new wrapper, a fake new destination, an aliased cache root, an inline HTTP
 //!    client, an `as` rename, a fn-pointer binding, plus doc-comment/`use`/string-literal negatives.
@@ -612,6 +613,14 @@ const DOWNLOAD_PRIMITIVES: &[&str] = &[
 /// This is the escape hatch for [`downloads_fetch_surface_is_registered`], and it is deliberately
 /// small: everything else discovered by that test has to go in [`DOWNLOAD_PRIMITIVES`], where the
 /// reachability scan covers it.
+///
+/// # The criterion is machine-checked, not comment-checked
+///
+/// This was the last list in the module resting on a comment. A `probe_and_save(client, url, dest)`
+/// added to `downloads.rs` and listed here with a plausible note would have made its lane callers
+/// invisible. So the property every entry must have — *it cannot write remote bytes to a
+/// caller-chosen destination* — is asserted: a member whose signature takes a `Path`/`PathBuf`
+/// parameter is rejected outright and has to go in [`DOWNLOAD_PRIMITIVES`] instead.
 const NON_WEIGHT_FETCHERS: &[&str] = &[
     // The two HTTP client factories. They return a `reqwest::Client` — configured with the download
     // timeouts — and transfer nothing themselves. What a caller then DOES with the client is confined
@@ -908,6 +917,8 @@ fn invokes_matching(code: &str, name: &str, accept: impl Fn(&str, usize) -> bool
 struct FnItem {
     name: String,
     params: Vec<String>,
+    /// The parameter list verbatim, types included — `params` keeps only the names.
+    params_raw: String,
     body: String,
     /// `pub`, `pub(crate)`, `pub(super)`, `pub(in …)`. A private `fn` in `downloads.rs` cannot be
     /// named by a job lane at all, which is what lets the fetch-surface registry stay small.
@@ -1030,7 +1041,8 @@ fn fn_items(code: &str) -> Vec<FnItem> {
             }
             index += 1;
         }
-        let params = split_params(&slice_lossy(bytes, params_start, index));
+        let params_raw = slice_lossy(bytes, params_start, index);
+        let params = split_params(&params_raw);
         // Return type / where clause, then the body brace.
         while index < bytes.len() && bytes[index] != b'{' {
             match bytes[index] {
@@ -1073,6 +1085,7 @@ fn fn_items(code: &str) -> Vec<FnItem> {
             is_public: item_is_public(code, keyword),
             name,
             params,
+            params_raw,
             body: slice_lossy(bytes, body_start.min(body_end), body_end),
         });
         cursor = body_start;
@@ -1789,14 +1802,35 @@ fn alias_edges(code: &str, watch: &BTreeMap<String, String>) -> Vec<(String, Str
     out
 }
 
+/// The shortest discovered-wrapper name the value-reference rule will chase.
+///
+/// Without a floor the rule cries wolf: a wrapper named `stage` — five letters, and a perfectly real
+/// wrapper shape — matched the bare word in six unrelated production files (`audio_jobs.rs`,
+/// `caption_jobs.rs`, `progress.rs`, `training_jobs.rs`, `analysis_jobs_common.rs`,
+/// `prompt_refine_jobs.rs`). The failure direction is noisy rather than blind, which is the safe
+/// one — but a gate that cries wolf gets weakened by the next person who hits it. Every
+/// [`DOWNLOAD_PRIMITIVES`] member is chased regardless of length; the floor applies only to
+/// discovered wrappers and aliases.
+const MIN_VALUE_REFERENCE_NAME_LEN: usize = 12;
+
 /// Watched names referenced as VALUES rather than called: `let grab = ensure_hf_cached_file;`
 /// followed by `grab(…)` downloads exactly as much as calling it directly, and matches no `NAME(`
 /// pattern anywhere in the file.
+///
+/// Restricted twice over, because a bare-name match is the loosest rule in this module: the name must
+/// be a primitive or long enough not to collide ([`MIN_VALUE_REFERENCE_NAME_LEN`]), and it must sit
+/// where a function VALUE is actually bound or passed — after `=`, or directly after `(` or `,` in an
+/// argument list.
 fn value_references(code: &str, watch: &BTreeMap<String, String>) -> Vec<String> {
     let bytes = code.as_bytes();
     let imports = use_item_ranges(code);
     let mut out = Vec::new();
     for (name, definer) in watch {
+        if name.len() < MIN_VALUE_REFERENCE_NAME_LEN
+            && !DOWNLOAD_PRIMITIVES.contains(&name.as_str())
+        {
+            continue;
+        }
         let mut cursor = 0usize;
         while let Some(offset) = code[cursor..].find(name.as_str()) {
             let start = cursor + offset;
@@ -1829,6 +1863,14 @@ fn value_references(code: &str, watch: &BTreeMap<String, String>) -> Vec<String>
                 || next.starts_with("as")
                 || next.starts_with('!')
                 || next.starts_with("::")
+            {
+                continue;
+            }
+            // ...and it has to sit where a function value is bound or passed, or the bare word
+            // matches prose-shaped identifiers across the crate.
+            if !(before.ends_with('=') && !before.ends_with("==") && !before.ends_with("!="))
+                && !before.ends_with('(')
+                && !before.ends_with(',')
             {
                 continue;
             }
@@ -1967,17 +2009,39 @@ fn concat_literal_value(value: &str) -> Option<String> {
 /// spell a cache root that a `find(".join(\"cache\")")` scan cannot see, and both resolve here.
 fn subdir_label(argument: &str, constants: &BTreeMap<String, String>) -> String {
     let argument = argument.trim().trim_start_matches('&').trim();
-    // `join(Path::new("cache"))` and `join(PathBuf::from("cache"))` are the same path segment as
-    // `join("cache")`, and were two more ways to spell a root the literal scan could not see.
-    let argument = ["Path::new(", "PathBuf::from(", "OsStr::new("]
+    // `join(Path::new("cache"))`, `join(std::path::Path::new("cache"))` and
+    // `join("cache".to_string())` are all the same path segment as `join("cache")`. Matching the
+    // wrapper on a bare prefix left the `::`-qualified spelling and the owned-conversion spelling as
+    // one-token bypasses, so the qualifier goes first and the conversion suffix last.
+    let unqualified = argument
+        .rsplit_once("::")
+        .filter(|(_, tail)| tail.starts_with("new(") || tail.starts_with("from("))
+        .map(|(_, tail)| tail)
+        .unwrap_or(argument);
+    let argument = ["new(", "from("]
         .iter()
         .find_map(|wrapper| {
-            argument
+            unqualified
                 .strip_prefix(*wrapper)
                 .and_then(|rest| rest.strip_suffix(')'))
         })
         .map(str::trim)
         .unwrap_or(argument);
+    let argument = [
+        "to_string()",
+        "to_owned()",
+        "as_str()",
+        "as_ref()",
+        "into()",
+    ]
+    .iter()
+    .find_map(|conversion| {
+        argument
+            .strip_suffix(*conversion)
+            .and_then(|rest| rest.strip_suffix('.'))
+    })
+    .map(str::trim)
+    .unwrap_or(argument);
     if let Some(literal) = string_literal_value(argument) {
         return literal;
     }
@@ -2568,6 +2632,28 @@ fn downloads_fetch_surface_is_registered() {
         DOWNLOAD_PRIMITIVES.len() + NON_WEIGHT_FETCHERS.len(),
         registered.len(),
         "a name appears in both DOWNLOAD_PRIMITIVES and NON_WEIGHT_FETCHERS"
+    );
+
+    // A fetcher that takes a filesystem destination can write remote bytes wherever the caller
+    // says. That is a download primitive by definition, whatever the comment beside it claims.
+    let items = fn_items(&downloads.code);
+    let smuggled: Vec<String> = NON_WEIGHT_FETCHERS
+        .iter()
+        .filter_map(|name| {
+            let item = items.iter().find(|item| item.name == *name)?;
+            let types = item.params_raw.replace(char::is_whitespace, "");
+            (types.contains("Path") || types.contains("PathBuf"))
+                .then(|| format!("{name}{}", item.params_raw.trim()))
+        })
+        .collect();
+    assert!(
+        smuggled.is_empty(),
+        "NON_WEIGHT_FETCHERS member(s) that take a filesystem destination:\n  {}\n\nEvery entry on \
+         that list is there because it CANNOT write remote bytes to a caller-chosen path — that is \
+         the entire criterion. A function that takes one is a download primitive however it is \
+         described, so move it to DOWNLOAD_PRIMITIVES where the reachability scan covers its \
+         callers.",
+        smuggled.join("\n  ")
     );
 
     let unregistered: Vec<&String> = discovered.difference(&registered).collect();
@@ -3222,67 +3308,129 @@ fn http_client_file_fetch_surfaces_are_registered() {
     }
 }
 
-/// A phantom string literal — the failure where a mis-parsed quote swallows the rest of a file and
-/// silently removes it from BOTH gates — always shows up as one absurdly long literal.
+/// What the literal walkers made of one file: `(brace balance, paren balance, lowest brace depth,
+/// number of string literals containing a newline)`.
+fn literal_partition_shape(code: &str) -> (i64, i64, i64, usize) {
+    let bytes = code.as_bytes();
+    let (mut brace, mut paren, mut floor, mut multiline) = (0i64, 0i64, 0i64, 0usize);
+    let mut index = 0usize;
+    let note = |slice: &[u8], multiline: &mut usize| {
+        if slice.contains(&b'\n') {
+            *multiline += 1;
+        }
+    };
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            index = skip_char(bytes, index);
+            continue;
+        }
+        if (bytes[index] == b'r' || bytes[index] == b'b')
+            && index
+                .checked_sub(1)
+                .map(|i| !(bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()))
+                .unwrap_or(true)
+        {
+            if let Some((_, end)) = crate::architecture_tests::raw_string_parts(bytes, index) {
+                let end = end.min(bytes.len());
+                note(&bytes[index..end], &mut multiline);
+                index = end;
+                continue;
+            }
+        }
+        match bytes[index] {
+            b'"' => {
+                let end = skip_string(bytes, index).min(bytes.len());
+                note(&bytes[index..end], &mut multiline);
+                index = end;
+                continue;
+            }
+            b'{' => brace += 1,
+            b'}' => brace -= 1,
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            _ => {}
+        }
+        floor = floor.min(brace);
+        index += 1;
+    }
+    (brace, paren, floor, multiline)
+}
+
+/// **The self-check.** The literal walkers must partition every scanned file into code and literals
+/// the way `rustc` does. When they do not, the failure is silent: a mis-paired quote absorbs real
+/// code into a phantom literal and removes it from BOTH gates without any assertion firing.
 ///
-/// The longest REAL multi-line literal in the scanned trees is 52 lines (`jobs_store.rs`'s SQL
-/// schema), so the ceiling here sits at more than twice that. When this fires, the fix is in
-/// `architecture_tests`' literal walkers, not in the file it names.
+/// # Why these two measures, and not the obvious ones
 ///
-/// This is the cheap, always-on version of the per-line mutation canary that caught `'\''`: linear,
-/// no mutation needed, and it detects the whole class rather than the spellings known today.
+/// This class has shipped twice, and the first version of this test was itself a false green — it
+/// gated on the LONGEST literal, and would have passed the very defect it was written for. The
+/// numbers below are measured across all 240 scanned files, once with the walkers correct and once
+/// with round two's broken `char_literal_end` restored.
+///
+/// * **Longest literal — rejected.** A parity inversion re-syncs at every subsequent `"`, so it
+///   makes MANY SHORT phantom literals, never one long one. The longest phantom in `media_jobs.rs`
+///   (the file that defect blinded across 1143 lines) was 55 lines, against a real maximum of 52
+///   (`jobs_store.rs`'s SQL schema). No ceiling fits in a 3-line gap.
+/// * **Literal-byte share — rejected.** The real distribution runs to 42.2% (`worker/preflight.rs`),
+///   38.2% (`core/control_weights.rs`), 34.2% (`core/jobs_store/routing/gaps.rs`), while broken
+///   `media_jobs.rs` sits near 40%. The populations overlap; no threshold separates them.
+/// * **Delimiter balance — exact, no threshold.** Valid Rust balances its braces and parens; code
+///   absorbed into a phantom literal takes its delimiters with it. All 240 files balance exactly
+///   with the walkers correct, and `core/session_log.rs` goes to `braces=-1` with them broken.
+/// * **COUNT of multi-line literals — the same "many short" fact, used as the detector instead of
+///   treated as an obstacle.** Real multi-line literals are few and long: the maximum anywhere is 54
+///   (`core/jobs_store.rs`), then 52, 38, 38, 30. Broken `media_jobs.rs` produces **207** — four
+///   times the highest legitimate count in the tree.
+///
+/// Measured deliberately BEFORE [`strip_cfg_test_items`], over every `.rs` file rather than only the
+/// production ones: `rustc` guarantees the whole file's shape, so keeping cfg-stripping out of the
+/// comparison leaves this a statement about the literal walkers alone.
 #[test]
-fn the_stripper_never_opens_a_phantom_string_literal() {
-    const MAX_LITERAL_LINES: usize = 120;
-    let mut worst = (0usize, String::new(), 0usize);
-    for (label, files) in all_production_sources() {
-        for file in files {
-            let bytes = file.code.as_bytes();
-            let mut index = 0usize;
-            while index < bytes.len() {
-                if bytes[index] == b'\'' {
-                    index = skip_char(bytes, index);
-                    continue;
-                }
-                if (bytes[index] == b'r' || bytes[index] == b'b')
-                    && index
-                        .checked_sub(1)
-                        .map(|i| !(bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()))
-                        .unwrap_or(true)
-                {
-                    if let Some((_, end)) =
-                        crate::architecture_tests::raw_string_parts(bytes, index)
-                    {
-                        index = end.min(bytes.len());
-                        continue;
-                    }
-                }
-                if bytes[index] == b'"' {
-                    let end = skip_string(bytes, index).min(bytes.len());
-                    let lines = bytes[index..end].iter().filter(|b| **b == b'\n').count();
-                    if lines > worst.0 {
-                        worst = (
-                            lines,
-                            format!("{label}/{}", file.rel),
-                            file.code[..index].lines().count(),
-                        );
-                    }
-                    index = end;
-                    continue;
-                }
-                index += 1;
+fn the_literal_walkers_partition_every_scanned_file_correctly() {
+    // Legitimate maximum is 54; the observed failure is 207. Sitting between them at roughly double
+    // the real maximum leaves room for a genuinely fixture-heavy new file without leaving room for
+    // an inversion.
+    const MAX_MULTILINE_LITERALS: usize = 100;
+    let mut broken: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    let mut worst = (0usize, String::new());
+
+    for (label, src, _, _) in SCANNED_CRATES {
+        for (rel, code) in read_tree(&repo_root().join(src)) {
+            scanned += 1;
+            let (brace, paren, floor, multiline) = literal_partition_shape(&code);
+            if brace != 0 || paren != 0 || floor < 0 {
+                broken.push(format!(
+                    "{label}/{rel}  braces={brace:+} parens={paren:+} lowest-depth={floor}"
+                ));
+            }
+            if multiline > worst.0 {
+                worst = (multiline, format!("{label}/{rel}"));
+            }
+            if multiline > MAX_MULTILINE_LITERALS {
+                broken.push(format!(
+                    "{label}/{rel}  {multiline} string literals span a newline"
+                ));
             }
         }
     }
+
     assert!(
-        worst.0 <= MAX_LITERAL_LINES,
-        "a string literal spanning {} lines starts at {}:{} — that is a mis-parsed quote, not a real \
-         literal. Everything after it sits inside a phantom string and has stopped being scanned by \
-         BOTH gates. Fix `char_literal_end` / `raw_string_parts` / `skip_string` in \
-         `architecture_tests`, not the file named here.",
+        scanned > 200,
+        "walked only {scanned} files — this assertion would prove nothing"
+    );
+    assert!(
+        broken.is_empty(),
+        "the literal walkers mis-partitioned {} file(s):\n  {}\n\nValid Rust balances its delimiters \
+         exactly, and real multi-line string literals are few. A file failing either check has code \
+         absorbed into phantom string literals, which means that code has SILENTLY STOPPED being \
+         scanned by both gates and no other assertion will fire. Fix `char_literal_end` / \
+         `raw_string_parts` / `skip_string` in `architecture_tests`, not the file named here. \
+         (Most multi-line literals seen: {} in {}.)",
+        broken.len(),
+        broken.join("\n  "),
         worst.0,
-        worst.1,
-        worst.2
+        worst.1
     );
 }
 
@@ -3341,6 +3489,42 @@ fn scanner_sees_through_aliases_and_value_bindings() {
     );
 }
 
+/// A short wrapper name must not turn the value-reference rule into a crate-wide word search.
+///
+/// `stage` is a real wrapper shape, and matching the bare word falsely flagged six unrelated
+/// production files. Noisy rather than blind, so fail-safe — but a gate that cries wolf gets weakened
+/// by whoever hits it next.
+#[test]
+fn scanner_does_not_cry_wolf_on_a_short_wrapper_name() {
+    let definer = SourceFile {
+        rel: "image_jobs/instantid.rs".to_owned(),
+        code: "async fn stage(c: &DownloadContext<'_>) -> R { ensure_hf_cached_file(c).await }"
+            .to_owned(),
+    };
+    // Prose that merely contains the word, in the shapes the real crate uses.
+    let innocent = SourceFile {
+        rel: "audio_jobs.rs".to_owned(),
+        code: "fn run(stage: Stage) { match stage { Stage::One => report(stage) } }".to_owned(),
+    };
+    let watch = watch_map(&[definer, innocent.clone()]);
+    assert!(
+        watch.contains_key("stage"),
+        "the wrapper itself must still be discovered: {watch:?}"
+    );
+    let reasons = download_reach(&innocent.code_without_literals(), &watch);
+    assert!(
+        reasons.is_empty(),
+        "a short wrapper name must not match prose-shaped identifiers: {reasons:?}"
+    );
+
+    // ...while a genuine value binding of a PRIMITIVE is still caught whatever its length.
+    let bound = SourceFile {
+        rel: "zz_lane.rs".to_owned(),
+        code: "fn run() { let grab = ensure_hf_cached_file; grab(a); }".to_owned(),
+    };
+    assert!(!download_reach(&bound.code_without_literals(), &watch).is_empty());
+}
+
 /// **MINOR 6.** Three more spellings of a cache destination, none of which occurs in production
 /// source today and all of which would have been invisible.
 #[test]
@@ -3391,6 +3575,24 @@ fn scanner_sees_the_remaining_cache_spellings() {
         &constants
     )
     .contains("brand-new-weights"));
+
+    // A `::`-qualified wrapper and an owned-conversion suffix are the same segment. Both were
+    // one-token bypasses of the bare-prefix match this used to do.
+    assert!(cache_destinations(
+        "let p = d.join(std::path::Path::new(\"cache\")).join(\"zz-qualified\");",
+        &constants
+    )
+    .contains("zz-qualified"));
+    assert!(cache_destinations(
+        "let p = d.join(\"cache\".to_string()).join(\"zz-owned\");",
+        &constants
+    )
+    .contains("zz-owned"));
+    assert!(cache_destinations(
+        "let p = d.join(\"cache\".to_owned()).join(\"zz-owned2\");",
+        &constants
+    )
+    .contains("zz-owned2"));
 
     // NEGATIVE: an unrelated path that merely contains the word.
     assert!(
