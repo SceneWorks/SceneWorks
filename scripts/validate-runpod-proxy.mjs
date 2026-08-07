@@ -257,6 +257,7 @@ export async function validateProxy({
   minimumHeartbeats = 5,
   maximumEventLatencyMs = 10_000,
   allowNonRunpod = false,
+  stopWhenSatisfied = false,
 }) {
   if (!token) {
     fail("SCENEWORKS_ACCESS_TOKEN is required");
@@ -324,10 +325,22 @@ export async function validateProxy({
       fail("placeholder job response did not include an id");
     }
 
-    const observationDeadline = performance.now() + observationSeconds * 1000;
+    // `observationSeconds` is a *ceiling*, not a fixed dwell. A real proxy run
+    // keeps `stopWhenSatisfied` false so the full window elapses -- that is what
+    // proves RunPod's proxy does not sever an idle SSE stream. Callers that only
+    // need to prove events flow (the tests) set it true, which turns the window
+    // into "wait up to this long for the contract to be met" instead of a
+    // wall-clock race that a scheduling stall can lose.
+    const observationStartedAt = performance.now();
+    const observationDeadline = observationStartedAt + observationSeconds * 1000;
     const heartbeatTimes = [];
     let jobEventLatencyMs = null;
+    const observationSatisfied = () =>
+      jobEventLatencyMs !== null && heartbeatTimes.length >= minimumHeartbeats;
     while (performance.now() < observationDeadline) {
+      if (stopWhenSatisfied && observationSatisfied()) {
+        break;
+      }
       const remaining = observationDeadline - performance.now();
       const waitMs = Math.min(25_000, Math.max(1, remaining));
       const next = await nextEvent(events, waitMs);
@@ -361,6 +374,8 @@ export async function validateProxy({
         `only ${heartbeatTimes.length} heartbeat events arrived; expected ${minimumHeartbeats}`,
       );
     }
+    const observedSeconds =
+      Math.round(performance.now() - observationStartedAt) / 1000;
 
     const upload = multipartUpload(uploadFile);
     const uploadStartedAt = performance.now();
@@ -415,7 +430,12 @@ export async function validateProxy({
       sse: {
         readyLatencyMs,
         jobEventLatencyMs,
+        // `observationSeconds` is the configured ceiling; `observedSeconds` is
+        // what the window actually spent. They are equal on a real proxy run
+        // (`stopWhenSatisfied` false) and diverge when a caller opts into the
+        // early break, so the logged record never overstates the observation.
         observationSeconds,
+        observedSeconds,
         heartbeatCount: heartbeatTimes.length,
         remainedConnected: true,
       },

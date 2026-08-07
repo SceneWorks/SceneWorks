@@ -983,6 +983,56 @@ pub(crate) async fn create_model_convert_job(
             "Model does not require MLX conversion",
         ));
     };
+    // Pre-flight the source weights (sc-14708 follow-up). The worker resolves the same HF snapshot and
+    // fails the job when the checkpoint is absent, which reads as a defect to the user: the three Anima
+    // variants share `circlestone-labs/Anima`, their per-variant downloads are serialized, and the
+    // sibling cards flip to *downloaded* the moment THEIR files land — so converting the variant whose
+    // 4 GB DiT is still streaming produced a bare "Anima source DiT is missing." Refuse it here, while
+    // the request can still carry an explanation. Only `requiresConversion` reads a native checkpoint;
+    // the legacy quantize-only path has its own worker-side rejection.
+    if requires_conversion {
+        if let Some(download) = store_call(state.clone(), {
+            let model_id = model_id.clone();
+            move |store, _timeout| store.find_active_model_download_job(&model_id)
+        })
+        .await?
+        {
+            let model_name = model
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(model_id.as_str());
+            return Err(ApiError::conflict(format!(
+                "{model_name} is still downloading ({percent}%). Wait for the download to finish \
+                 before converting it.",
+                percent = (download.progress.as_f64().unwrap_or(0.0) * 100.0).round() as i64,
+            )));
+        }
+        if let Some(source_file) = mlx
+            .get("convertSourceFile")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            match sceneworks_worker::convert_source_state(
+                &state.settings.data_dir,
+                &source_repo,
+                source_file,
+            ) {
+                sceneworks_worker::ConvertSourceState::Ready => {}
+                sceneworks_worker::ConvertSourceState::RepoNotCached => {
+                    return Err(ApiError::conflict(format!(
+                        "{source_repo} is not downloaded yet. Download it before converting."
+                    )));
+                }
+                sceneworks_worker::ConvertSourceState::FileMissing => {
+                    return Err(ApiError::conflict(format!(
+                        "{source_file} has not finished downloading from {source_repo}. Wait for \
+                         the download to complete, then convert."
+                    )));
+                }
+            }
+        }
+    }
+
     let job_payload = build_model_convert_job_payload(ModelConvertJobPayload {
         model: &model,
         model_id: &model_id,
@@ -4116,7 +4166,26 @@ static TEST_CATALOG_PROBES_PEAK: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 pub(crate) fn test_reset_catalog_probe_concurrency() {
     use std::sync::atomic::Ordering;
-    TEST_CATALOG_PROBES_ACTIVE.store(0, Ordering::SeqCst);
+    // DRAIN, do not clobber. Delayed probes run via spawn_blocking on pool OS threads
+    // that cannot be cancelled mid-sleep, and the probe tests run concurrently in one
+    // binary against these process-global atomics (their sleeps are bounded: <=250ms).
+    // Storing 0 into ACTIVE while a concurrent test's probe was mid-sleep made that
+    // probe's later decrement wrap to usize::MAX, and the next probe's `+ 1` panicked
+    // with "attempt to add with overflow" — a cross-test 500 that only surfaced on the
+    // slower hosted macos-26 runners once the workspace suite moved there (sc-17723).
+    // Waiting live probes out keeps ACTIVE's +1/-1 pairing intact, so it can never go
+    // below zero; only PEAK is forced. The probe tests additionally serialize behind
+    // catalog_probe_test_lock() in tests/catalog.rs, which also keeps a neighbor's
+    // probes from clobbering a PEAK measurement — this drain is the belt-and-braces
+    // for any future probe user outside that lock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while TEST_CATALOG_PROBES_ACTIVE.load(Ordering::SeqCst) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "catalog probe stragglers did not drain within 10s — a probe thread is leaking"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
     TEST_CATALOG_PROBES_PEAK.store(0, Ordering::SeqCst);
 }
 
@@ -4140,10 +4209,18 @@ fn test_delay_catalog_probe(model: &Value) {
     else {
         return;
     };
-    let active = TEST_CATALOG_PROBES_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+    // saturating_add / checked_sub: with the draining reset above, ACTIVE can no longer
+    // underflow — but these keep any future reset-style edit from reintroducing the
+    // wrap-then-panic class (a straggler now parks at 0 instead of poisoning every later
+    // sample with usize::MAX).
+    let active = TEST_CATALOG_PROBES_ACTIVE
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
     TEST_CATALOG_PROBES_PEAK.fetch_max(active, Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(delay_ms));
-    TEST_CATALOG_PROBES_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    let _ = TEST_CATALOG_PROBES_ACTIVE.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+        count.checked_sub(1)
+    });
 }
 
 fn apply_model_catalog_size_fields(
@@ -4343,8 +4420,29 @@ mod model_size_concurrency_tests {
         // macOS gains one over windows/linux for each mac-only entry; sc-8444 added
         // `krea_realtime_14b` (macOS-only — there is no candle Krea Realtime engine), taking it
         // from 81 to 82.
+        //
+        // sc-17627 then declared the three person-vision utilities that were previously job-time
+        // auto-downloads with no catalog entry at all: `sam3_person_segment` (both platforms),
+        // `sam2_person_segment` (macOS-only — `mod person_segment` is `#[cfg(target_os = "macos")]`)
+        // and `person_detector` (one platform-scoped row each, so exactly one survives
+        // `retain_downloads_for_os` per OS). macOS +3 → 85, windows/linux +2 → 82. `real_esrgan`
+        // swapped its repo rather than adding one, so it does not move these counts.
+        //
+        // sc-17632 then declared `seedvr2_upscaler`, the last of that same class: a job-time
+        // auto-download with no catalog entry, fetched TWICE into two `<data_dir>/cache` subtrees.
+        // One download row, no `platforms` scoping (both the image and video SeedVR2 lanes run on
+        // macOS and on the off-Mac candle lane), so every OS gains exactly one: macOS 85 → 86,
+        // windows/linux 82 → 83.
+        //
+        // sc-17634 declared `dwpose_pose_detector`, the LAST of that class and the only one that
+        // was not a Hugging Face download at all (two openmmlab `.zip` bundles, re-hosted at
+        // `SceneWorks/dwpose-onnx` so it can be installed like everything else). One download row
+        // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
+        // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
+        // 83 → 84.
+        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 82_usize), ("windows", 80), ("linux", 80)]
+            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

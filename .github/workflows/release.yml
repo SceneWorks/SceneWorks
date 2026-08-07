@@ -87,13 +87,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
-      - name: Fetch the private inference release
+          toolchain: "1.97.1"
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -259,13 +256,10 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
-      - name: Fetch the private inference release
+          toolchain: "1.97.1"
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       # Put the VS2022 MSVC toolchain (cl.exe) on PATH so nvcc finds the host
       # compiler when candle-kernels' build script compiles the CUDA kernels.
@@ -276,7 +270,7 @@ jobs:
       # the redist staging in build-sidecar.mjs. (Pin kept in lockstep with
       # desktop-windows.yml / server-candle-linux.yml.)
       - name: Install CUDA Toolkit 12.9
-        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
         with:
           cuda: "12.9.1"
           method: "network"
@@ -405,7 +399,7 @@ jobs:
             apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
 
       # Match the manual Linux packaging lane. gstreamer1.0-libav supplies H.264
@@ -428,16 +422,13 @@ jobs:
             patchelf \
             wget
 
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
 
       - name: Install CUDA Toolkit 12.9
-        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
         with:
           cuda: "12.9.1"
           method: "network"

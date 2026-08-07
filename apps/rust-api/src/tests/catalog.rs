@@ -371,15 +371,43 @@ async fn real_builtin_catalog_serves_engine_keyed_live_preview_support() {
             .is_none(),
         "an un-dumped backend must be absent (unknown), never served as false"
     );
-    // Purely additive: a model the generated table does not know keeps its exact previous shape.
-    assert!(
-        entry("kokoro_82m").get("preview").is_none(),
-        "an audio model has no engine-backed preview answer and must get no `preview` key at all"
+    // sc-17593. This assertion used to read "an audio model has no engine-backed preview answer" —
+    // true at the time, and the bug: the audio registry is a SEPARATE `ProviderRegistry` that
+    // nothing dumped, so every audio route served `unknown`, which the card renders exactly like
+    // "wired and does not preview". It is dumped now, and answers.
+    assert_eq!(
+        entry("kokoro_82m")["preview"]["byBackend"]["candle"],
+        Value::Bool(false),
+        "kokoro_82m is a wired candle audio route that does not emit PreviewSink frames — served \
+         as false, not omitted"
     );
+    // Still purely additive, on a case that stays unknown BY CONSTRUCTION rather than by omission:
+    // `supports_preview` lives on `Capabilities`, which only Generators carry. `openvoice_v2` is an
+    // `AudioTransform` and `chatterbox_ve` a `VoiceEmbedder` — descriptor types with no such field —
+    // so the registry has no opinion and the catalog must not manufacture one.
+    for non_generator in ["openvoice_v2", "chatterbox_ve"] {
+        assert!(
+            entry(non_generator).get("preview").is_none(),
+            "{non_generator} is not a Generator, so it has no supports_preview to serve and must \
+             get no `preview` key at all"
+        );
+    }
+}
+
+// The three probe-delay tests (this one and the two 250ms ones below) share the
+// process-global TEST_CATALOG_PROBES_* atomics and the probe-concurrency semaphore, and
+// cargo's default harness runs them concurrently. Serialize them: an unserialized
+// neighbor's live probes can zero PEAK mid-measurement (via the draining reset) or
+// spuriously satisfy `peak > 1` — flakes that only surface on the slow hosted macos-26
+// runners (sc-17723). Same pattern as dataset_catalogs.rs's catalog_scan_hook_test_lock.
+fn catalog_probe_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[tokio::test]
 async fn models_route_overlaps_slow_probes_with_bounded_fanout() {
+    let _probe_guard = catalog_probe_test_lock().lock().await;
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -717,6 +745,7 @@ async fn concurrent_failed_estimate_is_shared_and_retries_after_negative_ttl_exp
 
 #[tokio::test]
 async fn models_catalog_starts_install_sweep_before_size_estimation_completes() {
+    let _probe_guard = catalog_probe_test_lock().lock().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
@@ -778,6 +807,7 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
 
 #[tokio::test]
 async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
+    let _probe_guard = catalog_probe_test_lock().lock().await;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");

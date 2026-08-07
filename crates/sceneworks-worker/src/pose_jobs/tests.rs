@@ -364,22 +364,384 @@ async fn cleanup_temp_uploads_removes_only_pose_upload_files() {
     cleanup_temp_uploads(&settings, &[staged]).await;
 }
 
-/// sc-8879: the openmmlab DWPose bundle digests must be real, distinct 64-hex SHA-256
-/// values (not a placeholder) so the download integrity check actually enforces a pin.
+/// sc-17634: [`DWPOSE_REVISION`] must be a real 40-hex commit pin, not `main` and not a
+/// placeholder. The resolver branches on `is_pinned_hf_revision`, so a non-pin would silently
+/// switch it to the mutable `refs/main` snapshot — reading whatever the repo currently points at
+/// rather than the reviewed bytes. Replaces the sc-8879 zip-digest test, whose subject (a download
+/// this lane no longer performs) was deleted with `extract_onnx`.
 #[test]
-fn dwpose_zip_digests_are_pinned_sha256() {
-    for (label, digest) in [("det", DET_ZIP_SHA256), ("pose", POSE_ZIP_SHA256)] {
-        assert_eq!(digest.len(), 64, "{label} digest must be 64-hex sha256");
+fn dwpose_revision_is_a_pinned_commit() {
+    assert_eq!(
+        DWPOSE_REVISION.len(),
+        40,
+        "DWPOSE_REVISION must be a 40-hex commit sha, got {DWPOSE_REVISION}"
+    );
+    assert!(
+        DWPOSE_REVISION
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "DWPOSE_REVISION must be lowercase hex, got {DWPOSE_REVISION}"
+    );
+    assert_ne!(
+        DWPOSE_REVISION, "main",
+        "a branch name would take the resolver's UNPINNED snapshot branch"
+    );
+}
+
+/// sc-17634, epic 17625 rule 6 — the `dwpose_pose_detector` catalog entry must declare
+/// byte-for-byte the repo, revision and filenames [`resolve_dwpose_graph`] reads.
+///
+/// `DWPOSE_REVISION` is a 40-hex pin, so the resolver takes `resolve_hf_component_file`'s
+/// `huggingface_pinned_snapshot_dir` branch and reads `snapshots/<sha>/` — that EXACT sha, with no
+/// fall-through to `refs/main`. A manifest that installed a different revision would therefore
+/// install weights the loader cannot see: the entry would report "installed" while every pose job
+/// failed with "not installed". Reading the pin out of the embedded catalog (rather than mirroring
+/// it here) means a bump on either side has to be a bump on both.
+#[test]
+fn manifest_declares_the_same_dwpose_pin_the_loader_reads() {
+    let pin = crate::manifest_pins::builtin_model_pin("dwpose_pose_detector");
+    assert_eq!(
+        pin.repo, DWPOSE_REPO,
+        "the catalog entry must declare the repo the loader resolves"
+    );
+    assert_eq!(
+        pin.revision, DWPOSE_REVISION,
+        "the catalog entry must declare the EXACT pinned snapshot the loader reads"
+    );
+    let mut declared = pin.files.clone();
+    declared.sort();
+    let mut loaded = vec![DET_FILE.to_owned(), POSE_FILE.to_owned()];
+    loaded.sort();
+    assert_eq!(
+        declared, loaded,
+        "the catalog entry must declare exactly the two graph filenames the loader resolves — the \
+         upstream archive stems, unrenamed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// cache-only weight resolution (sc-17634, epic 17625)
+// ---------------------------------------------------------------------------
+
+/// Neutralize everything ambient that could decide these tests for us:
+///
+/// * the three HF cache vars, so `huggingface_repo_cache_path` resolves under the temp `data_dir`
+///   rather than a developer's real `HF_HOME` (the sc-13679 trap — it passes locally and fails on
+///   a machine with the model installed, or vice versa);
+/// * both operator pins, since an exported `SCENEWORKS_DWPOSE_DET` short-circuits step 1 of every
+///   case below;
+/// * `HOME`, because the rtmlib legacy root is `$HOME/.cache/rtmlib/hub/checkpoints` — the one
+///   legacy root in this epic NOT under `data_dir`. Left ambient, the two "not installed" tests
+///   would pass or fail depending on whether the developer ever ran Python rtmlib. This machine
+///   has that cache populated, so it is a live hazard here, not a theoretical one.
+fn isolate(home: &Path) -> crate::test_env::EnvVars {
+    crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+        ("SCENEWORKS_DWPOSE_DET", ""),
+        ("SCENEWORKS_DWPOSE_POSE", ""),
+        ("HOME", &home.to_string_lossy()),
+    ])
+}
+
+fn settings_at(data_dir: &Path) -> Settings {
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.to_path_buf();
+    settings
+}
+
+/// Stage `file` where the Model Manager install puts it: the PINNED snapshot dir.
+fn stage_install(data_dir: &Path, file: &str) -> PathBuf {
+    let snapshot = crate::huggingface_repo_cache_path(data_dir, DWPOSE_REPO)
+        .expect("repo cache path")
+        .join("snapshots")
+        .join(DWPOSE_REVISION);
+    std::fs::create_dir_all(&snapshot).expect("mk snapshot");
+    let path = snapshot.join(file);
+    std::fs::write(&path, b"installed onnx").expect("write");
+    path
+}
+
+/// Stage `file` in the legacy app cache the deleted download+unzip path wrote to.
+fn stage_legacy_app_cache(data_dir: &Path, file: &str) -> PathBuf {
+    let dir = data_dir.join(DWPOSE_LEGACY_DATA_DIR_ROOT);
+    std::fs::create_dir_all(&dir).expect("mk legacy app cache");
+    let path = dir.join(file);
+    std::fs::write(&path, b"legacy app-cache onnx").expect("write");
+    path
+}
+
+/// Stage `file` in rtmlib's own checkpoint cache under the test `HOME`.
+fn stage_legacy_rtmlib(home: &Path, file: &str) -> PathBuf {
+    let dir = home.join(DWPOSE_LEGACY_RTMLIB_ROOT);
+    std::fs::create_dir_all(&dir).expect("mk legacy rtmlib cache");
+    let path = dir.join(file);
+    std::fs::write(&path, b"legacy rtmlib onnx").expect("write");
+    path
+}
+
+/// The Model Manager install (declared at the SAME pin the loader reads) satisfies the loader, for
+/// BOTH graphs — the whole point of sc-17634.
+#[test]
+fn resolves_both_graphs_from_the_installed_hf_snapshot() {
+    let home = tempfile::tempdir().expect("home");
+    let _env = isolate(home.path());
+    let dir = tempfile::tempdir().expect("data dir");
+    let det = stage_install(dir.path(), DET_FILE);
+    let pose = stage_install(dir.path(), POSE_FILE);
+
+    let resolved = require_dwpose_weights(&settings_at(dir.path())).expect("resolves");
+    assert_eq!(
+        resolved,
+        (det, pose),
+        "both graphs must come from the pinned HF snapshot"
+    );
+}
+
+/// AC10: a pre-migration install keeps working from `<data_dir>/cache/dwpose/` with nothing in the
+/// HF cache, so upgrading re-downloads none of the ~300 MB already on disk.
+#[test]
+fn falls_back_to_the_legacy_app_cache_root() {
+    let home = tempfile::tempdir().expect("home");
+    let _env = isolate(home.path());
+    let dir = tempfile::tempdir().expect("data dir");
+    let det = stage_legacy_app_cache(dir.path(), DET_FILE);
+    let pose = stage_legacy_app_cache(dir.path(), POSE_FILE);
+
+    let resolved = require_dwpose_weights(&settings_at(dir.path())).expect("resolves");
+    assert_eq!(
+        resolved,
+        (det, pose),
+        "the legacy app cache must still satisfy both graphs"
+    );
+}
+
+/// AC10, the OTHER legacy root: rtmlib's own cache on a dev machine / a pre-Rust-port install.
+/// Keyed off `$HOME`, not `data_dir`, which is why it needs its own case.
+#[test]
+fn falls_back_to_the_legacy_rtmlib_root() {
+    let home = tempfile::tempdir().expect("home");
+    let _env = isolate(home.path());
+    let dir = tempfile::tempdir().expect("data dir");
+    let det = stage_legacy_rtmlib(home.path(), DET_FILE);
+    let pose = stage_legacy_rtmlib(home.path(), POSE_FILE);
+
+    let resolved = require_dwpose_weights(&settings_at(dir.path())).expect("resolves");
+    assert_eq!(
+        resolved,
+        (det, pose),
+        "rtmlib's own checkpoint cache must still satisfy both graphs"
+    );
+}
+
+/// Resolution ORDER, asserted with all three roots populated at once so the assertion cannot pass
+/// by absence: the HF install wins over both legacy roots, and the app cache wins over rtmlib.
+/// Each staged file has distinct CONTENT, so reading the bytes back proves which root answered
+/// rather than merely which path was returned.
+#[test]
+fn hf_install_wins_over_both_legacy_roots_and_app_cache_wins_over_rtmlib() {
+    let home = tempfile::tempdir().expect("home");
+    let _env = isolate(home.path());
+    let dir = tempfile::tempdir().expect("data dir");
+
+    // All three roots hold the detector; only the two legacy roots hold the pose model.
+    let installed_det = stage_install(dir.path(), DET_FILE);
+    let legacy_app_det = stage_legacy_app_cache(dir.path(), DET_FILE);
+    let legacy_rtmlib_det = stage_legacy_rtmlib(home.path(), DET_FILE);
+    let legacy_app_pose = stage_legacy_app_cache(dir.path(), POSE_FILE);
+    let legacy_rtmlib_pose = stage_legacy_rtmlib(home.path(), POSE_FILE);
+    // The competing candidates really are all present — otherwise "the winner won" is vacuous.
+    for competitor in [
+        &legacy_app_det,
+        &legacy_rtmlib_det,
+        &legacy_rtmlib_pose,
+        &legacy_app_pose,
+    ] {
+        assert!(competitor.exists(), "{competitor:?} must be staged");
+    }
+
+    let (det, pose) = require_dwpose_weights(&settings_at(dir.path())).expect("resolves");
+    assert_eq!(
+        det, installed_det,
+        "the HF install must beat both legacy roots"
+    );
+    assert_eq!(
+        std::fs::read(&det).expect("read det"),
+        b"installed onnx",
+        "the detector bytes must be the INSTALLED copy, not a legacy one"
+    );
+    // With no HF copy of the pose model, the app cache beats rtmlib.
+    assert_eq!(
+        pose, legacy_app_pose,
+        "the legacy app cache must beat the rtmlib cache"
+    );
+    assert_eq!(
+        std::fs::read(&pose).expect("read pose"),
+        b"legacy app-cache onnx",
+        "the pose bytes must be the app-cache copy, not the rtmlib one"
+    );
+}
+
+/// A missing install is an actionable "install X from the Model Manager" error naming the model,
+/// the repo/file and the env pin — never a silent fetch (S10, sc-17635). It must also name the
+/// FIRST missing graph, so a half-install points at the file that is actually absent.
+#[test]
+fn a_missing_install_is_an_actionable_error_not_a_download() {
+    let home = tempfile::tempdir().expect("home");
+    let _env = isolate(home.path());
+    let dir = tempfile::tempdir().expect("data dir");
+
+    let error = require_dwpose_weights(&settings_at(dir.path())).expect_err("nothing installed");
+    let WorkerError::InvalidPayload(message) = &error else {
+        panic!("expected InvalidPayload, got {error:?}");
+    };
+    for needle in [
+        "DWPose Pose Detector",
+        DWPOSE_REPO,
+        DET_FILE,
+        "SCENEWORKS_DWPOSE_DET",
+        "Model Manager",
+    ] {
         assert!(
-            digest
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "{label} digest must be lowercase hex, got {digest}"
+            message.contains(needle),
+            "the install error must mention {needle:?}: {message}"
         );
     }
-    assert_ne!(
-        DET_ZIP_SHA256, POSE_ZIP_SHA256,
-        "det and pose bundles are different files with different digests"
+
+    // A HALF install (detector only) still fails, and now names the POSE file — proving the
+    // message tracks the missing graph rather than being a fixed string.
+    stage_install(dir.path(), DET_FILE);
+    let error = require_dwpose_weights(&settings_at(dir.path())).expect_err("pose still missing");
+    let WorkerError::InvalidPayload(message) = &error else {
+        panic!("expected InvalidPayload, got {error:?}");
+    };
+    assert!(
+        message.contains(POSE_FILE) && message.contains("SCENEWORKS_DWPOSE_POSE"),
+        "a half install must name the MISSING graph and its pin: {message}"
+    );
+}
+
+/// The two operator pins survive the migration and stay per-graph: each key overrides only its own
+/// graph, and it beats an HF install (an operator override is the whole point). Staging an HF copy
+/// of both graphs is what makes "the pin won" non-vacuous.
+#[test]
+fn env_pins_override_the_installed_snapshot_per_graph() {
+    let home = tempfile::tempdir().expect("home");
+    let pinned = tempfile::tempdir().expect("pin dir");
+    let pinned_det = pinned.path().join("my-det.onnx");
+    std::fs::write(&pinned_det, b"operator det").expect("write pin");
+
+    let dir = tempfile::tempdir().expect("data dir");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+        ("SCENEWORKS_DWPOSE_POSE", ""),
+        ("HOME", &home.path().to_string_lossy()),
+        ("SCENEWORKS_DWPOSE_DET", &pinned_det.to_string_lossy()),
+    ]);
+    let installed_det = stage_install(dir.path(), DET_FILE);
+    let installed_pose = stage_install(dir.path(), POSE_FILE);
+    assert!(
+        installed_det.exists(),
+        "the HF detector must be installed, or 'the pin won' proves nothing"
+    );
+
+    let (det, pose) = require_dwpose_weights(&settings_at(dir.path())).expect("resolves");
+    assert_eq!(
+        det, pinned_det,
+        "SCENEWORKS_DWPOSE_DET must win for the detector"
+    );
+    assert_eq!(
+        pose, installed_pose,
+        "SCENEWORKS_DWPOSE_DET must NOT affect the pose graph"
+    );
+}
+
+/// sc-8911 survives the migration: a set-but-MISSING pin is a hard error, not a fall-through to a
+/// perfectly good install. Staging both graphs in the HF cache is what makes this meaningful — the
+/// resolver has somewhere valid to fall through TO, and must refuse anyway.
+#[test]
+fn a_set_but_missing_env_pin_still_fails_loudly_with_an_install_present() {
+    let home = tempfile::tempdir().expect("home");
+    let dir = tempfile::tempdir().expect("data dir");
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+        ("SCENEWORKS_DWPOSE_POSE", ""),
+        ("HOME", &home.path().to_string_lossy()),
+        ("SCENEWORKS_DWPOSE_DET", "/nonexistent/dwpose/yolox.onnx"),
+    ]);
+    let installed = stage_install(dir.path(), DET_FILE);
+    stage_install(dir.path(), POSE_FILE);
+    assert!(
+        installed.exists(),
+        "the install must be present, so the refusal is a CHOICE not an absence"
+    );
+
+    let error = require_dwpose_weights(&settings_at(dir.path())).expect_err("typo'd pin must fail");
+    assert!(
+        matches!(&error, WorkerError::InvalidPayload(m)
+            if m.contains("SCENEWORKS_DWPOSE_DET") && m.contains("does not exist")),
+        "a set-but-missing pin must error rather than silently use the install: {error:?}"
+    );
+}
+
+/// The pin table is the loader's own source of keys and filenames, and covers both graphs. Asserted
+/// LITERALLY rather than by walking it: a test that only iterated `DWPOSE_FILE_PINS` would pass
+/// vacuously if the table were emptied (the sc-17632 defect). The array's length is part of its
+/// type, so `require_dwpose_weights`'s destructuring already makes an empty table a compile error —
+/// this pins the CONTENT.
+#[test]
+fn dwpose_file_pins_name_both_graphs_and_their_keys() {
+    assert_eq!(
+        DWPOSE_FILE_PINS,
+        [
+            ("SCENEWORKS_DWPOSE_DET", DET_FILE),
+            ("SCENEWORKS_DWPOSE_POSE", POSE_FILE),
+        ],
+        "both documented operator pins must stay wired to their graphs"
+    );
+    assert_eq!(
+        DET_FILE, "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx",
+        "the detector filename is the upstream archive stem the re-host preserves"
+    );
+    assert_eq!(
+        POSE_FILE, "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx",
+        "the pose filename is the upstream archive stem the re-host preserves"
+    );
+}
+
+/// AC10's two legacy roots, pinned by VALUE — the same vacuity class as
+/// [`dwpose_file_pins_name_both_graphs_and_their_keys`], one level further in.
+///
+/// `stage_legacy_app_cache` and `stage_legacy_rtmlib` build their paths from these very constants,
+/// so `falls_back_to_the_legacy_app_cache_root`, `falls_back_to_the_legacy_rtmlib_root` and the
+/// ordering test all move WITH any edit to them and stay green. Those tests prove the fallback
+/// branches are reached; none of them can prove the branches point at the directories real installs
+/// actually hold. Retargeting either root is therefore invisible to them — and it is the precise
+/// AC10 regression this story promises not to cause: every pre-sc-17634 box silently stops
+/// resolving and re-downloads ~330 MB, with a fully green suite.
+///
+/// Verified by mutation: retargeting `DWPOSE_LEGACY_RTMLIB_ROOT` failed NOTHING in the whole
+/// worker lib suite before this test existed. (The `data_dir` root was already pinned incidentally
+/// — `job_time_download_guard::cache_destinations_match_the_allow_list` derives
+/// `<data_dir>/cache/<subdir>` destinations from the string constants, so it reds on `cache/dwpose`.
+/// That is a guard about where the app WRITES, not about AC10 compatibility, and it cannot cover
+/// the `$HOME`-keyed rtmlib root at all, so both values are pinned here rather than one.)
+#[test]
+fn dwpose_legacy_roots_are_the_paths_existing_installs_actually_hold() {
+    assert_eq!(
+        DWPOSE_LEGACY_DATA_DIR_ROOT, "cache/dwpose",
+        "the deleted download+unzip path wrote `<data_dir>/cache/dwpose/`; retargeting this \
+         strands every install made before sc-17634"
+    );
+    assert_eq!(
+        DWPOSE_LEGACY_RTMLIB_ROOT, ".cache/rtmlib/hub/checkpoints",
+        "rtmlib's own cache is `$HOME/.cache/rtmlib/hub/checkpoints/`; retargeting this strands \
+         every install that predates the Rust port"
     );
 }
 
@@ -408,8 +770,14 @@ fn shared_resolve_env_file_pin_errors_on_missing_env_path() {
     );
 
     // Set and existing: resolve to that path. Write a real temp file to point at.
-    let existing_path =
-        std::env::temp_dir().join(format!("sw-dwpose-pin-test-{}.onnx", std::process::id()));
+    // The pin names a FILE, so the guard is the directory around it: the
+    // `temp_dir()/sw-dwpose-pin-test-{pid}.onnx` this replaces was unlinked on a trailing
+    // line a panicking test skips, and repeated on a recycled PID (sc-17707).
+    let pin_guard = tempfile::Builder::new()
+        .prefix("sw-dwpose-pin-test-")
+        .tempdir()
+        .expect("temp dir");
+    let existing_path = pin_guard.path().join("dwpose-det.onnx");
     std::fs::write(&existing_path, b"onnx").expect("write temp weight");
     let resolved = resolve_env_file_pin(
         "SCENEWORKS_DWPOSE_DET",
@@ -422,7 +790,6 @@ fn shared_resolve_env_file_pin_errors_on_missing_env_path() {
         Some(existing_path.as_path()),
         "existing pin resolves"
     );
-    let _ = std::fs::remove_file(&existing_path);
 }
 
 /// sc-8875: a project-relative source path is confined to the project tree — any `..`

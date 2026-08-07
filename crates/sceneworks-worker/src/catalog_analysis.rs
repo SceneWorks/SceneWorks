@@ -227,16 +227,22 @@ fn default_face_model_version() -> String {
     "bca0cacf8e5e04529bb2b326a521361b02be84fd".to_owned()
 }
 
+/// The pinned DWPose re-host revision, mirroring [`default_person_model_version`]'s shape (an HF
+/// repo revision) now that both detectors install from the Model Manager.
+///
+/// **This value CHANGED in sc-17634**, from the `<det-zip-sha>+<pose-zip-sha>` pair of the deleted
+/// openmmlab download. `AnalyzerRecordSpec::matches_spec` compares `model_version`, so every
+/// existing pose analysis record is one-time stale and re-runs. The underlying graphs are
+/// byte-identical either way — the re-host mirrors the same `end2end.onnx` files — so the
+/// re-analysis costs compute and produces the same keypoints. It is accepted rather than papered
+/// over: freezing the old digest pair as a magic string would keep a value naming archives nothing
+/// fetches, and would then fail to invalidate if the re-host revision ever genuinely moved.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn default_pose_model_version() -> String {
-    format!(
-        "{}+{}",
-        crate::pose_jobs::DET_ZIP_SHA256,
-        crate::pose_jobs::POSE_ZIP_SHA256
-    )
+    crate::pose_jobs::DWPOSE_REVISION.to_owned()
 }
 
 #[cfg(not(any(
@@ -244,7 +250,7 @@ fn default_pose_model_version() -> String {
     all(not(target_os = "macos"), feature = "backend-candle")
 )))]
 fn default_pose_model_version() -> String {
-    "a000224fd8ba283202bc62d4a5fcdfe353adb9f468777dbac1ea2ada2093adde+a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd".to_owned()
+    "c330a9609201343576b8b69d222e38c1486d2854".to_owned()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

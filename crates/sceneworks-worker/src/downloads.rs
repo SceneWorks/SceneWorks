@@ -245,6 +245,19 @@ mod download_lock {
 // off-Mac InstantID provider stages its SCRFD/ArcFace/IP-Adapter/ControlNet files via this same
 // download-on-first-use path, so it broadened from macOS-only. (All helpers it calls — download_file,
 // DownloadProgress, DownloadContext, HuggingFaceSnapshot — already build on every platform.)
+//
+// **No production caller since sc-17634**, and that is the epic landing rather than a leftover.
+// This is the arbitrary-URL primitive — the one fetcher that does NOT go through Hugging Face — and
+// DWPose's openmmlab `.zip` bundles were its last job-lane consumer. It is deliberately NOT deleted:
+// `job_time_download_guard`'s `downloads_fetch_surface_is_registered` rediscovers this module's
+// fetch surface structurally and requires `ensure_cached_file` to be among the names it finds, so
+// removing the function would blind that self-check rather than simplify anything.
+//
+// The `allow` is UNCONDITIONAL, not `cfg_attr(not(test), …)`: the only remaining caller is
+// `ensure_cached_file_tests`, which is `#[cfg(all(test, target_os = "macos"))]`, so on the candle
+// (Linux) lane the function is dead in the test build too. Gating the allow on `not(test)` compiles
+// on this Mac and fails `rust:check:candle` with `-D dead-code` — which is exactly what it did.
+#[allow(dead_code)]
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -346,6 +359,68 @@ async fn remote_content_length(client: &reqwest::Client, url: &str) -> WorkerRes
     } else {
         Ok(None)
     }
+}
+
+/// Resolve one ALREADY-INSTALLED Hugging Face file, **cache-only** — the resolve half of
+/// [`ensure_hf_cached_file`] with the download half removed (sc-17626, epic 17625).
+///
+/// # Why this takes no `DownloadContext`
+///
+/// Deliberately: no [`DownloadContext`], no `reqwest::Client`, and it is not `async`. That is the
+/// enforcement mechanism, not an aesthetic choice. Job-time code that holds only a [`Settings`]
+/// **cannot** reach the network, so "no job-time path downloads model weights" becomes a property
+/// the compiler checks rather than a convention a reviewer has to notice. The 24 destinations this
+/// epic migrates were added incrementally, one plausible call site at a time; a rule that only
+/// lives in a comment regrows the same way.
+///
+/// # Resolution
+///
+/// A pinned `revision` (F-029) reads that EXACT `snapshots/<sha>/` via
+/// [`huggingface_pinned_snapshot_dir`]; an unpinned one takes the `refs/main`-preferring
+/// [`huggingface_snapshot_dir`]. There is deliberately **no fallback from a pinned revision to
+/// `refs/main`**: the pins exist precisely so a re-push (or a compromised token) cannot swap the
+/// weights we load (sc-9879 / sc-9682), and a silent fall-through to the mutable branch would hand
+/// back exactly the artifact the pin was added to refuse. `resolve_co_requisites` refuses the same
+/// fall-through, though it asks a different question: it branches on whether the manifest row
+/// DECLARES a `revision`, whereas this branches on whether the revision it was handed IS a pin.
+///
+/// Returns `None` when the component is not cached. Callers turn that into an actionable
+/// "install X from the Model Manager" error (S10, sc-17635) rather than a fetch.
+///
+/// # Legacy `<data_dir>/cache/…` reads are the CALLER's job
+///
+/// AC10 requires an existing install to keep working without re-downloading, and every weight this
+/// epic migrates has pre-migration bytes on disk today (6.9 GiB of `cache/upscale/` alone on the
+/// audit machine). That fallback deliberately lives in each caller, not here: the sites already
+/// walk **two** legacy roots (`<data_dir>/cache/<dest>/` and `<data_dir>/models/<dest>/`), and the
+/// multi-file ones require both files to come from the SAME root — semantics a single
+/// `legacy: Option<&Path>` parameter on this seam could not express, and which would end up
+/// duplicated beside the loops that already do it correctly. This function answers exactly one
+/// question: is it in the HF cache?
+// Callers are the job-time weight resolvers, which live in lanes gated macOS or off-Mac +
+// `backend-candle`. Compiled on every platform anyway so the bare lib build type-checks it too
+// (a gated-out helper is how parity goes blind to dead code); dead_code silenced only where
+// nothing calls it, the same idiom as `safe_weight_filename`.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn resolve_hf_component_file(
+    settings: &Settings,
+    repo: &str,
+    revision: &str,
+    file: &str,
+) -> Option<PathBuf> {
+    let snapshot = if is_pinned_hf_revision(revision) {
+        huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+    } else {
+        huggingface_snapshot_dir(&settings.data_dir, repo)
+    };
+    // `file` is a worker-source constant today, but confine it anyway: this seam is the one the
+    // remaining 23 destinations migrate onto, and some of them (InstantID's `ControlNetModel/*`)
+    // carry nested, manifest-derived names.
+    let path = safe_join(&snapshot?, file).ok()?;
+    path.is_file().then_some(path)
 }
 
 /// Resolve a single Hugging Face file and stream it into an app cache target with
@@ -2323,6 +2398,180 @@ pub fn download_progress_payload(
         None,
         eta_seconds,
     )
+}
+
+/// sc-17626 (epic 17625) — the cache-only [`resolve_hf_component_file`] seam.
+///
+/// Not macOS-gated (unlike `ensure_cached_file_tests` below): the resolver compiles on every
+/// platform, so its contract is checked on the Linux parity lane too.
+#[cfg(test)]
+mod resolve_hf_component_file_tests {
+    use super::*;
+
+    const PIN: &str = "3ed10b164a755c00b1a4d671dde95719c127e1a7";
+    const OTHER_PIN: &str = "06e0c5e919918aeb7cec966a83ce6fe394feec5e";
+    const REPO: &str = "SceneWorks/sam3-mlx";
+    const FILE: &str = "model.safetensors";
+
+    /// Neutralize the ambient HF cache env so `huggingface_repo_cache_path` resolves under the
+    /// test's own `data_dir` — else a developer's real `HF_HOME` wins and the test reads the
+    /// machine's actual 2.1 TB cache (the sc-13679 trap).
+    fn isolate_hf_cache() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    fn settings_at(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "sc-17626".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: crate::DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: crate::DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: crate::DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    /// Write `file` into `models--…/snapshots/<revision>/`, the real HF hub layout.
+    fn stage_snapshot_file(data_dir: &Path, revision: &str, file: &str) -> PathBuf {
+        let snapshot = huggingface_repo_cache_path(data_dir, REPO)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+        let path = snapshot.join(file);
+        std::fs::write(&path, b"hf-cache weights").expect("write staged file");
+        path
+    }
+
+    /// Point `refs/main` at `revision`, the way an unpinned install leaves the cache.
+    fn stage_refs_main(data_dir: &Path, revision: &str) {
+        let refs = huggingface_repo_cache_path(data_dir, REPO)
+            .expect("repo cache path resolves")
+            .join("refs");
+        std::fs::create_dir_all(&refs).expect("create refs dir");
+        std::fs::write(refs.join("main"), revision).expect("write refs/main");
+    }
+
+    /// The happy path: a pinned revision reads that exact `snapshots/<sha>/`.
+    #[test]
+    fn resolves_a_pinned_snapshot_file() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let staged = stage_snapshot_file(data_dir.path(), PIN, FILE);
+
+        let resolved =
+            resolve_hf_component_file(&settings_at(data_dir.path().to_path_buf()), REPO, PIN, FILE);
+        assert_eq!(resolved.as_deref(), Some(staged.as_path()));
+    }
+
+    /// An UNPINNED revision (`main`) takes the `refs/main`-preferring resolver.
+    #[test]
+    fn resolves_an_unpinned_revision_through_refs_main() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let staged = stage_snapshot_file(data_dir.path(), PIN, FILE);
+        stage_refs_main(data_dir.path(), PIN);
+
+        let resolved = resolve_hf_component_file(
+            &settings_at(data_dir.path().to_path_buf()),
+            REPO,
+            "main",
+            FILE,
+        );
+        assert_eq!(resolved.as_deref(), Some(staged.as_path()));
+    }
+
+    /// **The pin is a refusal, not a preference.** A request for pin A whose snapshot is NOT cached
+    /// must resolve to nothing even though a fully materialized `refs/main` snapshot (pin B) sits
+    /// right there. Falling through would hand back the mutable branch the pin exists to refuse
+    /// (sc-9879 / sc-9682) — a resolver written with `.or_else(huggingface_snapshot_dir)` passes
+    /// every other test in this module and fails only this one.
+    #[test]
+    fn refuses_to_fall_back_from_an_uncached_pin_to_refs_main() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        stage_snapshot_file(data_dir.path(), OTHER_PIN, FILE);
+        stage_refs_main(data_dir.path(), OTHER_PIN);
+
+        let resolved =
+            resolve_hf_component_file(&settings_at(data_dir.path().to_path_buf()), REPO, PIN, FILE);
+        assert_eq!(
+            resolved, None,
+            "an uncached pin must not silently resolve to the refs/main snapshot"
+        );
+    }
+
+    /// A component installed nowhere resolves to `None` — the input S10 turns into an actionable
+    /// "install X from the Model Manager" error instead of a mid-render fetch.
+    #[test]
+    fn returns_none_when_the_component_is_not_installed() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let resolved =
+            resolve_hf_component_file(&settings_at(data_dir.path().to_path_buf()), REPO, PIN, FILE);
+        assert_eq!(resolved, None);
+    }
+
+    /// A traversing `file` cannot escape the snapshot.
+    ///
+    /// The `..` depth is load-bearing and was wrong on the first draft of this test: the snapshot
+    /// root is `<data_dir>/cache/huggingface/hub/models--<slug>/snapshots/<PIN>/`, so escaping to
+    /// `<data_dir>` takes SIX levels (PIN -> snapshots -> models-- -> hub -> huggingface -> cache).
+    /// With four, the un-confined path lands on a directory that does not exist, `is_file()` is
+    /// false either way, and the test passes with `safe_join` swapped for a plain `Path::join` —
+    /// green while proving nothing.
+    ///
+    /// So the escape target is asserted reachable FIRST: `naive` is what an unconfined join would
+    /// produce, and it really is a file. Only then does the `None` mean confinement.
+    #[test]
+    fn confines_a_traversing_component_file() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let snapshot = stage_snapshot_file(data_dir.path(), PIN, FILE)
+            .parent()
+            .expect("snapshot dir")
+            .to_path_buf();
+        let outside = data_dir.path().join("outside.safetensors");
+        std::fs::write(&outside, b"host file").expect("write escape target");
+
+        const TRAVERSAL: &str = "../../../../../../outside.safetensors";
+        // What a plain `Path::join` would resolve to — proven to be a real file, so a resolver
+        // without confinement WOULD hand it back and this test would fail.
+        let naive = snapshot.join(TRAVERSAL);
+        assert!(
+            naive.is_file(),
+            "the traversal must actually reach a real file, else this test proves nothing; \
+             naive path was {}",
+            naive.display()
+        );
+
+        let resolved = resolve_hf_component_file(
+            &settings_at(data_dir.path().to_path_buf()),
+            REPO,
+            PIN,
+            TRAVERSAL,
+        );
+        assert_eq!(resolved, None, "a traversing file name must not resolve");
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

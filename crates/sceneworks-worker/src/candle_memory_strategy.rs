@@ -16,10 +16,6 @@ use sceneworks_core::memory_calibration::{
 };
 use serde_json::{Map as JsonObject, Value};
 
-use crate::inference_compatibility_audit::{
-    compatibility_audit_authorizes, FLUX2_AUDIT_ARTIFACT_PROOF, FLUX2_CAPTURED_INFERENCE_REVISION,
-    FLUX2_COMPATIBLE_INFERENCE_REVISION, FLUX2_INFERENCE_COMPATIBILITY_AUDIT,
-};
 use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 use crate::vram_gate::VramBudget;
 use crate::{WorkerError, WorkerResult};
@@ -102,8 +98,14 @@ fn strategy(rung: StrategyRung) -> MemoryStrategy {
     }
 }
 
+/// Read one binding's exact strategy parameters against the composition it ENGAGES (sc-17728).
+///
+/// The Candle sibling of `mlx_fit_gate::parse_evidence_parameters`, with the same rule and the same
+/// shared derivation: a rung the composition engages must name its parameters, and a rung it does
+/// not engage must not. Keying this on the selected rung's ordinal made a provider that implements
+/// rung 4 with rungs 2 and 3 `Missing` unable to bind evidence at all.
 fn parse_parameters(
-    rung: StrategyRung,
+    engaged: &[StrategyRung],
     parameters: &JsonObject<String, Value>,
 ) -> Option<gen_core::MemoryStrategyParameters> {
     const KEYS: [&str; 5] = [
@@ -123,21 +125,7 @@ fn parse_parameters(
             .and_then(|value| u32::try_from(value).ok())
             .filter(|value| *value >= minimum)
     };
-    let required: &[(&str, u32)] = match rung {
-        StrategyRung::Resident | StrategyRung::StagedResidency => &[],
-        StrategyRung::BoundedDecode => &[("decodeTileEdge", 1), ("decodeOverlap", 0)],
-        StrategyRung::BoundedAttention => &[
-            ("decodeTileEdge", 1),
-            ("decodeOverlap", 0),
-            ("attentionChunkSize", 1),
-        ],
-        StrategyRung::BoundedTransformerResidency => &[
-            ("decodeTileEdge", 1),
-            ("decodeOverlap", 0),
-            ("attentionChunkSize", 1),
-            ("transformerWindowSize", 1),
-        ],
-    };
+    let required = crate::memory_strategy::required_numeric_parameters(engaged);
     if required
         .iter()
         .any(|(key, minimum)| integer(key, *minimum).is_none())
@@ -151,16 +139,15 @@ fn parse_parameters(
     {
         return None;
     }
+    let engages_transformer = engaged.contains(&StrategyRung::BoundedTransformerResidency);
     let transformer_window_component = match parameters.get("transformerWindowComponent") {
         None => None,
-        Some(Value::String(value)) if rung == StrategyRung::BoundedTransformerResidency => {
-            Some(match value.as_str() {
-                "dit" => gen_core::TransformerComponent::Dit,
-                "text_encoder" => gen_core::TransformerComponent::TextEncoder,
-                "both" => gen_core::TransformerComponent::Both,
-                _ => return None,
-            })
-        }
+        Some(Value::String(value)) if engages_transformer => Some(match value.as_str() {
+            "dit" => gen_core::TransformerComponent::Dit,
+            "text_encoder" => gen_core::TransformerComponent::TextEncoder,
+            "both" => gen_core::TransformerComponent::Both,
+            _ => return None,
+        }),
         Some(_) => return None,
     };
     Some(gen_core::MemoryStrategyParameters {
@@ -180,36 +167,6 @@ fn text<'a>(object: &'a JsonObject<String, Value>, key: &str) -> Option<&'a str>
         .filter(|value| !value.is_empty())
 }
 
-fn immutable_revision(object: &JsonObject<String, Value>, key: &str) -> Option<String> {
-    let revision = text(object, key)?;
-    (revision.len() == 40
-        && revision
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
-    .then(|| revision.to_owned())
-}
-
-fn audited_compatible_inference_revision(
-    model_id: &str,
-    provider: &str,
-    captured_revision: &str,
-    binding: &JsonObject<String, Value>,
-) -> Option<String> {
-    let claimed = immutable_revision(binding, "compatibleInferenceRevision")?;
-    if model_id != "flux2_dev"
-        || provider != "flux2_dev"
-        || captured_revision != FLUX2_CAPTURED_INFERENCE_REVISION
-        || claimed != FLUX2_COMPATIBLE_INFERENCE_REVISION
-    {
-        return None;
-    }
-    compatibility_audit_authorizes(
-        FLUX2_INFERENCE_COMPATIBILITY_AUDIT,
-        FLUX2_AUDIT_ARTIFACT_PROOF,
-    )?;
-    Some(claimed)
-}
-
 fn binding(object: &JsonObject<String, Value>) -> Option<CalibrationBinding> {
     let abi = u32::try_from(object.get("abi")?.as_u64()?).ok()?;
     let load_shape = match object.get("loadShape").and_then(Value::as_str) {
@@ -226,6 +183,7 @@ fn binding(object: &JsonObject<String, Value>) -> Option<CalibrationBinding> {
         scene_works_revision: text(object, "sceneWorksRevision")?.to_owned(),
         matrix_source_revision: text(object, "matrixSourceRevision")?.to_owned(),
         inference_revision: text(object, "inferenceRevision")?.to_owned(),
+        inference_closure_digest: text(object, "inferenceClosureDigest")?.to_owned(),
         artifact_repository: text(object, "artifactRepository")?.to_owned(),
         artifact_resolved_revision: text(object, "artifactResolvedRevision")?.to_owned(),
         artifact_variant: text(object, "artifactVariant")?.to_owned(),
@@ -279,6 +237,7 @@ fn binding_matches_request(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verified_candidates(
     manifest: &JsonObject<String, Value>,
     model_id: &str,
@@ -287,6 +246,7 @@ fn verified_candidates(
     mode: &RequestModeBinding,
     overlay: &str,
     geometry: MemoryGeometry,
+    closure_digests: &mut Vec<String>,
 ) -> WorkerResult<Vec<MemoryEvidence>> {
     let evidence_provider = evidence_provider(runtime_provider);
     let loaded = sceneworks_core::memory_calibration::load_packaged_bundle().map_err(|error| {
@@ -333,28 +293,41 @@ fn verified_candidates(
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let Some(selection_parameters) = parse_parameters(rung, &parameters) else {
+        let declared_engaged = match item.get("engagedRungs") {
+            None => None,
+            Some(Value::Array(values)) => {
+                let Some(declared) = values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .and_then(crate::memory_strategy::rung_from_key)
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                Some(declared)
+            }
+            Some(_) => continue,
+        };
+        let Ok(engaged_rungs) =
+            crate::memory_strategy::engaged_composition(rung, declared_engaged.as_deref())
+        else {
+            continue;
+        };
+        let Some(selection_parameters) = parse_parameters(&engaged_rungs, &parameters) else {
             continue;
         };
         let Some(calibration) = binding(item) else {
             continue;
         };
-        // Capture provenance remains `inferenceRevision`. A later runtime pin may be used for
-        // admission only when the manifest carries an exact provider-closure compatibility audit.
-        // Malformed compatibility claims fail closed instead of falling back to captured provenance.
-        let effective_inference_revision = if item.contains_key("compatibleInferenceRevision") {
-            let Some(revision) = audited_compatible_inference_revision(
-                model_id,
-                evidence_provider,
-                &calibration.inference_revision,
-                item,
-            ) else {
-                continue;
-            };
-            revision
-        } else {
-            calibration.inference_revision.clone()
-        };
+        // sc-17774: there is no per-model compatibility hatch any more. `flux2_dev` used to be the
+        // one provider that could reach a later runtime pin, via a hand-audited
+        // `compatibleInferenceRevision` naming exactly one target revision — spent the moment the
+        // pin moved once more, and available to no other model. Currency is now decided for every
+        // provider identically, by `calibration.inference_closure_digest` inside `evidence_for`.
+        // `inferenceRevision` is capture provenance and is never compared.
         let query = EvidenceQuery {
             backend: CalibrationBackend::Candle,
             model_id: model_id.to_owned(),
@@ -381,31 +354,35 @@ fn verified_candidates(
             LoadShapeKey::EagerMaterialization => gen_core::LoadShape::EagerMaterialization,
             LoadShapeKey::DeferredMaterialization => gen_core::LoadShape::DeferredMaterialization,
         };
+        let evidence_key = MemoryEvidenceKey {
+            resolved_route: runtime_provider.to_owned(),
+            backend: MemoryBackend::Candle,
+            tier: numeric_tier(tier).expect("validated numeric tier"),
+            mode: mode.mode.clone(),
+            load_shape,
+            overlay: (overlay != "none").then(|| overlay.to_owned()),
+            geometry,
+            strategy: selected_strategy,
+            engaged_composition: record
+                .strategy
+                .engaged_rungs
+                .iter()
+                .copied()
+                .map(strategy)
+                .collect(),
+            parameters: selection_parameters,
+        };
+        // Index-aligned with `candidates`: `MemoryEvidenceKey` is a gen-core type without `Hash`,
+        // and the two vectors are pushed together in this one loop.
+        closure_digests.push(calibration.inference_closure_digest.clone());
         candidates.push(MemoryEvidence {
-            key: MemoryEvidenceKey {
-                resolved_route: runtime_provider.to_owned(),
-                backend: MemoryBackend::Candle,
-                tier: numeric_tier(tier).expect("validated numeric tier"),
-                mode: mode.mode.clone(),
-                load_shape,
-                overlay: (overlay != "none").then(|| overlay.to_owned()),
-                geometry,
-                strategy: selected_strategy,
-                engaged_composition: record
-                    .strategy
-                    .engaged_rungs
-                    .iter()
-                    .copied()
-                    .map(strategy)
-                    .collect(),
-                parameters: selection_parameters,
-            },
+            key: evidence_key,
             conformance: MemoryConformanceState::Verified,
             dimensions: MemoryEvidenceDimensions::VERIFIED,
             calibration_abi: calibration.abi,
             calibration_fingerprint: calibration.fingerprint,
             sceneworks_revision: calibration.scene_works_revision,
-            inference_revision: effective_inference_revision,
+            inference_revision: calibration.inference_revision.clone(),
             harness_version: record.harness_version.clone(),
             predicted_peak_bytes: predicted.overall(),
             observed_peak_bytes: match &record.observed_memory {
@@ -676,6 +653,7 @@ fn evaluate_shared_image_inner(
     // `z_image_turbo`), while the runtime registers the strict-control implementation under a
     // dedicated `_control` id. Query the packaged evidence by its catalog identity, then bind the
     // returned candidate to the exact runtime route expected by the provider contract.
+    let mut closure_digests: Vec<String> = Vec::new();
     let mut verified = if artifact_is_certified {
         verified_candidates(
             manifest,
@@ -685,6 +663,7 @@ fn evaluate_shared_image_inner(
             &mode,
             exact_overlay,
             geometry,
+            &mut closure_digests,
         )?
     } else {
         Vec::new()
@@ -701,9 +680,19 @@ fn evaluate_shared_image_inner(
     }
     let mut selections = Vec::with_capacity(verified.len() + 1);
     let mut evidence = Vec::with_capacity(verified.len() + 1);
+    // The resident candidate is a live estimate, not a calibrated record, so it carries the live
+    // digest and is never staled by this gate.
+    let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
+        "candle",
+        evidence_provider(engine_id),
+    )
+    .unwrap_or_default();
+    let mut candidate_digests = Vec::with_capacity(verified.len() + 1);
     selections.push(resident_selection);
     evidence.push(&resident);
-    for item in &verified {
+    candidate_digests.push(live_closure_digest.clone());
+    for (index, item) in verified.iter().enumerate() {
+        candidate_digests.push(closure_digests.get(index).cloned().unwrap_or_default());
         selections.push(MemorySelection {
             strategy: item.key.strategy,
             parameters: item.key.parameters,
@@ -714,9 +703,11 @@ fn evaluate_shared_image_inner(
     let candidates = selections
         .iter()
         .zip(evidence)
-        .map(|(selection, evidence)| Candidate {
+        .zip(&candidate_digests)
+        .map(|((selection, evidence), closure_digest)| Candidate {
             selection: *selection,
             evidence,
+            closure_digest,
         })
         .collect::<Vec<_>>();
     let selected = crate::memory_strategy::select_strategy(
@@ -727,7 +718,8 @@ fn evaluate_shared_image_inner(
             mode: &mode.scope_key,
             overlay,
             geometry,
-            expected_inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+            // sc-17774: one mechanism, same as every other lane. `unwrap_or_default` fails closed.
+            expected_closure_digest: &live_closure_digest,
         },
         &contract,
         Some(Budget {
@@ -795,6 +787,62 @@ mod tests {
     use gen_core::WeightsSource;
     use serde_json::json;
     use std::path::PathBuf;
+
+    /// sc-17728, the Candle sibling of the MLX fit gate's coverage. The required parameter set
+    /// follows the ENGAGED composition, so a provider that implements rung 4 with rungs 2 and 3
+    /// `Missing` reads cleanly, while an engaged rung must still name every parameter it owns and a
+    /// withheld rung's parameters stay unnameable.
+    #[test]
+    fn candle_parameters_follow_the_engaged_composition_not_the_rung_ordinal() {
+        let withheld = [
+            StrategyRung::Resident,
+            StrategyRung::StagedResidency,
+            StrategyRung::BoundedTransformerResidency,
+        ];
+        let cumulative = crate::memory_strategy::default_engaged_composition(
+            StrategyRung::BoundedTransformerResidency,
+        );
+        let object = |value: Value| value.as_object().expect("parameter object").clone();
+
+        let parsed = parse_parameters(
+            &withheld,
+            &object(json!({ "transformerWindowSize": 1, "transformerWindowComponent": "both" })),
+        )
+        .expect("a rung-4 composition that withholds rungs 2 and 3 must read");
+        assert_eq!(parsed.transformer_window_size, Some(1));
+        assert_eq!(parsed.decode_tile_edge, None);
+        assert_eq!(parsed.attention_chunk_size, None);
+
+        // Naming a withheld rung's parameter, and omitting an engaged rung's, both fail closed.
+        assert!(parse_parameters(
+            &withheld,
+            &object(
+                json!({ "transformerWindowSize": 1, "decodeTileEdge": 512, "decodeOverlap": 64 })
+            ),
+        )
+        .is_none());
+        assert!(parse_parameters(
+            &withheld,
+            &object(json!({ "transformerWindowComponent": "dit" }))
+        )
+        .is_none());
+
+        // The cumulative default is unchanged for a provider with the whole ladder implemented.
+        assert!(
+            parse_parameters(&cumulative, &object(json!({ "transformerWindowSize": 1 })),)
+                .is_none()
+        );
+        assert!(parse_parameters(
+            &cumulative,
+            &object(json!({
+                "decodeTileEdge": 512,
+                "decodeOverlap": 64,
+                "attentionChunkSize": 256,
+                "transformerWindowSize": 1,
+            })),
+        )
+        .is_some());
+    }
 
     #[test]
     fn strict_control_uses_the_advertised_base_provider_evidence_cell() {
@@ -1006,6 +1054,7 @@ mod tests {
                 &request_mode(provider, "text_to_image"),
                 "none",
                 geometry,
+                &mut Vec::new(),
             )
             .expect("packaged FLUX evidence");
             assert_eq!(candidates.len(), 5);
@@ -1041,6 +1090,7 @@ mod tests {
                         reference_count: 1,
                         ..geometry
                     },
+                    &mut Vec::new(),
                 )
                 .expect("uncertified overlay query")
                 .is_empty());
@@ -1074,8 +1124,10 @@ mod tests {
                 && binding["mode"] == "text_to_image"
                 && binding["overlay"] == "none"
                 && binding["inferenceRevision"] == "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
-                && binding["compatibleInferenceRevision"]
-                    == "a4f409ae8ce73eda2ee8117b89b5f479666606b8"
+                // sc-17774: `compatibleInferenceRevision` is gone — it was flux2_dev's one-shot
+                // hand-audited hatch. The binding now carries the closure digest it was captured
+                // under, which is what currency compares.
+                && binding["inferenceClosureDigest"].is_string()
         }));
 
         let geometry = MemoryGeometry {
@@ -1093,6 +1145,7 @@ mod tests {
             &request_mode("flux2_dev", "text_to_image"),
             "none",
             geometry,
+            &mut Vec::new(),
         )
         .expect("packaged FLUX.2-dev evidence");
         assert_eq!(candidates.len(), 5);
@@ -1132,8 +1185,9 @@ mod tests {
             .as_array_mut()
             .expect("mutable FLUX.2-dev calibration bindings")
         {
-            binding["compatibleInferenceRevision"] =
-                json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            // sc-17774: as above — the deleted hatch cannot make a binding unaudited any more, so
+            // move the mutation onto the closure digest currency actually compares.
+            binding["inferenceClosureDigest"] = json!("a".repeat(64));
         }
         assert!(verified_candidates(
             &unaudited_manifest,
@@ -1143,6 +1197,7 @@ mod tests {
             &request_mode("flux2_dev", "text_to_image"),
             "none",
             geometry,
+            &mut Vec::new(),
         )
         .expect("unaudited compatibility query")
         .is_empty());
@@ -1167,6 +1222,7 @@ mod tests {
             &request_mode("flux2_dev", "text_to_image"),
             "control",
             geometry,
+            &mut Vec::new(),
         )
         .expect("uncertified FLUX.2-dev control query")
         .is_empty());
@@ -1200,43 +1256,27 @@ mod tests {
         )
         .expect("FLUX.2-dev safe-device-peak evaluation");
 
-        // Everything above is pin-independent: the packaged evidence is RETAINED whatever the live
-        // pin is, which is why `verified_candidates` still returns all five rungs. ADMISSION is the
-        // step that carries the pin — `evaluate_shared_image` threads
-        // `catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION` in as `expected_inference_revision`.
+        // sc-17774: everything above is closure-independent — the packaged evidence is RETAINED
+        // whatever the pin is, which is why `verified_candidates` still returns all five rungs.
+        // ADMISSION is the step that carries the currency term.
         //
-        // The bindings are audited through an exact compatibility WINDOW: captured at
-        // `FLUX2_CAPTURED_INFERENCE_REVISION` (5ffd), audited against
-        // `FLUX2_COMPATIBLE_INFERENCE_REVISION`. While the live pin is still that audited revision,
-        // bounded decode is admitted. Once the pin moves past it the evidence no longer authorizes
-        // the newer runtime and admission correctly yields `None` — evidence is superseded by
-        // revision, not rejected. Without this branch a routine pin bump reads as a selector
-        // regression rather than as the fail-closed rule doing its job.
+        // `flux2_dev`'s packaged bindings were captured at `5ffd7612`, and its compile closure HAS
+        // moved since. That is not a defect in this branch and not a fixture problem: sc-17760
+        // reached the identical verdict by an independent method (a linked-artifact digest on the
+        // RTX box, ARTIFACTS DIFFER), and `main`'s own generated matrix already shows those five q4
+        // cells at `Implemented/unverified`. The demotion stands until sc-15922 re-captures.
         //
-        // Deliberately NOT "fixed" by widening `FLUX2_COMPATIBLE_INFERENCE_REVISION`: re-certifying
-        // needs a new `inference-compatibility-<rev>.json` proof. sc-17524 produced one for the
-        // window ending at the live `a4f409ae` pin, by measuring the compiled artifact on the RTX
-        // box — two closure paths moved and the measurement binary was byte-identical at both
-        // ends. That is what a re-certification looks like; editing this constant is not.
-        if crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
-            != FLUX2_COMPATIBLE_INFERENCE_REVISION
-        {
-            assert!(
-                evaluation.is_none(),
-                "outside the audited compatibility window the packaged FLUX.2-dev evidence must \
-                 not admit a strategy against the newer runtime pin"
-            );
-            return;
-        }
-
-        let evaluation = evaluation.expect("bounded decode must fit");
-        assert_eq!(
-            evaluation.context.selection.strategy,
-            MemoryStrategy::BoundedDecode
-        );
-        assert_eq!(
-            (evaluation.predicted_peak_gb * BYTES_PER_GIB).round() as u64,
-            34_700_000_000
+        // So the honest assertion is that admission REFUSES, and the reason is the closure. An
+        // earlier revision of this branch asserted a fit here on the belief that the binding and the
+        // packaged closure table agreed — they do not, and the belief was never checked.
+        //
+        // This replaces a block that skipped the rest of the test whenever the pin had moved past
+        // the audited window, which meant the one lane with a hand-audited hatch was also the one
+        // whose selector test went dark after every bump. Refusal is asserted rather than skipped.
+        assert!(
+            evaluation.is_none(),
+            "flux2_dev's closure moved since 5ffd7612, so its packaged evidence must not admit an \
+             optimized strategy at the live pin"
         );
     }
 

@@ -476,7 +476,11 @@ fn saved_voice_register_render_dod() {
         .map(|home| {
             crate::test_env::EnvVars::set(&[("HF_HOME", home.to_str().expect("utf-8 OS HF home"))])
         });
-    let data_dir = std::env::temp_dir();
+    // An isolated data dir, not the bare `%TEMP%` root: `embed_reference_clip` resolves its
+    // cache UNDER this path, so the old `temp_dir()` handed it the shared temp root to write
+    // into and left whatever it made there (sc-17707).
+    let data_dir_guard = tempfile::tempdir().expect("temp data dir");
+    let data_dir = data_dir_guard.path();
     let chatterbox_dir = resolve_dir("VOICECLONE_CHATTERBOX_DIR", "ResembleAI/chatterbox", None);
     // The generator requires ve + perth staged as named components at this pin (no self-fetch).
     let perth_dir = resolve_dir("VOICECLONE_PERTH_DIR", "SceneWorks/perth-implicit", None);
@@ -496,7 +500,7 @@ fn saved_voice_register_render_dod() {
 
     // ── (a) REGISTER: real embed via the API's embed path + persist through the store ──
     let emb_reference =
-        crate::voice_register::embed_reference_clip(&data_dir, &reference_wav).expect("embed ref");
+        crate::voice_register::embed_reference_clip(data_dir, &reference_wav).expect("embed ref");
     assert_eq!(
         emb_reference.len(),
         256,
@@ -518,9 +522,8 @@ fn saved_voice_register_render_dod() {
     let narrator_id = narrator["id"].as_str().expect("voice id").to_owned();
 
     // ── (b) DEDUP consumer: the SAME clip warns; a DISTINCT clip does not ──
-    let emb_reference_again =
-        crate::voice_register::embed_reference_clip(&data_dir, &reference_wav)
-            .expect("re-embed ref");
+    let emb_reference_again = crate::voice_register::embed_reference_clip(data_dir, &reference_wav)
+        .expect("re-embed ref");
     let (_dup_voice, dup_hit) = store
         .create_saved_voice(
             "project_dod",
@@ -535,7 +538,7 @@ fn saved_voice_register_render_dod() {
     let dup_hit = dup_hit.expect("re-registering the same clip must flag a near-duplicate");
     assert_eq!(dup_hit.name, "Narrator");
 
-    let emb_distinct = crate::voice_register::embed_reference_clip(&data_dir, &distinct_wav)
+    let emb_distinct = crate::voice_register::embed_reference_clip(data_dir, &distinct_wav)
         .expect("embed distinct");
     let (_distinct_voice, distinct_hit) = store
         .create_saved_voice(
@@ -591,7 +594,7 @@ fn saved_voice_register_render_dod() {
 
     // Objective evidence the rendered clone tracks the saved voice's reference (not the distinct one).
     let emb_clone =
-        crate::voice_register::embed_reference_clip(&data_dir, &clone_wav).expect("embed clone");
+        crate::voice_register::embed_reference_clip(data_dir, &clone_wav).expect("embed clone");
     let sim_clone_reference = cosine(&emb_clone, &emb_reference);
     let sim_clone_distinct = cosine(&emb_clone, &emb_distinct);
 
@@ -738,21 +741,28 @@ fn voice_register_embed_path_smoke() {
         .map(|home| {
             crate::test_env::EnvVars::set(&[("HF_HOME", home.to_str().expect("utf-8 OS HF home"))])
         });
-    let data_dir = std::env::temp_dir();
+    // An isolated data dir, not the bare `%TEMP%` root: `embed_reference_clip` resolves its
+    // cache UNDER this path, so the old `temp_dir()` handed it the shared temp root to write
+    // into and left whatever it made there (sc-17707).
+    let data_dir_guard = tempfile::tempdir().expect("temp data dir");
+    let data_dir = data_dir_guard.path();
 
-    let tmp = std::env::temp_dir().join(format!("sw-voice-register-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).expect("temp dir");
+    let tmp_guard = tempfile::Builder::new()
+        .prefix("sw-voice-register-")
+        .tempdir()
+        .expect("temp dir");
+    let tmp = tmp_guard.path();
     let ref_a = tmp.join("ref_a.wav");
     let ref_b = tmp.join("ref_b.wav");
     dump_wav(&synthetic_reference(), &ref_a);
     dump_wav(&distinct_reference(), &ref_b);
 
     let emb_a1 =
-        crate::voice_register::embed_reference_clip(&data_dir, &ref_a).expect("embed clip a");
+        crate::voice_register::embed_reference_clip(data_dir, &ref_a).expect("embed clip a");
     let emb_a2 =
-        crate::voice_register::embed_reference_clip(&data_dir, &ref_a).expect("re-embed clip a");
+        crate::voice_register::embed_reference_clip(data_dir, &ref_a).expect("re-embed clip a");
     let emb_b =
-        crate::voice_register::embed_reference_clip(&data_dir, &ref_b).expect("embed clip b");
+        crate::voice_register::embed_reference_clip(data_dir, &ref_b).expect("embed clip b");
 
     assert_eq!(emb_a1.len(), 256, "Chatterbox-VE embedding is 256-dim");
     let self_sim = cosine(&emb_a1, &emb_a2);

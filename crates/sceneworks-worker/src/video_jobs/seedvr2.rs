@@ -29,38 +29,15 @@ pub(super) use runtime_cuda::providers::seedvr2::video as seedvr2_video;
 #[cfg(target_os = "macos")]
 pub(super) use runtime_macos::providers::seedvr2::video as seedvr2_video;
 
-/// HF repo hosting the raw SeedVR2 checkpoint (`numz/SeedVR2_comfyUI`); the engine converts it
-/// in-memory at load (no Python). Override the staged dir with `SCENEWORKS_SEEDVR2_DIR`.
 // SeedVR2 video upscale runs on Mac (native MLX) AND the Windows/CUDA candle lane (sc-5928); these
 // constants/helpers are backend-neutral (gen_core + ffmpeg + the shared streaming driver).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(super) const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
-/// Pinned SeedVR2 checkpoint revision (sc-8879 / sc-9879). `numz/SeedVR2_comfyUI` is a
-/// third-party mirror with a fixed (non-overridable) repo here — fetching the mutable `main`
-/// branch would let an upstream re-push silently swap the 3B fp16 DiT + VAE weights we load.
-/// Pin the exact commit so downloads are reproducible; HF's tree API still reports each file's
-/// `lfs.oid`, which `ensure_hf_cached_file` verifies the content against. MUST equal the
-/// image-upscale lane's `upscale_jobs::SEEDVR2_REVISION` (same repo + files) — the
-/// `seedvr2_video_revision_matches_image_lane` agreement test locks them together so they
-/// can't drift.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(super) const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-const SEEDVR2_DIT_3B_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
+//
+// The repo/revision/filename constants that used to live here are GONE (sc-17632). They were a
+// verbatim duplicate of the image-upscale lane's, and each lane downloaded the same ~7.3 GB
+// checkpoint into its OWN `<data_dir>/cache` subtree. Both lanes now resolve the ONE installed copy
+// through `upscale_jobs::require_seedvr2_checkpoint_dir`, which owns the repo pin, the two operator
+// dir pins and the read-only legacy roots — so the pins cannot drift between the lanes at all,
+// rather than being held together by an agreement test.
 /// The engine registry id wired for video upscale (3B; 7B = sc-5197 / sc-5927).
 #[cfg(any(
     target_os = "macos",
@@ -457,43 +434,6 @@ fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
         }
     }
     Some(path)
-}
-
-/// Provision the SeedVR2 checkpoint dir: an env-pinned dir (pre-staged for local validation) wins,
-/// else the app cache (download the VAE + 3B DiT from `numz/SeedVR2_comfyUI` on first use). Returns
-/// the dir to hand the engine as `WeightsSource::Dir`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-async fn ensure_seedvr2_weights(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-) -> WorkerResult<PathBuf> {
-    let dir = std::env::var("SCENEWORKS_SEEDVR2_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| settings.data_dir.join("cache").join("seedvr2-mlx"));
-    let client = crate::downloads::streaming_download_client();
-    let context = crate::downloads::DownloadContext {
-        api,
-        client: &client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Video upscale canceled while fetching SeedVR2 weights.",
-        fresh_download: false,
-    };
-    for file in [SEEDVR2_VAE_FILE, SEEDVR2_DIT_3B_FILE] {
-        crate::downloads::ensure_hf_cached_file(
-            &context,
-            SEEDVR2_REPO,
-            SEEDVR2_REVISION,
-            file,
-            &dir.join(file),
-        )
-        .await?;
-    }
-    Ok(dir)
 }
 
 /// Decode every frame of `source` to a numbered PNG sequence ON DISK (native resolution — the engine
@@ -1272,13 +1212,16 @@ pub(crate) async fn run_video_upscale_job(
             JobStatus::Preparing,
             ProgressStage::Preparing,
             0.1,
-            "Fetching SeedVR2 weights.",
+            "Loading SeedVR2 weights.",
             None,
             backend,
         ),
     )
     .await?;
-    let weights_dir = ensure_seedvr2_weights(api, settings, job).await?;
+    // Cache-only since sc-17632: the SAME resolver the image-upscale lane uses, so the checkpoint
+    // is installed once from the Model Manager (`seedvr2_upscaler`) and read from the HF cache — no
+    // 7.3 GB fetch inside the render, and no second `<data_dir>/cache` copy of the same repo.
+    let weights_dir = crate::upscale_jobs::require_seedvr2_checkpoint_dir(settings)?;
 
     update_job(
         api,

@@ -144,10 +144,6 @@ use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
 mod fit_gate;
-// sc-17497: compiled under `test` on every platform too, so the audit validator is not a candle-lane
-// blind spot. Not compiled at all in a non-candle release build, so nothing is dead there.
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-mod inference_compatibility_audit;
 pub mod memory_strategy;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
@@ -179,7 +175,11 @@ mod conditioning_fit;
 use supervisor::*;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;
+// The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
+// requested against a still-downloading source is refused at the request boundary instead of failing
+// in the worker (see `convert_source_state`).
 use model_jobs::*;
+pub use model_jobs::{convert_source_state, ConvertSourceState};
 mod media_jobs;
 use media_jobs::*;
 // Image-decode backstop (sc-6143): transcodes a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/
@@ -304,6 +304,12 @@ mod smoke_support;
     )
 ))]
 mod pinned_engine_geometry;
+// sc-17607: the COMPOSITION half of the SC-15833 FLUX.2 audit — is `flux2_dev` still registered by
+// `candle-gen-flux2` in the bundle the worker links? A codegen digest cannot answer that, because
+// the measurement binary links neither `runtime-cuda` nor `candle-gen-catalog`. Test-only and
+// candle-only: the composition under test IS the CUDA bundle, so there is no neutral version.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod flux2_composition_audit;
 // Real-weight GPU smoke for the candle SCAIL-2 lane (sc-7078). Test-only + candle-only; never built
 // in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -1613,7 +1619,7 @@ async fn run_utility_job(
             // Native MLX image generation, served in-process by the linked mlx-gen
             // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
             // capability is never advertised, so this arm is unreachable there.
-            JobType::ImageGenerate => run_image_generate_job(api, settings, http_client, &job)
+            JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image generation failed.", error)),
             // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
@@ -1621,7 +1627,7 @@ async fn run_utility_job(
             // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
             // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
             // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
-            JobType::ImageEdit => run_image_generate_job(api, settings, http_client, &job)
+            JobType::ImageEdit => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image edit failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
@@ -1690,7 +1696,7 @@ async fn run_utility_job(
             // routing gate keeps it on a candle worker (or the linked mlx build), the stub fails loudly
             // elsewhere.
             JobType::ControlTraining => {
-                control_training_jobs::run_control_training_job(api, settings, http_client, &job)
+                control_training_jobs::run_control_training_job(api, settings, &job)
                     .await
                     .map_err(|error| ("ControlNet training failed.", error))
             }
@@ -1755,7 +1761,7 @@ async fn run_utility_job(
             JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Timeline export failed.", error)),
-            JobType::PersonDetect => run_person_detect_job(api, settings, http_client, &job)
+            JobType::PersonDetect => run_person_detect_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person detection failed.", error)),
             // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
@@ -1767,7 +1773,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::PoseDetect => run_pose_detect_job(api, settings, http_client, &job)
+            JobType::PoseDetect => run_pose_detect_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Pose detection failed.", error)),
             // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle
@@ -1791,7 +1797,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
+            JobType::ImageUpscale => run_image_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image upscale failed.", error)),
             // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
@@ -1800,7 +1806,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, http_client, &job)
+            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset upscale failed.", error)),
             // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
@@ -1808,11 +1814,9 @@ async fn run_utility_job(
             // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
             // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
             #[cfg(target_os = "macos")]
-            JobType::ImageSegment => {
-                segment_jobs::run_image_segment_job(api, settings, http_client, &job)
-                    .await
-                    .map_err(|error| ("Smart-select segmentation failed.", error))
-            }
+            JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Smart-select segmentation failed.", error)),
             // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
             // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
             // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
@@ -1827,7 +1831,7 @@ async fn run_utility_job(
                     .await
                     .map_err(|error| ("Video upscale failed.", error))
             }
-            JobType::PersonTrack => run_person_track_job(api, settings, http_client, &job)
+            JobType::PersonTrack => run_person_track_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Person tracking failed.", error)),
             _ => {
@@ -2002,6 +2006,15 @@ mod architecture_tests;
 // "make it compile with `preview: Default::default()`" regression lands.
 #[cfg(test)]
 mod candle_preview_wiring_tests;
+
+// The epic-17625 regression gate (sc-17637, AC9): no new job-time download, no new
+// `<data_dir>/cache` weight destination. Deliberately NOT cfg-gated for the same reason as the guard
+// above, only more so — every download helper and all of its call sites are gated
+// `macos || backend-candle`, so on the required ubuntu/default-features `parity` lane none of that
+// code is compiled at all and a gate inheriting those cfgs would never run. This one reads source
+// text, so it fires on every platform and every PR.
+#[cfg(test)]
+mod job_time_download_guard;
 
 // Pinned-snapshot provisioning helpers + the install-layout smokes (sc-13797/sc-13810). Compiled on
 // EVERY platform — the download/layout code is platform-agnostic; only the live-network smoke inside

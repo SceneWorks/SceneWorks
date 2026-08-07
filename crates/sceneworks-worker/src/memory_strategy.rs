@@ -4,11 +4,14 @@
 //! owns live-budget arithmetic and the normative strategy order. Optimized candidates are admitted
 //! only through gen-core's canonical evidence validator.
 
+use std::collections::BTreeSet;
+
 use gen_core::{
     MemoryCleanupSemantics, MemoryEvidence, MemoryEvidenceDimension, MemoryEvidenceVerdict,
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryProviderContract, MemorySelection,
     MemoryStrategy, MemoryStrategySupport,
 };
+use sceneworks_core::memory_calibration::StrategyRung;
 
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
@@ -24,6 +27,106 @@ pub(crate) fn load_shape_from_receipt(
             gen_core::LoadShape::DeferredMaterialization
         }
     }
+}
+
+/// Bridge a calibration receipt's rung spelling to the gen-core strategy it names.
+pub(crate) const fn strategy_from_rung(rung: StrategyRung) -> MemoryStrategy {
+    match rung {
+        StrategyRung::Resident => MemoryStrategy::Resident,
+        StrategyRung::StagedResidency => MemoryStrategy::StagedResidency,
+        StrategyRung::BoundedDecode => MemoryStrategy::BoundedDecode,
+        StrategyRung::BoundedAttention => MemoryStrategy::BoundedAttention,
+        StrategyRung::BoundedTransformerResidency => MemoryStrategy::BoundedTransformerResidency,
+    }
+}
+
+/// Canonical label a calibration binding and an evidence receipt both spell a rung with.
+pub(crate) const fn rung_key(rung: StrategyRung) -> &'static str {
+    match rung {
+        StrategyRung::Resident => "resident",
+        StrategyRung::StagedResidency => "staged_residency",
+        StrategyRung::BoundedDecode => "bounded_decode",
+        StrategyRung::BoundedAttention => "bounded_attention",
+        StrategyRung::BoundedTransformerResidency => "bounded_transformer_residency",
+    }
+}
+
+/// Parse one canonical rung label, the inverse of [`rung_key`].
+pub(crate) fn rung_from_key(value: &str) -> Option<StrategyRung> {
+    StrategyRung::ALL
+        .into_iter()
+        .find(|rung| rung_key(*rung) == value)
+}
+
+/// The composition a selection engages when a binding publishes no cheaper verified one.
+///
+/// Read through [`MemoryStrategy::engages`] — the contract's own defeasible cost-order policy seam —
+/// rather than restated here as an ordinal `<=`. Restating it would let the two drift silently, and
+/// the drift decides which strategy parameters a binding is obliged to name.
+pub(crate) fn default_engaged_composition(rung: StrategyRung) -> Vec<StrategyRung> {
+    let selection = strategy_from_rung(rung);
+    StrategyRung::ALL
+        .into_iter()
+        .filter(|candidate| selection.engages(strategy_from_rung(*candidate)))
+        .collect()
+}
+
+/// Validate a binding's declared `engagedRungs`, returning the composition to validate against.
+///
+/// Absent, the shared cost-order default applies, which is byte-identical to the pre-sc-17728
+/// cumulative behaviour. Declared, it is authoritative — that is how a provider which implements
+/// rung 4 while declaring rungs 2 and 3 `Missing` publishes evidence for the composition it actually
+/// ran. The declaration is still closed: it must be canonical and unique, it must contain `resident`
+/// and the selected rung, and it can never engage a rung costlier than the one it selected.
+pub(crate) fn engaged_composition(
+    rung: StrategyRung,
+    declared: Option<&[StrategyRung]>,
+) -> Result<Vec<StrategyRung>, String> {
+    let Some(declared) = declared else {
+        return Ok(default_engaged_composition(rung));
+    };
+    let unique = declared.iter().copied().collect::<BTreeSet<_>>();
+    let canonical = StrategyRung::ALL
+        .into_iter()
+        .filter(|candidate| unique.contains(candidate))
+        .collect::<Vec<_>>();
+    if unique.len() != declared.len() || canonical != declared {
+        return Err("engagedRungs must be a unique set in canonical ladder order".to_owned());
+    }
+    if !unique.contains(&StrategyRung::Resident) || !unique.contains(&rung) {
+        return Err(format!(
+            "engagedRungs must contain resident and the selected rung {}",
+            rung_key(rung)
+        ));
+    }
+    if let Some(costlier) = declared.iter().find(|candidate| **candidate > rung) {
+        return Err(format!(
+            "engagedRungs cannot engage {}, which is costlier than the selected rung {}",
+            rung_key(*costlier),
+            rung_key(rung)
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Numeric strategy parameters an engaged composition must name, with their minimums.
+///
+/// A rung the composition does not engage owns no parameter, so naming one is an error rather than
+/// harmless noise — the same rule gen-core's `validate_selected_parameters` applies to a runtime
+/// selection, keyed on engagement rather than on the selected rung's ordinal.
+pub(crate) fn required_numeric_parameters(engaged: &[StrategyRung]) -> Vec<(&'static str, u32)> {
+    let mut required = Vec::new();
+    if engaged.contains(&StrategyRung::BoundedDecode) {
+        required.push(("decodeTileEdge", 1));
+        required.push(("decodeOverlap", 0));
+    }
+    if engaged.contains(&StrategyRung::BoundedAttention) {
+        required.push(("attentionChunkSize", 1));
+    }
+    if engaged.contains(&StrategyRung::BoundedTransformerResidency) {
+        required.push(("transformerWindowSize", 1));
+    }
+    required
 }
 
 /// Typed [`MemoryMode`] for a canonical worker mode-key label, `as_key(from(key)) == key` for every
@@ -97,7 +200,13 @@ pub struct RequestScope<'a> {
     pub mode: &'a str,
     pub overlay: Option<&'a str>,
     pub geometry: MemoryGeometry,
-    pub expected_inference_revision: &'a str,
+    /// The live compile-closure digest of the provider being admitted (sc-17774).
+    ///
+    /// Read from `sceneworks_core::memory_calibration::packaged_closure_digest`. It replaces
+    /// `expected_inference_revision`, which every lane satisfied with its OWN frozen constant — four
+    /// separate per-model mechanisms doing the same job differently, none of which could tell a
+    /// change to its own model from a change to somebody else's.
+    pub expected_closure_digest: &'a str,
 }
 
 /// A provider estimate submitted to the selector. Cost is intentionally absent: strategy order is
@@ -106,6 +215,13 @@ pub struct RequestScope<'a> {
 pub struct Candidate<'a> {
     pub selection: MemorySelection,
     pub evidence: &'a MemoryEvidence,
+    /// The provider closure digest this candidate's evidence was MEASURED under (sc-17774).
+    ///
+    /// It sits on `Candidate` rather than on `evidence` only because `MemoryEvidence` is a gen-core
+    /// type owned by the inference repository, which SceneWorks pins by SHA; the field cannot move
+    /// there without an inference change and a pin bump. The comparison itself is unaffected and is
+    /// applied to every lane identically.
+    pub closure_digest: &'a str,
 }
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -227,7 +343,10 @@ fn candidate_exclusion(
     {
         return Some(MemoryEvidenceVerdict::OutOfEnvelope);
     }
-    if candidate.evidence.inference_revision != request.expected_inference_revision {
+    // sc-17774: the provider's own compiled closure, not an inference revision. `evidence
+    // .inference_revision` stays as capture provenance and is deliberately not compared — comparing
+    // it is what let a commit to one model stale every other model's measurements.
+    if candidate.closure_digest != request.expected_closure_digest {
         return Some(MemoryEvidenceVerdict::Stale);
     }
     if contract.validate_selection(&candidate.selection).is_err() {
@@ -388,6 +507,8 @@ mod tests {
     const FP: &str = "provider-formula-v1";
     const SW: &str = "sc-15449-contract-v1";
     const INF: &str = "0c85bc9ff9fe161227efebf396a83db5e967d9ad";
+    /// A closure digest that is deliberately NOT the request's, for candidates a test needs stale.
+    const STALE_CLOSURE: &str = "stale-closure-digest";
 
     fn tier() -> MemoryNumericTier {
         MemoryNumericTier {
@@ -530,7 +651,7 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
-            expected_inference_revision: INF,
+            expected_closure_digest: INF,
         }
     }
 
@@ -559,6 +680,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &source_only_change,
+            closure_digest: INF,
         };
 
         assert!(matches!(
@@ -594,6 +716,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &exact,
+            closure_digest: INF,
         };
 
         assert!(matches!(
@@ -632,6 +755,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
+                closure_digest: INF,
             },
             Candidate {
                 selection: MemorySelection {
@@ -640,6 +764,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &resident,
+                closure_digest: INF,
             },
         ];
         let mut provider = contract();
@@ -699,6 +824,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         assert_eq!(
             select_strategy(
@@ -734,6 +860,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         assert_eq!(
             select_strategy(
@@ -771,6 +898,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         assert_eq!(
             select_strategy(
@@ -800,6 +928,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &captured,
+            closure_digest: INF,
         };
         let mut changed_contract = contract();
         changed_contract.additional_prerequisites.push((
@@ -854,6 +983,10 @@ mod tests {
     #[test]
     fn excluded_cheaper_rung_does_not_block_a_verified_deeper_fit() {
         let mut stale_staged = evidence(MemoryStrategy::StagedResidency);
+        // sc-17774: staleness is a CLOSURE mismatch now, so the candidate below carries a digest
+        // that is not the request's. Mutating `inference_revision` no longer stales anything — that
+        // field is capture provenance — and leaving this test written that way would have quietly
+        // stopped exercising the excluded-rung path at all.
         stale_staged.inference_revision = "1111111111111111111111111111111111111111".into();
         let mut bounded_decode = evidence(MemoryStrategy::BoundedDecode);
         bounded_decode.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
@@ -880,6 +1013,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &stale_staged,
+                closure_digest: STALE_CLOSURE,
             },
             Candidate {
                 selection: MemorySelection {
@@ -888,6 +1022,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &bounded_decode,
+                closure_digest: INF,
             },
         ];
         assert!(matches!(
@@ -928,6 +1063,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &resident,
+                closure_digest: INF,
             },
             Candidate {
                 selection: MemorySelection {
@@ -936,6 +1072,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: &staged,
+                closure_digest: INF,
             },
         ];
         let mut provider = contract();
@@ -997,6 +1134,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         let mut scope = request();
         scope.mode = "character_image";
@@ -1061,6 +1199,7 @@ mod tests {
         let candidate = Candidate {
             selection,
             evidence: &staged,
+            closure_digest: INF,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1082,6 +1221,7 @@ mod tests {
                 &[Candidate {
                     selection,
                     evidence: &staged,
+                    closure_digest: INF,
                 }],
             ),
             Selection::Selected {
@@ -1104,6 +1244,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &staged,
+            closure_digest: INF,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1130,6 +1271,7 @@ mod tests {
                 &[Candidate {
                     selection: candidate.selection,
                     evidence: &wrong_backend,
+                    closure_digest: INF,
                 }],
             ),
             Selection::Unverified {
@@ -1175,6 +1317,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &high,
+            closure_digest: INF,
         };
         let low_candidate = Candidate {
             evidence: &low,
@@ -1185,6 +1328,7 @@ mod tests {
         let high_candidate = Candidate {
             selection: high_selection,
             evidence: &high,
+            closure_digest: INF,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1221,6 +1365,7 @@ mod tests {
                 Candidate {
                     selection: high_selection,
                     evidence: &tied_high,
+                    closure_digest: INF,
                 },
             ],
         );
@@ -1544,6 +1689,7 @@ mod tests {
                     tier: tier(),
                 },
                 evidence: record,
+                closure_digest: INF,
             })
             .collect::<Vec<_>>();
         let provider = contract();
@@ -1605,11 +1751,14 @@ mod tests {
         // 4. The caveat, asserted rather than asserted-away: excluding a cheaper rung's evidence does
         //    NOT stop the walk, so rung 4 is reachable while rung 3's peak still fits. The alternative
         //    is `Unverified` — still no render — which is why the conclusion survives. Stale is the
-        //    realistic trigger: every inference pin bump invalidates evidence by `inference_revision`.
+        //    realistic trigger: a change to THIS provider's compile closure invalidates its evidence
+        //    (sc-17774 — it used to be every inference pin bump, for every provider at once).
         let mut stale_attention = evidences[3].clone();
+        // sc-17774: as above — the stale candidate is marked by its closure digest, not its revision.
         stale_attention.inference_revision = "0000000000000000000000000000000000000000".into();
         let mut with_stale = candidates.clone();
         with_stale[3].evidence = &stale_attention;
+        with_stale[3].closure_digest = STALE_CLOSURE;
         let selection = select_strategy(
             request(),
             &provider,
@@ -1677,6 +1826,7 @@ mod tests {
                 tier: tier(),
             },
             evidence: &record,
+            closure_digest: INF,
         }];
         let select = |provider: &MemoryProviderContract| {
             select_strategy(
@@ -1786,6 +1936,7 @@ mod tests {
                         tier: tier(),
                     },
                     evidence: record,
+                    closure_digest: INF,
                 })
                 .collect::<Vec<_>>();
 

@@ -61,12 +61,7 @@ RUN mkdir -p \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=secret,id=inference_token,required=true \
-    token="$(cat /run/secrets/inference_token)" \
-    && GIT_CONFIG_COUNT=1 \
-       GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/SceneWorks/inference.insteadOf" \
-       GIT_CONFIG_VALUE_0="https://github.com/SceneWorks/inference" \
-       cargo fetch --locked
+    cargo fetch --locked
 
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
@@ -168,8 +163,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-# Rust toolchain. The default rustup profile ships rustfmt+clippy, satisfying
-# rust-toolchain.toml (stable + those components).
+# Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
+# rust-toolchain.toml (a pinned concrete version + those components) is what any
+# in-repo cargo actually resolves, auto-installed by rustup on first use.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:/usr/local/cuda/bin:${PATH}"
 ENV CUDA_PATH=/usr/local/cuda
@@ -203,12 +199,7 @@ RUN mkdir -p \
       crates/sceneworks-memory-adapter/src/bin/mlx.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=secret,id=inference_token,required=true \
-    token="$(cat /run/secrets/inference_token)" \
-    && GIT_CONFIG_COUNT=1 \
-       GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/SceneWorks/inference.insteadOf" \
-       GIT_CONFIG_VALUE_0="https://github.com/SceneWorks/inference" \
-       cargo fetch --locked
+    cargo fetch --locked
 
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api

@@ -1014,7 +1014,7 @@
       "publisher": "Xintao Wang",
       "license": "BSD-3-Clause",
       "homepage": "https://github.com/xinntao/Real-ESRGAN",
-      "usage": "Image upscaler (utility model). Downloaded on first use from the upstream repository; NOT re-hosted by SceneWorks.",
+      "usage": "Image upscaler (utility model). SceneWorks installs its own ONNX export of the upstream Real-ESRGAN release weights, re-hosted at SceneWorks/real-esrgan-onnx and reproducible via scripts/spikes/sc3489_export_reference.py; the original BSD-3-Clause weights are published by Xintao Wang at the homepage below.",
       "documents": [
         {
           "label": "BSD 3-Clause License",
@@ -1141,6 +1141,91 @@
       "homepage": "https://github.com/fpgaminer/joycaption",
       "usage": "The caption-type taxonomy, prompt template bodies and name option reproduced in the native captioners are near-verbatim copies of gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION) from fpgaminer/joycaption, which is Apache-2.0. This covers BOTH caption lanes: the Candle provider (crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs) and the MLX provider (crates/media/mlx-gen/src/caption/joycaption.rs). SceneWorks MODIFIED the reproduced text: punctuation was normalized (em dash to hyphen, curly to straight quotes, backticks dropped) and upstream's \"Note any watermarks, signatures, or compression artifacts.\" sentence was folded into the \"Never mention...\" clause of the Straightforward bodies. The upstream repository ships no NOTICE file. This entry covers the reproduced PROMPT CONTENT only; the JoyCaption model WEIGHTS declare no license of their own and remain undetermined.",
       "documents": [{"label": "Apache License 2.0", "key": "joycaption-source-apache"}]
+    },
+    {
+      "id": "sam3",
+      "models": [
+        "sam3_person_segment"
+      ],
+      "name": "SAM 3 (Segment Anything Model 3)",
+      "publisher": "Meta Platforms, Inc.",
+      "license": "SAM License (Meta, custom)",
+      "homepage": "https://huggingface.co/facebook/sam3",
+      "usage": "Text-concept person segmentation (utility model) behind person tracking and Smart Select. The stock facebook/sam3 checkpoint, re-hosted by SceneWorks at SceneWorks/sam3-mlx and installed from the Model Manager. The upstream LICENSE is redistributed with the weights, as the SAM License requires.",
+      "documents": [
+        {
+          "label": "SAM License",
+          "key": "sam3-license"
+        }
+      ]
+    },
+    {
+      "id": "sam2",
+      "models": [
+        "sam2_person_segment"
+      ],
+      "name": "SAM 2.1 (Segment Anything Model 2.1)",
+      "publisher": "Meta Platforms, Inc.",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/facebook/sam2.1-hiera-large",
+      "usage": "Box-prompt person mask propagation (utility model, macOS only). Converted to MLX safetensors from Meta's official checkpoint and re-hosted by SceneWorks at SceneWorks/sam2-mlx; installed from the Model Manager. Upstream ships no LICENSE file at the pinned revision, so the Apache-2.0 text here is vendored from facebook/sam2.1-hiera-large.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "sam2-apache"
+        }
+      ]
+    },
+    {
+      "id": "yolo11",
+      "models": [
+        "person_detector"
+      ],
+      "name": "YOLO11m",
+      "publisher": "Ultralytics",
+      "license": "AGPL-3.0-only",
+      "homepage": "https://github.com/ultralytics/ultralytics",
+      "usage": "Person bounding-box detection (utility model) feeding ByteTrack person tracking. Weights are derived from Ultralytics YOLO11m and re-hosted by SceneWorks as a conv+BN-fused MLX safetensors (macOS) and an ONNX export (Windows/Linux); installed from the Model Manager. SceneWorks is itself AGPL-3.0, so the copyleft terms are compatible.",
+      "documents": [
+        {
+          "label": "GNU Affero General Public License v3",
+          "key": "yolo11-agpl"
+        }
+      ]
+    },
+    {
+      "id": "seedvr2",
+      "models": [
+        "seedvr2_upscaler"
+      ],
+      "name": "SeedVR2-3B",
+      "publisher": "ByteDance Seed",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/ByteDance-Seed/SeedVR2-3B",
+      "usage": "One-step diffusion super-resolution (utility model) behind the SeedVR2 image-upscale engine and video upscaling; installed from the Model Manager. The 3B fp16 DiT + VAE pair is downloaded from the third-party ComfyUI repackaging numz/SeedVR2_comfyUI, which mirrors ByteDance Seed's Apache-2.0 SeedVR2-3B release; SceneWorks does not re-host it. The Apache 2.0 text here is the standard license, matching the apache-2.0 declared by both the upstream and the mirror.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "seedvr2-apache"
+        }
+      ]
+    },
+    {
+      "id": "dwpose",
+      "models": [
+        "dwpose_pose_detector"
+      ],
+      "name": "DWPose (RTMW + YOLOX, OpenMMLab mmpose)",
+      "publisher": "OpenMMLab",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/open-mmlab/mmpose",
+      "usage": "Whole-body pose and keypoint detection (utility model) behind the Pose Library, OpenPose control conditioning, ControlNet pose training and catalog pose analysis; installed from the Model Manager. The two ONNX graphs are the yolox_m HumanArt person detector and the RTMW-x COCO-WholeBody cocktail14 pose model, extracted verbatim from OpenMMLab's published ONNX SDK archives and re-hosted by SceneWorks at SceneWorks/dwpose-onnx with no modification. The Apache 2.0 text here is mmpose's own LICENSE file, including its Copyright 2018-2020 Open-MMLab notice. Note that mmpose's LICENSE covers the OpenMMLab project and does not itself assert terms for the HumanArt and COCO-WholeBody datasets these particular checkpoints were trained on, which carry their own terms from their own publishers.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "dwpose-apache"
+        }
+      ]
     }
   ]
 }

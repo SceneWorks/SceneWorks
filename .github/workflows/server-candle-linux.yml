@@ -47,15 +47,12 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
       # the candle `cuda` feature links against. Sets CUDA_PATH for the build.
@@ -65,7 +62,7 @@ jobs:
         # pin tops out at 12.8.0 (network method still validates against the map), so
         # `cuda: "12.9.1"` failed with "Version not available". (Kept in lockstep with
         # desktop-windows.yml's pin.)
-        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
         with:
           cuda: "12.9.1"
           method: "network"

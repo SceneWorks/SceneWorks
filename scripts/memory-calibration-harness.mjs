@@ -8,6 +8,8 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { providerClosureDigest } from "./inference-closure-digest.mjs";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
   readFileSync(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"),
@@ -153,11 +155,24 @@ export function logicalCaseId(spec) {
   }).slice(0, 20)}`;
 }
 
+/** `repositories` with the derived closure digest stripped, for identity hashing only. */
+function repositoriesIdentity(repositories) {
+  const { inference, ...rest } = repositories ?? {};
+  if (!inference) return repositories;
+  const { closureDigest, ...inferenceIdentity } = inference;
+  return { ...rest, inference: inferenceIdentity };
+}
+
 export function recordId(record) {
   return `imc-${digest({
     harnessVersion: record.harnessVersion,
     evidenceScope: record.evidenceScope,
-    repositories: record.repositories,
+    // sc-17774: `inference.closureDigest` is DERIVED provenance — it is a pure function of
+    // (provider, inference revision), both of which are already inside this identity — so it is
+    // excluded. Including it would rotate all 65 record ids on a field that carries no new identity,
+    // and every `evidenceRecords` reference in the manifest and matrix would have to be rewritten
+    // for nothing.
+    repositories: repositoriesIdentity(record.repositories),
     backend: record.backend,
     loadShape: record.loadShape,
     hardware: record.hardware,
@@ -617,12 +632,42 @@ export function evidenceSemantics(record, revisions) {
   if (record.evidenceScope === "candidate") return "candidate";
   if (record.status === "negative_complete") return "negative";
   if (!["complete", "runtime_complete"].includes(record.status)) return "gated";
-  // SceneWorks invalidation is owned by calibrationBinding's provider ABI fingerprint. The exact
-  // matrixSourceRevision remains captured provenance, but treating it as a second invalidation gate
-  // would stale every measurement on comments, formatting, or unrelated source edits.
-  return record.repositories.inference.revision === revisions.inference ||
-    revisions.compatibleCapturedInferenceRevisions?.includes(record.repositories.inference.revision)
-    ? "current" : "historical";
+
+  // sc-17774: currency is decided by the PROVIDER'S OWN compile closure, never by the inference pin.
+  //
+  // This used to read `record.repositories.inference.revision === revisions.inference`. The unit of
+  // invalidation was therefore the whole inference repository at commit granularity: a commit to
+  // `mlx-gen-z-image` demoted `flux2_dev`, and a documentation-only commit demoted all six
+  // calibrated providers. Measured over the 90 days to `fbb00d6b`, all 2812 non-merge commits
+  // demoted everything. The comment that used to sit here already stated the intended policy —
+  // "invalidation is owned by calibrationBinding's provider ABI fingerprint" — and then the line
+  // below it did the opposite for the inference side. That gap is what this change closes.
+  //
+  // The closure digest is derived in `scripts/inference-closure-digest.mjs` and lives in
+  // `config/inference-provider-closures.json`; the record carries the digest it was captured under.
+  const captured = record.repositories.inference.closureDigest;
+  // Keyed `<backend>:<provider>` — a provider id alone is not unique. `krea_2_turbo_control` exists
+  // on both mlx and candle with different crates, so the bare id would compare one backend's
+  // measurements against the other backend's code.
+  const provider = `${record.backend}:${record.target.provider}`;
+  const live = revisions.inferenceClosureDigests?.[provider];
+  // Fail closed and LOUDLY. Falling back to pin equality when a digest is missing would silently
+  // restore the policy this replaces, and the fallback would be invisible in a green run.
+  if (!captured) {
+    fail(
+      `${record.id}: no repositories.inference.closureDigest. Every complete record must carry the ` +
+        "provider closure digest it was captured under (sc-17774); re-run the backfill in " +
+        "scripts/backfill-closure-digests.mjs against an inference clone.",
+    );
+  }
+  if (!live) {
+    fail(
+      `${record.id}: provider "${provider}" has no entry in config/inference-provider-closures.json. ` +
+        "Declare its inference crate and regenerate: node scripts/inference-closure-digest.mjs " +
+        "--repo <inference> --write.",
+    );
+  }
+  return captured === live ? "current" : "historical";
 }
 
 export function mergeBundles(left, right) {
@@ -738,10 +783,23 @@ function completedLogicalIds(record) {
 }
 
 function operationallyAttemptedLogicalIds(records, repositories, hardware) {
+  // sc-17935: compared on repository IDENTITY, with the derived closure digest stripped from both
+  // sides — the same argument `recordId` makes. The digest is a pure function of (lane, inference
+  // revision); the revision is compared here, and the lane is fixed by `logicalCaseId`, so it adds
+  // nothing. Comparing it raw would make resume lane-sensitive: the run-level `repositories` no
+  // longer carries any one lane's digest, so every prior record would look foreign and a resumed
+  // capture would repeat GPU work it had already paid for.
+  //
+  // The converse is deliberate and worth stating: resume is now blind to the digest in BOTH
+  // directions, so a record stamped under a wrong declaration stays "already attempted" until the
+  // bundle is discarded. That is the correct trade — this check decides whether to re-run a
+  // multi-hour capture, not whether the evidence is current. Currency is `evidenceSemantics`, which
+  // reads the digest and fails closed.
+  const wanted = repositoriesIdentity(repositories);
   return new Set(records
     .filter((record) =>
       record.harnessVersion === HARNESS_VERSION &&
-      equal(record.repositories, repositories) &&
+      equal(repositoriesIdentity(record.repositories), wanted) &&
       equal(record.hardware, hardware)
     )
     .map((record) => record.logicalCaseId));
@@ -850,6 +908,9 @@ function execute(command, args, input) {
 export async function runProviderPlan({
   config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
   onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
+  // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
+  // inference crate layout to derive a real closure from. Production always uses the default.
+  closureDigestFor = null,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   const gitState = async (repo, sceneWorks = false) => ({
@@ -863,10 +924,45 @@ export async function runProviderPlan({
         }
       : {}),
   });
+  // sc-17774: stamp the provider's compile-closure digest AT CAPTURE TIME. The runner already has a
+  // live inference checkout, so the captured half of the currency comparison is derived here rather
+  // than backfilled later.
+  //
+  // sc-17935: the LANE decides which closure is measured, and a lane is `<backend>:<provider>` —
+  // exactly the key `config/inference-provider-closures.json` and `evidenceSemantics` use. This used
+  // to pass `providerName`, the `--provider` PLAN-ENTRY name (`candle-krea-q4-fresh-reference-
+  // resident`), which is not a table key and is `undefined` under the `--fixture` selection every
+  // checked-in capture workflow actually uses. Both spellings failed with `provider "…" has no
+  // entry`, so no macOS or Windows capture job could produce replacement evidence — precisely when
+  // a narrowed currency term makes replacement evidence the remedy.
+  const closureDigest =
+    closureDigestFor ??
+    (async (lane, revision) => {
+      const declarations = JSON.parse(
+        await readFile(path.join(sceneWorksRepo, "config/inference-provider-closures.json"), "utf8"),
+      );
+      const crateDir = declarations.providers?.[lane]?.crate;
+      if (!crateDir) {
+        fail(
+          `lane "${lane}" has no entry in config/inference-provider-closures.json. Declare its ` +
+            "inference crate before capturing evidence, or the record cannot carry a currency term.",
+        );
+      }
+      return providerClosureDigest({
+        repo: inferenceRepo,
+        revision,
+        provider: lane,
+        crateDir,
+      }).digest;
+    });
+  const laneOf = (planned) => `${planned.backend}:${planned.target.provider}`;
   const probeRepositories = async () => ({
     sceneWorks: await gitState(sceneWorksRepo, true),
     inference: await gitState(inferenceRepo),
   });
+  // The stability probe deliberately carries NO closure digest: the digest is a pure function of
+  // (lane, inference revision), and the revision is compared here, so hashing it again would only
+  // re-derive a value that cannot move while `revision` holds still.
   const repositories = await probeRepositories();
   const assertRepositoriesStable = async () => {
     const after = await probeRepositories();
@@ -922,6 +1018,23 @@ export async function runProviderPlan({
   const attempted = operationallyAttemptedLogicalIds(existing.records, repositories, probe.hardware);
   const cases = selectedCases.filter((planned) => !attempted.has(planned.logicalCaseId));
   if (cases.length === 0) return existing;
+
+  // Derive one digest per AUTHORITATIVE lane actually being captured, before the first GPU-bound
+  // invocation. Only an authoritative capture can ever be `current` — `evidenceSemantics`
+  // short-circuits fixture and candidate scopes before the comparison is reached — so a selection
+  // that is entirely fixture/candidate derives nothing and needs neither an inference crate layout
+  // nor a declarations file. That is what lets the schema-mutation suite drive this runner against a
+  // synthetic repo. Deriving EAGERLY is the point of doing it here rather than lazily at stamping
+  // time: an undeclared lane must fail before a 26 GB capture burns, not after.
+  const digestByLane = new Map();
+  for (const lane of new Set(cases.filter((planned) => planned.evidenceScope === "authoritative").map(laneOf))) {
+    digestByLane.set(lane, await closureDigest(lane, repositories.inference.revision));
+  }
+  const repositoriesFor = (planned) => {
+    const digest = digestByLane.get(laneOf(planned));
+    if (!digest) return repositories;
+    return { ...repositories, inference: { ...repositories.inference, closureDigest: digest } };
+  };
   const incoming = [];
   let remaining = cases;
   const sameBatch = (left, right) =>
@@ -1023,7 +1136,10 @@ export async function runProviderPlan({
         evidenceScope: planned.evidenceScope,
         backend: planned.backend,
         loadShape: fragment.loadShape,
-        repositories,
+        // Per-lane, not per-run: a `--backend candle` run with no `--fixture` selects several
+        // providers, and stamping them all with one lane's digest would compare each against the
+        // wrong code path forever.
+        repositories: repositoriesFor(planned),
         hardware: probe.hardware,
         target: planned.target,
         strategy: fragment.strategy,

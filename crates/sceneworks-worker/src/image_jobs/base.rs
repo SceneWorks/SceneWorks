@@ -2564,7 +2564,10 @@ fn krea_evidence_revision() -> String {
     format!(
         "{}@{}",
         crate::vram_gate::KREA_TURBO_SCENEWORKS_REVISION,
-        crate::vram_gate::KREA_TURBO_INFERENCE_REVISION
+        // sc-17774: the lane's compile-closure digest replaced the frozen inference SHA here too, so
+        // the traced receipt names the same thing the selector actually compared.
+        sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
+            .unwrap_or_default()
     )
 }
 
@@ -6874,6 +6877,14 @@ mod krea_turbo_memory_route_tests {
             .expect("Krea 2 Turbo manifest entry");
         model["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        // sc-17774: these tests make the ladder historical through the FINGERPRINT, which is their
+        // subject. Stamp the live closure so currency is not a second, unintended historical axis —
+        // the shipped digest is behind the pin (`gen-core` moved), and letting that decide too would
+        // stop these tests exercising the fingerprint path they are named for.
+        model["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String(
+            sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
+                .unwrap_or_default(),
+        );
         // sc-17097 removed the ABI re-stamp that used to sit here. Overwriting the shipped
         // `calibrationAbi` with the current constant is what kept every selector test green while
         // production rejected the same manifest: no test in the tree ever read the shipped value.
@@ -6919,11 +6930,11 @@ mod krea_turbo_memory_route_tests {
 
     #[test]
     fn adapter_bytes_disable_krea_streaming_and_missing_bytes_fail_closed() {
-        let root = std::env::temp_dir().join(format!(
-            "krea-adapter-evidence-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        let root_guard = tempfile::Builder::new()
+            .prefix("krea-adapter-evidence-")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let adapter = root.join("adapter.safetensors");
         std::fs::write(&adapter, vec![0_u8; 321]).unwrap();
         let measured = vec![gen_core::AdapterSpec::new(
@@ -6955,7 +6966,6 @@ mod krea_turbo_memory_route_tests {
             (false, None),
             "missing byte evidence must retain the count-based fail-closed fallback"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -11819,11 +11829,11 @@ mod mlx_downtier_emulation_tests {
         );
         // Sparse tier dirs: q8 ~5 GiB, q4 ~1 GiB LOGICAL (set_len ⇒ no real disk on APFS). The gate sums
         // `metadata.len()`, so these read as 5/1 GiB → predicted peaks 23/19 GiB (+18 headroom).
-        let root = std::env::temp_dir().join(format!(
-            "mlx_downtier_emu_{}_{}",
-            std::process::id(),
-            line!()
-        ));
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_downtier_emu_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
         let make_tier = |tier: &str, gib: u64| -> PathBuf {
             let dir = root.join(tier).join("transformer");
             std::fs::create_dir_all(&dir).expect("mk tier dir");
@@ -11851,7 +11861,6 @@ mod mlx_downtier_emulation_tests {
             "q8 default must capability-downtier to q4 under the {cap} GB emulated cap"
         );
         eprintln!("emulation knob cap={cap} GB → q8 default DOWNTIERED to q4 (sc-10733 ✓)");
-        std::fs::remove_dir_all(&root).ok();
     }
 }
 

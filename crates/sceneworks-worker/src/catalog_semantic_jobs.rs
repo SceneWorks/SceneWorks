@@ -1344,21 +1344,10 @@ pub(crate) async fn run_catalog_analysis_job(
 
     let mut structured_resources = None;
     if analyzer_config.settings.structured_analysis_enabled {
-        let client = crate::downloads::streaming_download_client();
-        let context = crate::downloads::DownloadContext {
-            api,
-            client: &client,
-            settings,
-            job_id: &job.id,
-            cancel_message: CANCEL_MESSAGE,
-            fresh_download: false,
-        };
-        let person_detector =
-            crate::person_jobs::ensure_detector_weights(settings, &context).await?;
+        let person_detector = crate::person_jobs::require_detector_weights(settings)?;
         let face_weights_directory =
             crate::image_jobs::ensure_face_stack_dir(api, settings, job).await?;
-        let (pose_detector, pose_model) =
-            crate::pose_jobs::ensure_dwpose_weights(api, settings, &client, job).await?;
+        let (pose_detector, pose_model) = crate::pose_jobs::require_dwpose_weights(settings)?;
         structured_resources = Some(crate::catalog_analysis::ModelBackedCatalogAnalyzerPaths {
             person_detector,
             face_weights_directory,

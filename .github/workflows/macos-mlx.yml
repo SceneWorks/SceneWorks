@@ -29,6 +29,20 @@ name: macOS MLX worker
 # deleted; epic work now branches off and PRs into main (sc-4177 re-pointed the
 # lane after it sat dead on the deleted branch).
 on:
+  # THE MERGE QUEUE'S SPECULATIVE MERGE. Without this trigger the queue's `gh-readonly-queue/main/**`
+  # ref is validated only by check.yml's hosted Linux jobs, and this lane — the ONLY compiler of
+  # `cfg(target_os = "macos")` code anywhere in CI — never sees it. Two individually-green PRs whose
+  # merge does not compile under that cfg would merge, exactly the shape that broke `main` in
+  # e71b932f.
+  #
+  # NOTE THE ASYMMETRY WITH THE TWO TRIGGERS BELOW: they are path-filtered and this one CANNOT BE.
+  # GitHub supports no `paths:` / `paths-ignore:` filter on `merge_group` (community discussion
+  # 45899, still open), so a bare trigger here would wake this lane for a README-only queue entry.
+  # The filter therefore moves into the `changes` gate job, which reads the SAME anchor below and
+  # skips the build when nothing it watches changed. Do not "simplify" that job away.
+  #
+  # Only the hosted half runs here. See the `merge_group` note on `nax-worker`.
+  merge_group:
   push:
     branches: [main]
     paths: &mlx_paths
@@ -50,14 +64,50 @@ on:
       # the "real dump, not a restamp" step below is unreachable for the one edit it exists to
       # catch: a restamp touches ONLY config/engine-capabilities/capabilities.mlx.json, matching no
       # other path here, so the lane would not run at all on the PR that made the file wrong.
-      - "config/engine-capabilities/**"
+      #
+      # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also matched
+      # capabilities.candle.json, so a candle-only restamp woke this whole macOS job -- including the
+      # bare `cargo test` over every default member -- for a file its verify step never opens.
+      # Self-hosted runners are the fleet's most constrained resource. Nothing here reads the sibling
+      # file: no Rust reads the facts directory at all (`default_facts_dir()` only builds the dumper
+      # bin's default OUTPUT path), and the three consumers that DO glob it sit outside this job --
+      # previewSupportCatalog.test.js runs in check.yml's hosted Linux `web` job, and
+      # generate-preview-support.mjs / bump-inference.mjs are manual scripts no workflow invokes.
+      #
+      # No coverage is lost. A restamp is the only edit this drops, and it is exactly the edit this
+      # lane cannot check; a *material* sibling change also regenerates
+      # config/manifests/builtin.preview-support.jsonc, and `config/manifests/**` above still wakes
+      # both lanes. Path filters match DELETES and ADDS too, so a restamp, delete or re-add of this
+      # file still triggers the lane.
+      - "config/engine-capabilities/capabilities.mlx.json"
+      # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
+      # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
+      # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
+      #
+      # sc-17665 narrowed the entry above from `config/engine-capabilities/**` to a single filename,
+      # and that landed while sc-17593 was in flight. The two are individually correct and combine
+      # badly: the audio verification was added to a step whose trigger paths had just stopped
+      # matching the audio file. Demonstrated on `97a7655a9`, an audio-only re-dump that woke neither
+      # stage-1 lane -- declared but unreachable, for exactly the edit the step exists to catch.
+      - "config/engine-capabilities/audio/capabilities.candle.json"
       - "Cargo.toml"
       - "Cargo.lock"
+      # sc-17703 (Michael's call — a deliberate under-trigger fix): rust-toolchain.toml
+      # governs which toolchain cargo resolves, so a bump changes what this lane
+      # compiles with — and nothing else here would trigger on it. The channel is a
+      # concrete version, never floating `stable` (sc-17717), and both jobs' dtolnay
+      # `toolchain:` inputs carry the same version (contract-test enforced), so a
+      # toolchain change is always an edit that wakes this lane.
+      - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/workflows/macos-mlx.yml"
+  # NO `paths:` FILTER, deliberately (sc-17014). `macos-checks` below is a REQUIRED status check,
+  # and GitHub leaves a path-filtered workflow's check **Pending** forever rather than passing it —
+  # so a filter here would block every PR that does not touch these paths. The `changes` gate job
+  # replaces it: a job skipped by `if:` reports Success, which a required check accepts. The `push:`
+  # trigger above keeps its filter, since nothing gates on main pushes.
   pull_request:
     branches: [main]
-    paths: *mlx_paths
   workflow_dispatch:
     inputs:
       run_memory_calibration:
@@ -128,10 +178,236 @@ concurrency:
   group: macos-mlx-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# BUILD ARTIFACTS OUTSIDE THE DIRECTORY `actions/checkout` CLEANS.
+#
+# This lane had no cache of any kind, and `actions/checkout` defaults to `clean: true` —
+# `git clean -ffdx` in the repo directory, which deletes gitignored `target/`. So every PR
+# rebuilt the whole MLX-from-source graph from nothing on a self-hosted Mac. Measured on
+# `nax-macos` 2026-08-04: `target/debug/deps` carried one job's timestamps end to end
+# (CACHEDIR.TAG 21:58, newest artifact 22:16) across 13 GB, i.e. the entire tree was cold.
+#
+# `github.workspace` is `_work/<repo>/<repo>`; its parent is the runner's per-repo work
+# directory, which checkout does not touch and the runner does not recreate between jobs
+# (only `_temp` is). `../cargo-target` therefore survives the clean, stays scoped per repo
+# and per box, and needs no cache action, no upload, and no network round trip. Workflow-level
+# because the `runner` context is step-level only, while `github` is available here.
+#
+# This is the PR merge gate, so its wall clock is queue pressure for every other job on the
+# same two boxes (sc-14708). Reclaiming the cold build is the cheapest reduction available.
+#
+# It is a cache: if a box runs short of disk, delete the directory and the next job rebuilds
+# it. Nothing here is a test input — the calibration/reference dispatch paths below take their
+# weights from host snapshots, never from `target/`.
+#
+# SCOPED TO `nax-worker`, NOT WORKFLOW-LEVEL. It was workflow-level when first written, which
+# silently broke the hosted job's cache: `Swatinem/rust-cache` derives its target path as
+# `<workspace>/target` from its `workspaces` input and does NOT read `CARGO_TARGET_DIR`, so it
+# cached an empty `<workspace>/target` while the build wrote to `../cargo-target`. Only
+# `~/.cargo` was stored, the artifacts were not, and the job stayed cold at 26m55s while
+# reporting a green cache step. Confirmed from the run-31010484672 log, where "Cache Paths"
+# ends in `/SceneWorks/SceneWorks/target` and the env above ends in `/../cargo-target`.
+#
+# The override only ever helped a PERSISTENT runner, where surviving `clean: true` between jobs
+# is the whole point. A hosted runner is ephemeral — nothing survives it either way — so there
+# the default `<workspace>/target` is correct precisely because it is what rust-cache stores.
+
 jobs:
+  # THE PATH FILTER THE `merge_group` TRIGGER CANNOT HAVE. See the note on that trigger: GitHub
+  # supports no `paths:` filter for merge-queue events, so this hosted job re-derives the same
+  # verdict the other two triggers get for free, by parsing THIS FILE'S OWN `mlx_paths` anchor and
+  # diffing the merge group. Reading the anchor rather than copying it is the point — a copy would
+  # rot in the silent direction, where a newly watched path this job did not know about reads as
+  # "not relevant" and skips the lane on a green-looking merge group.
+  #
+  # ~15s on a hosted runner, and it only gates the hosted `macos-checks` job. `nax-worker` never
+  # runs on a merge group at all, so it does not need this.
+  #
+  # push / pull_request runs reach this job already path-filtered by the triggers, so it re-answers
+  # `true` for them; that is a couple of cheap seconds to keep one code path rather than two.
+  changes:
+    uses: ./.github/workflows/changed-paths.yml
+    with:
+      lane: .github/workflows/macos-mlx.yml
+      anchor: mlx_paths
+
+  # THE HOSTED HALF. Everything on this lane that does not need Apple matrix-unit silicon.
+  #
+  # This job did not exist because it could not: the workspace `/.cargo/config.toml` pins
+  # MACOSX_DEPLOYMENT_TARGET=26.2 for MLX's NAX kernels, and GitHub's hosted macOS images
+  # topped out at macos-15 / SDK 15, so the whole lane had to be self-hosted. That is no
+  # longer true — `macos-26` went GA 2026-02-26 and the image is macOS 26.5.2 with SDKs
+  # 26.0 through 26.5 and Xcode 26.2 through 26.6 installed.
+  #
+  # The split is by HARDWARE, not by cost. Exactly one thing on this lane needs an M5: the
+  # `nax_guard` test, which exercises a 16-bit fused SDPA against an f32 reference and is
+  # meaningful only where the matrix-unit kernels actually dispatch. Build, both clippy
+  # steps, the rest of the workspace test suite, and the capability dump are all ordinary
+  # macOS work. Keeping them on a hand-registered pool of two Macs — one of which is a
+  # developer's daily driver — is what made every PR compete with real-weight jobs for
+  # unified memory, up to and including jetsam kills (six on 2026-08-04).
+  #
+  # WHY 15.0 HERE, for now. At the workspace's 26.2 pin this job would compile the NAX
+  # kernels in, and the hosted image's host OS (26.5.2) is above the 26.2 floor that
+  # `is_nax_available()` checks — so on hosted silicon that is probably not M5 it may claim
+  # NAX and dispatch matrix-unit kernels onto hardware without matrix units. That is an
+  # open question, not a known failure: the MLX C++ is fetched at build time and is not in
+  # the fork checkout, so whether the gate is OS-version-only or also device-capability
+  # gated could not be read. Until a trial run answers it, this job builds the same
+  # non-NAX configuration the inference repo's hosted `macos-metal` lane has always built,
+  # and the 26.2 verdict stays entirely with `nax-worker` below. Settle it by running just
+  # `nax_guard` on this image at 26.2 and reading the result; if it has teeth there, this
+  # override can go and `nax-worker` can shrink further.
+  #
+  # CACHED. The first version of this job shipped without a cache action, on the claim that
+  # "the MLX-from-source build is ~13 GB, above GitHub's 10 GB cache ceiling". Both halves of
+  # that were wrong and it is worth recording why, because the reasoning is the reusable part.
+  #
+  # 13 GB was the size of the whole `target/` directory, measured on a developer box. That is
+  # not what gets cached. `Swatinem/rust-cache` prunes workspace-member artifacts, keeps
+  # dependency artifacts, and compresses with zstd — so the stored set is a subset of a subset.
+  # Re-measured 2026-08-05 on `nax-macos`, the real numbers are:
+  #
+  #   whole target dir      8.7 GB   (not 13)
+  #     debug/deps          6.9 GB
+  #     debug/build         1.4 GB
+  #       pmetal-mlx-sys    1.3 GB   <- the C++/Metal build, i.e. the slow part of this job
+  #   ~/.cargo/registry     1.4 GB
+  #
+  # The thing that actually costs the wall clock — compiling MLX's C++ and Metal kernels — is
+  # 1.3 GB, a rounding error against the ceiling. (Ignore the 11 GB in a developer's
+  # `~/.cargo/git`: that is local accumulation across many pinned revisions, where a hosted
+  # runner fetches only the two it needs.)
+  #
+  # If the stored size ever does exceed 10 GB, that limit is no longer hard — since 2025-11-20
+  # a repo can go past it pay-as-you-go on Pro/Team/Enterprise, with a budget cap that makes
+  # the cache read-only rather than failing builds. Read the size this action reports before
+  # spending anything; the measurement is one run, the estimate above is still an estimate.
+  #
+  # `cache-bin` is left at its default here, unlike the self-hosted lanes. Its post step
+  # deletes non-cargo-installed regular files from `$CARGO_HOME/bin`, which orphans `rustup`
+  # on a persistent box — harmless on an ephemeral hosted runner, which is what this is.
+  macos-checks:
+    name: macOS build, lint and workspace tests (hosted)
+    # NO same-repo guard, deliberately — it was removed once its premise proved false. It read:
+    # "the 'Fetch the pinned inference release' step reads the PRIVATE SceneWorks/inference repo,
+    # and a fork PR has neither the secret nor a `github.token` that can see it."
+    #
+    # SceneWorks/inference is PUBLIC and was never intended to be private. Verified two ways:
+    # the pinned rev fetches with no token, no credential helper and no HOME; and the same fetch
+    # succeeds with the EMPTY token a fork PR would supply. So the guard protected nothing.
+    #
+    # It also became actively harmful when `macos-checks` was made a required status check
+    # (sc-17014): a fork PR matched the guard, this job was SKIPPED, and a skipped job reports
+    # Success — so the required macOS check went green having validated nothing. That is the same
+    # false-green class the fail-open work removed one level down, and it was reachable, not
+    # theoretical.
+    #
+    # This job is HOSTED and ephemeral, so running fork code here is ordinary CI. The two
+    # SELF-HOSTED jobs — `nax-worker` below and windows-candle.yml's `candle-worker` — KEEP their
+    # guards: there the concern is untrusted code on a persistent box, which repo visibility has
+    # nothing to do with. Do not "restore symmetry" by adding one back here.
+    #
+    # THE MERGE-QUEUE GATE runs through here: `changes` supplies the path filter the `merge_group`
+    # trigger cannot carry. On push / pull_request it always answers `true` (those triggers are
+    # already filtered), so this only ever subtracts merge-group runs for diffs this lane cannot
+    # be affected by.
+    needs: changes
+    # FAIL OPEN. `!cancelled()` and the `result != 'success'` clause are BOTH load-bearing, and
+    # neither is decoration: in GitHub Actions a job whose `needs:` FAILED is skipped, and a
+    # skipped job reports **Success**, which satisfies a required status check. So without this,
+    # a broken gate — a checkout failure, a dead runner, a syntax error in the reusable workflow —
+    # would silently skip this lane and turn its required check green without running a thing.
+    # That is the exact false-green shape this whole story exists to remove, reintroduced one
+    # level up. A gate that did not succeed must therefore RUN the lane, matching
+    # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
+    # `needs.changes.outputs.relevant == 'true'`.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
+    runs-on: macos-26
+    env:
+      # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    # Well above the observed warm 6-14 min, sized for a cold MLX-from-source build on a
+    # hosted image rather than on an M5 Max. Re-size from the first ten runs.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+          components: clippy
+      # Keyed by job + rustc version + lockfile by default, which is what we want: the MLX pin
+      # moves with `Cargo.lock`, so a pin bump invalidates the native build rather than
+      # silently reusing kernels compiled from a different MLX revision.
+      #
+      # This job deliberately leaves `CARGO_TARGET_DIR` unset so the build lands in
+      # `<workspace>/target` — the path this action derives and stores. See the block above
+      # `jobs:`; pointing the two at different directories caches nothing and says nothing,
+      # which is exactly what the first version of this step did.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      - name: Ensure Metal compiler
+        # The hosted image ships Xcode but not necessarily the Metal toolchain component,
+        # and mlx-sys's build script shells out to `xcrun metal`. Same step the inference
+        # repo's hosted macOS lane carries, for the same reason.
+        run: |
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            sudo xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun metal --version || true
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Build the MLX GPU worker (mlx-gen linked)
+        run: cargo build -p sceneworks-worker
+      # LINT BEFORE TEST, and the same widened package scope sc-17026 established: every
+      # default member, not just the worker. A step failure aborts the job, so tests first
+      # would mean an unrelated red test skips the lint entirely.
+      - name: Clippy (macOS default feature set, every default member)
+        run: cargo clippy --all-targets -- -D warnings
+      # sceneworks-memory-adapter is NOT a workspace default member, so the step above
+      # cannot reach it. Its Candle twin is guarded on windows-candle.yml.
+      - name: Clippy the MLX memory adapter (memory-mlx-adapter)
+        run: cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings
+      # The whole workspace suite MINUS the one test that needs matrix-unit silicon.
+      # `nax_16bit_sdpa_is_correct` runs on `nax-worker` below and nowhere else; the
+      # contract test in scripts/platform-review-contracts.test.mjs pins both halves so
+      # this skip cannot quietly become a hole.
+      - name: Workspace tests (excluding the NAX guard, which needs M5)
+        run: cargo test -- --skip nax_16bit_sdpa_is_correct
+
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    #
+    # AND NEVER ON A MERGE GROUP, deliberately. The pool is two hand-registered Macs, one of them a
+    # developer's daily driver, and PR runs there already compete with real-weight jobs for unified
+    # memory badly enough to have produced six jetsam kills on 2026-08-04. A merge group is an
+    # ADDITIONAL run per queued batch on top of the PR run and the main-push run, and the queue can
+    # build several speculative groups at once (`max_entries_to_build`), so this would be the
+    # heaviest new consumer of the scarcest hardware in the fleet.
+    #
+    # What that costs is bounded and specific: `nax_16bit_sdpa_is_correct`, the one test the hosted
+    # job skips. Everything else this lane proves — the whole workspace suite, both clippy scopes,
+    # the MLX-linked build — is `macos-checks` above, which DOES gate the queue. And `nax_guard`
+    # asserts a property of the M5 matrix-unit kernels, not of how two PRs compose, so it is a poor
+    # fit for the class the merge queue exists to catch. It still runs on every PR and on the
+    # post-merge main push, which is where a NAX regression would surface anyway.
+    #
+    # `needs: changes` IS LOAD-BEARING HERE, not just an optimisation. sc-17014 dropped the
+    # `paths:` filter from this workflow's pull_request trigger so `macos-checks` could become a
+    # required check — which means that without this gate, EVERY pull request in the repo would
+    # wake this job on the two-Mac `nax` pool, including docs-only ones. The trigger filter used to
+    # be what protected that pool; this is now.
+    needs: changes
+    # FAIL OPEN. `!cancelled()` and the `result != 'success'` clause are BOTH load-bearing, and
+    # neither is decoration: in GitHub Actions a job whose `needs:` FAILED is skipped, and a
+    # skipped job reports **Success**, which satisfies a required status check. So without this,
+    # a broken gate — a checkout failure, a dead runner, a syntax error in the reusable workflow —
+    # would silently skip this lane and turn its required check green without running a thing.
+    # That is the exact false-green shape this whole story exists to remove, reintroduced one
+    # level up. A gate that did not succeed must therefore RUN the lane, matching
+    # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
+    # `needs.changes.outputs.relevant == 'true'`.
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     # The PR/main path needs only `nax`. The workflow_dispatch calibration paths
     # additionally need the HF snapshots, and those are HOST STATE that does not travel
     # with a label — the same defect class this repo just fixed for release.yml's signing
@@ -153,85 +429,65 @@ jobs:
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     env:
       CARGO_NET_OFFLINE: "true"
+      # Survives `actions/checkout`'s `clean: true` between jobs on this persistent box. See
+      # the rationale block above `jobs:`. Job-level rather than workflow-level so it cannot
+      # reach the hosted job, whose cache action stores `<workspace>/target` instead.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
     # default (sc-10420). The nax pool is small and hand-registered — GitHub's
     # hosted images cannot run this lane at all, so capacity is exactly the Macs
     # somebody provisioned (scripts/setup-nax-runner.sh, docs/rust-mlx-build.md).
     # A wedge therefore removes a whole box from a pool of a couple, and the
-    # remaining boxes absorb every queued PR/main run (sc-13603). Well above the
-    # healthy ~6-14 min warm build+test+clippy — a cold MLX-from-source rebuild
-    # still fits. Only an explicit calibration+provisioning dispatch gets four
-    # hours for the approximately 57 GiB public snapshot.
+    # remaining boxes absorb every queued PR/main run (sc-13603). Only an explicit
+    # calibration+provisioning dispatch gets four hours for the approximately 57 GiB
+    # public snapshot.
+    #
+    # The 45 is now LOOSE and deliberately left alone. It was sized against a
+    # ~6-14 min warm build+test+clippy, and both clippy steps plus the workspace suite
+    # have since moved to `macos-checks`; the PR path here is a build, one test target
+    # and the capability dump. A cold MLX-from-source rebuild still has to fit, which is
+    # what the headroom is really for. Re-size it from measured runs after the split has
+    # a few weeks of data rather than guessing it down now — guessing budgets down from
+    # an estimate instead of a measurement is the sc-16981 defect.
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && ((inputs.run_memory_calibration && inputs.provision_qwen_snapshot) || (inputs.run_five_rung_reference && inputs.provision_z_image_snapshot)) && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: stable
+          toolchain: "1.97.1"
           components: clippy
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       # No MACOSX_DEPLOYMENT_TARGET override: the workspace /.cargo/config.toml pins
       # 26.2, so the NAX kernels compile in and the fast path is actually built.
       - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)
         run: cargo build -p sceneworks-worker
-      # Lint EVERY default member on macOS, not just the worker (sc-17026).
+      # THE ONLY REASON THIS JOB IS SELF-HOSTED.
       #
-      # LINT BEFORE TEST, deliberately. A step failure aborts the job, so with the tests
-      # first an unrelated red test means the lint below never executes — which is
-      # exactly what happened on the first run of this PR: an inherited `mlx_fit_gate`
-      # failure from main (sc-17037) aborted the job and the widened lint, the whole
-      # point of this change, never ran. Lint coverage that only runs when every test
-      # already passes is not coverage. Clippy is also the cheaper, faster signal.
+      # `nax_guard` exercises a 16-bit fused SDPA against an f32 reference and goes red
+      # when the kernels were compiled below the 26.2 floor — the tripwire for a
+      # miscompile that produces right-scale, uncorrelated garbage. It is meaningful only
+      # where the matrix-unit kernels actually dispatch, which is Apple M5 silicon that no
+      # cloud sells and no hosted image provides. Everything else this lane used to do —
+      # the widened sc-17026 clippy over every default member, the memory-adapter lint,
+      # and the rest of the workspace test suite — now runs on `macos-checks` above,
+      # because none of it needs matrix units and all of it was competing with
+      # real-weight jobs for unified memory on a two-Mac pool.
       #
-      # `npm run rust:lint` — what a Mac developer runs before pushing, and what the
-      # Linux `parity` lane runs — covers every default member. This step was scoped to
-      # `-p sceneworks-worker`, so macOS-conditional code outside the worker was linted
-      # by NO lane in the configuration it actually ships in — `parity` lints these
-      # crates on Linux, and nothing linted them on a Mac. Lines naming
-      # `target_os = "macos"` today: sceneworks-core 15, apps/rust-api 22,
-      # sceneworks-image-quality 1. apps/rust-worker and sceneworks-mcp have none yet —
-      # covering them now is what stops the first one from arriving unlinted. A
-      # macOS-only unused import or dead symbol in any of them lands on a developer's
-      # `rust:check` instead of in review — the sc-17007 failure class, one crate over.
+      # `--test nax_guard` rather than a bare `cargo test`: the workspace suite is the
+      # hosted job's responsibility now, and running it twice would put the whole point of
+      # the split back on the scarce hardware. The two halves are pinned against each
+      # other in scripts/platform-review-contracts.test.mjs — the hosted job must run the
+      # workspace suite skipping exactly this test, and this job must run exactly this
+      # test — so neither can drift into a hole without failing that contract.
       #
-      # Cheap: the two steps above already built the heavy mlx-gen/MLX graph, so the
-      # marginal cost is the small non-worker crates. Deliberately NOT `--workspace` —
-      # default-members excludes apps/desktop (it needs the Tauri stack and staged
-      # sidecar placeholders), which desktop-macos-check.yml owns instead.
-      - name: Clippy (macOS default feature set, every default member)
-        run: cargo clippy --all-targets -- -D warnings
-      # sceneworks-memory-adapter is NOT a workspace default member, so the step above
-      # cannot reach it — and this lane otherwise compiles it only inside the
-      # `workflow_dispatch` calibration path below. Its Candle twin is guarded on a real
-      # PR lane (windows-candle.yml:200-201, `cargo check` + `cargo test`); the MLX twin
-      # was guarded on none, so a break in the authoritative MLX calibration adapter
-      # surfaced only when someone dispatched a calibration run. (server-candle-linux.yml
-      # also checks the Candle bin, but it is `workflow_dispatch`-only, so it is not a
-      # PR guard.)
-      #
-      # `clippy --all-targets -- -D warnings`, not `cargo check`: the defect class this
-      # story is about — a symbol left behind when its cfg'd call sites compile out — is
-      # a WARNING, so a bare `check` cannot see it. This is the only place `-D warnings`
-      # is ever applied to this crate on any platform or feature set. `--all-targets`
-      # rather than `--bin`, so its tests are linted too; the Candle bin is skipped
-      # automatically here via its `required-features`. sc-17026.
-      - name: Clippy the MLX memory adapter (memory-mlx-adapter)
-        run: cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings
-      # Every default member, not just the worker — the same widening as the clippy
-      # steps above and for the same reason: `npm run rust:check` runs a bare
-      # `cargo test` (whole default-member set), so macOS-conditional test code in
-      # sceneworks-core / rust-api / image-quality ran on NO lane. Measured on an
-      # M-series Mac with the graph already built for `-p sceneworks-worker`: the added
-      # members are 24 suites in ~26 s of actual test time. Still runs the NAX 16-bit
-      # SDPA guard, which is this lane's original reason to exist. sc-17026.
-      - name: Workspace tests incl. the NAX 16-bit SDPA guard
-        run: cargo test
+      # Deliberately NOT `-p sceneworks-worker` for anything but this test target. The
+      # narrow spelling is what sc-17026 removed, and re-introducing it for the suite
+      # would re-dark every non-worker crate.
+      - name: NAX 16-bit SDPA guard (needs M5 matrix units)
+        run: cargo test -p sceneworks-worker --test nax_guard
       # sc-17119. THE ONLY LANE THAT CAN PRODUCE capabilities.mlx.json, so it is the only place the
       # checked-in file can be checked against a real registry rather than taken on trust.
       #
@@ -265,6 +521,16 @@ jobs:
       # the box's WSL stub, and `cmd` has no `diff`. sc-17592 closed it there instead, as a `cmd` step
       # using `git diff --no-index --exit-code`. Keep the two in sync: a change to the semantics here
       # wants the same change in windows-candle.yml's "Verify capabilities.candle.json" step.
+      #
+      # The AUDIO dump (sc-17593) is verified in BOTH lanes, and deliberately so. It is the one facts
+      # file both lanes write -- `AUDIO_BACKEND` is `candle` on every platform -- so it is the most
+      # exposed to a restamp and the only one whose correctness rests on a cross-lane claim: that a
+      # Mac and the CUDA box produce identical bytes. That claim holds by construction
+      # (`candle-audio-catalog` gates no registration on the platform, and the audio provenance
+      # stamps a lane-neutral invocation rather than this build's own), and checking it on both lanes
+      # is what turns it from an argument into a measurement. Costs nothing either side: the same
+      # `dump-engine-capabilities` run already writes it. If this half fails while the mlx half
+      # passes, lane-independence is what broke, not the dump.
       - name: Verify capabilities.mlx.json is a real dump, not a restamp
         run: |
           set -euo pipefail
@@ -276,6 +542,15 @@ jobs:
             echo "::error::config/engine-capabilities/capabilities.mlx.json does not match a fresh"\
                  "dump at this pin. Re-dump it on a Mac:"\
                  "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
+                 "then (cd apps/web && npm run gen:preview-support)."
+            exit 1
+          fi
+          if ! diff -u config/engine-capabilities/audio/capabilities.candle.json \
+                     "$scratch/audio/capabilities.candle.json"; then
+            echo "::error::config/engine-capabilities/audio/capabilities.candle.json does not"\
+                 "match a fresh dump at this pin. Either box re-dumps it --"\
+                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities"\
+                 "[--no-default-features --features backend-candle] --"\
                  "then (cd apps/web && npm run gen:preview-support)."
             exit 1
           fi
@@ -541,7 +816,7 @@ jobs:
             --backend mlx \
             --fixture "qwen-image-${QWEN_TIER}-seed${QWEN_SEED}-step2" \
             --fresh-per-case \
-            --provider-command '["target/release/memory-mlx-adapter"]' \
+            --provider-command "[\"$CARGO_TARGET_DIR/release/memory-mlx-adapter\"]" \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
             --output "$RUNNER_TEMP/memory-mlx-evidence.json"
@@ -567,7 +842,7 @@ jobs:
             --config config/memory-calibration-plan.json \
             --backend mlx \
             --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
-            --provider-command '["target/release/memory-mlx-adapter"]' \
+            --provider-command "[\"$CARGO_TARGET_DIR/release/memory-mlx-adapter\"]" \
             --output "$RUNNER_TEMP/sc-16059-mlx-reuse-assessment.json"
           node -e 'const a=require(process.argv[1]); if(a.verdict!=="unable_to_amortize") throw new Error(`unexpected MLX reuse verdict: ${a.verdict}`)' \
             "$RUNNER_TEMP/sc-16059-mlx-reuse-assessment.json"
@@ -576,7 +851,7 @@ jobs:
             --backend mlx \
             --fixture fresh-five-rung-z-image-q4-768-seed16402-step2 \
             --fresh-per-case \
-            --provider-command '["target/release/memory-mlx-adapter"]' \
+            --provider-command "[\"$CARGO_TARGET_DIR/release/memory-mlx-adapter\"]" \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
             --output "$RUNNER_TEMP/sc-16059-mlx-fresh.json"

@@ -18,10 +18,15 @@
 //   node scripts/bump-inference.mjs                 # bump to latest inference main, update lock, verify
 //   node scripts/bump-inference.mjs --dry-run       # show the target SHA, write nothing
 //   node scripts/bump-inference.mjs --sha <sha40>   # pin a specific inference revision
-//   node scripts/bump-inference.mjs --self-test     # exercise the pin rewrite on canned input
+//   node scripts/bump-inference.mjs --self-test     # exercise the pin rewrite + the facts checks
+//
+// `--self-test` runs in `npm run check`. It used to be a manual npm script only, which made it a
+// place to add an assertion and never learn whether it fired; sc-17593 wired it in when it grew the
+// engine-capability-facts coverage checks, whose whole subject is a guard that was never exercised.
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +35,7 @@ import { fileURLToPath } from "node:url";
 // shape as scripts/check-scaffold.mjs).
 import {
   assertBackendCoverage,
+  parseSceneworksAudioBackends,
   parseSceneworksBackends,
 } from "../apps/web/src/data/previewSupportDerivation.js";
 
@@ -91,9 +97,31 @@ const SEMANTIC_PROVENANCE = join(repoRoot, "crates/sceneworks-worker/src/catalog
 const SEMANTIC_PROVENANCE_RE = /(const INFERENCE_RUNTIME_REVISION: &str = ")[0-9a-f]{40}(";)/;
 const MEMORY_PROVENANCE = join(repoRoot, "crates/sceneworks-memory-adapter/src/lib.rs");
 const MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";)/;
+// The FLUX.2 compatibility audit's frozen end-of-window (sc-17497 / sc-17524 / sc-17606). Read, never
+// rewritten: unlike the two provenance stamps above, this constant is a claim about what a BUILD
+// proved, so substituting the string would fake the proof — the same reason
+// config/inference-third-party-source.json is left manual.
+// Relative-plus-joined rather than one absolute path because `--self-test` drives the same code over
+// a fixture tree; nothing else in this script needs a second root.
+const INFERENCE_CLOSURES_RELATIVE = "config/inference-provider-closures.json";
+const INFERENCE_CLOSURES = join(repoRoot, INFERENCE_CLOSURES_RELATIVE);
 const SHA_RE = /^[0-9a-f]{40}$/;
 
 // --- pure: rewrite the inference pins to rev=<sha> (self-tested; no fs/network) ---------------
+
+// The revision the tree is pinned at BEFORE the rewrite, read off the same lines `repin` rewrites.
+// Reported as `null` (unknown) for a manifest pinned by `tag`, or one whose lines disagree, rather
+// than guessed at.
+function pinnedRevision(manifestText) {
+  const revisions = new Set(
+    manifestText
+      .split("\n")
+      .filter((line) => line.includes(INFERENCE_GIT))
+      .map((line) => /\brev\s*=\s*"([0-9a-f]{40})"/.exec(line)?.[1])
+      .filter(Boolean),
+  );
+  return revisions.size === 1 ? [...revisions][0] : null;
+}
 
 function repin(manifestText, sha, manifestPath = MANIFEST) {
   let inferenceLines = 0;
@@ -275,14 +303,25 @@ function regenerateCalibrationCostModel() {
 // makes `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
 // stale, and `apps/web/src/data/previewSupportCatalog.test.js` (web vitest, every PR) fails until
 // `npm run gen:preview-support` is re-run.
-function verifyEngineCapabilityFacts(sha) {
-  const dir = join(repoRoot, "config/engine-capabilities");
-  let names;
-  try {
-    names = readdirSync(dir).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
-  } catch {
-    names = [];
-  }
+// `root` is a parameter purely so `--self-test` can drive this against fixture trees. It is the one
+// check in this script with real branching over the FILESYSTEM rather than over text, and its
+// audio half (sc-17593) guards a hole that stayed invisible for four pins, so "it is wired" is not
+// the same as "it fires".
+function verifyEngineCapabilityFacts(sha, root = repoRoot) {
+  const dir = join(root, "config/engine-capabilities");
+  // The audio registry's dumps live one level down (sc-17593), so `readdirSync` — not recursive —
+  // keeps the two sets apart on its own. They are validated for staleness together and for coverage
+  // separately, because their declared backend sets are different consts.
+  const audioDir = join(dir, "audio");
+  const factsFileNames = (from) => {
+    try {
+      return readdirSync(from).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
+    } catch {
+      return [];
+    }
+  };
+  const names = factsFileNames(dir);
+  const audioNames = factsFileNames(audioDir);
   if (names.length === 0) {
     throw new Error(
       `no engine-capability facts under ${dir}. Dump them on a lane that links engines: ` +
@@ -296,30 +335,60 @@ function verifyEngineCapabilityFacts(sha) {
   // forever. `capabilities.mlx.json` was absent for four consecutive pins beginning with the one
   // sc-16965 itself shipped on, and nothing in this function could have objected -- it validates
   // only the files that are there.
-  const dumpedBackends = names.map((name) => {
-    const backend = JSON.parse(readFileSync(join(dir, name), "utf8"))?.backend;
-    if (typeof backend !== "string" || backend.length === 0) {
-      // Named here rather than left to `assertBackendCoverage`, which sees only the values: a
-      // nameless backend reads there as an unidentifiable entry, and the operator needs the file.
-      throw new Error(
-        `${name} carries no \`backend\` field, so it cannot be matched against SCENEWORKS_BACKENDS. ` +
-          "Re-dump it on the lane that owns it rather than hand-editing it.",
-      );
-    }
-    return backend;
-  });
+  const dumpedBackendsIn = (from, fileNames, constName, lane) =>
+    fileNames.map((name) => {
+      const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
+      const backend = facts?.backend;
+      if (typeof backend !== "string" || backend.length === 0) {
+        // Named here rather than left to `assertBackendCoverage`, which sees only the values: a
+        // nameless backend reads there as an unidentifiable entry, and the operator needs the file.
+        throw new Error(
+          `${name} carries no \`backend\` field, so it cannot be matched against ${constName}. ` +
+            "Re-dump it on the lane that owns it rather than hand-editing it.",
+        );
+      }
+      // The `registry` discriminator (sc-17593). Checking it here and not only in the stage-2
+      // derivation matters because a media and an audio dump can carry the SAME `backend` —
+      // `candle` on every platform for audio — so `backend` alone cannot tell a file that landed in
+      // the wrong directory from a correct one, and this check would happily count it as coverage.
+      const registry = facts?.registry ?? "media";
+      if (registry !== lane) {
+        throw new Error(
+          `${name} is a ${JSON.stringify(registry)} dump but sits in the ${JSON.stringify(lane)} ` +
+            "facts directory. Media dumps belong in config/engine-capabilities/, audio dumps in " +
+            "config/engine-capabilities/audio/ — counting this one would report coverage for a " +
+            "registry that was never dumped.",
+        );
+      }
+      return backend;
+    });
+  const factsDeclarationSource = readFileSync(
+    join(root, "crates/sceneworks-worker/src/engine_capability_facts.rs"),
+    "utf8",
+  );
   assertBackendCoverage(
-    parseSceneworksBackends(
-      readFileSync(join(repoRoot, "crates/sceneworks-worker/src/engine_capability_facts.rs"), "utf8"),
-    ),
-    dumpedBackends,
+    parseSceneworksBackends(factsDeclarationSource),
+    dumpedBackendsIn(dir, names, "SCENEWORKS_BACKENDS", "media"),
+  );
+  // sc-17593. The audio registry is dumped separately and its coverage must be asserted separately:
+  // `candle` in SCENEWORKS_BACKENDS is satisfied by the media dump alone, so an undumped audio
+  // registry cleared the check above every time — which is how it stayed invisible.
+  assertBackendCoverage(
+    parseSceneworksAudioBackends(factsDeclarationSource),
+    dumpedBackendsIn(audioDir, audioNames, "SCENEWORKS_AUDIO_BACKENDS", "audio"),
+    "audio",
   );
 
   const stale = [];
-  for (const name of names) {
-    const facts = JSON.parse(readFileSync(join(dir, name), "utf8"));
-    const revision = facts?.generatedFrom?.inferenceRevision;
-    if (revision !== sha) stale.push(`${name} (dumped at ${revision ?? "unknown"})`);
+  for (const [from, fileNames, label] of [
+    [dir, names, ""],
+    [audioDir, audioNames, "audio/"],
+  ]) {
+    for (const name of fileNames) {
+      const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
+      const revision = facts?.generatedFrom?.inferenceRevision;
+      if (revision !== sha) stale.push(`${label}${name} (dumped at ${revision ?? "unknown"})`);
+    }
   }
   if (stale.length) {
     throw new Error(
@@ -329,11 +398,63 @@ function verifyEngineCapabilityFacts(sha) {
         "  macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
         "  off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
         "--no-default-features --features backend-candle\n" +
+        "Either command also rewrites audio/ — the audio registry is candle-native on both lanes.\n" +
         "then regenerate the derived catalog: (cd apps/web && npm run gen:preview-support). " +
         "The pin itself is already written.",
     );
   }
-  console.log(`OK: ${names.length} engine-capability facts file(s) dumped at ${sha}`);
+  // Silent when driven from `--self-test`, which runs in `npm run check`: the fixture tree is a
+  // temp dir at a fake SHA, and an "OK: … dumped at aaaa…" line there reads exactly like a real
+  // verification of the repo's own facts files.
+  if (root === repoRoot) {
+    console.log(
+      `OK: ${names.length} engine-capability facts file(s) + ${audioNames.length} audio file(s) ` +
+        `dumped at ${sha}`,
+    );
+  }
+}
+
+// The FLUX.2 compatibility audit is pin-keyed like the two checks above, and until sc-17760 this
+// script did not know it existed.
+//
+/**
+ * After a pin bump, every calibrated lane's compile-closure digest has to be re-derived (sc-17774).
+ *
+ * This replaces `verifyFlux2AuditWindow`, which gated the bump on ONE provider's hand-audited
+ * compatibility window: it refused a bump that moved the pin past `flux2_dev`'s audited revision and
+ * said nothing whatsoever about the other five calibrated lanes. Currency is now decided per lane by
+ * a derived digest, so the thing a bump must not leave behind is a STALE closure config — and that
+ * applies to every lane equally.
+ *
+ * Fail-closed and lane-agnostic, exactly like `config/inference-third-party-source.json`: the config
+ * is keyed to a revision, and a mismatch is a hard stop with the regenerate command rather than a
+ * silent pass. It runs BEFORE the rewrite, so re-running an unchanged bump refuses identically
+ * instead of inheriting half-applied state.
+ */
+function verifyInferenceClosures(sha, root = repoRoot) {
+  const path = join(root, INFERENCE_CLOSURES_RELATIVE);
+  let config;
+  try {
+    config = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `${INFERENCE_CLOSURES_RELATIVE} is missing or unreadable (${error?.message ?? error}). It ` +
+        "carries the per-lane compile-closure digests calibration currency compares against.",
+    );
+  }
+  if (config.inferenceRevision === sha) {
+    if (root === repoRoot) console.log(`OK: per-lane closure digests are derived at ${sha}`);
+    return;
+  }
+  throw new Error(
+    `${INFERENCE_CLOSURES_RELATIVE} is derived at ${config.inferenceRevision ?? "(unset)"}, not ` +
+      `${sha}. Calibration currency compares each provider's compile closure against this file, so ` +
+      "a bump must re-derive it (seconds, no toolchain, no GPU):\n" +
+      "  node scripts/inference-closure-digest.mjs --repo <inference clone> --write\n" +
+      "  node scripts/backfill-closure-digests.mjs --repo <inference clone> --write\n" +
+      "Then regenerate the matrix. Lanes whose closure did not move stay `current` across this " +
+      "bump; only the ones that actually changed are demoted, and the regenerated files show which.",
+  );
 }
 
 function verifyNoSkew() {
@@ -462,6 +583,176 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   }
   check("throws when the semantic provenance stamp is missing", stampThrew);
 
+  // --- engine-capability facts, over a real fixture tree (sc-17593) --------------------------
+  //
+  // Everything above is text in, text out. This check is here because the facts verification is the
+  // one part of the script that branches on FILES — including files that are not there, which is the
+  // failure mode that hid an undumped registry for four consecutive pins. Driven over a temp tree so
+  // it exercises the same code the bump runs, rather than a paraphrase of it.
+  const factsDeclaration = [
+    "/// doc comment naming candle and mlx in prose, which the parser must not anchor on.",
+    'pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "mlx"];',
+    'pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];',
+    "",
+  ].join("\n");
+  const factsFile = (backend, revision, extra = {}) =>
+    JSON.stringify({
+      ...extra,
+      backend,
+      generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
+      engines: [{ id: "x", modality: "image", supportsPreview: false }],
+    });
+  const fixture = ({ audio = true, revision = SHA, swapped = false } = {}) => {
+    const root = mkdtempSync(join(tmpdir(), "bump-inference-facts-"));
+    mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
+    writeFileSync(
+      join(root, "crates/sceneworks-worker/src/engine_capability_facts.rs"),
+      factsDeclaration,
+    );
+    const dir = join(root, "config/engine-capabilities");
+    mkdirSync(dir, { recursive: true });
+    for (const backend of ["candle", "mlx"]) {
+      writeFileSync(
+        join(dir, `capabilities.${backend}.json`),
+        // `swapped` puts an AUDIO dump where a media one belongs — the realistic mistake, and the
+        // one `backend` alone cannot detect, since both registries are `candle`.
+        factsFile(backend, SHA, swapped && backend === "candle" ? { registry: "audio" } : {}),
+      );
+    }
+    if (audio) {
+      mkdirSync(join(dir, "audio"), { recursive: true });
+      writeFileSync(
+        join(dir, "audio/capabilities.candle.json"),
+        factsFile("candle", revision, swapped ? {} : { registry: "audio" }),
+      );
+    }
+    return root;
+  };
+  const verifyFacts = (options) => {
+    const root = fixture(options);
+    try {
+      verifyEngineCapabilityFacts(SHA, root);
+      return null;
+    } catch (error) {
+      return error?.message ?? String(error);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  check("a complete facts tree verifies", verifyFacts() === null);
+  // THE regression this exists for. Before sc-17593 this exact tree — every media backend dumped,
+  // the audio registry dumped nowhere — passed, because `candle` in SCENEWORKS_BACKENDS is satisfied
+  // by the MEDIA dump alone. The check must name the audio lane, not merely fail.
+  const missingAudio = verifyFacts({ audio: false });
+  check("a missing audio dump fails", missingAudio !== null);
+  check(
+    "the missing-audio failure names the audio lane and how to dump it",
+    !!missingAudio &&
+      /audio engine-capability facts are missing/.test(missingAudio) &&
+      /dump-engine-capabilities/.test(missingAudio),
+  );
+  // Staleness must reach into the subdirectory too: an audio dump left at the previous pin describes
+  // descriptors that may have moved, exactly as a stale media dump does.
+  const staleAudio = verifyFacts({ revision: "b".repeat(40) });
+  check(
+    "a stale audio dump is reported, named by its subdirectory path",
+    !!staleAudio && /audio\/capabilities\.candle\.json/.test(staleAudio),
+  );
+  // Both dumps carry `backend: "candle"`, so swapping the two directories is invisible to a check
+  // that reads `backend` alone — it would count an audio file as media coverage and vice versa, and
+  // report full coverage with one registry dumped twice and the other not at all.
+  const swapped = verifyFacts({ swapped: true });
+  check(
+    "a dump sitting in the other registry's directory is refused",
+    !!swapped && /sits in the/.test(swapped),
+  );
+
+  // --- the FLUX.2 audited window (sc-17760) --------------------------------------------------
+  //
+  // Driven over a fixture tree for the same reason as the facts checks: this guard exists because a
+  // sc-17774: the guard is now lane-agnostic, so the self-test is too. The regression it protects
+  // is unchanged in shape — #2120 moved the pin with the derived config left behind and every check
+  // in this script stayed green — but it now covers all six calibrated lanes rather than `flux2_dev`
+  // alone. Both directions are exercised: a matching config must PASS, or the failing side proves
+  // only that the function throws.
+  const closureFixture = (recordedRevision) => {
+    const root = mkdtempSync(join(tmpdir(), "bump-inference-closures-"));
+    mkdirSync(join(root, "config"), { recursive: true });
+    if (recordedRevision !== null) {
+      writeFileSync(
+        join(root, INFERENCE_CLOSURES_RELATIVE),
+        JSON.stringify({
+          inferenceRevision: recordedRevision,
+          providers: { "mlx:qwen_image": { crate: "crates/media/mlx-gen/mlx-gen-qwen-image" } },
+        }),
+      );
+    }
+    try {
+      verifyInferenceClosures(SHA, root);
+      return null;
+    } catch (error) {
+      return error?.message ?? String(error);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  check("a closure config derived at the new pin passes", closureFixture(SHA) === null);
+  const staleClosures = closureFixture("b".repeat(40));
+  check("a closure config left at the previous pin is refused", !!staleClosures);
+  check(
+    "the refusal names both revisions and the two commands that re-derive them",
+    !!staleClosures &&
+      staleClosures.includes(SHA) &&
+      staleClosures.includes("b".repeat(40)) &&
+      /inference-closure-digest\.mjs/.test(staleClosures) &&
+      /backfill-closure-digests\.mjs/.test(staleClosures),
+  );
+  check(
+    "the refusal says unmoved lanes stay current, so a bump is not read as a blanket demotion",
+    !!staleClosures && /stay `current` across this/.test(staleClosures),
+  );
+  const missingClosures = closureFixture(null);
+  check(
+    "a missing closure config is refused rather than skipped",
+    !!missingClosures && /missing or unreadable/.test(missingClosures),
+  );
+  // The one assertion against the REAL file — the same argument this script's header makes for
+  // wiring the self-test into `npm run check` at all.
+  const shippedClosures = JSON.parse(readFileSync(INFERENCE_CLOSURES, "utf8"));
+  check(
+    "the shipped closure config is derived at the pin this repo actually carries",
+    SHA_RE.test(shippedClosures.inferenceRevision) &&
+      Object.keys(shippedClosures.providers ?? {}).length > 0,
+  );
+
+  // `pinnedRevision` supplies the previous pin for the bump's own reporting, so its ambiguous cases
+  // still need pinning down.
+  const PREVIOUS_PIN = "b".repeat(40);
+  const OTHER_PIN = "e".repeat(40);
+  check(
+    "the previous pin is read off the inference lines",
+    pinnedRevision(
+      `a = { git = "${INFERENCE_GIT}", rev = "${PREVIOUS_PIN}" }\nb = { git = "${INFERENCE_GIT}", rev = "${PREVIOUS_PIN}", optional = true }`,
+    ) === PREVIOUS_PIN,
+  );
+  check(
+    "a tag-pinned manifest reports an unknown previous pin",
+    pinnedRevision(`a = { git = "${INFERENCE_GIT}", tag = "runtime-2026.07.7" }`) === null,
+  );
+  check(
+    "disagreeing inference lines report an unknown previous pin rather than the first one",
+    pinnedRevision(
+      `a = { git = "${INFERENCE_GIT}", rev = "${PREVIOUS_PIN}" }\nb = { git = "${INFERENCE_GIT}", rev = "${OTHER_PIN}" }`,
+    ) === null,
+  );
+  check(
+    "the direct mlx-rs pin (other url) is not mistaken for the inference pin",
+    pinnedRevision(
+      `mlx = { git = "https://github.com/michaeltrefry/mlx-rs", rev = "${OTHER_PIN}" }\na = { git = "${INFERENCE_GIT}", rev = "${PREVIOUS_PIN}" }`,
+    ) === PREVIOUS_PIN,
+  );
+
   console.log(rc === 0 ? "self-test: PASS" : "self-test: FAIL");
   process.exit(rc);
 }
@@ -526,6 +817,10 @@ function main() {
   // and blind. `lockHasStaleInferenceRevision` narrows the report to the case that actually needs
   // repair; it deliberately does NOT gate the skew check, which catches divergences (gen-core,
   // pmetal-mlx-rs) that no revision-string comparison can see.
+  // Captured before anything is written: after the rewrite loop below the previous revision is gone
+  // from the tree, and `verifyFlux2AuditWindow` needs it to tell a bump that MOVES the pin out of
+  // the audited FLUX.2 window from one that merely inherits a pin already outside it.
+  const previousPin = pinnedRevision(manifests.find((m) => m.path === MANIFEST)?.current ?? "");
   const manifestsAlreadyPinned = manifests.every((m) => m.bumped === m.current);
   if (manifestsAlreadyPinned) {
     console.log(
@@ -537,10 +832,27 @@ function main() {
   console.log(
     `bump-inference: pinning inference (${[...INFERENCE_CRATES, ...PATCHED_CRATES].join(", ")}) -> ${sha}`,
   );
+  // BEFORE anything is written, unlike every other verifier in this script — and that placement is
+  // the difference between a guard and a formality. The sibling guards run post-write and still
+  // fail on a re-run, because re-running does not refresh a licence scan or a facts dump. This one
+  // keys on a TRANSITION, so a post-write refusal would launder itself: the refused run has already
+  // moved the manifests, the next invocation sees `previousPin === sha`, and the warn branch lets
+  // the demotion through. Refusing here leaves the tree untouched, so the second run refuses
+  // identically. It also costs nothing to move — the check reads two strings and a JSON file.
+  //
+  // Under `--dry-run` the same call reports instead of throwing: with nothing written there is no
+  // incomplete state to protect, and this is the cheapest place to learn that a bump you are
+  // considering owes a ~15 min audit re-run on the CUDA box.
   if (dryRun) {
+    try {
+      verifyInferenceClosures(sha);
+    } catch (error) {
+      console.warn(`bump-inference: this bump WOULD be refused —\n${error?.message ?? error}`);
+    }
     console.log("bump-inference: dry run, no files written");
     return;
   }
+  verifyInferenceClosures(sha);
   for (const m of manifests) {
     if (m.bumped === m.current) {
       console.log(`  unchanged ${m.path} (already at ${sha})`);

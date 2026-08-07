@@ -87,7 +87,6 @@ use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 const HEADROOM_GB: f64 = crate::vram_gate::HEADROOM_GB;
 
 const KREA_CONTROL_ROUTE: &str = "krea_2_turbo_control";
-const KREA_CONTROL_INFERENCE_REVISION: &str = "1899a7228deb99b65535745d09d4a5f5524565c4";
 const KREA_CONTROL_CALIBRATION: &str = "sc-16013-krea-control-direct-1024-v1";
 const KREA_CONTROL_ATTN_CHUNK_SIZE: u32 = 128 * 1024 * 1024;
 const KREA_CONTROL_DECODE_TILE_EDGE: u32 = 512;
@@ -240,6 +239,19 @@ pub(crate) fn control_block_present(manifest_entry: &JsonObject) -> bool {
 ///
 /// The shipped `krea_2_turbo` block is current after sc-16013. This remains load-bearing for future or
 /// synthetic stale entries: [`fit_ladder`] will not turn superseded evidence into a hard **reject**.
+/// The closure digest `candle.control`'s directly measured rows were captured under (sc-17774).
+///
+/// Empty when absent, which fails closed at the selector: no declared digest means nothing states
+/// what code these numbers describe, so they cannot be current against anything.
+pub(crate) fn control_closure_digest(manifest_entry: &JsonObject) -> &str {
+    manifest_entry
+        .get("candle")
+        .and_then(|candle| candle.get("control"))
+        .and_then(|control| control.get("inferenceClosureDigest"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
 pub(crate) fn control_evidence_is_current(manifest_entry: &JsonObject) -> bool {
     let Some(control) = manifest_entry.get("candle").and_then(|c| c.get("control")) else {
         return false;
@@ -359,6 +371,9 @@ fn fit_ladder_for_tier(
     evidence_is_current: bool,
     runtime_verified: bool,
     adapter_gb: f64,
+    // The `candle.control.inferenceClosureDigest` these manifest rows were measured under
+    // (sc-17774). Read from the manifest, never hardcoded.
+    measured_closure_digest: &str,
 ) -> KreaControlFit {
     let (Some(peak), Some(budget)) = (peak_gb, budget) else {
         return KreaControlFit::Unknown;
@@ -382,6 +397,11 @@ fn fit_ladder_for_tier(
     } else {
         "control_branch".to_owned()
     };
+    let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
+        "candle",
+        "krea_2_turbo_control",
+    )
+    .unwrap_or_default();
     let request = RequestScope {
         resolved_route: KREA_CONTROL_ROUTE,
         backend: "candle",
@@ -389,7 +409,8 @@ fn fit_ladder_for_tier(
         mode: "pose_control",
         overlay: Some(&overlay),
         geometry: request_geometry,
-        expected_inference_revision: KREA_CONTROL_INFERENCE_REVISION,
+        // sc-17774: one mechanism. `unwrap_or_default` fails closed on an undeclared lane.
+        expected_closure_digest: &live_closure_digest,
     };
     let bytes = |gb: f64| {
         (gb.max(0.0) * crate::fit_gate::BYTES_PER_GIB)
@@ -468,7 +489,7 @@ fn fit_ladder_for_tier(
                 .abi,
             calibration_fingerprint: KREA_CONTROL_CALIBRATION.to_owned(),
             sceneworks_revision: "sc-16013".to_owned(),
-            inference_revision: KREA_CONTROL_INFERENCE_REVISION.to_owned(),
+            inference_revision: measured_closure_digest.to_owned(),
             harness_version: "krea-control-cuda-direct-v1".to_owned(),
             predicted_peak_bytes: bytes(predicted_peak_gb),
             // The manifest records the no-adapter rendered-device observation. Adapter bytes may extend
@@ -532,6 +553,7 @@ fn fit_ladder_for_tier(
         .map(|(selection, evidence)| Candidate {
             selection: *selection,
             evidence,
+            closure_digest: measured_closure_digest,
         })
         .collect::<Vec<_>>();
     match crate::memory_strategy::select_strategy(
@@ -598,13 +620,14 @@ fn fit_ladder_for_tier(
 fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract> {
     // One directory per CALL: parallel tests sharing a per-process path race between this
     // writer and the provider's reader, which surfaces as a spurious `Unknown` ladder verdict.
-    static SNAPSHOT_SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let serial = SNAPSHOT_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "sw-krea-control-fit-{}-{serial}-{tier_key}",
-        std::process::id()
-    ));
-    let transformer = root.join("transformer");
+    // The guard also takes the snapshot with it when the call returns — the previous
+    // per-process path was never removed and had piled up 31,264 directories under `%TEMP%`
+    // on one box, the single largest leaker there (sc-17641).
+    let root = tempfile::Builder::new()
+        .prefix(&format!("sw-krea-control-fit-{tier_key}-"))
+        .tempdir()
+        .ok()?;
+    let transformer = root.path().join("transformer");
     std::fs::create_dir_all(&transformer).ok()?;
     let config = match tier_key {
         "q4" => Some(r#"{"quantization":{"bits":4,"group_size":64}}"#),
@@ -614,7 +637,7 @@ fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract
     if let Some(text) = config {
         std::fs::write(transformer.join("config.json"), text).ok()?;
     }
-    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(root));
+    let mut spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(root.path().to_path_buf()));
     if let Some(quant) = quant_for_tier_key(tier_key) {
         spec = spec.with_quant(quant);
     }
@@ -625,6 +648,7 @@ fn registered_contract_for_tier(tier_key: &str) -> Option<MemoryProviderContract
 }
 
 #[cfg(any(test, doc))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fit_ladder(
     tier_key: &str,
     peak_gb: Option<f64>,
@@ -633,6 +657,7 @@ pub(crate) fn fit_ladder(
     decode_tile_save_gb: Option<f64>,
     chunk_attn_save_gb: Option<f64>,
     evidence_is_current: bool,
+    measured_closure_digest: &str,
 ) -> KreaControlFit {
     let contract = registered_contract_for_tier(tier_key);
     fit_ladder_for_tier(
@@ -653,6 +678,7 @@ pub(crate) fn fit_ladder(
         evidence_is_current,
         true,
         0.0,
+        measured_closure_digest,
     )
 }
 
@@ -741,6 +767,7 @@ pub(crate) fn fit_ladder_for_entry_with_runtime(
         control_evidence_is_current(manifest_entry),
         runtime_verified,
         adapter_gb,
+        control_closure_digest(manifest_entry),
     )
 }
 
@@ -819,6 +846,17 @@ pub(crate) fn incurred_peak_gb_with_adapter_bytes(
 
 #[cfg(test)]
 mod tests {
+    /// The live digest for this lane, so a fixture is current unless a test deliberately says
+    /// otherwise. Read, never frozen — a literal here would go stale on the next pin bump and the
+    /// tests would silently stop exercising the admitted path.
+    fn live_test_closure_digest() -> String {
+        sceneworks_core::memory_calibration::packaged_closure_digest(
+            "candle",
+            "krea_2_turbo_control",
+        )
+        .unwrap_or_default()
+    }
+
     use super::*;
     use crate::vram_gate::VramBudget;
     use serde_json::json;
@@ -876,6 +914,10 @@ mod tests {
     }
 
     /// Flip a fixture's control block to CURRENT evidence (what sc-16013 ships).
+    ///
+    /// sc-17774: "current" now includes the closure term, so this stamps the LIVE digest for the
+    /// lane. Read rather than frozen — a literal would go stale on the next pin bump and every
+    /// ladder test below would quietly become a staleness test instead.
     fn current_evidence(mut entry: JsonObject) -> JsonObject {
         let control = entry
             .get_mut("candle")
@@ -884,6 +926,10 @@ mod tests {
             .and_then(Value::as_object_mut)
             .expect("control block");
         control.insert("measured".to_owned(), json!(true));
+        control.insert(
+            "inferenceClosureDigest".to_owned(),
+            json!(live_test_closure_digest()),
+        );
         control.remove("supersededBy");
         entry
     }
@@ -904,7 +950,66 @@ mod tests {
         tile: Option<f64>,
         chunk: Option<f64>,
     ) -> KreaControlFit {
-        super::fit_ladder("q4", peak, peak, budget, tile, chunk, true)
+        super::fit_ladder(
+            "q4",
+            peak,
+            peak,
+            budget,
+            tile,
+            chunk,
+            true,
+            &live_test_closure_digest(),
+        )
+    }
+
+    #[test]
+    fn a_stale_control_closure_falls_back_instead_of_reporting_a_fit() {
+        // sc-17774. Before this, the control lane's currency check compared
+        // `KREA_CONTROL_INFERENCE_REVISION` (as `expected_inference_revision`) against evidence this
+        // module had stamped with THE SAME CONSTANT — so the shared staleness check compared a
+        // constant to itself and could never fire. The manifest's `measured`/`supersededBy` booleans
+        // were not the primary gate; they were the only one. The ladder had been measured at
+        // `1899a722` with the pin hundreds of commits past it, and nothing noticed.
+        //
+        // Both sides are now read rather than frozen: `expected` is the live digest for
+        // `candle:krea_2_turbo_control` from the packaged closure table, and the candidate carries
+        // `candle.control.inferenceClosureDigest` from the manifest. This test drives them apart.
+        //
+        // The correct outcome is BestEffort, NOT a reject: a stale row is an unverified upper bound,
+        // and refusing on it would assert a non-fit nobody measured. Staging as far as the measured
+        // rungs allow and letting the reactive OOM backstop decide is the contract the lane already
+        // applies when the Sequential row is absent.
+        let budget = Some(budget(20.0));
+        let fresh = super::fit_ladder(
+            "q4",
+            Some(10.0),
+            Some(10.0),
+            budget,
+            Some(5.0),
+            Some(2.0),
+            true,
+            &live_test_closure_digest(),
+        );
+        assert!(
+            matches!(fresh, KreaControlFit::Fits { .. }),
+            "control point: an unmoved closure must still report a fit, or the assertion below \
+             proves nothing about staleness: {fresh:?}"
+        );
+
+        let stale = super::fit_ladder(
+            "q4",
+            Some(10.0),
+            Some(10.0),
+            budget,
+            Some(5.0),
+            Some(2.0),
+            true,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(
+            matches!(stale, KreaControlFit::BestEffort { .. }),
+            "a control ladder whose provider closure moved must not report a fit: {stale:?}"
+        );
     }
 
     /// The big-card fast path: monolithic decode, unchunked attention, nothing engaged.
@@ -1106,7 +1211,16 @@ mod tests {
         let chunk = Some(2.0);
         let starved = Some(budget(10.0)); // below every rung: 40 − 5 − 2 = 33
         assert_eq!(
-            super::fit_ladder("q4", peak, peak, starved, tile, chunk, false),
+            super::fit_ladder(
+                "q4",
+                peak,
+                peak,
+                starved,
+                tile,
+                chunk,
+                false,
+                &live_test_closure_digest()
+            ),
             KreaControlFit::BestEffort {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
@@ -1117,7 +1231,16 @@ mod tests {
             "superseded evidence must adapt maximally, never assert a non-fit"
         );
         assert_too_big(
-            super::fit_ladder("q4", peak, peak, starved, tile, chunk, true),
+            super::fit_ladder(
+                "q4",
+                peak,
+                peak,
+                starved,
+                tile,
+                chunk,
+                true,
+                &live_test_closure_digest(),
+            ),
             33.0,
             10.0,
         );
@@ -1136,6 +1259,7 @@ mod tests {
                 None,
                 None,
                 false,
+                &live_test_closure_digest(),
             ),
             KreaControlFit::BestEffort {
                 offload_policy: OffloadPolicy::Sequential,
@@ -1203,6 +1327,7 @@ mod tests {
                 None,
                 None,
                 true,
+                &live_test_closure_digest(),
             ),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
@@ -1219,6 +1344,7 @@ mod tests {
                 None,
                 None,
                 true,
+                &live_test_closure_digest(),
             ),
             KreaControlFit::BestEffort {
                 offload_policy: OffloadPolicy::Sequential,
@@ -1240,7 +1366,8 @@ mod tests {
                 Some(budget(20.0)),
                 Some(5.0),
                 Some(2.0),
-                true
+                true,
+                &live_test_closure_digest(),
             ),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
@@ -1346,7 +1473,16 @@ mod tests {
         let tile = decode_tile_save_gb(&m, "bf16"); // None
         let chunk = chunk_attn_save_gb(&m); // Some(2.43)
         assert_eq!(
-            super::fit_ladder("bf16", peak, peak, Some(budget(46.0)), tile, chunk, true,),
+            super::fit_ladder(
+                "bf16",
+                peak,
+                peak,
+                Some(budget(46.0)),
+                tile,
+                chunk,
+                true,
+                &live_test_closure_digest()
+            ),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
@@ -1362,7 +1498,7 @@ mod tests {
         let budget = Some(budget(36.0));
 
         assert_eq!(
-            super::fit_ladder("q4", resident, staged, budget, None, Some(5.0), true),
+            super::fit_ladder("q4", resident, staged, budget, None, Some(5.0), true, &live_test_closure_digest()),
             KreaControlFit::BestEffort {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
@@ -1373,7 +1509,16 @@ mod tests {
             "Q4 attention engages decode, so missing decode evidence must remove the full candidate"
         );
         assert_eq!(
-            super::fit_ladder("bf16", resident, staged, budget, None, Some(5.0), true),
+            super::fit_ladder(
+                "bf16",
+                resident,
+                staged,
+                budget,
+                None,
+                Some(5.0),
+                true,
+                &live_test_closure_digest()
+            ),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
@@ -1490,6 +1635,7 @@ mod tests {
             decode_tile_save_gb(&m, tier),
             chunk_attn_save_gb(&m),
             true,
+            &live_test_closure_digest(),
         );
         if let Some(p) = incurred_peak_gb(&fit, &m, tier) {
             assert!(
@@ -1623,6 +1769,9 @@ mod tests {
                     assert_eq!(
                         fit_ladder_for_entry(&m, tier, b),
                         // `super::` — the module's real 6-arg ladder, not this test module's 4-arg helper.
+                        // The seam derives its digest from the manifest, so the direct call must
+                        // read the SAME one — otherwise this compares two different currency states
+                        // rather than the ladder logic it exists to pin (sc-17774).
                         super::fit_ladder(
                             tier,
                             predicted_control_peak_gb(&m, tier),
@@ -1631,6 +1780,7 @@ mod tests {
                             decode_tile_save_gb(&m, tier),
                             chunk_attn_save_gb(&m),
                             control_evidence_is_current(&m),
+                            control_closure_digest(&m),
                         ),
                         "{tier} @ {free} GB free: the seam must not change a priced decision"
                     );
@@ -1660,7 +1810,16 @@ mod tests {
             total_gb: 96.0,
         };
         assert_eq!(
-            super::fit_ladder("q4", peak, seq, Some(raw), tile, chunk, true),
+            super::fit_ladder(
+                "q4",
+                peak,
+                seq,
+                Some(raw),
+                tile,
+                chunk,
+                true,
+                &live_test_closure_digest()
+            ),
             KreaControlFit::Fits {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
@@ -1670,7 +1829,16 @@ mod tests {
         // Crediting the 48.2 GB the first render left in-pool readmits it at the big-card fast path.
         let reclaimed = crate::vram_gate::with_reclaimable(raw, 48.2);
         assert_eq!(
-            super::fit_ladder("q4", peak, seq, Some(reclaimed), tile, chunk, true),
+            super::fit_ladder(
+                "q4",
+                peak,
+                seq,
+                Some(reclaimed),
+                tile,
+                chunk,
+                true,
+                &live_test_closure_digest()
+            ),
             fits_nothing_engaged()
         );
 
@@ -1678,8 +1846,26 @@ mod tests {
         // constrained card is gated exactly as before).
         let reclaimed_cold = crate::vram_gate::with_reclaimable(raw, 0.0);
         assert_eq!(
-            super::fit_ladder("q4", peak, seq, Some(reclaimed_cold), tile, chunk, true),
-            super::fit_ladder("q4", peak, seq, Some(raw), tile, chunk, true)
+            super::fit_ladder(
+                "q4",
+                peak,
+                seq,
+                Some(reclaimed_cold),
+                tile,
+                chunk,
+                true,
+                &live_test_closure_digest()
+            ),
+            super::fit_ladder(
+                "q4",
+                peak,
+                seq,
+                Some(raw),
+                tile,
+                chunk,
+                true,
+                &live_test_closure_digest()
+            )
         );
     }
 }

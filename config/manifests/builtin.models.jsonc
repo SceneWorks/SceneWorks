@@ -1486,7 +1486,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1501,7 +1501,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1516,7 +1516,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1531,7 +1531,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1546,7 +1546,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -2155,76 +2155,121 @@
         // wider production capability but cannot admit a request or verify either edit sibling.
         "calibrations": [
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
             "rung": "resident", "parameters": {}
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
             "rung": "staged_residency", "parameters": {}
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
-            "rung": "bounded_decode", "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+            "rung": "bounded_decode", "parameters": { "decodeOverlap": 64, "decodeTileEdge": 512 }
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
-            "rung": "bounded_attention",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
           },
           {
-            "abi": 1,
-            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1-deferred",
-            "sceneWorksRevision": "6c05d0d26b6f5824646673a4fc4d68cd1725c31d",
-            "matrixSourceRevision": "source-tree:5b8c279c372696c6e8cb48612d63aab8fdf5240377db553f1abee92f46cdb3d3",
-            "inferenceRevision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
-            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
-            "artifactVariant": "bf16",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
-            "rung": "bounded_transformer_residency",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+            "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+            "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+            "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q4",
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
+            "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q4",
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
           }
         ],
         "memoryStrategyContract": {
@@ -4034,7 +4079,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4047,7 +4092,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4060,7 +4105,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4073,7 +4118,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4087,7 +4132,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4237,7 +4282,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4246,7 +4291,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4255,7 +4300,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4264,7 +4309,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4273,7 +4318,7 @@
           {
             "abi": 3, "loadShape": "deferred_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -5226,40 +5271,30 @@
         // record through the shared reader. No curve or area interpolation is permitted.
         "calibrations": [
           {
-            "abi": 1,
-            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            "sceneWorksRevision": "95bb4babfed69581da36132c7bb44451000ca751",
-            "matrixSourceRevision": "source-tree:52936ede1054fe43de74c66d58d1aa0114d9578f2cb857e57aa9410f76b5e41a",
-            "inferenceRevision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-            "provider": "krea_2_turbo_control",
-            "tier": "q4",
-            "mode": "text_to_image",
-            "overlay": "control:1",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
+            "provider": "krea_2_turbo_control", "tier": "q4", "mode": "text_to_image", "overlay": "control:1",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
-            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
-            "artifactVariant": "q4",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723", "artifactVariant": "q4",
             "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
-            "rung": "bounded_decode",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+            "rung": "bounded_decode", "parameters": { "decodeOverlap": 64, "decodeTileEdge": 512 }
           },
           {
-            "abi": 1,
-            "fingerprint": "krea-control-mlx-v4-q4-pose-bounded-decode-512-64",
-            "sceneWorksRevision": "95bb4babfed69581da36132c7bb44451000ca751",
-            "matrixSourceRevision": "source-tree:52936ede1054fe43de74c66d58d1aa0114d9578f2cb857e57aa9410f76b5e41a",
-            "inferenceRevision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-            "provider": "krea_2_turbo_control",
-            "tier": "q4",
-            "mode": "text_to_image",
-            "overlay": "control:1",
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
+            "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
+            "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
+            "provider": "krea_2_turbo_control", "tier": "q4", "mode": "text_to_image", "overlay": "control:1",
             "geometry": { "width": 896, "height": 896, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
-            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
-            "artifactVariant": "q4",
+            "artifactResolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723", "artifactVariant": "q4",
             "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4|SceneWorks/krea2-pose-controlnet-beta@cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac:control_step5000.safetensors",
-            "rung": "bounded_decode",
-            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+            "rung": "bounded_decode", "parameters": { "decodeOverlap": 64, "decodeTileEdge": 512 }
           }
         ]
       },
@@ -5402,6 +5437,9 @@
           // layout, quantization floors and execution structure did not move - only the shared contract
           // ABI did, which is precisely the split the two identity fields exist to express.
           "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+          // sc-17774: the currency term. `inferenceRevision` above is capture provenance and is
+          // no longer compared — the digest of `candle-gen-krea`'s compile closure is.
+          "inferenceClosureDigest": "bdf379ae9f95302f2010f859eae6806b6382c22d9dffd36c51059d440548f03f",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
@@ -5434,7 +5472,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5544,7 +5581,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5654,7 +5690,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5757,7 +5792,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5867,7 +5901,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5970,7 +6003,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -6293,6 +6325,11 @@
         // the INT8-ConvRot variant. The current rows below are direct probe outputs; the retracted
         // `branchPackSaveGb` correction remains absent and no worker reader derives one.
         "control": {
+          // sc-17774: the closure of `candle-gen-krea` these direct control measurements were
+          // taken against (1899a722). Currency compares this against the live digest for the same
+          // lane; it replaces `krea_control_fit::KREA_CONTROL_INFERENCE_REVISION`, a per-model
+          // frozen SHA that only that one lane had.
+          "inferenceClosureDigest": "1983c17fe26dde17d6a08f2b7c606ef8c6721389259b4edf92a6b7b58c0eb48e",
           // TIER INTEGRITY (sc-15799): the tier the pose branch is packed to, per BASE tier. Not a lever
           // and not budget-dependent — `gen_core::tier_integrity::control_branch_tier` is the executable
           // form and `krea_control_fit::control_branch_tier_for_key` is the worker's entry point.
@@ -7225,8 +7262,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7239,8 +7275,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7253,8 +7288,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7267,8 +7301,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7282,8 +7315,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -11977,16 +12009,42 @@
       "capabilities": [],
       "downloads": [
         {
-          // Mirrors the upstream Real-ESRGAN release weights in one HF repo so
-          // the existing model_download job can cache both optional upscalers.
+          // The ONNX exports the Rust upscaler ACTUALLY loads (sc-17633). This entry used to
+          // declare the upstream `RealESRGAN_x{2,4}plus.pth` pair from `nateraw/real-esrgan`
+          // (~134 MB) — weights no lane has read since the Python upscaler was retired. The
+          // ONNX the macOS/Windows Rust lane does load was side-loaded at JOB time into
+          // `<data_dir>/cache/upscale/` instead, where the Models screen cannot see, size or
+          // delete it (6.9 GiB observed). Declaring the real artifacts here makes the install
+          // match the load: one Model Manager install, into the HF cache, no mid-render fetch.
+          //
+          // The loader half landed with it — `upscale_jobs::resolve_onnx` is cache-only and reads
+          // this snapshot. Declaring the ONNX WITHOUT that change would have been worse than
+          // leaving it alone: install state keys on the declared repo, so the entry would have
+          // flipped to "not installed", prompted a 134 MB download the loader ignored, and then
+          // still fetched the same bytes mid-upscale.
+          //
+          // Migration: an existing install keeps working from the legacy `cache/upscale/` copy, so
+          // nothing re-downloads. Its old `nateraw/real-esrgan` `.pth` bytes are now orphaned in
+          // the HF cache — never loaded, and no longer reachable from this entry's artifact paths.
+          // Reclaiming them is tracked on sc-17636 (S11), which owns delete/size coverage.
+          //
+          // `resources.imageUpscalers.real-esrgan.x{2,4}` still records the `.pth` provenance —
+          // `scripts/spikes/sc3489_export_reference.py` reproduces these ONNX files from it —
+          // but provenance is metadata, not something every user needs on disk.
+          //
+          // The revision is byte-for-byte the worker's own `ONNX_REVISION`
+          // (`upscale_jobs.rs`, sc-9682). They MUST agree: a manifest that installed one
+          // revision while the loader resolved another would recreate, at the revision level,
+          // exactly the declared-vs-loaded drift this story exists to remove.
           "provider": "huggingface",
-          "repo": "nateraw/real-esrgan",
-          "files": ["RealESRGAN_x2plus.pth", "RealESRGAN_x4plus.pth"],
-          "estimatedSizeBytes": 134100000
+          "repo": "SceneWorks/real-esrgan-onnx",
+          "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",
+          "files": ["real_esrgan_x2.onnx", "real_esrgan_x4.onnx"],
+          "estimatedSizeBytes": 134125050
         }
       ],
       "paths": {
-        "model": "${HF_CACHE}/nateraw/real-esrgan"
+        "model": "${HF_CACHE}/SceneWorks/real-esrgan-onnx"
       },
       "resources": {
         "imageUpscalers": {
@@ -12034,6 +12092,260 @@
             { "label": "Hugging Face mirror", "url": "https://huggingface.co/nateraw/real-esrgan" }
           ]
         }
+      }
+    },
+    {
+      // sc-17632 (epic 17625) — the OTHER upscaler, and the same story as SAM3 below: SeedVR2 had
+      // no install-flow representation at all. Its repo and pinned revision lived only as
+      // hardcoded constants in worker source, DUPLICATED across the two lanes that load it — the
+      // `image_upscale` job (`upscale_jobs.rs`) and the `video_upscale` job
+      // (`video_jobs/seedvr2.rs`) — and each lane downloaded the SAME ~7.3 GB checkpoint mid-render
+      // into its OWN destination (`<data_dir>/cache/upscale/seedvr2/` and
+      // `<data_dir>/cache/seedvr2-mlx/`), where the Models screen can neither size nor delete it.
+      //
+      // The loader half landed with this entry: both lanes now call ONE cache-only resolver,
+      // `upscale_jobs::require_seedvr2_checkpoint_dir`. Declaring the repo WITHOUT that change
+      // would have been worse than leaving it alone — install state keys on the declared repo, so
+      // the entry would have flipped every existing install to "not installed", prompted a 7.3 GB
+      // download the loaders ignored, and then still fetched the same bytes inside the next render.
+      //
+      // Migration: an existing install keeps working from EITHER legacy root, so nothing
+      // re-downloads. Those bytes are now orphaned — never written to again, and not reachable from
+      // this entry's artifact paths. Reclaiming them is tracked on sc-17636 (S11), which owns
+      // delete/size coverage.
+      //
+      // The revision is byte-for-byte the worker's own `SEEDVR2_REVISION` (`upscale_jobs.rs`,
+      // sc-8879), and the files are the upstream names verbatim — the engine loads them unrenamed,
+      // straight out of the HF snapshot dir. They MUST agree: `SEEDVR2_REVISION` is a 40-hex pin,
+      // so the resolver reads that EXACT `snapshots/<sha>/` with no fall-through to `refs/main`,
+      // and a manifest installing a different one would report "installed" while every SeedVR2 job
+      // failed with "not installed". `manifest_declares_the_same_seedvr2_pin_the_loader_reads`
+      // (upscale_jobs/tests.rs) fails if either side drifts.
+      "id": "seedvr2_upscaler",
+      "name": "SeedVR2 Upscaler",
+      "family": "seedvr2",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Third-party mirror of ByteDance-Seed's SeedVR2-3B (Apache-2.0), in the raw ComfyUI
+          // layout both engines convert in-memory at load. `numz/SeedVR2_comfyUI` also hosts 7B and
+          // fp8 variants this build does not load, so the file allow-list is what keeps the install
+          // to the 3B fp16 pair (~7.3 GB) rather than the whole repo.
+          "provider": "huggingface",
+          "repo": "numz/SeedVR2_comfyUI",
+          "revision": "09ced71023636e9bc8cdf9cdecfb2625d1e691e8",
+          "files": ["seedvr2_ema_3b_fp16.safetensors", "ema_vae_fp16.safetensors"],
+          "estimatedSizeBytes": 7284343622
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/numz/SeedVR2_comfyUI"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SeedVR2 Upscaler",
+        // No `promptGuide`: `type: "utility"` entries are exempt (`promptGuideRequiredForModel`)
+        // because they never reach a Studio prompt-guide surface, and the three utilities sc-17627
+        // declared carry none either. Pointing this at Real-ESRGAN's guide would satisfy the gate
+        // while describing a different upscaler. Provenance lives on the About→Licenses `seedvr2`
+        // component instead.
+        "description": "One-step diffusion super-resolution behind the SeedVR2 image-upscale engine and video upscaling. Larger and slower than Real-ESRGAN, and generative rather than pixel-faithful; install it only if you want that engine.",
+        "recommendedFor": ["image_upscale", "video_upscale"]
+      }
+    },
+    {
+      // sc-17627 / sc-17629 — SAM3 was a JOB-TIME auto-download with no install-flow
+      // representation at all: the repo and its pinned revision existed only as hardcoded
+      // constants in `person_segment_sam3_common.rs`, and the weights landed in
+      // `<data_dir>/cache/person-segment-sam3/` where the Models screen cannot see, size or
+      // delete them. Declaring it here is what lets the resolver be cache-only.
+      "id": "sam3_person_segment",
+      "name": "SAM3 Person Segmenter",
+      "family": "sam3",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // The stock `facebook/sam3` checkpoint mirrored by SceneWorks — the same
+          // `model.safetensors` + `tokenizer.json` BOTH backends load, with no MLX-specific
+          // conversion despite the `-mlx` repo name. Pinned (sc-9879, F-077): a re-push or a
+          // compromised token could otherwise silently swap the weights we load.
+          "provider": "huggingface",
+          "repo": "SceneWorks/sam3-mlx",
+          "revision": "3ed10b164a755c00b1a4d671dde95719c127e1a7",
+          "files": ["model.safetensors", "tokenizer.json"],
+          "estimatedSizeBytes": 3443580585
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sam3-mlx"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SAM3 Person Segmenter",
+        "description": "Text-concept person segmentation (\"person\" prompt, no manual box) behind person tracking and Smart Select. Required by person-mask features; installed once and shared by the MLX and candle lanes.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-17627 / sc-17629 — same story as SAM3 above: constants-only, job-time download into
+      // `<data_dir>/cache/person-segment/`. SAM2 is still live (macOS `run_person_track` box-prompt
+      // propagation), so it is a separate installable, not superseded by SAM3.
+      "id": "sam2_person_segment",
+      "name": "SAM2 Person Segmenter",
+      "family": "sam2",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // MLX-converted Meta SAM2.1 weights (sc-3707, converted from the official `.pt` via
+          // `tools/convert_sam2_to_mlx.py`; bit-identical to the avbiswas reference). Pinned for
+          // the same defense-in-depth reason as SAM3 (sc-9879).
+          "provider": "huggingface",
+          "repo": "SceneWorks/sam2-mlx",
+          "revision": "fbc86db0dceb8c744e5fc95feadc37572107be69",
+          "files": ["sam2.1_hiera_large.safetensors"],
+          "estimatedSizeBytes": 935568342,
+          // macOS-only: `mod person_segment` is `#[cfg(target_os = "macos")]`. Off-Mac person
+          // segmentation goes through the candle SAM3 seam, which needs the SAM3 entry above,
+          // not this one — so an off-Mac install must not offer or gate on SAM2 weights.
+          "platforms": ["macos"]
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sam2-mlx"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SAM2 Person Segmenter",
+        "description": "Box-prompt person mask propagation used by person tracking on macOS. Superseded by SAM3 for text-concept selection but still driven by the per-frame track propagation path.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-17627 / sc-17629 — the person detector, previously a job-time download into
+      // `<data_dir>/cache/person-detect/`. Two platform-scoped repos for the same model:
+      // `retain_downloads_for_os` (apps/rust-api/src/models.rs) keeps exactly one, so install
+      // size, install state and the download job all resolve to the right artifact per OS.
+      "id": "person_detector",
+      "name": "YOLO11m Person Detector",
+      "family": "yolo11m-person-detect",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Fused MLX safetensors for the macOS native detector. Pinned per repo (sc-9682, F-077).
+          "provider": "huggingface",
+          "repo": "SceneWorks/yolo11m-person-detect-mlx",
+          "revision": "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777",
+          "files": ["yolo11m_fused_mlx.safetensors"],
+          "estimatedSizeBytes": 80388864,
+          "platforms": ["macos"]
+        },
+        {
+          // Canonical ONNX export for the off-Mac `ort` lane (sc-5498). A DIFFERENT repo with its
+          // own pin — the two are not interchangeable and must not share one revision.
+          "provider": "huggingface",
+          "repo": "SceneWorks/yolo11m-person-detect-onnx",
+          "revision": "3cffbaccca4f239ae6301d8b66ba721401ecfa8d",
+          "files": ["yolo11m.onnx"],
+          "estimatedSizeBytes": 80622117,
+          "platforms": ["windows", "linux"]
+        }
+      ],
+      // No `paths.model`: the artifact repo differs per OS, and a single `${HF_CACHE}/…` string
+      // would name the wrong one off-Mac. It would be inert either way — `model_artifact_paths`
+      // and `model_manifest_installed_path` both skip any path containing `${` — but a value
+      // that is both wrong and unread is worse than none.
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "YOLO11m Person Detector",
+        "description": "Person bounding-box detection feeding ByteTrack person tracking and the segmentation prompts. Required by person-track features.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-17634 — DWPose was the ONE job-time download that did not come from Hugging Face: two
+      // `.zip` bundles pulled straight from `download.openmmlab.com` and unpacked into
+      // `<data_dir>/cache/dwpose/`, where the Models screen can neither see, size nor delete them.
+      // It could not simply be declared, either — a download row is hard-wired to
+      // `provider: "huggingface"` in four independent places (`is_supported_model_download`, this
+      // manifest's schema, `install_state_for`, `model_artifact_paths`), so a direct-URL row is
+      // silently INVISIBLE rather than an error. Re-hosting the two graphs SceneWorks actually
+      // loads removes the exception rather than building a second install path for one model.
+      //
+      // The loader half landed with it — `pose_jobs::require_dwpose_weights` is cache-only and
+      // reads this snapshot. Declaring WITHOUT that change would have been worse than leaving it
+      // alone: install state keys on the declared repo, so the entry would have flipped to "not
+      // installed", prompted a ~330 MB download the loader ignored, and then still fetched the
+      // openmmlab zips mid-job.
+      //
+      // Migration: an existing install keeps working from the legacy `cache/dwpose/` copy (or
+      // rtmlib's `~/.cache/rtmlib/hub/checkpoints/`), so nothing re-downloads. Reclaiming those
+      // ~300 MB is tracked on sc-17636 (S11), which owns delete/size coverage.
+      "id": "dwpose_pose_detector",
+      "name": "DWPose Pose Detector",
+      "family": "dwpose",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // The two ONNX graphs extracted VERBATIM from the OpenMMLab ONNX SDK archives (each
+          // archive's `end2end.onnx`, no re-export or conversion). The model card records both
+          // upstream URLs, their SHA-256s and the extraction map, so the mirror is reproducible.
+          //
+          // The revision is byte-for-byte the worker's own `DWPOSE_REVISION` (`pose_jobs.rs`).
+          // They MUST agree: a manifest that installed one revision while the loader resolved
+          // another would recreate, at the revision level, exactly the declared-vs-loaded drift
+          // this epic exists to remove. `manifest_declares_the_same_dwpose_pin_the_loader_reads`
+          // fails if they drift.
+          "provider": "huggingface",
+          "repo": "SceneWorks/dwpose-onnx",
+          "revision": "c330a9609201343576b8b69d222e38c1486d2854",
+          "files": [
+            "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx",
+            "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx"
+          ],
+          "estimatedSizeBytes": 330721274
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/dwpose-onnx"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "DWPose Pose Detector",
+        // No `promptGuide`: `type: "utility"` entries are exempt (`promptGuideRequiredForModel`)
+        // because they never reach a Studio prompt-guide surface. Provenance lives on the
+        // About→Licenses `dwpose` component instead.
+        "description": "Whole-body pose and keypoint detection (person boxes + 133-point COCO-WholeBody). Required by the Pose Library \"create from photo\" flow, OpenPose control conditioning, ControlNet pose training and catalog pose analysis.",
+        "recommendedFor": []
       }
     },
     {

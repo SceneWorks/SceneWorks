@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "63f82a242127f45a5ebdf6f9e91c595041e6ac02",
-  "auditDigest": "a3c838f8597e5b0d8ae24d1c3eaab81d78a9082463973ab7eb65de360fe2b5bc",
+  "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+  "auditDigest": "b5ef5382326d52c77a28fff6b9aead7affa375c9e66b721ba0aa549f08133b68",
   "artifacts": [
     {
       "id": "cmudict",
@@ -738,8 +738,9 @@
     {
       "source": "crates/media/candle-gen/candle-gen-seedvr2/src/pipeline.rs:60",
       "included": "data/neg_embed.safetensors",
-      "disposition": "model-data-no-separate-notice",
-      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+      "disposition": "model-asset",
+      "component": "seedvr2",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; it is part of the SeedVR2 model assembly, which sc-17632 declared as the installable `seedvr2_upscaler` catalog entry whose upstream terms are displayed."
     },
     {
       "source": "crates/media/candle-gen/candle-gen/src/quant/cublaslt.rs:185",
@@ -803,8 +804,9 @@
     {
       "source": "crates/media/mlx-gen/mlx-gen-seedvr2/src/pipeline.rs:75",
       "included": "data/neg_embed.safetensors",
-      "disposition": "model-data-no-separate-notice",
-      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+      "disposition": "model-asset",
+      "component": "seedvr2",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; it is part of the SeedVR2 model assembly, which sc-17632 declared as the installable `seedvr2_upscaler` catalog entry whose upstream terms are displayed."
     },
     {
       "source": "crates/media/candle-gen/vendor/candle-kernels/src/ptx.rs:1-11",

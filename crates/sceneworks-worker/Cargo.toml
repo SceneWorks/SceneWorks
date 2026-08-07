@@ -62,7 +62,7 @@ sceneworks-image-quality = { path = "../sceneworks-image-quality" }
 [features]
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
-backend-candle = ["dep:runtime-cuda", "dep:ort", "dep:zip"]
+backend-candle = ["dep:runtime-cuda", "dep:ort"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # DWPose whole-body pose detection in Rust (epic 3482, sc-3487): RTMW (yolox_m +
@@ -70,8 +70,7 @@ backend-candle = ["dep:runtime-cuda", "dep:ort", "dep:zip"]
 # Python rtmlib `pose_detect` path so the Pose Library "create from photo" flow +
 # InstantID pose conditioning keep working on a Python-free Mac. macOS-only (the
 # Python rtmlib path stays the Win/Linux backend); `download-binaries` pulls a
-# prebuilt onnxruntime that includes the CoreML EP. `zip` unpacks the openmmlab
-# weight bundles on first use (download-on-first-use parity with rtmlib). The spike
+# prebuilt onnxruntime that includes the CoreML EP. The spike
 # (docs/sc-3487/spike-findings.md) validated sub-pixel keypoint parity + matched
 # latency vs the shipped detector.
 # `load-dynamic` so the onnxruntime dylib is dlopen'd at runtime from
@@ -80,7 +79,6 @@ backend-candle = ["dep:runtime-cuda", "dep:ort", "dep:zip"]
 # `download-binaries` still fetches a CoreML-enabled onnxruntime at build time so the
 # desktop packager (build-sidecar.mjs) has a dylib to stage and dev runs work.
 ort = { workspace = true, features = ["coreml"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
 # Canonical Apple inference composition. Bespoke provider APIs are re-exported by the bundle.
 # `audio-metal` is additive over the default `media` + `audio` lanes: it runs the WHOLE candle audio
 # lane on the Metal GPU. This is not a nice-to-have — MOSS-SoundEffect denoises a full 30 s latent
@@ -108,10 +106,8 @@ runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "63f82a2
 # wholesale in Phase 7, epic 5483). `cuda` enables the CUDA EP; `load-dynamic` dlopens the onnxruntime
 # dylib at runtime from `ORT_DYLIB_PATH` (set by the desktop `setup.rs`, like the Mac path); and
 # `download-binaries` fetches a CUDA-enabled onnxruntime at build time so dev runs + the candle packager
-# have a dylib to stage. `zip` unpacks the openmmlab weight bundles (download-on-first-use parity with
-# rtmlib), shared with the Mac path — optional + candle-gated off-Mac for the same reason as `ort`.
+# have a dylib to stage.
 ort = { workspace = true, features = ["cuda"], optional = true }
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [lints]
 workspace = true

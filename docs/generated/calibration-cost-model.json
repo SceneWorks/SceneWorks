@@ -1,25 +1,25 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6353f335775361d8f3711c4340351adb62d51f512980ad2bb0918b9c8fc8c210",
-    "matrixRevision": "source-tree:9877fd7a053934768a96886816330e87fd651343f588adbbf5370c408e6b5b04",
-    "inferenceRevision": "63f82a242127f45a5ebdf6f9e91c595041e6ac02",
+    "sceneWorksRevision": "source-tree:3244343ca474193c1a87abcab4910f92a9f8dddbaab6e4399d3d841deea43509",
+    "matrixRevision": "source-tree:9bc7b46abb0be835c947dc7925696cf7567c1c48f1191bd2906abc976378d30e",
+    "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "5beb1d47d531d47774423e6a581a0a30f458fc8d0d9e33d04dc0a37280f305d5"
+        "sha256": "e826d782c29466f83d8c91fec43b52f93c55b0f49b1f63804e4c96266140f8ee"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "75d562c1ba42464c9399b09264693543f64a18f5729297cd554260c79d6f6d19"
+        "sha256": "fa57495ddbde07c5395ebcb05ddee9b761a87bd6f1b5bc2ad14391d9b6ea243c"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "5dc5c1fb59be44fd64fe95e1b2f5c8742a4a5e7a5ff710ee89029ae4c809e13b"
+        "sha256": "b647846bf51fafc3a8ba84cc2b20d75a55752fddc4cf7cd18e59a46ce110c8e1"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "ed9ae785aa7a288bdec4caea918f150411ae31a0c181c40de5dfe047cebed0af"
+        "sha256": "968eb512a8861c5812475b4424ed755a270f847a7f1fa5bd3cdb6a508c2df18f"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -31,15 +31,15 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "7afe1ffc316025254eaca6cfbbbc710dbed79aa4e653f767d656bbf6feeeefd8"
+        "sha256": "74dd1bd70749d14eb325fc97c70825091c076de90f5fd60edc64e7678810374f"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "20f54c77e2a2a7b849e29d3505acf37e31e8ff4f7eb360e3ef9ee2748becdd6e"
+        "sha256": "b66db4590ff547a467812fbd27bb31c5b21138aebdc613d3b83cf7bc4ce5c1dd"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "2ea1d75722c2703e2393056a9c93dcb8282c6442b4cec0952feb89e713afe570"
+        "sha256": "acb6acab8ddd7bd4cd0af542570f4e0b4574d205fa40e94a956cdba9a32613ce"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
@@ -47,7 +47,7 @@
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "9cf3fc70cb8afb89d98619a45c5bd19e0ac6907940cc0796bdd9f9910ead7cee"
+        "sha256": "93edec4e123b79d3b428d4935805864b22b5a999b6bc713cff7c48991d711d58"
       }
     }
   },
@@ -58,18 +58,18 @@
     "producibility": "DERIVED — from the shipped plan, the evidence bundle, and the adapter sources; this is the partition that says which of those hours can be spent today at all"
   },
   "completedBaseline": {
-    "evidenceBundleRecords": 48,
+    "evidenceBundleRecords": 65,
     "recordsByStatus": {
-      "complete": 33,
+      "complete": 50,
       "runtime_complete": 15
     },
-    "completeRecords": 33,
+    "completeRecords": 50,
     "runtimeCompleteRecords": 15,
-    "activationEligibleRecords": 48,
-    "matrixSummaryCalibrationRuns": 48,
-    "matrixSummaryCurrentCalibrationRuns": 0,
-    "verifiedCells": 0,
-    "note": "33 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "activationEligibleRecords": 65,
+    "matrixSummaryCalibrationRuns": 65,
+    "matrixSummaryCurrentCalibrationRuns": 11,
+    "verifiedCells": 10,
+    "note": "50 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 11 current calibration run(s) and 10 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -391,20 +391,22 @@
   "cells": {
     "total": 9140,
     "byState": {
-      "Implemented/unverified": 3222,
-      "Missing": 5912,
-      "Structurally N/A": 6
+      "Implemented/unverified": 3140,
+      "Missing": 5984,
+      "Structurally N/A": 6,
+      "Verified": 10
     },
     "byBackend": {
       "candle": 4520,
       "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 1273,
-      "Implemented/unverified @ mlx": 1949,
-      "Missing @ candle": 3241,
+      "Implemented/unverified @ candle": 1201,
+      "Implemented/unverified @ mlx": 1939,
+      "Missing @ candle": 3313,
       "Missing @ mlx": 2671,
-      "Structurally N/A @ candle": 6
+      "Structurally N/A @ candle": 6,
+      "Verified @ mlx": 10
     },
     "byRung": {
       "bounded_attention": 1828,
@@ -2935,7 +2937,7 @@
     },
     {
       "input": "perRunSeconds",
-      "why": "It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The current artifact has 48 activation-eligible record(s) and 230 producible cell(s), but the records do not carry per-scenario duration telemetry, so they do not narrow that multiplier yet.",
+      "why": "It is a pure multiplier on every reported hour and it spans a 40x range in the sweep. The current artifact has 65 activation-eligible record(s) and 230 producible cell(s), but the records do not carry per-scenario duration telemetry, so they do not narrow that multiplier yet.",
       "howToResolve": "Add per-scenario timing instrumentation to the now-complete Krea MLX adapter path and retain the exact geometry/strategy identity on every duration. This reuses an already-green real campaign instead of extrapolating one end-to-end duration across unrelated providers, and it narrows the 40x sweep without inventing timing for still-gated pairs."
     },
     {
