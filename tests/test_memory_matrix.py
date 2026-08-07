@@ -134,11 +134,18 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["record"]["status"] == "runtime_complete"
     ]
-    # sc-16915 measured seventeen Full-complete runs AT the live pin, so the complete population is
-    # no longer uniformly historical. Both semantics must be present and the current count pinned:
-    # asserting only the set would pass if a single run stayed current.
-    assert {run["semantics"] for run in full_runs} == {"current", "historical"}
-    assert sum(1 for run in full_runs if run["semantics"] == "current") == 17
+    # sc-16915 measured seventeen Full-complete runs AT the then-live pin, and this briefly read
+    # {"current", "historical"} with a current count of 17. Under sc-17774 currency is the provider's
+    # compile closure, and all three MLX closures those runs belong to moved in this pin's window
+    # (the shared `crates/media/mlx-gen` crate is a first-party dependency of every MLX provider), so
+    # the complete population is uniformly historical again.
+    #
+    # Pinned as an exact set AND an exact count, the same way it was when runs were current: a bare
+    # `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
+    # family's promotion mask another's demotion. Recapturing is the Qwen and Krea calibration
+    # stories' work, not a delivery PR's.
+    assert {run["semantics"] for run in full_runs} == {"historical"}
+    assert sum(1 for run in full_runs if run["semantics"] == "current") == 0
     expected_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
@@ -463,18 +470,16 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         for cell in matrix["cells"]
         if cell["state"] == "Verified"
     }
-    assert verified == {
-        ("qwen_image", "mlx", "bf16", "resident"),
-        ("qwen_image", "mlx", "bf16", "staged_residency"),
-        ("qwen_image", "mlx", "bf16", "bounded_decode"),
-        ("qwen_image", "mlx", "bf16", "bounded_attention"),
-        ("qwen_image", "mlx", "bf16", "bounded_transformer_residency"),
-        ("qwen_image", "mlx", "q8", "bounded_attention"),
-        ("qwen_image", "mlx", "q8", "bounded_transformer_residency"),
-        ("qwen_image", "mlx", "q4", "bounded_attention"),
-        ("qwen_image", "mlx", "q4", "bounded_transformer_residency"),
-        ("krea_2_turbo", "mlx", "q4", "bounded_decode"),
-    }
+    # Back to empty. sc-17774 made currency the provider's compile closure rather than the pin, and
+    # all three MLX closures that carried these promotions — mlx:qwen_image, mlx:krea_2_turbo_control,
+    # mlx:z_image_turbo — moved in this pin's window, because two commits touched the shared
+    # `crates/media/mlx-gen` crate and that crate is a first-party dependency of every MLX provider's
+    # closure. The records are unchanged and still in the bundle; recapturing them belongs to the Qwen
+    # and Krea calibration stories, not to a delivery PR that merely advanced the pin.
+    #
+    # This assertion is incidental context for this test either way. Its actual subject — Z-Image's
+    # history failing closed — is pinned directly below and is unaffected.
+    assert verified == set()
     assert not [
         cell
         for cell in matrix["cells"]
@@ -504,9 +509,12 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         and cell["evidence"]["historicalVerification"]
     ]
     assert historical_z_image == []
-    # sc-16915 recaptured this ladder, so these five are Verified rather than
-    # Implemented/unverified, and their parameters are the ones the promoted bindings name
-    # (overlap 64, attention chunk 64 MiB) rather than the previous 128 / 128 MiB point.
+    # sc-16915 recaptured this ladder and these five read Verified for a while. They are back to
+    # Implemented/unverified because sc-17774 made currency the provider's compile closure rather
+    # than the pin, and `mlx:qwen_image` moved in this pin's window — two commits touched the shared
+    # `crates/media/mlx-gen` crate, which is a first-party dependency of every MLX provider's closure.
+    # The records are unchanged and still in the bundle; recapture belongs to the Qwen calibration
+    # story, not to a delivery PR that advanced the pin.
     recaptured_qwen_cells = [
         cell
         for cell in matrix["cells"]
@@ -517,11 +525,15 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         and cell["overlay"] == "none"
     ]
     assert len(recaptured_qwen_cells) == 5
-    assert all(cell["state"] == "Verified" for cell in recaptured_qwen_cells)
     assert all(
+        cell["state"] == "Implemented/unverified" for cell in recaptured_qwen_cells
+    )
+    # The paired invariant is preserved in the direction that still bites: a cell that is NOT
+    # Verified must not be carrying current-environment evidence.
+    assert not any(
         cell["evidence"]["currentEnvironmentVerification"]
         for cell in recaptured_qwen_cells
-    ), "a Verified cell must carry the current-environment evidence its guard requires"
+    ), "a cell with no current evidence must carry no current-environment verification"
     assert {
         (cell["modelId"], cell["backend"], cell["tier"], cell["mode"], cell["overlay"])
         for cell in recaptured_qwen_cells
