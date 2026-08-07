@@ -714,6 +714,37 @@ fn dwpose_file_pins_name_both_graphs_and_their_keys() {
     );
 }
 
+/// AC10's two legacy roots, pinned by VALUE — the same vacuity class as
+/// [`dwpose_file_pins_name_both_graphs_and_their_keys`], one level further in.
+///
+/// `stage_legacy_app_cache` and `stage_legacy_rtmlib` build their paths from these very constants,
+/// so `falls_back_to_the_legacy_app_cache_root`, `falls_back_to_the_legacy_rtmlib_root` and the
+/// ordering test all move WITH any edit to them and stay green. Those tests prove the fallback
+/// branches are reached; none of them can prove the branches point at the directories real installs
+/// actually hold. Retargeting either root is therefore invisible to them — and it is the precise
+/// AC10 regression this story promises not to cause: every pre-sc-17634 box silently stops
+/// resolving and re-downloads ~330 MB, with a fully green suite.
+///
+/// Verified by mutation: retargeting `DWPOSE_LEGACY_RTMLIB_ROOT` failed NOTHING in the whole
+/// worker lib suite before this test existed. (The `data_dir` root was already pinned incidentally
+/// — `job_time_download_guard::cache_destinations_match_the_allow_list` derives
+/// `<data_dir>/cache/<subdir>` destinations from the string constants, so it reds on `cache/dwpose`.
+/// That is a guard about where the app WRITES, not about AC10 compatibility, and it cannot cover
+/// the `$HOME`-keyed rtmlib root at all, so both values are pinned here rather than one.)
+#[test]
+fn dwpose_legacy_roots_are_the_paths_existing_installs_actually_hold() {
+    assert_eq!(
+        DWPOSE_LEGACY_DATA_DIR_ROOT, "cache/dwpose",
+        "the deleted download+unzip path wrote `<data_dir>/cache/dwpose/`; retargeting this \
+         strands every install made before sc-17634"
+    );
+    assert_eq!(
+        DWPOSE_LEGACY_RTMLIB_ROOT, ".cache/rtmlib/hub/checkpoints",
+        "rtmlib's own cache is `$HOME/.cache/rtmlib/hub/checkpoints/`; retargeting this strands \
+         every install that predates the Rust port"
+    );
+}
+
 /// sc-8911: an env-pinned weight path that is set-but-missing must error, not silently
 /// fall through to the cache/download. Unset → `None`; set + existing → `Some(path)`.
 #[test]
