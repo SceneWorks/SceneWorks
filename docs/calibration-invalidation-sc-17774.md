@@ -31,6 +31,14 @@ non-merge commits demoted everything.** Re-capture costs ~47.6 GB.
 
 Under the closure unit, on the same window, each lane sees roughly **9–10.5%** of those commits.
 
+Two more places survived that first sweep and were converted in sc-17726: the `identity_matches`
+filter in `mlx_fit_gate::evidence_admission_route` and the same conjunct in
+`verified_lower_alternative`. Both compared `binding.query.inference_revision` against
+`catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION` — the raw Cargo pin — so **every** MLX binding
+was excluded the moment the pin moved, whether or not that provider's closure had. It reproduced
+exactly: bumping the pin alone, with `config/inference-provider-closures.json` untouched so no
+closure moved, turned four `mlx_fit_gate` tests red on the old code and none on the new.
+
 ## What a closure is
 
 Derived in [`scripts/inference-closure-digest.mjs`](../scripts/inference-closure-digest.mjs), with
@@ -96,6 +104,29 @@ leave the closure config behind, and names both commands.
 **Lanes whose closure did not move stay `current` across the bump.** Only the ones that actually
 changed are demoted, and the regenerated files show which.
 
+## What a demotion costs at runtime
+
+A lane whose closure moved **degrades to the legacy estimator. It is not refused.** An expired
+calibration is epistemically the same as no calibration, and every uncalibrated model already renders
+on the generic formula; turning a routine pin bump into a product outage on ~10% of commits is not a
+safety posture. `z_image_turbo` ships in exactly this state today and renders.
+
+That places the comparison ahead of the admission-path decision on both backends, for different
+structural reasons:
+
+| | where currency is applied | why there |
+| --- | --- | --- |
+| candle | `memory_strategy::candidate_exclusion` | the resident baseline is always in the candidate pool, so excluding the calibrated cells leaves something to select |
+| mlx | `mlx_fit_gate::evidence_admission_route`, before entering `AdmissionPath::Evidence` | that path withholds the resident baseline on purpose, so a stale binding admitted into it has nothing to fall back to and kills the request |
+
+`candidate_exclusion` still applies the same comparison on the MLX lane and remains the fail-closed
+backstop for a candidate reaching the selector another way. "The gate refuses a moved closure" means
+it refuses to admit that **candidate** — not that the request dies.
+
+`verified_lower_alternative` is the exception that has to carry its own copy: the geometry it names
+in a refusal never becomes a `Candidate`, so nothing downstream grades it. Left unfiltered it would
+name a smaller geometry that the very next request refuses for the identical staleness.
+
 `--restamp` exists for a `CLOSURE_DIGEST_VERSION` change, which legitimately re-derives the same
 underlying fact. It is not a way past a genuine conflict: rewriting a captured digest that disagrees
 with its own revision would launder a stale measurement into a current one, and the backfill refuses
@@ -109,7 +140,7 @@ that by default.
 | `check.yml` (parity job) | re-derives every lane's digest from a `--depth=1` fetch of the pinned revision — the digests are **real**, not merely present |
 | `check.yml`, same step | re-derives the **captured** half too: `backfill-closure-digests.mjs --verify` against a shallow fetch of every revision `--revisions` reports |
 | `scripts/inference-closure-digest.test.mjs` | the derivation itself, hermetically, over a synthetic workspace |
-| `memory_strategy.rs` / `mlx_fit_gate.rs` tests | the runtime gate refuses a moved closure and admits an unmoved one |
+| `memory_strategy.rs` / `mlx_fit_gate.rs` tests | the runtime gate demotes a moved closure and admits an unmoved one, on both the ladder and the named refusal alternative |
 
 The captured-half gate exists because grading only `config/inference-provider-closures.json` left the
 other side of every comparison — 65 record digests and 31 manifest bindings — checked by nothing. That
@@ -182,3 +213,9 @@ stopped grading anything.
    the live digest — precisely the value the request compares against — so an unplaceable candidate
    became automatically current. Digests are now carried from their push sites; there is no lookup
    to miss. Pinned by `a_moved_provider_closure_demotes_the_calibrated_ladder`, mutation-checked.
+4. **Two pin comparisons outlived the sweep** (sc-17726, above). A per-model unit of invalidation is
+   only worth what its *narrowest* remaining term is: while `evidence_admission_route` still keyed on
+   the pin, the whole MLX lane invalidated repository-wide no matter what the digests said. Both are
+   now the closure comparison, mutation-checked in each direction — dropping either conjunct, or
+   restoring the compare-against-self shape of defect 1, turns tests red including one driven by the
+   real shipped `z_image_turbo` opt-in.
