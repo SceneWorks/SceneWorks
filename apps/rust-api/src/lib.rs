@@ -3732,6 +3732,13 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         // and ads2v (source video + reference video + reference images).
         "multi_video_to_video",
         "ads2v",
+        // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
+        // character image + driving video → animated clip. It was wired end-to-end — catalog
+        // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
+        // the worker's `generate_scail2` — and offered in the Video Studio, but never added
+        // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
+        // unreachable from the moment it shipped (GH #2074).
+        "animate_character",
     ]
     .contains(&payload.mode.as_str())
     {
@@ -3855,6 +3862,21 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "ads2v" if payload.reference_asset_ids.is_empty() => Err(ApiError::bad_request(
             "Source + Reference Video requires at least one reference image.",
         )),
+        // SCAIL-2 standalone character animation (sc-5449): the same required-media contract the
+        // worker's `resolve_scail2_conditioning` enforces — the character is `referenceAssetIds[0]`
+        // (preferred) or the i2v `sourceAssetId`, and the motion comes from `sourceClipAssetId`.
+        // Both are hard engine inputs (`Reference` + `ControlClip`), so a missing one is a rejected
+        // enqueue rather than a job that fails minutes later inside the worker.
+        "animate_character" if payload.source_clip_asset_id.is_none() => Err(
+            ApiError::bad_request("Animate Character requires a driving video."),
+        ),
+        "animate_character"
+            if payload.reference_asset_ids.is_empty() && payload.source_asset_id.is_none() =>
+        {
+            Err(ApiError::bad_request(
+                "Animate Character requires a reference character image.",
+            ))
+        }
         _ => Ok(()),
     }
 }
