@@ -97,7 +97,6 @@ mod imp {
     pub(crate) async fn run_control_training_job(
         api: &ApiClient,
         settings: &Settings,
-        http_client: &reqwest::Client,
         job: &JobSnapshot,
     ) -> WorkerResult<()> {
         let backend = backend_label(&settings.gpu_id);
@@ -148,8 +147,7 @@ mod imp {
         let mut resources = PreprocessResources::new();
         match kind {
             ControlKind::Pose => {
-                resources.dwpose =
-                    Some(pose_jobs::ensure_dwpose_weights(api, settings, http_client, job).await?);
+                resources.dwpose = Some(pose_jobs::require_dwpose_weights(settings)?);
             }
             ControlKind::Canny => {}
             other => {
@@ -613,7 +611,7 @@ mod imp {
             .expect("job snapshot");
             let api = ApiClient::new(&settings);
 
-            let error = run_control_training_job(&api, &settings, &reqwest::Client::new(), &job)
+            let error = run_control_training_job(&api, &settings, &job)
                 .await
                 .expect_err("out-of-root output is rejected");
             assert!(
@@ -640,7 +638,6 @@ pub(crate) use imp::run_control_training_job;
 pub(crate) async fn run_control_training_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,
-    _http_client: &reqwest::Client,
     job: &sceneworks_core::contracts::JobSnapshot,
 ) -> crate::WorkerResult<()> {
     Err(crate::WorkerError::InvalidPayload(format!(
