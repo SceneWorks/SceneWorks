@@ -4613,55 +4613,38 @@ fn build_video_metrics_defaults_when_unset() {
     assert_eq!(metrics.height, Some(720));
 }
 
-/// sc-8879 / sc-9879 (F-077 follow-up): the video SeedVR2 upscale fetches the same fixed
-/// third-party mirror as the image lane, and must pin an exact commit rather than the mutable
-/// `main` branch so an upstream re-push can't silently swap the 3B DiT + VAE weights. Lock the
-/// constant to a real 40-hex lowercase commit id (mirrors `seedvr2_revision_is_pinned_commit_not_main`
-/// in the image-upscale lane).
+/// sc-17632 (epic 17625) — the video lane no longer owns a SeedVR2 pin, a checkpoint destination or
+/// a download.
+///
+/// This REPLACES `seedvr2_video_revision_is_pinned_commit_not_main` +
+/// `seedvr2_video_revision_matches_image_lane`, which held two verbatim copies of the same
+/// repo/revision together. Deleting one copy makes that drift impossible by construction, which is
+/// strictly stronger than asserting the copies agree — the format check still runs once, on the
+/// surviving const, in `upscale_jobs::tests::seedvr2_revision_is_pinned_commit_not_main`.
+///
+/// What CAN still regress is someone re-introducing the duplicate (that is exactly how the two
+/// destinations appeared in the first place), so gate on that: this module must name neither the
+/// mirror nor the pinned sha, and must reach the checkpoint through the shared image-lane resolver.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
-fn seedvr2_video_revision_is_pinned_commit_not_main() {
-    assert_ne!(
-        seedvr2::SEEDVR2_REVISION,
-        "main",
-        "video SeedVR2 must pin a fixed revision"
-    );
-    assert_eq!(
-        seedvr2::SEEDVR2_REVISION.len(),
-        40,
-        "a pinned HF revision is a 40-char commit sha"
+fn seedvr2_video_lane_has_no_private_checkpoint_pin() {
+    const SOURCE: &str = include_str!("seedvr2.rs");
+    assert!(
+        !SOURCE.contains(crate::upscale_jobs::SEEDVR2_REPO),
+        "the video lane must not name the SeedVR2 mirror itself — `upscale_jobs::SEEDVR2_REPO` is \
+         the single source of truth (sc-17632)"
     );
     assert!(
-        seedvr2::SEEDVR2_REVISION
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-        "the pinned revision must be lowercase hex"
+        !SOURCE.contains(crate::upscale_jobs::SEEDVR2_REVISION),
+        "the video lane must not carry its own copy of the pinned SeedVR2 revision (sc-17632)"
     );
-}
-
-/// sc-9879 (F-077 follow-up): the image (`upscale_jobs`) and video (`video_jobs`) SeedVR2 fetches
-/// pull the IDENTICAL files from the IDENTICAL fixed mirror, so their pinned commit must agree.
-/// Two independent consts (a shared source of truth would need a cfg-split hoist across the two
-/// modules) — lock them together here so a bump to one lane without the other fails loudly
-/// (mirrors this PR's InstantID/PuLID shared-repo sha-agreement tests).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-#[test]
-fn seedvr2_video_revision_matches_image_lane() {
-    assert_eq!(
-        seedvr2::SEEDVR2_REVISION,
-        crate::upscale_jobs::SEEDVR2_REVISION,
-        "video and image SeedVR2 fetch the same mirror + files; their pinned commit must match"
-    );
-    assert_eq!(
-        seedvr2::SEEDVR2_REPO,
-        crate::upscale_jobs::SEEDVR2_REPO,
-        "video and image SeedVR2 must reference the same upstream mirror repo"
+    assert!(
+        SOURCE.contains("upscale_jobs::require_seedvr2_checkpoint_dir"),
+        "the video lane must resolve its checkpoint through the shared cache-only resolver, not a \
+         private one (sc-17632)"
     );
 }
 

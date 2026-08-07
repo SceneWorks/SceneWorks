@@ -1389,7 +1389,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "b87b8cd858673ad724403cb721078d1742457a2c62d4337ecc65190c964964b2",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1404,7 +1404,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "b87b8cd858673ad724403cb721078d1742457a2c62d4337ecc65190c964964b2",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1419,7 +1419,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "b87b8cd858673ad724403cb721078d1742457a2c62d4337ecc65190c964964b2",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1434,7 +1434,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "b87b8cd858673ad724403cb721078d1742457a2c62d4337ecc65190c964964b2",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -1449,7 +1449,7 @@
             "fingerprint": "z-image-mlx-independent-materialization-v3",
             "sceneWorksRevision": "295a9ae7ce21b32a98a2aca1e56823d5d359824b",
             "matrixSourceRevision": "source-tree:fda058ba012df60ad6344a63954533e6da685f146018d9c4ac970fc513a11ccd",
-            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "inferenceRevision": "d48023204cd3a4f3f8eb060f79803dccaddcb482", "inferenceClosureDigest": "b87b8cd858673ad724403cb721078d1742457a2c62d4337ecc65190c964964b2",
             "provider": "z_image_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/z-image-turbo-mlx",
@@ -2062,7 +2062,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2075,7 +2075,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2088,7 +2088,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2101,7 +2101,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2114,7 +2114,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2127,7 +2127,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2140,7 +2140,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2153,7 +2153,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2166,7 +2166,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "d75425560beb7f0b85b3b13d3349575942d6f8a265afa5c2744ba6c8a5b640b9",
             "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -3982,7 +3982,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "6d81f414c80acabb430be58d01491b7642427530e2ddc7fa97e1adef78f117fb",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -3995,7 +3995,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "6d81f414c80acabb430be58d01491b7642427530e2ddc7fa97e1adef78f117fb",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4008,7 +4008,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "6d81f414c80acabb430be58d01491b7642427530e2ddc7fa97e1adef78f117fb",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4021,7 +4021,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "6d81f414c80acabb430be58d01491b7642427530e2ddc7fa97e1adef78f117fb",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4035,7 +4035,7 @@
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
             "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7",
             "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5",
-            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "6d81f414c80acabb430be58d01491b7642427530e2ddc7fa97e1adef78f117fb",
             "provider": "flux1_schnell", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-schnell-mlx",
@@ -4185,7 +4185,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "8bb03b94550deee30f4656fa502425b7c206ab1cff761d60225ad5cf13f44e74",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4194,7 +4194,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "8bb03b94550deee30f4656fa502425b7c206ab1cff761d60225ad5cf13f44e74",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4203,7 +4203,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "8bb03b94550deee30f4656fa502425b7c206ab1cff761d60225ad5cf13f44e74",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4212,7 +4212,7 @@
           {
             "abi": 3, "loadShape": "eager_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "8bb03b94550deee30f4656fa502425b7c206ab1cff761d60225ad5cf13f44e74",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -4221,7 +4221,7 @@
           {
             "abi": 3, "loadShape": "deferred_materialization",
             "fingerprint": "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1",
-            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+            "sceneWorksRevision": "f936e7e6a17a0b592752f634d21db17f5e8f2db7", "matrixSourceRevision": "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5", "inferenceRevision": "5f973a73bf00307240afd81d2778ba9d89349e51", "inferenceClosureDigest": "8bb03b94550deee30f4656fa502425b7c206ab1cff761d60225ad5cf13f44e74",
             "provider": "flux1_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux1-dev-mlx", "artifactResolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9", "artifactVariant": "q4",
@@ -5178,7 +5178,7 @@
             "fingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "65f94dfd6189c4039233c107c3aba645abccf262cb809bfc49771c0fe858c319",
             "provider": "krea_2_turbo_control", "tier": "q4", "mode": "text_to_image", "overlay": "control:1",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
@@ -5191,7 +5191,7 @@
             "fingerprint": "krea-control-mlx-full-ladder-512-64-attn64m-window1-2026-08-03-v2",
             "sceneWorksRevision": "41186dcca4e5bd0009723c7e0fc80ad3da760416",
             "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
-            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+            "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d", "inferenceClosureDigest": "65f94dfd6189c4039233c107c3aba645abccf262cb809bfc49771c0fe858c319",
             "provider": "krea_2_turbo_control", "tier": "q4", "mode": "text_to_image", "overlay": "control:1",
             "geometry": { "width": 896, "height": 896, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/krea-2-turbo-mlx",
@@ -5340,6 +5340,9 @@
           // layout, quantization floors and execution structure did not move - only the shared contract
           // ABI did, which is precisely the split the two identity fields exist to express.
           "inferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+          // sc-17774: the currency term. `inferenceRevision` above is capture provenance and is
+          // no longer compared — the digest of `candle-gen-krea`'s compile closure is.
+          "inferenceClosureDigest": "484ddf55e907daf9457430bdf2853bc92a812675ded09d86925901f24acdfa30",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
@@ -5372,7 +5375,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5482,7 +5484,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5592,7 +5593,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5695,7 +5695,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5805,7 +5804,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -5908,7 +5906,6 @@
               "sceneWorksCommit": "7711d5779a7a9d8a463e5c710dbec708cab08738",
               "inferenceCommit": "277f423822bf1899340ed3d867c3d6a773473d7b",
               "compatibleSceneWorksRevision": "sc-15449-contract-v1",
-              "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
               "loadability": {
                 "provider": "huggingface",
                 "repository": "SceneWorks/krea-2-turbo-mlx",
@@ -6231,6 +6228,11 @@
         // the INT8-ConvRot variant. The current rows below are direct probe outputs; the retracted
         // `branchPackSaveGb` correction remains absent and no worker reader derives one.
         "control": {
+          // sc-17774: the closure of `candle-gen-krea` these direct control measurements were
+          // taken against (1899a722). Currency compares this against the live digest for the same
+          // lane; it replaces `krea_control_fit::KREA_CONTROL_INFERENCE_REVISION`, a per-model
+          // frozen SHA that only that one lane had.
+          "inferenceClosureDigest": "19b34c9104e0f5a4def21599868ad4cfa0125bd15b22616001593b468224d7cd",
           // TIER INTEGRITY (sc-15799): the tier the pose branch is packed to, per BASE tier. Not a lever
           // and not budget-dependent — `gen_core::tier_integrity::control_branch_tier` is the executable
           // form and `krea_control_fit::control_branch_tier_for_key` is the worker's entry point.
@@ -7163,8 +7165,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "8156f7f064a58a6ce35f09be50cae41b27249b7a4b4e604a14e1e20f79951dca",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7177,8 +7178,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "8156f7f064a58a6ce35f09be50cae41b27249b7a4b4e604a14e1e20f79951dca",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7191,8 +7191,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "8156f7f064a58a6ce35f09be50cae41b27249b7a4b4e604a14e1e20f79951dca",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7205,8 +7204,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "8156f7f064a58a6ce35f09be50cae41b27249b7a4b4e604a14e1e20f79951dca",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -7220,8 +7218,7 @@
             "fingerprint": "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2",
             "sceneWorksRevision": "a9bb7303420855aeb276da33b31aa826a5d09faa",
             "matrixSourceRevision": "source-tree:0fe5b55382f409e2da43aaad16a2d2ab0af871c8e9759328ead6593262c20fe5",
-            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "compatibleInferenceRevision": "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
+            "inferenceRevision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d", "inferenceClosureDigest": "8156f7f064a58a6ce35f09be50cae41b27249b7a4b4e604a14e1e20f79951dca",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -12573,6 +12570,71 @@
             { "label": "Hugging Face mirror", "url": "https://huggingface.co/nateraw/real-esrgan" }
           ]
         }
+      }
+    },
+    {
+      // sc-17632 (epic 17625) — the OTHER upscaler, and the same story as SAM3 below: SeedVR2 had
+      // no install-flow representation at all. Its repo and pinned revision lived only as
+      // hardcoded constants in worker source, DUPLICATED across the two lanes that load it — the
+      // `image_upscale` job (`upscale_jobs.rs`) and the `video_upscale` job
+      // (`video_jobs/seedvr2.rs`) — and each lane downloaded the SAME ~7.3 GB checkpoint mid-render
+      // into its OWN destination (`<data_dir>/cache/upscale/seedvr2/` and
+      // `<data_dir>/cache/seedvr2-mlx/`), where the Models screen can neither size nor delete it.
+      //
+      // The loader half landed with this entry: both lanes now call ONE cache-only resolver,
+      // `upscale_jobs::require_seedvr2_checkpoint_dir`. Declaring the repo WITHOUT that change
+      // would have been worse than leaving it alone — install state keys on the declared repo, so
+      // the entry would have flipped every existing install to "not installed", prompted a 7.3 GB
+      // download the loaders ignored, and then still fetched the same bytes inside the next render.
+      //
+      // Migration: an existing install keeps working from EITHER legacy root, so nothing
+      // re-downloads. Those bytes are now orphaned — never written to again, and not reachable from
+      // this entry's artifact paths. Reclaiming them is tracked on sc-17636 (S11), which owns
+      // delete/size coverage.
+      //
+      // The revision is byte-for-byte the worker's own `SEEDVR2_REVISION` (`upscale_jobs.rs`,
+      // sc-8879), and the files are the upstream names verbatim — the engine loads them unrenamed,
+      // straight out of the HF snapshot dir. They MUST agree: `SEEDVR2_REVISION` is a 40-hex pin,
+      // so the resolver reads that EXACT `snapshots/<sha>/` with no fall-through to `refs/main`,
+      // and a manifest installing a different one would report "installed" while every SeedVR2 job
+      // failed with "not installed". `manifest_declares_the_same_seedvr2_pin_the_loader_reads`
+      // (upscale_jobs/tests.rs) fails if either side drifts.
+      "id": "seedvr2_upscaler",
+      "name": "SeedVR2 Upscaler",
+      "family": "seedvr2",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // Third-party mirror of ByteDance-Seed's SeedVR2-3B (Apache-2.0), in the raw ComfyUI
+          // layout both engines convert in-memory at load. `numz/SeedVR2_comfyUI` also hosts 7B and
+          // fp8 variants this build does not load, so the file allow-list is what keeps the install
+          // to the 3B fp16 pair (~7.3 GB) rather than the whole repo.
+          "provider": "huggingface",
+          "repo": "numz/SeedVR2_comfyUI",
+          "revision": "09ced71023636e9bc8cdf9cdecfb2625d1e691e8",
+          "files": ["seedvr2_ema_3b_fp16.safetensors", "ema_vae_fp16.safetensors"],
+          "estimatedSizeBytes": 7284343622
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/numz/SeedVR2_comfyUI"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SeedVR2 Upscaler",
+        // No `promptGuide`: `type: "utility"` entries are exempt (`promptGuideRequiredForModel`)
+        // because they never reach a Studio prompt-guide surface, and the three utilities sc-17627
+        // declared carry none either. Pointing this at Real-ESRGAN's guide would satisfy the gate
+        // while describing a different upscaler. Provenance lives on the About→Licenses `seedvr2`
+        // component instead.
+        "description": "One-step diffusion super-resolution behind the SeedVR2 image-upscale engine and video upscaling. Larger and slower than Real-ESRGAN, and generative rather than pixel-faithful; install it only if you want that engine.",
+        "recommendedFor": ["image_upscale", "video_upscale"]
       }
     },
     {

@@ -144,10 +144,6 @@ use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
 mod fit_gate;
-// sc-17497: compiled under `test` on every platform too, so the audit validator is not a candle-lane
-// blind spot. Not compiled at all in a non-candle release build, so nothing is dead there.
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-mod inference_compatibility_audit;
 pub mod memory_strategy;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
@@ -1623,7 +1619,7 @@ async fn run_utility_job(
             // Native MLX image generation, served in-process by the linked mlx-gen
             // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
             // capability is never advertised, so this arm is unreachable there.
-            JobType::ImageGenerate => run_image_generate_job(api, settings, http_client, &job)
+            JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image generation failed.", error)),
             // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
@@ -1631,7 +1627,7 @@ async fn run_utility_job(
             // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
             // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
             // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
-            JobType::ImageEdit => run_image_generate_job(api, settings, http_client, &job)
+            JobType::ImageEdit => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image edit failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
@@ -1801,7 +1797,7 @@ async fn run_utility_job(
                 target_os = "macos",
                 all(not(target_os = "macos"), feature = "backend-candle")
             ))]
-            JobType::ImageUpscale => run_image_upscale_job(api, settings, http_client, &job)
+            JobType::ImageUpscale => run_image_upscale_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image upscale failed.", error)),
             // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
@@ -2010,6 +2006,15 @@ mod architecture_tests;
 // "make it compile with `preview: Default::default()`" regression lands.
 #[cfg(test)]
 mod candle_preview_wiring_tests;
+
+// The epic-17625 regression gate (sc-17637, AC9): no new job-time download, no new
+// `<data_dir>/cache` weight destination. Deliberately NOT cfg-gated for the same reason as the guard
+// above, only more so — every download helper and all of its call sites are gated
+// `macos || backend-candle`, so on the required ubuntu/default-features `parity` lane none of that
+// code is compiled at all and a gate inheriting those cfgs would never run. This one reads source
+// text, so it fires on every platform and every PR.
+#[cfg(test)]
+mod job_time_download_guard;
 
 // Pinned-snapshot provisioning helpers + the install-layout smokes (sc-13797/sc-13810). Compiled on
 // EVERY platform — the download/layout code is platform-agnostic; only the live-network smoke inside

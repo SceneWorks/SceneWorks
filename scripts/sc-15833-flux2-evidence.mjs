@@ -485,7 +485,14 @@ function validateCaptureEnvelope(capture) {
   }
   exactObject(capture.repositories, "repositories", ["sceneWorks", "inference"]);
   exactObject(capture.repositories.sceneWorks, "repositories.sceneWorks", ["revision", "dirty", "matrixSourceRevision"]);
-  exactObject(capture.repositories.inference, "repositories.inference", ["revision", "dirty"]);
+  // sc-17774: the capture now carries the provider's compile-closure digest — the term currency
+  // compares. `revision` stays as provenance and is still pinned to the reviewed merge below.
+  exactObject(capture.repositories.inference, "repositories.inference", [
+    "revision",
+    "dirty",
+    "closureDigest",
+  ]);
+  requireDigest(capture.repositories.inference.closureDigest, "inference closure digest");
   requireRevision(capture.repositories.sceneWorks.revision, "SceneWorks revision");
   requireRevision(capture.repositories.inference.revision, "inference revision");
   if (capture.repositories.inference.revision !== EXPECTED_INFERENCE_REVISION) {

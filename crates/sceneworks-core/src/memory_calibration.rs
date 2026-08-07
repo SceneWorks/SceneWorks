@@ -29,6 +29,34 @@ pub const MEMORY_CALIBRATION_HARNESS_VERSION: &str = "sceneworks-memory-v5";
 /// stale because neither edit cardinality nor eager/deferred materialization is interchangeable.
 /// A worker-side lockstep test asserts this constant equals gen-core's.
 pub const MEMORY_CALIBRATION_ABI: u32 = 3;
+/// The per-provider inference compile-closure digests, compiled in (sc-17774).
+///
+/// ONE mechanism, applied identically to every model. Before this, each lane carried its own frozen
+/// revision constant — `KREA_CONTROL_INFERENCE_REVISION`, `KREA_TURBO_INFERENCE_REVISION`,
+/// `INFERENCE_CONTRACT_REVISION`, `INFERENCE_RUNTIME_REVISION` — and `flux2_dev` additionally had a
+/// hand-audited one-shot compatibility hatch. All of them are gone; every lane now asks this table
+/// for the provider it is actually admitting.
+pub const PACKAGED_INFERENCE_PROVIDER_CLOSURES: &str =
+    include_str!("../../../config/inference-provider-closures.json");
+
+/// The live closure digest for one `(backend, provider)` lane, or `None` when it is not declared.
+///
+/// Keyed by BOTH because a provider id is not unique: `krea_2_turbo_control` exists on mlx
+/// (`mlx-gen-krea`) and on candle (`candle-gen-krea`), which are different code paths that must
+/// never be compared against each other.
+///
+/// `None` is a real answer and callers must fail closed on it rather than admitting: an undeclared
+/// lane means nobody derived what code its measurements were taken against.
+pub fn packaged_closure_digest(backend: &str, provider: &str) -> Option<String> {
+    serde_json::from_str::<Value>(PACKAGED_INFERENCE_PROVIDER_CLOSURES)
+        .ok()?
+        .get("providers")?
+        .get(format!("{backend}:{provider}"))?
+        .get("digest")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
     include_str!("../../../docs/generated/memory-calibration-evidence.json");
 
@@ -242,6 +270,15 @@ pub struct GitState {
     pub revision: String,
     pub dirty: bool,
     pub matrix_source_revision: Option<String>,
+    /// Digest of the measured provider's inference compile closure at `revision` (sc-17774).
+    ///
+    /// This — not `revision` — is the currency term. `revision` stays as capture provenance so a
+    /// record can still say where it came from, but comparing it was what demoted every provider's
+    /// measurements on any inference commit, including commits to a different model entirely.
+    ///
+    /// Optional in the type so a bundle can be parsed and diagnosed; [`EvidenceBundle::evidence_for`]
+    /// refuses a record without one rather than falling back to revision equality.
+    pub closure_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -702,7 +739,14 @@ pub struct CalibrationBinding {
     pub fingerprint: String,
     pub scene_works_revision: String,
     pub matrix_source_revision: String,
+    /// Capture provenance only — NEVER compared (sc-17774). See [`Self::inference_closure_digest`].
     pub inference_revision: String,
+    /// The provider compile-closure digest this calibration is in force for (sc-17774).
+    ///
+    /// One mechanism for every model: a record is current exactly when the closure of the provider
+    /// it measured is unchanged. A change to any other model's code path cannot move this value, so
+    /// it cannot demote this calibration.
+    pub inference_closure_digest: String,
     pub artifact_repository: String,
     pub artifact_resolved_revision: String,
     pub artifact_variant: String,
@@ -728,7 +772,16 @@ pub enum StaleEvidenceReason {
     CalibrationAbi,
     LoadShape,
     CalibrationFingerprint,
-    InferenceRevision,
+    /// The measured provider's own inference compile closure moved (sc-17774).
+    ///
+    /// Replaces the former `InferenceRevision`, which fired whenever the inference pin moved at all
+    /// — including for a commit to an unrelated model.
+    InferenceClosure,
+    /// A record carried no closure digest, so currency cannot be decided (sc-17774).
+    ///
+    /// Separate from [`Self::InferenceClosure`] on purpose: "we could not tell" must never be
+    /// reported as "the code changed", and neither may silently fall back to revision equality.
+    MissingClosureDigest,
     ArtifactRepository,
     ArtifactResolvedRevision,
     ArtifactVariant,
@@ -781,9 +834,15 @@ impl EvidenceBundle {
                 Some(StaleEvidenceReason::LoadShape)
             } else if record.calibration_fingerprint != query.calibration.fingerprint {
                 Some(StaleEvidenceReason::CalibrationFingerprint)
-            } else if record.repositories.inference.revision != query.calibration.inference_revision
+            } else if record.repositories.inference.closure_digest.is_none() {
+                Some(StaleEvidenceReason::MissingClosureDigest)
+            } else if record.repositories.inference.closure_digest.as_deref()
+                != Some(query.calibration.inference_closure_digest.as_str())
             {
-                Some(StaleEvidenceReason::InferenceRevision)
+                // sc-17774: the provider's own compile closure, not the inference pin. The pin
+                // comparison this replaces demoted every calibrated provider on any inference
+                // commit — 2812 of 2812 non-merge commits over the 90 days to `fbb00d6b`.
+                Some(StaleEvidenceReason::InferenceClosure)
             } else if record.artifact.repository != query.calibration.artifact_repository {
                 Some(StaleEvidenceReason::ArtifactRepository)
             } else if record.artifact.resolved_revision
@@ -2092,7 +2151,8 @@ mod tests {
                 },
                 "inference": {
                     "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "dirty": false
+                    "dirty": false,
+                    "closureDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 }
             },
             "hardware": {
@@ -2300,6 +2360,7 @@ mod tests {
                 scene_works_revision: "a".repeat(40),
                 matrix_source_revision: "source-tree:1111111".to_owned(),
                 inference_revision: "b".repeat(40),
+                inference_closure_digest: "d".repeat(64),
                 artifact_repository: "SceneWorks/fixture".to_owned(),
                 artifact_resolved_revision: "c".repeat(40),
                 artifact_variant: "q4".to_owned(),
@@ -2784,11 +2845,22 @@ mod tests {
             EvidenceVerdict::Verified(_)
         ));
 
+        // sc-17774: the inference REVISION is provenance and moving it changes nothing. Before this
+        // change the same mutation returned `Stale`, which is why an inference commit to any model
+        // demoted every model's measurements.
         let mut inference = exact_query();
         inference.calibration.inference_revision = "d".repeat(40);
-        assert_eq!(
+        assert!(matches!(
             bundle.evidence_for(&inference),
-            EvidenceVerdict::Stale(StaleEvidenceReason::InferenceRevision)
+            EvidenceVerdict::Verified(_)
+        ));
+
+        // The provider's own compile closure is the term that decides currency, and it is not blind.
+        let mut closure = exact_query();
+        closure.calibration.inference_closure_digest = "e".repeat(64);
+        assert_eq!(
+            bundle.evidence_for(&closure),
+            EvidenceVerdict::Stale(StaleEvidenceReason::InferenceClosure)
         );
 
         let mut matrix = exact_query();

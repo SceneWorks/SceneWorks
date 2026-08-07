@@ -16,7 +16,8 @@
       "properties": {
         "revision": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
         "dirty": { "type": "boolean" },
-        "matrixSourceRevision": { "type": "string", "pattern": "^source-tree:[0-9a-f]+$" }
+        "matrixSourceRevision": { "type": "string", "pattern": "^source-tree:[0-9a-f]+$" },
+        "closureDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "hardwareBase": {
@@ -177,6 +178,22 @@
         "hardware", "artifact", "target", "fixture", "strategy", "sweep", "scenarios",
         "predictedPeakBytes", "observedMemory", "quality", "negativeMutation",
         "loadability", "calibrationFingerprint", "capturedAt", "harnessVersion"
+      ],
+      "allOf": [
+        {
+          "$comment": "sc-17774: currency is the provider's compile-closure digest, so an AUTHORITATIVE record must carry the one it was captured under. Fixture and candidate scopes are refused by evidenceSemantics before the comparison is ever reached, so demanding a real digest there would force the harness to derive one against a synthetic repo that has no provider crate to derive from.",
+          "if": {
+            "properties": { "evidenceScope": { "const": "authoritative" } },
+            "required": ["evidenceScope"]
+          },
+          "then": {
+            "properties": {
+              "repositories": {
+                "properties": { "inference": { "required": ["closureDigest"] } }
+              }
+            }
+          }
+        }
       ],
       "properties": {
         "id": { "type": "string", "pattern": "^imc-[0-9a-f]{20}$" },

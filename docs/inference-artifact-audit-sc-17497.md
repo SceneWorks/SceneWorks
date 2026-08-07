@@ -1,5 +1,20 @@
 # Extending a FLUX.2 calibration across an inference pin bump (sc-17497)
 
+> **SUPERSEDED by sc-17774 — the mechanism this documents no longer exists.**
+>
+> Calibration currency is now decided by a per-provider compile-closure digest, one mechanism applied
+> identically to every model. See **[calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md)**.
+>
+> `scripts/inference-artifact-audit.mjs`, `FLUX2_COMPATIBILITY_AUDIT` and
+> `crates/sceneworks-worker/src/inference_compatibility_audit.rs` are all deleted, so the procedure
+> below **cannot be run**. It is kept because its reasoning is still load-bearing: the finding under
+> "Why the source tree was the wrong unit" is exactly why the replacement hashes SEMANTIC source
+> rather than raw bytes, which gives every lane the comment-absolution this audit bought for one.
+>
+> What did NOT go: the composition check (sc-17607,
+> `crates/sceneworks-worker/src/flux2_composition_audit.rs`). "Which provider is registered under
+> `flux2_dev`" is not an invalidation question and no digest can answer it in either direction.
+
 A packaged calibration is a set of measurements taken against a specific build of the inference
 engine. Extending it to a newer pin means proving the code it describes has not changed. sc-15833
 proved that with **git object identity** over FLUX.2's Candle/CUDA compile closure; sc-17497 keeps

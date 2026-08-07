@@ -110,7 +110,7 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     "name: Disable unstable sccache wrapper for the heavy Candle lane",
   );
   const isolate = workflow.indexOf("name: Isolate Cargo dependency checkout");
-  const fetch = workflow.indexOf("name: Fetch the private inference release");
+  const fetch = workflow.indexOf("name: Fetch the pinned inference release");
   assert.ok(
     prepare >= 0 && prepare < disableWrapper && disableWrapper < isolate && isolate < fetch,
   );
@@ -339,10 +339,13 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     inferenceCheckout,
     /token: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}/,
   );
-  assert.match(
-    workflow,
-    /x-access-token:\$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}@github\.com\/SceneWorks\/inference\.insteadOf/,
-  );
+  // The Cargo fetch itself carries NO credential (sc-17879). `SceneWorks/inference` is public, so
+  // the `url.…insteadOf` rewrite this lane used to inject bought nothing, and on a fork -- where
+  // `secrets.*` expands to empty -- it emitted `https://x-access-token:@github.com/...` and broke
+  // the fetch outright. The dispatch-only calibration checkout above is a separate mechanism and
+  // keeps its `|| github.token` fallback.
+  assert.doesNotMatch(workflow, /x-access-token:/);
+  assert.doesNotMatch(workflow, /GIT_CONFIG_(?:COUNT|KEY_0|VALUE_0)/);
   assert.match(workflow, /--backend mlx/);
   assert.match(workflow, /QWEN_SEED=15511/);
   assert.match(workflow, /QWEN_SEED=16353/);
@@ -1196,4 +1199,72 @@ test("a broken relevance gate runs the lane instead of silently passing its requ
       );
     }
   }
+});
+
+test("hosted required checks do not skip fork PRs into a vacuous green", async () => {
+  // A same-repo guard on a REQUIRED check is a false green: the fork PR matches it, the job is
+  // SKIPPED, and a skipped job reports Success. `macos-checks` carried one justified by
+  // "SceneWorks/inference is private, a fork cannot read it" — which is not true. The repo is
+  // public and was never intended to be private; the pinned rev fetches with no token at all, and
+  // also with the EMPTY token a fork PR supplies.
+  //
+  // Self-hosted jobs are the exception and MUST keep their guards: untrusted code on a persistent
+  // box is a real concern that has nothing to do with repo visibility.
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+  const macosChecks = mlx.slice(mlx.indexOf("  macos-checks:"), mlx.indexOf("  nax-worker:"));
+  assert.ok(macosChecks.length > 0, "macos-checks job not found");
+  assert.doesNotMatch(
+    macosChecks,
+    /head\.repo\.full_name/,
+    "macos-checks is a HOSTED required check — a same-repo guard makes a fork PR skip it, and a " +
+      "skipped job satisfies the required check, so the macOS verdict goes green having run nothing.",
+  );
+  // Positive half, so this never reads as "guards are bad".
+  const nax = mlx.slice(mlx.indexOf("  nax-worker:"));
+  assert.match(
+    nax,
+    /head\.repo\.full_name/,
+    "nax-worker MUST keep its same-repo guard — fork code must not execute on the nax pool.",
+  );
+  assert.match(
+    await source(".github/workflows/windows-candle.yml"),
+    /head\.repo\.full_name/,
+    "candle-worker MUST keep its same-repo guard — fork code must not execute on the cuda pool.",
+  );
+});
+
+test("the FLUX.2 composition audit still runs, and is still wired into a lane", async () => {
+  // sc-17607's composition check answers "which provider is registered under `flux2_dev`" — a
+  // question no code digest can answer in either direction, which is why it is a pointer-identity
+  // test rather than part of the calibration closure. It is NOT an invalidation mechanism and
+  // survived sc-17774's removal of the per-model ones.
+  //
+  // Its liveness guard did not, at first: it lived in `scripts/inference-artifact-audit.test.mjs`,
+  // which sc-17774 deleted along with the flux2-only audit tooling that file existed to grade. The
+  // guard itself was never about that tooling, so it is restored here — in a file every lane runs.
+  //
+  // Why it has to live OUTSIDE the module: `flux2_composition_audit` is
+  // `cfg(all(test, not(macos), backend-candle))`, so no macOS or non-candle lane executes anything
+  // in it. Deleting its tests, or mistyping its cfg, would fail nothing anywhere.
+  //
+  // Named `#[test]` functions rather than keywords, because every keyword also appears in that
+  // module's own prose — a substring check would pass with all three tests deleted.
+  const composition = await source("crates/sceneworks-worker/src/flux2_composition_audit.rs");
+  for (const name of [
+    "the_bundle_routes_flux2_dev_to_the_provider_the_calibration_measured",
+    "the_bundle_keeps_flux2_devs_memory_strategy_route_intact",
+    "the_audited_composition_is_the_full_cuda_bundle",
+  ]) {
+    assert.match(
+      composition,
+      new RegExp(`#\\[test\\]\\s*\\n\\s*fn ${name}\\(`),
+      `the composition audit must still RUN ${name}, not merely mention it`,
+    );
+  }
+  const workerLib = await source("crates/sceneworks-worker/src/lib.rs");
+  assert.match(
+    workerLib,
+    /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod flux2_composition_audit;/,
+    "an undeclared module is compiled by no lane, so the composition check would vanish in silence",
+  );
 });

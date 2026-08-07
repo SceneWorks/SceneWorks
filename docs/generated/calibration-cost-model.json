@@ -1,25 +1,25 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:4389863e2980e62aa9dfe770b6932d787d8c1bd11593f277714c2de989286c06",
-    "matrixRevision": "source-tree:6bd7bef1893271bd4cc0f9974f8053419a6da4cab54ec476281ef06a6201d58d",
-    "inferenceRevision": "574f0d99f44740622cacb51735474a210c678a96",
+    "sceneWorksRevision": "source-tree:e90c41ab5e330e79696a8c7dc07a8be59fc61bc433a95949770e4646605c6705",
+    "matrixRevision": "source-tree:61761951f29d5e20fac46d5d6af00c5856c9b3b667f5006e2873268aaaa59b4a",
+    "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "8b33c5c42e999efa868edebe217a21e8d5ef4fa74254b73d78d99df8bad4f544"
+        "sha256": "10fa9a8d441fd4c45ad03f454c16769113007e70aee75bd6eeb41acad1ae0fb2"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "4abe9ea7f7f2d6f0790b8ef14b3eb4c1a60011b8cedaaa49b968018de159076d"
+        "sha256": "b5eb9a1de601cf792513c595d8b84a273383992a541e119ce331edab5cd440fa"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "5dc5c1fb59be44fd64fe95e1b2f5c8742a4a5e7a5ff710ee89029ae4c809e13b"
+        "sha256": "d29e7a7bdbb762629de0da768fad3205ba814beb077d955e2591a8b054a267e5"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "bf42e9d7229dc24c749b49964ec321a4ed63848c1bf0cadf176ad8c074dc454a"
+        "sha256": "968eb512a8861c5812475b4424ed755a270f847a7f1fa5bd3cdb6a508c2df18f"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -35,11 +35,11 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "04524551b09626d6f172f6606346210818b5c2ce72b4512a6f4335b3289cd4ef"
+        "sha256": "b66db4590ff547a467812fbd27bb31c5b21138aebdc613d3b83cf7bc4ce5c1dd"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "69b5bce3921a5a1d79241b5e6ffa24f5ccd618a0169f2a5ab6f4fcb4427a2b7d"
+        "sha256": "545d24eb0daeef84e5e862819ad2e9cb8c1a3b1e9656e137b49a15eb4d468348"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",
@@ -67,9 +67,9 @@
     "runtimeCompleteRecords": 15,
     "activationEligibleRecords": 65,
     "matrixSummaryCalibrationRuns": 65,
-    "matrixSummaryCurrentCalibrationRuns": 0,
-    "verifiedCells": 0,
-    "note": "50 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 0 current calibration run(s) and 0 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
+    "matrixSummaryCurrentCalibrationRuns": 11,
+    "verifiedCells": 10,
+    "note": "50 Full complete and 15 base-only runtime-complete record(s) exist in the evidence bundle; the matrix reports 11 current calibration run(s) and 10 aggregate Verified cell(s). Exact records remain narrower than aggregate matrix cells, so a current exact run does not by itself promote a whole cell."
   },
   "producibility": {
     "partition": [
@@ -391,9 +391,10 @@
   "cells": {
     "total": 9140,
     "byState": {
-      "Implemented/unverified": 3240,
-      "Missing": 5894,
-      "Structurally N/A": 6
+      "Implemented/unverified": 3140,
+      "Missing": 5984,
+      "Structurally N/A": 6,
+      "Verified": 10
     },
     "byBackend": {
       "candle": 4520,
@@ -401,10 +402,11 @@
     },
     "byStateAndBackend": {
       "Implemented/unverified @ candle": 1201,
-      "Implemented/unverified @ mlx": 2039,
+      "Implemented/unverified @ mlx": 1939,
       "Missing @ candle": 3313,
-      "Missing @ mlx": 2581,
-      "Structurally N/A @ candle": 6
+      "Missing @ mlx": 2671,
+      "Structurally N/A @ candle": 6,
+      "Verified @ mlx": 10
     },
     "byRung": {
       "bounded_attention": 1828,

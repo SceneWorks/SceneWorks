@@ -20,8 +20,11 @@
 //!
 //! Engine scope: `engine=real-esrgan` (the default, the `ort` path above) and
 //! `engine=seedvr2` (epic 4811 / sc-4815 — the one-step diffusion super-resolution upscaler) are
-//! served here. SeedVR2 runs in-process via the registry generator (native MLX on Mac /
-//! `candle-gen-seedvr2` off-Mac, sc-5157), driven through the shared `with_cached_generator` seam
+//! served here. Both are **resolve-only**: their weights arrive from the Model Manager
+//! (`real_esrgan` sc-17633, `seedvr2_upscaler` sc-17632) and neither resolver can reach the
+//! network, so nothing downloads mid-render. SeedVR2 runs in-process via the registry generator
+//! (native MLX on Mac / `candle-gen-seedvr2` off-Mac, sc-5157), driven through the shared
+//! `with_cached_generator` seam
 //! (single-resident engine cache — it evicts any cached image-gen engine, bounding peak memory,
 //! which matters because the SeedVR2 image path has no spatial tiling yet). It takes a target
 //! resolution (factor → `round_to_16(src × factor)`) and an optional `--softness` pre-blur.
@@ -42,7 +45,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::asset_media::resolve_asset_media;
-use crate::downloads::{ensure_hf_cached_file, DownloadContext};
 use crate::generator_cache::with_cached_generator;
 use crate::single_child_asset::{write_single_child_asset, SingleChildAssetSpec};
 use crate::util::resolve_env_file_pin;
@@ -450,21 +452,67 @@ fn upscale_blocking(
 // ONNX weight provisioning (cache-only since sc-17633; mirrors Python resolution order)
 // ---------------------------------------------------------------------------
 
-/// Resolve the `SCENEWORKS_SEEDVR2_CHECKPOINT` dir pin (sc-8911). Unset → `Ok(None)`. Set
-/// and holding both checkpoint files → `Ok(Some(dir))`. Set but incomplete → an
-/// `InvalidPayload` error. Testable without env mutation via the explicit raw value.
-fn resolve_seedvr2_dir_pin(value: Option<std::ffi::OsString>) -> WorkerResult<Option<PathBuf>> {
+/// What a set-but-INCOMPLETE value means, which differs per key because the two keys did not
+/// historically mean the same thing. See [`SEEDVR2_DIR_PINS`] for the full story.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedVr2Pin {
+    /// The key NAMES a checkpoint, so incomplete is an operator error and fails loudly (sc-8911).
+    NamedCheckpoint,
+    /// The key named a STAGING DESTINATION the worker used to create and download into, so empty
+    /// is a legal state for it and incomplete falls through to the next candidate.
+    StagingDir,
+}
+
+/// Resolve one SeedVR2 checkpoint-dir env pin. Unset → `Ok(None)`. Set and holding both checkpoint
+/// files → `Ok(Some(dir))`. Testable without env mutation via the explicit raw value.
+///
+/// Set but INCOMPLETE splits on `kind`, and the split is the whole point (sc-17632 review):
+///
+/// * [`SeedVr2Pin::NamedCheckpoint`] → an `InvalidPayload` error naming the key and the files that
+///   are actually missing. This is sc-8911's rule, kept verbatim: an operator who points the worker
+///   at a specific checkpoint must not silently get a different one, and an error they can read and
+///   unset beats loading weights they did not ask for. The message tells them how to fix it.
+/// * [`SeedVr2Pin::StagingDir`] → a loud `warn!` and `Ok(None)`, so resolution continues to the HF
+///   cache. Erroring here would be a regression invented by this story rather than a rule anyone
+///   chose: the key used to be a *download destination*, so an empty one is exactly the state it
+///   was in before first use, and hard-failing on it would let a stale developer export make a
+///   perfectly good installed model unreachable.
+fn resolve_seedvr2_dir_pin(
+    key: &str,
+    kind: SeedVr2Pin,
+    value: Option<std::ffi::OsString>,
+) -> WorkerResult<Option<PathBuf>> {
     let Some(value) = value else {
         return Ok(None);
     };
     let dir = PathBuf::from(&value);
-    if dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists() {
+    let missing: Vec<&str> = [SEEDVR2_DIT_FILE, SEEDVR2_VAE_FILE]
+        .into_iter()
+        .filter(|file| !dir.join(file).exists())
+        .collect();
+    if missing.is_empty() {
         return Ok(Some(dir));
     }
-    Err(WorkerError::InvalidPayload(format!(
-        "SCENEWORKS_SEEDVR2_CHECKPOINT is set to {} but that directory is missing {SEEDVR2_DIT_FILE} and/or {SEEDVR2_VAE_FILE}. Point it at a complete checkpoint dir, or unset it to download on first use.",
-        dir.display()
-    )))
+    // Name the files that are ACTUALLY absent rather than "X and/or Y": with two files, "and/or"
+    // makes the operator check both when we already know which one is wrong.
+    let missing = missing.join(" and ");
+    match kind {
+        SeedVr2Pin::NamedCheckpoint => Err(WorkerError::InvalidPayload(format!(
+            "{key} is set to {} but that directory is missing {missing}. Point it at a complete \
+             checkpoint dir, or unset it to use the copy installed from the Model Manager.",
+            dir.display()
+        ))),
+        SeedVr2Pin::StagingDir => {
+            tracing::warn!(
+                pin = key,
+                dir = %dir.display(),
+                %missing,
+                "ignoring {key}: it names an incomplete SeedVR2 checkpoint dir, falling back to \
+                 the installed copy. Unset it, or populate it, to silence this."
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Resolve the ONNX for `factor`, **cache-only** (sc-17633, epic 17625). Order:
@@ -557,20 +605,76 @@ fn manifest_onnx_resource(manifest_entry: &Value, factor: u8) -> Option<(String,
 // SeedVR2 native-MLX upscaler (epic 4811 / sc-4815)
 // ---------------------------------------------------------------------------
 
-/// Upstream HuggingFace repo holding the raw SeedVR2 ComfyUI checkpoint. The `mlx-gen-seedvr2`
-/// registry loads it directly (converts to MLX layout in-memory, no Python). Public; downloaded on
-/// first use. Overridable via the manifest `seedvr2` resource or `SCENEWORKS_SEEDVR2_CHECKPOINT`.
+/// Upstream HuggingFace repo holding the raw SeedVR2 ComfyUI checkpoint. The `mlx-gen-seedvr2` /
+/// `candle-gen-seedvr2` registries load it directly (converting to the backend layout in-memory, no
+/// Python). Public; declared by the `seedvr2_upscaler` catalog entry and installed from the Model
+/// Manager (sc-17632) — NOT downloaded on first use any more. Overridable via
+/// `SCENEWORKS_SEEDVR2_CHECKPOINT` / `SCENEWORKS_SEEDVR2_DIR`.
+///
+/// This is the ONE repo both SeedVR2 lanes read: the image upscaler here and the `video_upscale`
+/// job in [`crate::video_jobs`]. Until sc-17632 each lane owned a private copy of these constants
+/// and downloaded the same ~7.3 GB twice, into two different `<data_dir>/cache` subtrees.
 pub(crate) const SEEDVR2_REPO: &str = "numz/SeedVR2_comfyUI";
 /// Pinned SeedVR2 checkpoint revision (sc-8879). `numz/SeedVR2_comfyUI` is a third-party
 /// mirror; fetching the mutable `main` branch means an upstream re-push would silently
 /// change the weights we load. Pin the exact commit that carries the 3B fp16 DiT + VAE
-/// (`seedvr2_ema_3b_fp16.safetensors` / `ema_vae_fp16.safetensors`) so downloads are
-/// reproducible. HF's tree API still reports each file's `lfs.oid`, which
-/// `ensure_hf_cached_file` verifies the content against.
+/// (`seedvr2_ema_3b_fp16.safetensors` / `ema_vae_fp16.safetensors`).
+///
+/// The `seedvr2_upscaler` catalog entry declares this SAME revision (sc-17632), so the Model
+/// Manager installs exactly the snapshot [`resolve_seedvr2_checkpoint_dir`] then reads; the
+/// integrity check against each file's `lfs.oid` happens there, in the download job, not at load
+/// time. `manifest_declares_the_same_seedvr2_pin_the_loader_reads` fails if the two drift.
 pub(crate) const SEEDVR2_REVISION: &str = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8";
 /// The exact filenames `Seedvr2Pipeline::load` expects in the checkpoint dir (3B fp16 DiT + VAE).
+/// They are byte-identical to the upstream filenames, which is why nothing renames them: the
+/// checkpoint dir the engine is handed is the HF snapshot dir itself.
 const SEEDVR2_DIT_FILE: &str = "seedvr2_ema_3b_fp16.safetensors";
 const SEEDVR2_VAE_FILE: &str = "ema_vae_fp16.safetensors";
+
+/// Operator overrides naming a local SeedVR2 checkpoint dir, in precedence order, each with what a
+/// set-but-INCOMPLETE value means for that key.
+///
+/// # One knob per lane, now read by both lanes
+///
+/// The two keys are historical siblings, not synonyms someone added for convenience.
+/// `SCENEWORKS_SEEDVR2_CHECKPOINT` was the **image** upscaler's and has always been a *pin*: it
+/// named a checkpoint, and an incomplete one was a loud error (sc-8911). `SCENEWORKS_SEEDVR2_DIR`
+/// was the **video** upscaler's and was a **staging destination** — the pre-sc-17632 code created
+/// that directory and downloaded the DiT + VAE *into* it, so an empty one was the normal state
+/// before first use. Each key was completely INERT on the other lane.
+///
+/// Collapsing the two lanes onto one resolver (sc-17632) means **both keys are now read on both
+/// lanes**, and there is nothing left to stage into — every candidate here is resolve-only. The
+/// consequence a reader needs to know: an export that used to affect only video upscaling now
+/// influences image upscaling too, and vice versa.
+///
+/// # Why the strictness differs
+///
+/// Because the widening is exactly where a hard error would do new damage. Keeping
+/// `SCENEWORKS_SEEDVR2_DIR` strict would mean a stale developer export — legally empty under its
+/// old meaning — could make a correctly installed model unreachable on a lane that export never
+/// touched. So it warns and falls through, while `SCENEWORKS_SEEDVR2_CHECKPOINT` keeps sc-8911's
+/// hard failure: it names a checkpoint, so incomplete means the operator got it wrong, and the
+/// error says which files are missing and that unsetting it uses the installed copy.
+///
+/// The residual, stated rather than hidden: an incomplete `SCENEWORKS_SEEDVR2_CHECKPOINT` now fails
+/// the **video** lane too, which it did not before. That is sc-8911's deliberate rule reaching a
+/// lane that loads the same model from the same repo — not a new rule — and it is loud and
+/// self-describing when it fires.
+const SEEDVR2_DIR_PINS: &[(&str, SeedVr2Pin)] = &[
+    ("SCENEWORKS_SEEDVR2_CHECKPOINT", SeedVr2Pin::NamedCheckpoint),
+    ("SCENEWORKS_SEEDVR2_DIR", SeedVr2Pin::StagingDir),
+];
+
+/// Pre-migration checkpoint roots under `<data_dir>`, read-only (AC10 of sc-17598).
+///
+/// Before sc-17632 the two SeedVR2 lanes each fetched the SAME ~7.3 GB repo into its OWN cache
+/// subtree — the image upscaler into `cache/upscale/seedvr2/`, the video upscaler into
+/// `cache/seedvr2-mlx/` — so an install that used both engines paid for the checkpoint twice, in a
+/// tree the Models screen can neither size nor delete. Both are read here so an existing install of
+/// EITHER lane satisfies BOTH and the upgrade re-downloads nothing. Nothing WRITES to them any
+/// more, so they only drain; reclaiming them is tracked on sc-17636 (S11).
+const SEEDVR2_LEGACY_DIRS: &[&str] = &["cache/upscale/seedvr2", "cache/seedvr2-mlx"];
 
 /// Round up to the nearest multiple of 16 (the SeedVR2 VAE /8 · patch /2 constraint the registry
 /// validates), floored at 16. `factor × src` is usually already a multiple of 16; odd sizes round.
@@ -578,100 +682,82 @@ fn round_to_16(v: u32) -> u32 {
     (v.div_ceil(16)).max(1) * 16
 }
 
-/// Pull a `{repo, ditFile, vaeFile}` override out of a job's `modelManifestEntry` if present:
-/// `resources.imageUpscalers.seedvr2` (or the legacy `resources.upscalers.seedvr2`).
-fn manifest_seedvr2_resource(manifest_entry: &Value) -> Option<(String, String, String)> {
-    let node = manifest_entry
-        .get("resources")?
-        .get("imageUpscalers")
-        .or_else(|| manifest_entry.get("resources")?.get("upscalers"))?
-        .get("seedvr2")?;
-    let repo = node.get("repo")?.as_str()?.to_owned();
-    let dit = node
-        .get("ditFile")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| SEEDVR2_DIT_FILE.to_owned());
-    let vae = node
-        .get("vaeFile")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| SEEDVR2_VAE_FILE.to_owned());
-    Some((repo, dit, vae))
+/// Resolve the raw SeedVR2 checkpoint dir — the dir holding the canonical DiT + VAE filenames the
+/// engine loads — **cache-only** (sc-17632, epic 17625). Order mirrors [`resolve_onnx`]:
+///
+/// 1. the explicit dir pins [`SEEDVR2_DIR_PINS`];
+/// 2. the **HF cache**, where the `seedvr2_upscaler` Model Manager install puts it — the pinned
+///    `snapshots/<sha>/` of [`SEEDVR2_REPO`] at [`SEEDVR2_REVISION`];
+/// 3. the legacy [`SEEDVR2_LEGACY_DIRS`] copies, read-only.
+///
+/// Both files must be present **from the same root** — a torn pair is not a resolution, exactly as
+/// in [`crate::person_segment_sam3_common::resolve_segmenter_weights`].
+///
+/// There is no download half. This used to fetch ~7.3 GB mid-render via `ensure_hf_cached_file`,
+/// and the `video_upscale` lane fetched the identical repo again into a second destination. Both
+/// lanes now call THIS function, so the checkpoint is installed once, into the HF cache, and a miss
+/// is an actionable install error rather than a surprise 7.3 GB transfer inside a render.
+///
+/// # No rename, and nothing may canonicalize this path
+///
+/// The engine consumes the returned **directory** (`WeightsSource::Dir` → `Seedvr2Pipeline::load`),
+/// and an HF snapshot dir holds relative SYMLINKS into extensionless blobs. The symlink names keep
+/// their `.safetensors` extension, and the safetensors loader dispatches on the extension, so this
+/// works only as long as nothing calls `canonicalize()` on the path (see the mlx-rs
+/// extension-dispatch note). Do not add one. The deleted pre-migration code copied each file to a
+/// "canonical" name under `cache/`; that rename was already a no-op — upstream's filenames ARE the
+/// canonical ones — and its only live branch was a manifest override that no SceneWorks surface
+/// could populate.
+pub(crate) fn resolve_seedvr2_checkpoint_dir(settings: &Settings) -> WorkerResult<Option<PathBuf>> {
+    let pair_in = |dir: PathBuf| -> Option<PathBuf> {
+        (dir.join(SEEDVR2_DIT_FILE).exists() && dir.join(SEEDVR2_VAE_FILE).exists()).then_some(dir)
+    };
+    // An operator dir pin wins over anything installed. A set-but-incomplete one is either a loud
+    // error or a warned fall-through depending on which key carried it — see `SEEDVR2_DIR_PINS`.
+    for (key, kind) in SEEDVR2_DIR_PINS {
+        if let Some(dir) = resolve_seedvr2_dir_pin(key, *kind, std::env::var_os(key))? {
+            return Ok(Some(dir));
+        }
+    }
+    // The installed location: whatever the `seedvr2_upscaler` Model Manager entry cached. Ask for
+    // ONE file, take its parent — the pinned `snapshots/<sha>/` dir the engine is handed — then
+    // require the other beside it, so the pair is whole PER ROOT exactly as in the legacy loop
+    // below. Deriving the dir from a resolved file rather than rebuilding the cache path keeps the
+    // `is_pinned_hf_revision` branch decision in one place; `.parent()` is lexical, and nothing on
+    // this path may `canonicalize` (see above).
+    if let Some(dit) = crate::downloads::resolve_hf_component_file(
+        settings,
+        SEEDVR2_REPO,
+        SEEDVR2_REVISION,
+        SEEDVR2_DIT_FILE,
+    ) {
+        if let Some(dir) = dit.parent().map(Path::to_path_buf).and_then(&pair_in) {
+            return Ok(Some(dir));
+        }
+    }
+    // Legacy pre-migration roots, read-only (AC10). Whole-pair per root, so a half-populated legacy
+    // dir falls through to the next candidate instead of handing the engine a torn checkpoint.
+    for sub in SEEDVR2_LEGACY_DIRS {
+        if let Some(dir) = pair_in(settings.data_dir.join(sub)) {
+            return Ok(Some(dir));
+        }
+    }
+    Ok(None)
 }
 
-/// Resolve the raw SeedVR2 checkpoint dir (containing the canonical DiT + VAE filenames the engine
-/// loads). Order mirrors `resolve_onnx`: env pin (`SCENEWORKS_SEEDVR2_CHECKPOINT`, a dir holding both
-/// files) → the app cache `<data_dir>/cache/upscale/seedvr2/` → download from the manifest/default HF
-/// repo on first use. The source filenames may be overridden by the manifest, but they are always
-/// stored under the canonical names so `Seedvr2Pipeline::load` finds them.
-async fn ensure_seedvr2_checkpoint(
-    api: &ApiClient,
-    settings: &Settings,
-    http_client: &reqwest::Client,
-    job: &JobSnapshot,
-    manifest_entry: &Value,
-) -> WorkerResult<PathBuf> {
-    // A set env pin must resolve to a dir holding both checkpoint files; if it's set but
-    // incomplete, that's an operator error — fail loudly instead of silently downloading
-    // (sc-8911).
-    if let Some(dir) = resolve_seedvr2_dir_pin(std::env::var_os("SCENEWORKS_SEEDVR2_CHECKPOINT"))? {
-        return Ok(dir);
-    }
-
-    let dir = settings
-        .data_dir
-        .join("cache")
-        .join("upscale")
-        .join("seedvr2");
-    tokio::fs::create_dir_all(&dir).await?;
-
-    let (repo, dit_src, vae_src) = manifest_seedvr2_resource(manifest_entry).unwrap_or_else(|| {
-        (
-            SEEDVR2_REPO.to_owned(),
-            SEEDVR2_DIT_FILE.to_owned(),
-            SEEDVR2_VAE_FILE.to_owned(),
-        )
-    });
-
-    let context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Image upscale canceled while fetching SeedVR2 weights.",
-        fresh_download: false,
-    };
-    for (src_file, canonical) in [
-        (dit_src.as_str(), SEEDVR2_DIT_FILE),
-        (vae_src.as_str(), SEEDVR2_VAE_FILE),
-    ] {
-        let target = dir.join(canonical);
-        if target.exists() {
-            continue;
-        }
-        // Pin the exact commit for the default third-party mirror so `main` moving under
-        // us can't swap the weights (sc-8879). A manifest-supplied override repo may carry
-        // its own revision layout, so only pin when we're using the default repo.
-        let revision = if repo == SEEDVR2_REPO {
-            SEEDVR2_REVISION
-        } else {
-            "main"
-        };
-        ensure_hf_cached_file(&context, &repo, revision, src_file, &target)
-            .await
-            .map_err(|error| {
-                let detail = match &error {
-                    WorkerError::InvalidPayload(d) => d.clone(),
-                    other => other.to_string(),
-                };
-                WorkerError::Engine(format!(
-                    "SeedVR2 weight download failed ({repo}/{src_file}): {detail}. Set \
-                     SCENEWORKS_SEEDVR2_CHECKPOINT to a local checkpoint dir, or populate {SEEDVR2_REPO}."
-                ))
-            })?;
-    }
-    Ok(dir)
+/// The SeedVR2 checkpoint dir, or an actionable install error (sc-17632 / S10, sc-17635).
+///
+/// Taking `&Settings` and **no `DownloadContext`** is the enforcement, not an aesthetic choice:
+/// neither SeedVR2 lane can reach the network any more, by construction rather than by convention
+/// (epic 17625).
+pub(crate) fn require_seedvr2_checkpoint_dir(settings: &Settings) -> WorkerResult<PathBuf> {
+    resolve_seedvr2_checkpoint_dir(settings)?.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "The SeedVR2 upscaler is not installed. Install \"SeedVR2 Upscaler\" from the Model \
+             Manager, or point SCENEWORKS_SEEDVR2_CHECKPOINT at a local {SEEDVR2_REPO} checkpoint \
+             dir."
+        ))
+    })
 }
 
 /// Run a SeedVR2 image upscale: the LR `source` (native resolution) → a `round_to_16(factor×)`
@@ -752,14 +838,16 @@ async fn run_seedvr2_upscale(
 /// Shared by the standalone `image_upscale` job and the Image Studio inline "Upscale" toggle
 /// (sc-8091): Real-ESRGAN runs via the cached `ort` session on a blocking thread; SeedVR2 runs
 /// in-process through the registry generator. `manifest_entry` may be `Value::Null` (the inline
-/// path carries the *generation* model's manifest, not an upscaler one) — the weight resolvers
-/// then fall back to the default HF repos. `engine_id` is the canonical id (`seedvr2`, else
+/// path carries the *generation* model's manifest, not an upscaler one) — the Real-ESRGAN resolver
+/// then falls back to the default HF repo. `engine_id` is the canonical id (`seedvr2`, else
 /// Real-ESRGAN); the caller normalises before passing it in.
+///
+/// Takes no `reqwest::Client`: since sc-17633 (Real-ESRGAN) and sc-17632 (SeedVR2) both weight
+/// resolvers are cache-only, so this whole lane is unable to reach the network (epic 17625).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upscale_image_in_memory(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     manifest_entry: &Value,
     engine_id: &str,
@@ -777,8 +865,7 @@ pub(crate) async fn upscale_image_in_memory(
     // standalone `image_upscale` job already wraps the same compute this way.
     match engine_id {
         "seedvr2" => {
-            let dir =
-                ensure_seedvr2_checkpoint(api, settings, http_client, job, manifest_entry).await?;
+            let dir = require_seedvr2_checkpoint_dir(settings)?;
             let task_cancel = cancel.clone();
             run_upscale_with_heartbeat(
                 api,
@@ -878,7 +965,6 @@ fn resolve_image_upscale_factor(factor: u64) -> WorkerResult<u8> {
 pub(crate) async fn run_image_upscale_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -997,8 +1083,7 @@ pub(crate) async fn run_image_upscale_job(
             ),
         )
         .await?;
-        let dir =
-            ensure_seedvr2_checkpoint(api, settings, http_client, job, &manifest_entry).await?;
+        let dir = require_seedvr2_checkpoint_dir(settings)?;
 
         update_job(
             api,
