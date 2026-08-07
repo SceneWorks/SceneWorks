@@ -947,11 +947,15 @@ fn parse_evidence_parameters(
 /// Apply Decision 2 at the request seam: exact verified cells fail closed; every non-covering state
 /// returns to the established legacy selector. The route is returned so tests and telemetry can
 /// distinguish a normal empty-bundle transition from drift or an out-of-envelope request.
+/// `expected_closure_digest` is the LIVE compile-closure digest for `("mlx", plan.engine_id)`
+/// (sc-17774) — see [`evidence_admission_route`] for why it is a parameter rather than a lookup
+/// performed here.
 fn packaged_admission_route(
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
     mode_key: &str,
     budget: MemoryBudget,
+    expected_closure_digest: &str,
 ) -> WorkerResult<AdmissionRoute> {
     if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
         return Err(WorkerError::InvalidPayload(format!(
@@ -977,15 +981,27 @@ fn packaged_admission_route(
             });
         }
     };
-    evidence_admission_route(&bundle, plan, inputs, mode_key, budget)
+    evidence_admission_route(
+        &bundle,
+        plan,
+        inputs,
+        mode_key,
+        budget,
+        expected_closure_digest,
+    )
 }
 
+/// `expected_closure_digest` is the LIVE compile-closure digest for `("mlx", plan.engine_id)`
+/// (sc-17774). It is threaded in rather than resolved here so the caller's injected resolver reaches
+/// this seam too — the synthetic test lanes are deliberately absent from the shipped closure config,
+/// and re-deriving from the packaged table here would silently grade them against `None`.
 fn evidence_admission_route(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
     mode_key: &str,
     budget: MemoryBudget,
+    expected_closure_digest: &str,
 ) -> WorkerResult<AdmissionRoute> {
     if let MlxCalibrationConfig::Invalid(reason) = &plan.calibration {
         return Err(WorkerError::InvalidPayload(format!(
@@ -1027,12 +1043,24 @@ fn evidence_admission_route(
         MlxCalibrationConfig::Valid(calibration) => calibration,
         MlxCalibrationConfig::Invalid(_) => unreachable!("invalid opt-in rejected above"),
     };
+    // sc-17774: currency is the measured provider's own compile closure, NOT the inference pin. This
+    // conjunct read `binding.query.inference_revision == INFERENCE_RUNTIME_REVISION`, which is the
+    // repo-wide pin-keyed invalidation the epic removed everywhere else: it demoted every MLX
+    // binding on any inference commit, including one to a different model. `inference_revision`
+    // survives on the binding as capture provenance and is deliberately not compared.
+    //
+    // The comparison stays HERE, at the admission seam, rather than being left to
+    // `memory_strategy::candidate_exclusion` downstream. Entering `AdmissionPath::Evidence` commits
+    // the request to its exact verified ladder with the resident baseline deliberately withheld, so
+    // a stale binding admitted here has no candidate left to fall back to and kills the request
+    // instead of demoting it. An expired calibration is epistemically the same as no calibration, so
+    // it must land on the legacy estimator — which is what the candle lane does, and what the shipped
+    // (historical) z_image_turbo opt-in relies on today.
     let identity_matches = calibration
         .bindings
         .iter()
         .filter(|binding| {
-            binding.query.inference_revision
-                == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+            binding.query.inference_closure_digest == expected_closure_digest
                 && binding.provider == plan.engine_id
                 && binding.tier == plan_tier_key(plan.tier)
                 && binding.query.artifact_repository == calibration.resolved.identity.repository
@@ -1085,6 +1113,7 @@ fn evidence_admission_route(
                 inputs,
                 mode_key,
                 budget,
+                expected_closure_digest,
             ),
         });
     }
@@ -1180,8 +1209,15 @@ fn evidence_admission_route(
             lower_alternative: None,
         });
     }
-    let lower_alternative =
-        verified_lower_alternative(bundle, calibration, plan, inputs, mode_key, budget);
+    let lower_alternative = verified_lower_alternative(
+        bundle,
+        calibration,
+        plan,
+        inputs,
+        mode_key,
+        budget,
+        expected_closure_digest,
+    );
     Ok(AdmissionRoute {
         path: AdmissionPath::Evidence,
         fallback_reason: None,
@@ -1195,6 +1231,11 @@ fn evidence_admission_route(
 /// Select the largest strictly lower, same-aspect geometry backed by a current exact record that
 /// fits the live host boundary. This is the only source for a named refusal alternative: no formula,
 /// interpolation, tier heuristic, or aspect-ratio rewrite is admitted.
+///
+/// "Current" is `expected_closure_digest` (sc-17774), and this filter is the ONLY thing enforcing it
+/// on this path: the alternative never becomes a `Candidate`, so `memory_strategy` never grades it.
+/// The conjunct here used to be the inference pin, which named an alternative geometry the very next
+/// request would refuse for the same staleness — advice the gate itself would not honour.
 fn verified_lower_alternative(
     bundle: &EvidenceBundle,
     calibration: &MlxCalibrationSet,
@@ -1202,6 +1243,7 @@ fn verified_lower_alternative(
     inputs: &MlxRequestInputs,
     mode_key: &str,
     budget: MemoryBudget,
+    expected_closure_digest: &str,
 ) -> Option<VerifiedGeometryAlternative> {
     let overlay = inputs.overlay.as_deref().unwrap_or("none");
     let requested_width = u64::from(inputs.width);
@@ -1210,8 +1252,7 @@ fn verified_lower_alternative(
         .bindings
         .iter()
         .filter(|binding| {
-            binding.query.inference_revision
-                == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+            binding.query.inference_closure_digest == expected_closure_digest
                 && binding.provider == plan.engine_id
                 && binding.tier == plan_tier_key(plan.tier)
                 && binding.mode == mode_key
@@ -1284,9 +1325,18 @@ fn verified_lower_geometry(
     inputs: &MlxRequestInputs,
     mode_key: &str,
     budget: MemoryBudget,
+    expected_closure_digest: &str,
 ) -> Option<CalibrationGeometry> {
-    verified_lower_alternative(bundle, calibration, plan, inputs, mode_key, budget)
-        .map(|alternative| alternative.geometry)
+    verified_lower_alternative(
+        bundle,
+        calibration,
+        plan,
+        inputs,
+        mode_key,
+        budget,
+        expected_closure_digest,
+    )
+    .map(|alternative| alternative.geometry)
 }
 
 /// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
@@ -1394,10 +1444,29 @@ fn evaluate_request_with_budget_using_bundle(
         .calibration
         .as_ref()
         .map_or(0, |identity| identity.abi);
+    // sc-17774: the LIVE closure for the provider being admitted, resolved once and used by BOTH
+    // currency seams — the admission filter that decides which bindings are still measurements of
+    // this code, and the selector comparison below. The constant this replaces was read off the
+    // first candidate's own evidence, so the gate compared candidates against themselves and could
+    // never see a stale one. `unwrap_or_default` fails CLOSED — an undeclared provider yields an
+    // empty expectation that no real 64-hex digest matches.
+    let live_closure_digest = closure_digests
+        .map_or_else(
+            || sceneworks_core::memory_calibration::packaged_closure_digest("mlx", plan.engine_id),
+            |lookup| lookup("mlx", plan.engine_id),
+        )
+        .unwrap_or_default();
     let mut admission = if plan.tier.component_precision_floors.is_empty() {
         match evidence_bundle {
-            Some(bundle) => evidence_admission_route(bundle, plan, inputs, mode_key, budget)?,
-            None => packaged_admission_route(plan, inputs, mode_key, budget)?,
+            Some(bundle) => evidence_admission_route(
+                bundle,
+                plan,
+                inputs,
+                mode_key,
+                budget,
+                &live_closure_digest,
+            )?,
+            None => packaged_admission_route(plan, inputs, mode_key, budget, &live_closure_digest)?,
         }
     } else {
         // Persisted calibration bindings currently identify only the coarse tier token (for
@@ -1522,16 +1591,6 @@ fn evaluate_request_with_budget_using_bundle(
         predicted_peak_bytes,
         calibration_fingerprint,
     );
-    // sc-17774: the LIVE closure for the provider being admitted. The constant this replaces was
-    // read off the first candidate's own evidence, so the gate compared candidates against
-    // themselves and could never see a stale one. `unwrap_or_default` fails CLOSED — an undeclared
-    // provider yields an empty expectation that no real digest matches.
-    let live_closure_digest = closure_digests
-        .map_or_else(
-            || sceneworks_core::memory_calibration::packaged_closure_digest("mlx", plan.engine_id),
-            |lookup| lookup("mlx", plan.engine_id),
-        )
-        .unwrap_or_default();
     let mut selections = Vec::new();
     let mut evidence = Vec::new();
     // Index-aligned with `evidence`, and pushed at the same sites. Each entry is the closure the
@@ -3150,16 +3209,23 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
-    /// SC-16915 recaptured these measurements, so this test now pins the opposite of what it used
-    /// to: it asserted `inference_revision == 7fbcb4a2` and `!= INFERENCE_RUNTIME_REVISION` with
-    /// the note "must remain historical until they are recaptured on the new runtime". They have
-    /// been. Every shipped Qwen binding is now at the running pin.
+    /// SC-16915 recaptured these measurements, so this test pins the opposite of what it originally
+    /// did: it asserted the bindings were historical, with the note "must remain historical until
+    /// they are recaptured on the new runtime". They have been, and every shipped Qwen binding is
+    /// current.
     ///
-    /// The assertion is inverted, not weakened. It still requires the full five-rung bf16 ladder —
+    /// sc-17774 retargets "current" from the inference pin to `mlx:qwen_image`'s own compile-closure
+    /// digest. Grading the pin made this red on EVERY bump, including a documentation-only commit or
+    /// a commit to a model Qwen shares no code with; grading the closure makes it red only when the
+    /// code these measurements describe actually moved, which is a true statement that the ladder
+    /// needs recapturing. `inference_revision` survives on the binding as capture provenance and is
+    /// deliberately not compared.
+    ///
+    /// The rest of the assertion is unweakened. It still requires the full five-rung bf16 ladder —
     /// checked as a rung SET on the bf16 subset rather than as a total count, so adding the q8/q4
     /// tiers cannot mask a dropped bf16 rung the way a bare `bindings.len()` would.
     #[test]
-    fn shipped_qwen_manifest_carries_every_tier_ladder_at_the_running_pin() {
+    fn shipped_qwen_manifest_carries_every_tier_ladder_at_the_current_closure() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3178,6 +3244,13 @@ mod tests {
             9,
             "bf16 five-rung ladder plus q8 and q4 pairs"
         );
+        let live = live_mlx_closure_digest("qwen_image");
+        assert!(
+            !live.is_empty(),
+            "qwen_image must be declared in config/inference-provider-closures.json; an undeclared \
+             lane resolves to the fail-closed empty expectation and would make the comparison below \
+             vacuously discriminating for the wrong reason"
+        );
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
                 && binding.provider == "qwen_image"
@@ -3190,8 +3263,7 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                && binding.query.inference_revision
-                    == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                && binding.query.inference_closure_digest == live
         }));
         // The load shape is a receipt axis, not a naming convention: rung 4 goes deferred and every
         // other rung is eager, on every tier. A bundle where one shape covers all rows is the tell
@@ -3326,9 +3398,14 @@ mod tests {
 
             let mut inputs = fixture_inputs(dimension("width"), dimension("height"));
             inputs.overlay = None;
-            let route =
-                packaged_admission_route(&plan, &inputs, &text("mode"), fixture_budget(128.0))
-                    .expect("a covered cell must not error");
+            let route = packaged_admission_route(
+                &plan,
+                &inputs,
+                &text("mode"),
+                fixture_budget(128.0),
+                &live_mlx_closure_digest("qwen_image"),
+            )
+            .expect("a covered cell must not error");
             assert_eq!(
                 route.path,
                 AdmissionPath::Evidence,
@@ -3405,6 +3482,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(128.0),
+            &live_mlx_closure_digest("qwen_image"),
         )
         .expect("a load-shape mismatch degrades, never errors");
         assert_eq!(
@@ -3502,9 +3580,14 @@ mod tests {
             inputs.overlay = Some(text("overlay"));
             inputs.has_reference = true;
             inputs.reference_count = 1;
-            let route =
-                packaged_admission_route(&plan, &inputs, &text("mode"), fixture_budget(128.0))
-                    .expect("a covered krea cell must not error");
+            let route = packaged_admission_route(
+                &plan,
+                &inputs,
+                &text("mode"),
+                fixture_budget(128.0),
+                &live_mlx_closure_digest("krea_2_turbo_control"),
+            )
+            .expect("a covered krea cell must not error");
             assert_eq!(
                 route.path,
                 AdmissionPath::Evidence,
@@ -3620,9 +3703,14 @@ mod tests {
         let inputs = fixture_inputs(1024, 1024);
 
         // Cheap pre-load check, so a routing regression fails before a 57 GB load.
-        let route =
-            packaged_admission_route(&plan, &inputs, "text_to_image", fixture_budget(128.0))
-                .expect("covered cell must not error");
+        let route = packaged_admission_route(
+            &plan,
+            &inputs,
+            "text_to_image",
+            fixture_budget(128.0),
+            &live_mlx_closure_digest("qwen_image"),
+        )
+        .expect("covered cell must not error");
         assert_eq!(
             route.path,
             AdmissionPath::Evidence,
@@ -3684,6 +3772,11 @@ mod tests {
         );
     }
 
+    /// The demotion half of sc-17774 on a REAL shipped lane. Z-Image's ladder was measured at
+    /// `d4802320`, and `mlx:z_image_turbo`'s closure has moved since, so this is the one shipped
+    /// opt-in whose calibration is genuinely expired. It must reach the legacy estimator — not be
+    /// refused — which is the behaviour the deleted pin comparison happened to produce and the
+    /// closure comparison now produces for the right reason.
     #[test]
     fn shipped_z_image_manifest_rejects_historical_exact_mlx_ladder_rungs() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
@@ -3713,9 +3806,14 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
+                // Capture provenance, pinned as a literal because it is a fact about the shipped
+                // opt-in that no pin bump may silently rewrite. It is NOT the currency term.
                 && binding.query.inference_revision == "d48023204cd3a4f3f8eb060f79803dccaddcb482"
-                && binding.query.inference_revision
-                    != crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                // The currency term (sc-17774). The digest below is what the ladder was measured
+                // under; `mlx:z_image_turbo` has moved past it, which is why the route degrades.
+                && binding.query.inference_closure_digest
+                    == "b87b8cd858673ad724403cb721078d1742457a2c62d4337ecc65190c964964b2"
+                && binding.query.inference_closure_digest != live_mlx_closure_digest("z_image_turbo")
         }));
         assert!(bindings.iter().all(|binding| {
             binding.query.load_shape
@@ -3752,6 +3850,7 @@ mod tests {
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
+            &live_mlx_closure_digest("z_image_turbo"),
         )
         .expect("historical Z-Image evidence must fall back without an error");
 
@@ -3935,20 +4034,22 @@ mod tests {
         }
     }
 
+    /// The fixture record carries its own synthetic revision and [`FIXTURE_CLOSURE_DIGEST`].
+    ///
+    /// This used to rewrite every record's `inference.revision` to the live Cargo pin, because
+    /// currency was pin equality and the fixture would otherwise have read as stale on load. Under
+    /// sc-17774 currency is the closure digest, which the fixture file already carries, so the
+    /// rewrite is dead — and keeping it would restate the pin as a currency term in the one place
+    /// every gate test builds its evidence from.
     fn fixture_bundle() -> EvidenceBundle {
-        let mut bundle = match sceneworks_core::memory_calibration::load_bundle(include_str!(
+        match sceneworks_core::memory_calibration::load_bundle(include_str!(
             "../tests/fixtures/mlx-memory-calibration.json"
         ))
         .expect("valid MLX calibration fixture")
         {
             BundleLoad::Ready(bundle) => bundle,
             BundleLoad::Stale(reason) => panic!("unexpected stale fixture: {reason:?}"),
-        };
-        for record in &mut bundle.records {
-            record.repositories.inference.revision =
-                crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned();
         }
-        bundle
     }
 
     fn fixture_binding(tier: &str, variant: &str) -> MlxCalibrationBinding {
@@ -3972,8 +4073,10 @@ mod tests {
                 fingerprint: "fixture-formula-v2".to_owned(),
                 scene_works_revision: "a".repeat(40),
                 matrix_source_revision: "source-tree:1111111".to_owned(),
-                inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
-                    .to_owned(),
+                // Capture provenance only, and deliberately the fixture RECORD's own synthetic
+                // revision rather than the live pin: nothing compares this field, and spelling the
+                // pin here implied a currency that no longer exists (sc-17774).
+                inference_revision: "b".repeat(40),
                 inference_closure_digest: fixture_closure_digest(),
                 artifact_repository: "SceneWorks/fixture".to_owned(),
                 artifact_resolved_revision: "c".repeat(40),
@@ -4017,6 +4120,14 @@ mod tests {
         FIXTURE_CLOSURE_DIGEST.to_owned()
     }
 
+    /// What the gate resolves in production for one real MLX lane, including the fail-closed empty
+    /// string for a lane nobody declared (`krea_2_turbo`, the base t2i route, is one). Spelled as a
+    /// helper so a test names the provider whose currency it is asserting instead of a hex literal.
+    fn live_mlx_closure_digest(provider: &str) -> String {
+        sceneworks_core::memory_calibration::packaged_closure_digest("mlx", provider)
+            .unwrap_or_default()
+    }
+
     /// The injected resolver. Real lanes still resolve through the shipped table, so a test that
     /// uses `qwen_image` or `krea_2_turbo_control` is still graded against production config.
     fn fixture_closure_lookup(backend: &str, provider: &str) -> Option<String> {
@@ -4033,7 +4144,8 @@ mod tests {
             "fingerprint": "fixture-formula-v2",
             "sceneWorksRevision": "a".repeat(40),
             "matrixSourceRevision": "source-tree:1111111",
-            "inferenceRevision": crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+            // Capture provenance only — see `fixture_binding_for`.
+            "inferenceRevision": "b".repeat(40),
             // sc-17774: the fixture must present the digest the gate will look up for this lane,
             // otherwise every fit-ladder test silently becomes a currency-refusal test.
             "inferenceClosureDigest": fixture_closure_digest(),
@@ -4123,8 +4235,13 @@ mod tests {
         };
         // Select the records that ARE current instead of rewriting stale ones into looking current,
         // which is what the deleted `packaged_bundle_migrated_to_v4_for_tests` shim did. The bundle
-        // still carries the superseded 96b13b66 Krea cells as history, so without this revision
+        // still carries the superseded 96b13b66 Krea cells as history, so without this currency
         // predicate the filter matches four records and the count assertion below fails.
+        //
+        // sc-17774: the predicate is the provider's own closure digest, not the inference pin. The
+        // pin form separated the same two records only by coincidence — it also expired them on any
+        // unrelated inference commit, so this fixture went unbuildable on every bump.
+        let live = live_mlx_closure_digest("krea_2_turbo_control");
         let records = bundle
             .records
             .iter()
@@ -4135,14 +4252,15 @@ mod tests {
                     && record.target.tier == "q4"
                     && record.target.mode == "text_to_image"
                     && record.target.overlay == "control:1"
-                    && record.repositories.inference.revision
-                        == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                    && record.repositories.inference.closure_digest.as_deref()
+                        == Some(live.as_str())
             })
             .collect::<Vec<_>>();
         assert_eq!(
             records.len(),
             2,
-            "the packaged Krea contract has two exact cells at the current pin"
+            "the packaged Krea contract has two exact cells at the current mlx:krea_2_turbo_control \
+             closure"
         );
         let first = records[0];
         let resolved_path_fingerprint =
@@ -4243,8 +4361,8 @@ mod tests {
             .find(|record| {
                 matches!(record.backend, CalibrationBackend::Mlx)
                     && record.target.provider == "krea_2_turbo_control"
-                    && record.repositories.inference.revision
-                        == crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                    && record.repositories.inference.closure_digest.as_deref()
+                        == Some(live_mlx_closure_digest("krea_2_turbo_control").as_str())
             })
             .expect("the packaged bundle carries a current Krea control record");
         contract.calibration = Some(MemoryCalibrationIdentity::new(
@@ -4498,6 +4616,7 @@ mod tests {
                 &inputs,
                 "text_to_image",
                 fixture_budget(128.0),
+                FIXTURE_CLOSURE_DIGEST,
             ),
             Some(CalibrationGeometry {
                 width: 768,
@@ -4505,6 +4624,24 @@ mod tests {
                 batch: 1,
                 frames: 1,
             })
+        );
+
+        // sc-17774: currency, on the one path `memory_strategy` never sees. The alternative is only
+        // ever formatted into a refusal message, so nothing downstream would catch a stale one —
+        // and naming a geometry the very next request refuses for the identical staleness is worse
+        // than naming none. Same binding, same bundle, same budget: only the live closure moves.
+        assert_eq!(
+            verified_lower_geometry(
+                &bundle,
+                calibration,
+                &plan,
+                &inputs,
+                "text_to_image",
+                fixture_budget(128.0),
+                &"a".repeat(64),
+            ),
+            None,
+            "a moved provider closure must stop the refusal from naming the lower geometry"
         );
 
         let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
@@ -4522,6 +4659,7 @@ mod tests {
                 &inputs,
                 "text_to_image",
                 fixture_budget(128.0),
+                FIXTURE_CLOSURE_DIGEST,
             ),
             None,
             "a fingerprint mutation must stop the refusal from naming the lower geometry"
@@ -4543,6 +4681,7 @@ mod tests {
                 &inputs,
                 "text_to_image",
                 fixture_budget(128.0),
+                FIXTURE_CLOSURE_DIGEST,
             ),
             None,
             "a geometry mutation must stop the refusal from naming the lower geometry"
@@ -4772,7 +4911,8 @@ mod tests {
                 &unavailable,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0)
+                fixture_budget(8.0),
+                FIXTURE_CLOSURE_DIGEST,
             )
             .expect("an unproven opt-in must degrade, never refuse")
             .path,
@@ -4800,7 +4940,8 @@ mod tests {
             &malformed,
             &fixture_inputs(1024, 1024),
             "text_to_image",
-            fixture_budget(8.0)
+            fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect_err("a malformed present opt-in must not collapse to packaged-empty legacy")
         .to_string()
@@ -5295,7 +5436,8 @@ mod tests {
                 &q4_plan,
                 &fixture_inputs(512, 512),
                 "text_to_image",
-                fixture_budget(8.0)
+                fixture_budget(8.0),
+                FIXTURE_CLOSURE_DIGEST,
             )
             .expect("the second exact cell is independently selectable")
             .path,
@@ -5327,7 +5469,8 @@ mod tests {
                 &q4,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0)
+                fixture_budget(8.0),
+                FIXTURE_CLOSURE_DIGEST,
             )
             .expect("q4 packed artifact is independently verified")
             .path,
@@ -5374,7 +5517,8 @@ mod tests {
                 &wrong_variant,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0)
+                fixture_budget(8.0),
+                FIXTURE_CLOSURE_DIGEST,
             )
             .expect("unverified artifact variant uses legacy")
             .fallback_reason,
@@ -5423,7 +5567,8 @@ mod tests {
                 &q8,
                 &fixture_inputs(1024, 1024),
                 "text_to_image",
-                fixture_budget(8.0)
+                fixture_budget(8.0),
+                FIXTURE_CLOSURE_DIGEST,
             )
             .expect("q8 record is selected independently of q4")
             .path,
@@ -5524,6 +5669,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("an uncalibrated model uses legacy");
         assert_eq!(route.path, AdmissionPath::Legacy);
@@ -5538,6 +5684,7 @@ mod tests {
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("an uncovered geometry uses legacy");
         assert_eq!(uncovered.path, AdmissionPath::Legacy);
@@ -5557,6 +5704,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("fingerprint drift uses legacy");
         assert_eq!(drifted.path, AdmissionPath::Legacy);
@@ -5571,6 +5719,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("the exact covered cell fits its captured safe envelope");
         assert_eq!(covered.path, AdmissionPath::Evidence);
@@ -5734,6 +5883,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("target-tier mismatch falls back");
         assert_eq!(
@@ -5754,6 +5904,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("artifact mismatch falls back as drift");
         assert_eq!(
@@ -5772,6 +5923,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("provider mismatch falls back as drift");
         assert_eq!(
@@ -5787,17 +5939,46 @@ mod tests {
         // read off the first candidate's own evidence, so the comparison was candidate-against-self
         // and could not fail; every fit-ladder test below therefore passed under a dead gate.
         //
-        // This also pins the direction the threading must fail in. Recovering each candidate's
-        // digest by searching `admission.evidence` for a matching `MemoryEvidenceKey` — how it read
-        // first — fell back to the LIVE digest on a miss, which is the exact value the request
-        // compares against, so an unplaceable candidate silently became current. With the digests
-        // carried from their push sites there is no miss to fall back from, and this test fails
-        // loudly if that ever regresses.
+        // DEMOTES, not refuses. The comparison sits in `evidence_admission_route`, ahead of the
+        // decision to enter `AdmissionPath::Evidence` — which withholds the resident baseline and so
+        // leaves a stale request with nothing to fall back to. An expired calibration is
+        // epistemically the same as no calibration and must land on the legacy estimator, which is
+        // what candle does and what the shipped historical z_image_turbo opt-in relies on. The
+        // selector's own closure exclusion (`memory_strategy::candidate_exclusion`) stays as the
+        // fail-closed backstop for anything reaching it another way, and is graded there against
+        // `STALE_CLOSURE`.
         let bundle = fixture_bundle();
         let generator = fixture_generator();
         let plan = fixture_plan();
         let inputs = fixture_inputs(1024, 1024);
-        let moved = |_backend: &str, _provider: &str| Some("a".repeat(64));
+        let moved_digest = "a".repeat(64);
+        let moved = |_backend: &str, _provider: &str| Some(moved_digest.clone());
+
+        // The seam itself: a binding measured under another closure is not an identity match, and
+        // the reason must be the staleness rather than a parse or provenance failure.
+        let demoted = evidence_admission_route(
+            &bundle,
+            &plan,
+            &inputs,
+            "text_to_image",
+            fixture_budget(8.0),
+            &moved_digest,
+        )
+        .expect("a moved closure demotes, it does not error");
+        assert_eq!(demoted.path, AdmissionPath::Legacy);
+        assert_eq!(
+            demoted.fallback_reason,
+            Some(LegacyAdmissionReason::StaleIdentity)
+        );
+        assert!(demoted.evidence.is_empty());
+        // The refusal alternative is filtered by the SAME term. It never becomes a `Candidate`, so
+        // nothing downstream grades it: leaving it unfiltered would name a smaller geometry that the
+        // very next request refuses for the identical staleness.
+        assert!(demoted.lower_alternative.is_none());
+
+        // End to end. `process_limit_bytes` is derived only from an exact verified cell, so it
+        // distinguishes "admitted" — which the legacy estimator also does — from "an exact verified
+        // rung was selected", which is what a moved closure must cost.
         let evaluated = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
@@ -5810,19 +5991,16 @@ mod tests {
             &[],
             Some(&bundle),
             Some(&moved),
-        );
-        let message = evaluated
-            .err()
-            .map(|error| error.to_string())
-            .expect("a calibrated ladder whose provider closure moved must not be admitted");
-        assert!(
-            message.contains("Stale"),
-            "the refusal must name staleness rather than some unrelated gate: {message}"
+        )
+        .expect("a demoted request still evaluates against the generic estimator");
+        assert_eq!(
+            evaluated.process_limit_bytes, None,
+            "a moved closure must not keep the calibrated request-scoped ceiling"
         );
 
-        // The control: the SAME request with the closure unmoved is admitted, so the assertion
-        // above is discriminating rather than a request that never fit.
-        evaluate_request_with_budget_using_bundle(
+        // The control: the SAME request with the closure unmoved keeps the verified rung, so the
+        // assertions above are discriminating rather than a request that never fit.
+        let current = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
@@ -5836,6 +6014,10 @@ mod tests {
             Some(&fixture_closure_lookup),
         )
         .expect("the unmoved closure must still admit the verified rung");
+        assert!(
+            current.process_limit_bytes.is_some(),
+            "the unmoved closure must still reach the exact verified cell"
+        );
     }
 
     #[test]
@@ -5855,6 +6037,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("covered route")
         .evidence
@@ -6137,6 +6320,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             "text_to_image",
             fixture_budget(8.0),
+            FIXTURE_CLOSURE_DIGEST,
         )
         .expect("a current promoted bundle with no exact record degrades, never errors");
         assert_eq!(route.path, AdmissionPath::Legacy);
@@ -8314,6 +8498,10 @@ mod tests {
                         &fixture_inputs(1024, 1024),
                         "text_to_image",
                         fixture_budget(128.0),
+                        // The base t2i lane is undeclared in the closure config, so production
+                        // resolves the empty fail-closed expectation here. Reproduced, not papered
+                        // over: every krea binding names `krea_2_turbo_control`.
+                        &live_mlx_closure_digest("krea_2_turbo"),
                     ),
                 )
             });
