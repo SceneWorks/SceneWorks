@@ -114,9 +114,10 @@ on:
       # main misattributed). This lane runs no rust-toolchain action: cargo in-repo
       # auto-selects the toolchain rust-toolchain.toml pins (see the step comment
       # below), so a bump changes what this entire job compiles with. And
-      # .cargo/config.toml carries `git-fetch-with-cli = true`, without which
-      # cargo's built-in fetch ignores the GIT_CONFIG_* token injection in "Fetch
-      # the private inference release" and the lane cannot fetch at all. The
+      # .cargo/config.toml carries `git-fetch-with-cli = true`, which routes every
+      # git dependency fetch (including the pinned inference release) through the
+      # system git rather than cargo's built-in transport — so an edit there
+      # changes how this lane resolves its dependencies. The
       # channel is a concrete version, never floating `stable` (sc-17717): a
       # toolchain change is therefore always an edit to that file, which this
       # entry turns into a run of this lane — and the contract test keeps every
@@ -206,7 +207,7 @@ on:
 # 18.0 - 25.8m end to end; the 24.1m median above is over 85 runs, so do not expect this
 # table to sum to it. Ranges are truncated to 0.1m, which always understates a max.
 #
-#   Fetch the private inference release          3.5 - 8.8m
+#   Fetch the pinned inference release           3.5 - 8.8m
 #   Test the candle GPU worker (backend-candle)  3.6 - 5.6m
 #   Check the candle sidecar builds (rust-api)   2.5 - 4.0m
 #   Check and test the candle memory adapter     4.5 - 6.7m
@@ -307,12 +308,9 @@ jobs:
           $jobCargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'
           New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       # No rust-toolchain action: the self-hosted box has rustup + the repo's
       # `rust-toolchain.toml`-pinned toolchain (incl. clippy) pre-installed, and the
