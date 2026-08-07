@@ -103,9 +103,14 @@ jobs:
           git -C "$RUNNER_TEMP/inference" checkout -q FETCH_HEAD
           node scripts/inference-closure-digest.mjs --repo "$RUNNER_TEMP/inference" --check
           # sc-17935: the line above grades ONE file. The CAPTURED half of the comparison — 65 record
-          # digests in the evidence bundle and 31 calibration bindings in the shipped manifest — was
+          # digests in the evidence bundle and the calibration bindings in the shipped manifest — was
           # graded by nothing, and the class was not hypothetical: a constant carrying the comment
           # "derive it with …" had never been a real derivation and survived all of sc-17774 unnoticed.
+          #
+          # sc-17989 closed the last hole in the manifest half: `turboFit` and `candle.control` were
+          # maintained by hand and unreachable to the locator, so it graded 31 of 33 digests. All 33
+          # are covered now, and a digest that becomes unreachable again fails rather than going
+          # quiet — that regression is what `--verify`'s coverage check exists to catch.
           #
           # The backfill re-derives each of those at the revision it was captured at and exits 1 on
           # any disagreement, so running it in dry mode IS the verification. It needs every captured

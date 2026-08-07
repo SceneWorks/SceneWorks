@@ -23,6 +23,7 @@ import {
   modelStory,
 } from "./generate-memory-matrix.mjs";
 import { recordId } from "./memory-calibration-harness.mjs";
+import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
@@ -2204,21 +2205,63 @@ async function currentEvidenceFixture({
 /// promote" could be asserted by simply reading the shipped matrix. Now that the evidence is
 /// current, that half has to be produced deliberately — otherwise the negative claim would quietly
 /// become untested the moment the positive one started holding.
-/// The `mlx:krea_2_turbo_control` closure digest at `96b13b66` — the revision the superseded krea
-/// records were captured at. Derive with:
-///   node scripts/inference-closure-digest.mjs --repo <inference> --revision 96b13b66 \
-///     --provider mlx:krea_2_turbo_control
-const SUPERSEDED_KREA_CLOSURE_DIGEST =
-  "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325";
+/// The revision the superseded krea records were captured at.
+const SUPERSEDED_KREA_REVISION = "96b13b6630132410a29ae1bcdf4d8738db7af28a";
+
+/// The `mlx:krea_2_turbo_control` closure digest at [`SUPERSEDED_KREA_REVISION`], READ OUT of the
+/// shipped bundle rather than transcribed (sc-17989).
+///
+/// It used to be a hardcoded 64-hex constant under a "derive it with `inference-closure-digest.mjs`"
+/// comment, which nothing re-derived. A wrong value there does not fail — it makes every test built
+/// on this fixture assert "historical evidence does not promote" for the wrong reason, because ANY
+/// digest that is not the live one demotes. That is exactly how `820bf106…` hid in
+/// `sc-15833-flux2-evidence.test.mjs` through the whole of sc-17774.
+///
+/// Reading it from the bundle inherits a real gate: `backfill-closure-digests.mjs --verify` in
+/// `check.yml` re-derives every record digest from inference source at the revision it names, so a
+/// value that disagrees with `96b13b66` fails CI at the source instead of silently here. The
+/// not-live assertion pins the property the fixture actually needs on top of that.
+function supersededKreaClosureDigest(parsed, liveClosures) {
+  // `recordsNeedingDigest` is the gate's OWN eligibility predicate, not an approximation of it: it
+  // is what `--verify` re-derives. Filtering on `(backend, provider, revision)` alone would read a
+  // digest out of a record the gate skips — one demoted to `status: "superseded"` or a non-
+  // authoritative scope — and the claim that CI grades this value would quietly stop being true.
+  const digests = new Set(
+    recordsNeedingDigest(parsed)
+      .filter(
+        (record) =>
+          record.backend === "mlx" &&
+          record.target.provider === "krea_2_turbo_control" &&
+          record.repositories.inference.revision === SUPERSEDED_KREA_REVISION,
+      )
+      .map((record) => record.repositories.inference.closureDigest),
+  );
+  assert.equal(
+    digests.size,
+    1,
+    `expected exactly one mlx:krea_2_turbo_control closure digest at ${SUPERSEDED_KREA_REVISION.slice(0, 8)}, ` +
+      `found ${digests.size}. The fixture's superseded digest is read from these records.`,
+  );
+  const [digest] = digests;
+  assert.notEqual(
+    digest,
+    liveClosures["mlx:krea_2_turbo_control"].digest,
+    "the superseded fixture digest equals the LIVE one, so 'historical evidence does not promote' " +
+      "would be asserting against evidence that is current. Re-point the fixture at a genuinely " +
+      "superseded capture.",
+  );
+  return digest;
+}
 
 async function historicalEvidenceFixture({
   select = (record) => record.target.provider === "krea_2_turbo_control",
 } = {}) {
-  const bundle = await readFile(
-    new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url),
-    "utf8",
-  );
+  const [bundle, closureBody] = await Promise.all([
+    readFile(new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.inferenceClosures}`, import.meta.url), "utf8"),
+  ]);
   const parsed = JSON.parse(bundle);
+  const supersededDigest = supersededKreaClosureDigest(parsed, JSON.parse(closureBody).providers);
   parsed.records = parsed.records.map((record) => {
     if (!select(record)) return record;
     const restamped = {
@@ -2231,8 +2274,8 @@ async function historicalEvidenceFixture({
         // the provider's compile closure. Moving only the revision demotes nothing, by design.
         inference: {
           ...record.repositories.inference,
-          revision: "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-          closureDigest: SUPERSEDED_KREA_CLOSURE_DIGEST,
+          revision: SUPERSEDED_KREA_REVISION,
+          closureDigest: supersededDigest,
         },
       },
     };

@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { deflateSync } from "node:zlib";
 
+import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
+import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { validateRecord } from "./memory-calibration-harness.mjs";
 import {
@@ -15,17 +17,6 @@ import {
 
 const SCENEWORKS_REVISION = "1".repeat(40);
 const INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
-// sc-17774: `candle:flux2_dev`'s compile-closure digest AT that revision. Currency compares this,
-// never the revision — derive it with `node scripts/inference-closure-digest.mjs --repo <inference>
-// --revision 5ffd7612 --provider candle:flux2_dev`.
-//
-// sc-17935: this used to be a synthetic 64-hex value with the same comment attached, so the comment
-// documented a derivation the constant had never come from and the stated command named a bare
-// `flux2_dev` that is not a table key. These replays run with `enforceLivePin: false`, so nothing
-// here compares it — which is exactly why a wrong value could sit unnoticed. It is now the real
-// derivation, so the fixture and the instructions above agree.
-const INFERENCE_CLOSURE_DIGEST =
-  "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4";
 const LIVE_INFERENCE_REVISION = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
 const MODEL_REVISION = "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 const MODEL_INVENTORY = "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b";
@@ -34,6 +25,47 @@ const CONTROL_SHA = "516532a885d12ae84bb3c6b24ef4816ac05ffa1c9c7b93476f74652eb0a
 const RECORD_PATH = "docs/calibration/sc-15833/inference-compatibility-a4f4.json";
 const MATRIX_SOURCE = `source-tree:${"7".repeat(64)}`;
 const FINGERPRINT = "flux2-dev-cuda-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v2";
+
+// sc-17774: `candle:flux2_dev`'s compile-closure digest AT `INFERENCE_REVISION`. Currency compares
+// this, never the revision.
+//
+// sc-17989: READ OUT of the shipped evidence bundle rather than transcribed. It was a hardcoded
+// 64-hex constant under a "derive it with `inference-closure-digest.mjs …`" comment that nothing
+// re-derived — and for the whole of sc-17774 the value was `820bf106…`, a synthetic number the
+// stated command never produced. These replays run with `enforceLivePin: false`, so nothing here
+// compares the digest; a wrong one changes no verdict and therefore fails no test, which is
+// precisely why it hid. Reading it from the bundle inherits a real gate:
+// `backfill-closure-digests.mjs --verify` in `check.yml` re-derives every record digest from
+// inference source at the revision it names, so a value that disagrees with `5ffd7612` now fails CI
+// at the source instead of sitting here unexamined.
+//
+// The candidate set runs through `recordsNeedingDigest` — the gate's own eligibility predicate —
+// rather than a `(backend, provider, revision)` filter that merely resembles it. A record demoted
+// out of `complete`/`runtime_complete` or `authoritative` scope is one the gate no longer derives,
+// so reading a digest out of it would restore exactly the ungraded constant this replaces. Losing
+// the last eligible record empties the set and trips the assert below instead.
+const INFERENCE_CLOSURE_DIGEST = await (async () => {
+  const bundle = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url), "utf8"),
+  );
+  const digests = new Set(
+    recordsNeedingDigest(bundle)
+      .filter(
+        (record) =>
+          record.backend === "candle" &&
+          record.target.provider === "flux2_dev" &&
+          record.repositories.inference.revision === INFERENCE_REVISION,
+      )
+      .map((record) => record.repositories.inference.closureDigest),
+  );
+  assert.equal(
+    digests.size,
+    1,
+    `expected exactly one candle:flux2_dev closure digest at ${INFERENCE_REVISION.slice(0, 8)}, found ` +
+      `${digests.size}. These fixtures replay that capture, so they take their digest from it.`,
+  );
+  return [...digests][0];
+})();
 
 // These tests replay immutable 5ffd capture fixtures. Live-pin authorization is tested separately;
 // replay must continue validating the captured bytes after a later runtime pin makes them historical.
@@ -389,6 +421,28 @@ function fixture({ promotionIntent = "runtime_complete" } = {}) {
   };
   return { capture, files, reader };
 }
+
+test("the replayed closure digest is a real graded derivation, not a transcribed constant", async () => {
+  // The module-level derivation above throws at LOAD if the bundle stops carrying exactly one
+  // graded digest at this revision, which is loud but nameless. This pins the same invariant as a
+  // named test, and pins what the value must BE: the digest of the very records these fixtures
+  // replay, which `backfill-closure-digests.mjs --verify` re-derives from inference source in CI.
+  const bundle = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url), "utf8"),
+  );
+  const graded = recordsNeedingDigest(bundle).filter(
+    (record) =>
+      record.backend === "candle" &&
+      record.target.provider === "flux2_dev" &&
+      record.repositories.inference.revision === INFERENCE_REVISION,
+  );
+  assert.ok(graded.length > 0, "no graded record backs this fixture's digest any more");
+  assert.match(INFERENCE_CLOSURE_DIGEST, /^[0-9a-f]{64}$/);
+  for (const record of graded) {
+    assert.equal(record.repositories.inference.closureDigest, INFERENCE_CLOSURE_DIGEST);
+  }
+  assert.equal(REPOSITORIES.inference.closureDigest, INFERENCE_CLOSURE_DIGEST);
+});
 
 test("SC-15833 ingests five strict physical base rungs plus real edit/control PNGs", async () => {
   const { capture, reader } = fixture();
