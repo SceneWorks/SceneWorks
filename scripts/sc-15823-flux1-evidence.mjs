@@ -19,8 +19,8 @@ const INFERENCE_REVISION = "5f973a73bf00307240afd81d2778ba9d89349e51";
 //   node scripts/inference-closure-digest.mjs --repo <inference> --revision 5f973a73 \
 //     --provider candle:flux1_dev
 const INFERENCE_CLOSURE_DIGESTS = Object.freeze({
-  flux1_dev: "8bb03b94550deee30f4656fa502425b7c206ab1cff761d60225ad5cf13f44e74",
-  flux1_schnell: "6d81f414c80acabb430be58d01491b7642427530e2ddc7fa97e1adef78f117fb",
+  flux1_dev: "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
+  flux1_schnell: "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
 });
 const FINGERPRINT = "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1";
 

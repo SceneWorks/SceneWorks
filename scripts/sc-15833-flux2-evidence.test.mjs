@@ -15,11 +15,17 @@ import {
 
 const SCENEWORKS_REVISION = "1".repeat(40);
 const INFERENCE_REVISION = "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d";
-// sc-17774: `flux2_dev`'s compile-closure digest AT that revision. Currency compares this, never the
-// revision — derive it with `node scripts/inference-closure-digest.mjs --repo <inference>
-// --revision 5ffd7612 --provider flux2_dev`.
+// sc-17774: `candle:flux2_dev`'s compile-closure digest AT that revision. Currency compares this,
+// never the revision — derive it with `node scripts/inference-closure-digest.mjs --repo <inference>
+// --revision 5ffd7612 --provider candle:flux2_dev`.
+//
+// sc-17935: this used to be a synthetic 64-hex value with the same comment attached, so the comment
+// documented a derivation the constant had never come from and the stated command named a bare
+// `flux2_dev` that is not a table key. These replays run with `enforceLivePin: false`, so nothing
+// here compares it — which is exactly why a wrong value could sit unnoticed. It is now the real
+// derivation, so the fixture and the instructions above agree.
 const INFERENCE_CLOSURE_DIGEST =
-  "820bf106844e7c74256161b63708c43539af901343c1540a0e7dbc38c671b8b3";
+  "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4";
 const LIVE_INFERENCE_REVISION = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
 const MODEL_REVISION = "2868b1461b2b6e6e05d84e52534df3632b4c7d5d";
 const MODEL_INVENTORY = "896f227194e48c6e4df10cec20733f4ed1a357affc021bc131e6851b787da98b";
