@@ -348,6 +348,7 @@
         "sceneWorksRevision",
         "inferenceRevision",
         "inferenceClosureDigest",
+        "provider",
         "measured",
         "verification",
         "evidenceRecords",
@@ -384,6 +385,10 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "Digest of candle-gen-krea's compile closure at inferenceRevision (sc-17774). Currency compares this against the live digest for candle:krea_2_turbo in config/inference-provider-closures.json. It replaces vram_gate.rs's frozen KREA_TURBO_INFERENCE_REVISION, which was one of several per-model mechanisms doing the same job differently."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Closure lane id this block's digest belongs to, as the suffix of a `config/inference-provider-closures.json` key (`candle:` + this). sc-17989: scripts/backfill-closure-digests.mjs locates a binding by pairing this with inferenceRevision, so without it the digest is invisible to the CI verification gate and was maintained by hand."
         },
         "measured": {
           "const": true,
@@ -1057,12 +1062,24 @@
               "control": {
                 "type": "object",
                 "additionalProperties": false,
+                "dependentRequired": {
+                  "inferenceClosureDigest": ["inferenceRevision", "provider"]
+                },
                 "description": "Pose-ControlNet lane VRAM fit ladder numbers (sc-11754, epic 8459 → epic 10765), keyed by BASE quant tier. Present only for a model with a bespoke trained control branch (Krea 2 Turbo). The control lane loads the base at the installed tier PLUS the control branch, so its render peak exceeds the txt2img vramGbByTier and needs its own numbers; the worker's krea_control_fit gate reads these vs live/capped free VRAM and engages the cheapest sufficient rung only when constrained. sc-15799 (tier integrity) removed the branch-quant rung: the branch's tier is a function of the BASE tier (branchTierByBaseTier), so there is nothing left for the ladder to trade. Current peak rows are measured against that shipping branch tier and are read verbatim with no derived branch correction.",
                 "properties": {
                   "inferenceClosureDigest": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{64}$",
                     "description": "Digest of candle-gen-krea's compile closure when these direct control-lane measurements were taken (sc-17774). Currency compares it against the live digest for candle:krea_2_turbo_control. It replaces krea_control_fit.rs's frozen KREA_CONTROL_INFERENCE_REVISION — which that module also stamped onto its own evidence, so the shared staleness check compared a constant against itself and could never fire."
+                  },
+                  "inferenceRevision": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$",
+                    "description": "Capture provenance for inferenceClosureDigest: the inference revision these control-lane measurements were taken at. NOT the compared term — currency is the digest above. sc-17989 promoted it from a prose comment so scripts/backfill-closure-digests.mjs can pair it with `provider` below, re-derive the digest from real source at this revision, and fail CI on a disagreement. Before it, this digest was maintained by hand and graded by nothing."
+                  },
+                  "provider": {
+                    "type": "string",
+                    "description": "Closure lane id this block's digest belongs to, as the suffix of a `config/inference-provider-closures.json` key (`candle:` + this). sc-17989: the stamper locates a binding by pairing this with inferenceRevision, so without it the digest is invisible to the CI verification gate."
                   },
                   "branchTierByBaseTier": {
                     "type": "object",
