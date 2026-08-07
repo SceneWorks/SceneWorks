@@ -1197,6 +1197,7 @@ function declaredEvidence(model, backend, tier) {
     "vramGbByTier",
     "supportsSequentialOffload",
     "memoryStrategyCapabilities",
+    "memoryStrategyStructuralExemptions",
     "sequentialPeakGb",
     "turboFit",
     "measured",
@@ -1389,6 +1390,16 @@ function strategyStatus({
       `config/manifests/builtin.models.jsonc#models/${model.id}/${backend}/calibrations`,
       false,
     );
+  }
+  const staticExemption =
+    declaredModel[backend]?.memoryStrategyStructuralExemptions?.[rung];
+  if (staticExemption?.overlays?.includes(overlay)) {
+    return {
+      state: "Structurally N/A",
+      source: staticExemption.evidence[0].source,
+      parameters: {},
+      structural: staticExemption.evidence,
+    };
   }
   const staticCapability = declaredModel[backend]?.memoryStrategyCapabilities?.[rung];
   if (staticCapability?.overlays?.includes(overlay)) {

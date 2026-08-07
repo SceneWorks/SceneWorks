@@ -1539,6 +1539,29 @@ test("PuLID's closed overlay contract does not redefine legacy Candle resident c
   );
 });
 
+test("Mage Candle bounded decode is structurally exempt rather than advertised or left Missing", async () => {
+  const matrix = await buildMatrix();
+  const cells = matrix.cells.filter(
+    (cell) =>
+      cell.modelId.startsWith("mage_flow") &&
+      cell.backend === "candle" &&
+      cell.rung === "bounded_decode",
+  );
+
+  assert.equal(cells.length, 27, "fixture covers every Mage Candle tier and mode coordinate");
+  assert.ok(cells.every((cell) => cell.state === "Structurally N/A"));
+  assert.ok(
+    cells.every((cell) =>
+      cell.evidence.structural.some(
+        (item) =>
+          item.source.endsWith("candle-gen-mage/src/memory_strategy.rs") &&
+          /StructurallyNotApplicable/.test(item.reason),
+      ),
+    ),
+    "every exemption must carry the provider architecture evidence that justifies it",
+  );
+});
+
 test("Candle Krea's Implemented cells report the shared backend that makes them reachable", async () => {
   const matrix = await buildMatrix();
   const source = await surveyFixture();
@@ -1572,14 +1595,17 @@ test("Candle Krea's Implemented cells report the shared backend that makes them 
   assert.doesNotMatch(serialized, /does not go through.*BlockWindowBackend/i);
 });
 
-test("rung 4 is not claimed where its declared rung-1 prerequisite is absent", async () => {
+test("rung 4 is not claimed on MLX where its declared rung-1 prerequisite is absent", async () => {
   // gen_core::memory_strategy makes rung 1 a prerequisite of rung 4, so a family with a perfectly
   // windowable trunk still reports Missing where the entry cannot stage its phases. Mage-Flow and
-  // SenseNova are the epic's own uncovered-rung-1 families.
+  // SenseNova are the epic's own uncovered-rung-1 MLX families; Candle capability is independent.
   const matrix = await buildMatrix();
   for (const modelId of ["mage_flow", "sensenova_u1_8b"]) {
     const staged = matrix.cells.filter(
-      (cell) => cell.modelId === modelId && cell.rung === "staged_residency",
+      (cell) =>
+        cell.modelId === modelId &&
+        cell.backend === "mlx" &&
+        cell.rung === "staged_residency",
     );
     assert.ok(staged.length > 0);
     assert.ok(
@@ -1587,7 +1613,10 @@ test("rung 4 is not claimed where its declared rung-1 prerequisite is absent", a
       `${modelId}: fixture assumes rung 1 is unavailable`,
     );
     const rung4 = matrix.cells.filter(
-      (cell) => cell.modelId === modelId && cell.rung === "bounded_transformer_residency",
+      (cell) =>
+        cell.modelId === modelId &&
+        cell.backend === "mlx" &&
+        cell.rung === "bounded_transformer_residency",
     );
     assert.ok(
       rung4.every((cell) => cell.state === "Missing"),

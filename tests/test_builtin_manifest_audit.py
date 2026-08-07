@@ -239,7 +239,7 @@ def _assert_mage_tier_layout(model, model_id, repo, revision):
 
 
 def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
-    """sc-15813: every Candle Mage route declares the same unverified five-rung contract."""
+    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract."""
     assert model["candle"] == {
         "minMemoryGb": 17,
         "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
@@ -247,10 +247,6 @@ def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
         "measured": False,
         "supportsSequentialOffload": True,
         "memoryStrategyCapabilities": {
-            "bounded_decode": {
-                "parameters": {"decodeTileEdge": 1024, "decodeOverlap": 1},
-                "overlays": ["none"],
-            },
             "bounded_attention": {
                 "parameters": {"attentionChunkSize": 67_108_864},
                 "overlays": ["none"],
@@ -261,6 +257,21 @@ def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
                     "transformerWindowComponent": "Dit",
                 },
                 "overlays": ["none"],
+            },
+        },
+        "memoryStrategyStructuralExemptions": {
+            "bounded_decode": {
+                "overlays": ["none", "lora"],
+                "evidence": [
+                    {
+                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                        "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization.",
+                    },
+                    {
+                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                        "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field.",
+                    },
+                ],
             },
         },
     }, model_id

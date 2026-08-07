@@ -944,10 +944,23 @@ mod tests {
             let capabilities = candle["memoryStrategyCapabilities"]
                 .as_object()
                 .expect("memory strategy capabilities");
-            assert_eq!(capabilities.len(), 3);
+            assert_eq!(capabilities.len(), 2);
+            assert!(
+                !capabilities.contains_key("bounded_decode"),
+                "{model_id}: CoD full-field normalization makes bounded decode structurally inapplicable"
+            );
+            let bounded_decode_exemption =
+                &candle["memoryStrategyStructuralExemptions"]["bounded_decode"];
             assert_eq!(
-                capabilities["bounded_decode"]["parameters"],
-                json!({ "decodeTileEdge": 1024, "decodeOverlap": 1 })
+                bounded_decode_exemption["overlays"],
+                json!(["none", "lora"])
+            );
+            assert_eq!(
+                bounded_decode_exemption["evidence"]
+                    .as_array()
+                    .expect("bounded decode structural evidence")
+                    .len(),
+                2
             );
             assert_eq!(
                 capabilities["bounded_attention"]["parameters"],

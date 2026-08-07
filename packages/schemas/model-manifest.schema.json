@@ -23,6 +23,32 @@
         }
       }
     },
+    "structuralMemoryStrategyExemption": {
+      "type": "object",
+      "required": ["overlays", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "overlays": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["none", "lora", "identity", "control"] }
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["source", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
     "samplerKey": {
       "type": "string",
       "enum": [
@@ -1027,6 +1053,16 @@
                   "bounded_decode": { "$ref": "#/$defs/staticMemoryStrategyCapability" },
                   "bounded_attention": { "$ref": "#/$defs/staticMemoryStrategyCapability" },
                   "bounded_transformer_residency": { "$ref": "#/$defs/staticMemoryStrategyCapability" }
+                }
+              },
+              "memoryStrategyStructuralExemptions": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Static architecture evidence for rungs that cannot apply to this provider. These declarations produce Structurally N/A matrix cells and never enable a runtime strategy.",
+                "properties": {
+                  "bounded_decode": { "$ref": "#/$defs/structuralMemoryStrategyExemption" },
+                  "bounded_attention": { "$ref": "#/$defs/structuralMemoryStrategyExemption" },
+                  "bounded_transformer_residency": { "$ref": "#/$defs/structuralMemoryStrategyExemption" }
                 }
               },
               "calibrations": {
