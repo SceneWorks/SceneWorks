@@ -255,7 +255,6 @@
         "sceneWorksCommit",
         "inferenceCommit",
         "compatibleSceneWorksRevision",
-        "compatibleInferenceRevision",
         "loadability",
         "predictedPeaksGb",
         "predictedPhasesGb",
@@ -278,7 +277,6 @@
         "sceneWorksCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "inferenceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "compatibleSceneWorksRevision": { "const": "sc-15449-contract-v1" },
-        "compatibleInferenceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "loadability": {
           "type": "object",
           "required": ["provider", "repository", "resolvedRevision", "tierRoot", "route", "backend", "computeCapability"],
@@ -349,6 +347,7 @@
         "calibrationFingerprint",
         "sceneWorksRevision",
         "inferenceRevision",
+        "inferenceClosureDigest",
         "measured",
         "verification",
         "evidenceRecords",
@@ -379,7 +378,12 @@
         "inferenceRevision": {
           "type": "string",
           "pattern": "^[0-9a-f]{40}$",
-          "description": "Exact merged inference commit against which this calibration and its provider hooks were verified."
+          "description": "Capture provenance only — the merged inference commit these curves were measured against. NEVER compared (sc-17774); see inferenceClosureDigest."
+        },
+        "inferenceClosureDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Digest of candle-gen-krea's compile closure at inferenceRevision (sc-17774). Currency compares this against the live digest for candle:krea_2_turbo in config/inference-provider-closures.json. It replaces vram_gate.rs's frozen KREA_TURBO_INFERENCE_REVISION, which was one of several per-model mechanisms doing the same job differently."
         },
         "measured": {
           "const": true,
@@ -1055,6 +1059,11 @@
                 "additionalProperties": false,
                 "description": "Pose-ControlNet lane VRAM fit ladder numbers (sc-11754, epic 8459 → epic 10765), keyed by BASE quant tier. Present only for a model with a bespoke trained control branch (Krea 2 Turbo). The control lane loads the base at the installed tier PLUS the control branch, so its render peak exceeds the txt2img vramGbByTier and needs its own numbers; the worker's krea_control_fit gate reads these vs live/capped free VRAM and engages the cheapest sufficient rung only when constrained. sc-15799 (tier integrity) removed the branch-quant rung: the branch's tier is a function of the BASE tier (branchTierByBaseTier), so there is nothing left for the ladder to trade. Current peak rows are measured against that shipping branch tier and are read verbatim with no derived branch correction.",
                 "properties": {
+                  "inferenceClosureDigest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "Digest of candle-gen-krea's compile closure when these direct control-lane measurements were taken (sc-17774). Currency compares it against the live digest for candle:krea_2_turbo_control. It replaces krea_control_fit.rs's frozen KREA_CONTROL_INFERENCE_REVISION — which that module also stamped onto its own evidence, so the shared staleness check compared a constant against itself and could never fire."
+                  },
                   "branchTierByBaseTier": {
                     "type": "object",
                     "description": "TIER INTEGRITY (sc-15799): the tier the pose control branch is packed to, keyed by BASE quant tier. Declarative mirror of gen_core::tier_integrity::control_branch_tier, which is the executable rule — this records what ships so the audit table and the parity lane can see it. q8 and int8-convrot use q8; q4 floors its branch to q8 because q4 residuals caused measured non-pose drift; bf16 uses bf16. NOT budget-dependent and NOT a memory lever. Every tier the entry HOSTS must appear as a key, enforced by scripts/check-tier-integrity.mjs.",

@@ -935,13 +935,24 @@ export async function runProviderPlan({
         crateDir,
       }).digest;
     });
+  // Only an AUTHORITATIVE capture can ever be `current`, so only it needs a real closure digest.
+  // `evidenceSemantics` short-circuits fixture and candidate scopes before the comparison is
+  // reached. Deriving unconditionally made the schema-mutation suite fail outright: it drives this
+  // runner against a synthetic repo that has no provider crate to derive a closure from, and no
+  // `config/inference-provider-closures.json` to declare one — a fixture capture cannot supply
+  // either, and should not have to.
+  const capturesAuthoritativeEvidence = (config.providers ?? []).some(
+    (provider) => provider.evidenceScope === "authoritative",
+  );
   const probeRepositories = async () => {
     const inference = await gitState(inferenceRepo);
     return {
       sceneWorks: await gitState(sceneWorksRepo, true),
       inference: {
         ...inference,
-        closureDigest: await closureDigest(providerName, inference.revision),
+        ...(capturesAuthoritativeEvidence
+          ? { closureDigest: await closureDigest(providerName, inference.revision) }
+          : {}),
       },
     };
   };
