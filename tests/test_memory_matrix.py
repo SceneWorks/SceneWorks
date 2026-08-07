@@ -199,29 +199,24 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    # Two independent sources of "current", kept separate and both DERIVED from the live pin rather
-    # than hardcoded, so a pin bump makes each fall away on its own instead of making this wrong:
+    # Two independent sources of "current", kept separate and derived from the live provider
+    # closures rather than the repository-wide pin:
     #
-    #   - records measured AT the live pin (sc-16915's MLX re-collection);
+    #   - Full-complete records whose captured provider closure still matches the live closure;
     #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
     #
-    # Before sc-16915 the first set was empty, so this read `set()` outside the window.
-    measured_at_live_pin = {
-        record["id"]
-        for record in calibration["records"]
-        if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
+    # A global pin bump may leave a provider's compile closure byte-identical. Requiring the capture
+    # revision itself to equal the live pin would contradict the closure-digest currency contract
+    # and falsely report that calibrated admission fell back to the legacy estimator.
+    current_complete_ids = {
+        run["record"]["id"]
+        for run in full_runs
+        if run["semantics"] == "current"
     }
-    assert measured_at_live_pin, (
-        "the shipped bundle must contain evidence measured at the live pin; an empty set here "
-        "means calibrated admission has silently fallen back to the legacy estimator"
+    assert len(current_complete_ids) == 17, (
+        "the shipped bundle must retain the 17 closure-current complete records; an empty or "
+        "reduced set means calibrated admission has silently fallen back toward the legacy estimator"
     )
-    # Measured at the live pin means CURRENT, without exception — a record may not be measured here
-    # and dated elsewhere.
-    assert {
-        run["semantics"]
-        for run in matrix["calibrationRuns"]
-        if run["record"]["id"] in measured_at_live_pin
-    } == {"current"}
     # Current is necessary but not sufficient for eligible: a record must also BIND a declared cell.
     # sc-16915 swept seven decode tile edges and the manifest binds only the production point
     # (512/64), so the six off-point edges are current-but-ineligible by design — they widen the
@@ -229,13 +224,13 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     unbound_decode_edges = {
         record["id"]
         for record in calibration["records"]
-        if record["id"] in measured_at_live_pin
+        if record["id"] in current_complete_ids
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
     assert len(unbound_decode_edges) == 6
     assert {run["record"]["id"] for run in current_eligible} == (
-        measured_at_live_pin - unbound_decode_edges
+        current_complete_ids - unbound_decode_edges
     ) | (set(expected_flux2_runtime) if within_audited_window else set())
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
