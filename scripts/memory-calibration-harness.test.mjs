@@ -1541,3 +1541,258 @@ test("the promoted evidence bundle carries the current harnessVersion", async ()
   assert.equal(bundle.harnessVersion, HARNESS_VERSION);
   validateBundle(bundle);
 });
+
+// -----------------------------------------------------------------------------------------------
+// sc-17935 item 3: a capture run must be able to derive its own closure digest.
+//
+// The digest was keyed on `providerName` — the `--provider` PLAN-ENTRY name — while the declarations
+// table is keyed by LANE (`<backend>:<provider>`). Every checked-in capture workflow selects with
+// `--fixture`, so `providerName` was `undefined` and the run died with `provider "undefined" has no
+// entry` before touching the GPU; passing `--provider` failed on the other spelling. macOS and
+// Windows capture jobs therefore could not produce replacement evidence — the one remedy a narrowed
+// currency term leaves you.
+// -----------------------------------------------------------------------------------------------
+
+/** An authoritative one-rung plan provider on a given lane, selected by its fixture. */
+function laneProvider({ backend, provider, fixture, modelId = provider }) {
+  return {
+    evidenceScope: "authoritative",
+    backend,
+    loadShape: "eager_materialization",
+    target: { ...complete().target, modelId, provider },
+    rung: "resident",
+    engagedRungs: ["resident"],
+    calibrationFingerprint: `${provider}-formula-v1`,
+    fixture,
+    cases: [{ parameters: { decodeTileEdge: 512, decodeOverlap: 128 }, expectedResult: "passed" }],
+  };
+}
+
+async function runFixtureSelection({ config, fixture, providerName, closureDigestFor }) {
+  const cleanRepo = await cleanFixtureRepo();
+  return runProviderPlan({
+    closureDigestFor,
+    config,
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    fixture,
+    providerName,
+  });
+}
+
+test("a --fixture-only capture run keys its closure digest by lane, not by plan-entry name", async () => {
+  // This is the checked-in workflow invocation shape verbatim: `--backend … --fixture … ` and no
+  // `--provider`, so `providerName` is undefined.
+  const asked = [];
+  const result = await runFixtureSelection({
+    config: { providers: [laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-krea" })] },
+    fixture: "cap-krea",
+    closureDigestFor: async (lane) => {
+      asked.push(lane);
+      return createHash("sha256").update(`closure:${lane}`).digest("hex");
+    },
+  });
+  assert.deepEqual(asked, ["candle:krea_2_turbo"], "the table key is <backend>:<provider>");
+  assert.equal(result.records.length, 1);
+  assert.equal(
+    result.records[0].repositories.inference.closureDigest,
+    createHash("sha256").update("closure:candle:krea_2_turbo").digest("hex"),
+  );
+});
+
+test("the stamped digest is the one evidenceSemantics compares, so the capture reads current", async () => {
+  // The end-to-end property: a fresh capture of a lane whose declared digest is live must come back
+  // `current`. If the runner keyed on anything but the lane, this is where it would read historical.
+  const result = await runFixtureSelection({
+    config: { providers: [laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-krea" })] },
+    fixture: "cap-krea",
+    closureDigestFor: stubClosureDigest,
+  });
+  const record = result.records[0];
+  const live = { "candle:krea_2_turbo": await stubClosureDigest("candle:krea_2_turbo") };
+  assert.equal(
+    evidenceSemantics(record, {
+      sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+      inference: record.repositories.inference.revision,
+      inferenceClosureDigests: live,
+    }),
+    "current",
+  );
+  // Mutation check: the same record against ANOTHER lane's digest must not read current, so the
+  // assertion above is testing the key and not merely that both sides ran the same stub.
+  assert.equal(
+    evidenceSemantics(record, {
+      sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+      inference: record.repositories.inference.revision,
+      inferenceClosureDigests: { "candle:krea_2_turbo": await stubClosureDigest("mlx:qwen_image") },
+    }),
+    "historical",
+  );
+});
+
+test("a multi-lane capture stamps each record with ITS lane's digest", async () => {
+  // `--backend candle` with no `--fixture` selects every candle lane. One run-level digest would
+  // stamp both records with whichever lane happened to be first.
+  const config = {
+    providers: [
+      laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-multi" }),
+      laneProvider({ backend: "candle", provider: "flux2_dev", fixture: "cap-multi" }),
+    ],
+  };
+  const result = await runFixtureSelection({ config, fixture: "cap-multi", closureDigestFor: stubClosureDigest });
+  assert.equal(result.records.length, 2);
+  const byLane = new Map(result.records.map((record) =>
+    [`${record.backend}:${record.target.provider}`, record.repositories.inference.closureDigest]));
+  assert.equal(byLane.get("candle:krea_2_turbo"), await stubClosureDigest("candle:krea_2_turbo"));
+  assert.equal(byLane.get("candle:flux2_dev"), await stubClosureDigest("candle:flux2_dev"));
+  assert.notEqual(byLane.get("candle:krea_2_turbo"), byLane.get("candle:flux2_dev"));
+});
+
+test("a selection with no authoritative entry derives no digest at all", async () => {
+  // A fixture/candidate capture can never be `current`, so it must not need an inference crate
+  // layout or a declarations file. The injected deriver throws to prove it is never reached.
+  const config = {
+    providers: [{
+      ...laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-fixture" }),
+      evidenceScope: "fixture",
+    }],
+  };
+  const result = await runFixtureSelection({
+    config,
+    fixture: "cap-fixture",
+    closureDigestFor: async () => assert.fail("a fixture-scope capture must not derive a closure digest"),
+  });
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].repositories.inference.closureDigest, undefined);
+});
+
+test("an undeclared lane fails BEFORE the first capture, not after it", async () => {
+  // Eager derivation is the point: the hardware probe is cheap, but a 26 GB `run`/`run_batch` must
+  // not burn before the runner discovers it cannot stamp a currency term. This drives the REAL
+  // deriver (no `closureDigestFor`) against the real declarations file, and `onProviderInvocation`
+  // fires only for capture actions — so an empty list proves nothing was measured.
+  const cleanRepo = await cleanFixtureRepo();
+  const invocations = [];
+  await assert.rejects(
+    runProviderPlan({
+      config: {
+        providers: [laneProvider({
+          backend: "candle", provider: "never_declared_provider", fixture: "cap-undeclared",
+        })],
+      },
+      providerCommand: [
+        process.execPath,
+        fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+      ],
+      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+      inferenceRepo: cleanRepo,
+      fixture: "cap-undeclared",
+      onProviderInvocation: (invocation) => invocations.push(invocation),
+    }),
+    /lane "candle:never_declared_provider" has no entry in config\/inference-provider-closures\.json/,
+  );
+  assert.deepEqual(invocations, [], "no capture may run once the lane is known to be underivable");
+});
+
+test("resume is not defeated by the per-lane digest a prior record carries", async () => {
+  // A GATED authoritative record is the shape that actually reaches the operational-attempt check:
+  // `completedLogicalIds` returns nothing for it, so `expandPlan` does not suppress it and only
+  // `operationallyAttemptedLogicalIds` can stop it being measured again. It still carries a lane
+  // digest — stamping keys on evidenceScope, not status — while the run-level `repositories` now
+  // carries none. Comparing those two raw makes every prior record look foreign, and the cost of
+  // that is repeating a multi-hour, tens-of-GB GPU capture.
+  const cleanRepo = await cleanFixtureRepo();
+  const config = {
+    providers: [laneProvider({ backend: "candle", provider: "krea_2_turbo", fixture: "cap-resume" })],
+  };
+  const gated = fileURLToPath(
+    new URL("./fixtures/memory-provider-gated-canonical-batch-fixture.mjs", import.meta.url),
+  );
+  const run = (resume, onProviderInvocation) => runProviderPlan({
+    closureDigestFor: stubClosureDigest,
+    config,
+    providerCommand: [process.execPath, gated],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    fixture: "cap-resume",
+    resume,
+    onProviderInvocation,
+  });
+
+  const first = await run(undefined);
+  assert.equal(first.records.length, 1);
+  assert.equal(first.records[0].status, "gated");
+  assert.equal(
+    first.records[0].repositories.inference.closureDigest,
+    await stubClosureDigest("candle:krea_2_turbo"),
+    "an authoritative capture stamps its lane digest even when the result is gated",
+  );
+
+  const invocations = [];
+  const resumed = await run(first, (invocation) => invocations.push(invocation));
+  assert.deepEqual(invocations, [], "a resumed capture must not repeat work it has already paid for");
+  assert.equal(resumed.records.length, 1);
+});
+
+test("every checked-in capture invocation selects a plan fixture on a DECLARED lane", async () => {
+  // The story's regression gate, driven off the real workflow files. Three ways this drifts: a
+  // workflow names a fixture the plan no longer has, its `--backend`/`--fixture` pair selects
+  // nothing, or the plan gains an authoritative lane nobody declared a crate for. Each one kills a
+  // capture job on a runner instead of here.
+  const root = new URL("../", import.meta.url);
+  const plan = JSON.parse(await readFile(new URL("config/memory-calibration-plan.json", root)));
+  const closures = JSON.parse(await readFile(new URL("config/inference-provider-closures.json", root)));
+  const workflows = await readdir(new URL(".github/workflows/", root));
+
+  const selected = [];
+  for (const file of workflows.filter((name) => name.endsWith(".yml"))) {
+    const body = await readFile(new URL(`.github/workflows/${file}`, root), "utf8");
+    // `harness.mjs run` invocations only; `assess-reuse` and `check` never derive a digest. Windows
+    // packs the whole invocation onto one line, macOS uses backslash continuations.
+    for (const invocation of body.match(/memory-calibration-harness\.mjs\s+run\b[\s\S]*?--output\s+\S+/g) ?? []) {
+      const backend = invocation.match(/--backend\s+(\S+)/)?.[1];
+      const fixture = invocation.match(/--fixture\s+"?([^"\s\\]+)"?/)?.[1];
+      assert.ok(backend && fixture, `${file}: a capture invocation selects no --backend/--fixture`);
+      if (!fixture.includes("$")) {
+        selected.push([`${file} --fixture ${fixture}`, backend, (name) => name === fixture]);
+        continue;
+      }
+      // The Qwen invocation templates its fixture from `inputs.qwen_tier` and a seed chosen in the
+      // same shell block. Both come out of the workflow itself rather than being restated here, so a
+      // drift on either side is caught: every DECLARED tier option must reach a plan fixture, and
+      // that fixture's seed must be one the workflow can actually set.
+      const tiers = body.match(/qwen_tier:[\s\S]*?options:\s*((?:\s*-\s*\w+\n)+)/)?.[1];
+      // The seed is assigned upstream of the invocation in the same shell block, so it is read off
+      // the workflow rather than the sliced invocation.
+      const seeds = [...body.matchAll(/QWEN_SEED=(\d+)/g)].map((match) => match[1]);
+      assert.ok(tiers, `${file}: the templated fixture's tier input declares no options`);
+      assert.ok(seeds.length, `${file}: the templated fixture's seed is set nowhere in the workflow`);
+      for (const tier of tiers.match(/-\s*(\w+)/g).map((line) => line.replace(/-\s*/, ""))) {
+        const shape = new RegExp(`^${fixture.replace("${QWEN_TIER}", tier).replace("${QWEN_SEED}", `(?:${seeds.join("|")})`)}$`);
+        selected.push([`${file} --fixture ${fixture} (tier ${tier})`, backend, (name) => shape.test(name)]);
+      }
+    }
+  }
+  assert.ok(selected.length >= 6, `expected the checked-in capture selections, found ${selected.length}`);
+
+  for (const [label, backend, matches] of selected) {
+    // Exactly what `runProviderPlan` does: filter the plan, then key every authoritative survivor.
+    const entries = plan.providers.filter((provider) => provider.backend === backend && matches(provider.fixture));
+    assert.ok(entries.length, `${label}: selects no plan provider on backend ${backend}`);
+    for (const entry of entries.filter((provider) => provider.evidenceScope === "authoritative")) {
+      const lane = `${entry.backend}:${entry.target.provider}`;
+      assert.ok(closures.providers[lane], `${label}: lane ${lane} has no closure declaration`);
+    }
+  }
+
+  // And the converse, so a plan lane that no workflow captures yet still cannot be added undeclared.
+  const undeclared = [...new Set(plan.providers
+    .filter((provider) => provider.evidenceScope === "authoritative")
+    .map((provider) => `${provider.backend}:${provider.target.provider}`))]
+    .filter((lane) => !closures.providers[lane]);
+  assert.deepEqual(undeclared, [], "authoritative plan lanes with no closure declaration cannot be captured");
+});
