@@ -66,6 +66,30 @@ function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
+/**
+ * `git init` with git's background work disabled.
+ *
+ * Committing can fork `gc --auto` (and, on newer git, `maintenance`), which writes into `.git`
+ * asynchronously. If that lands while the teardown below is walking the tree, `rmSync` fails with
+ * `ENOTEMPTY: rmdir '<tmp>/.git'` — a flake seen on `main`'s Check run at `8e4a5683e`. This is a
+ * REQUIRED check, so when it fires it blocks the merge queue for everyone.
+ *
+ * Disabling the trigger is the actual fix; `removeRepo` retries as a second line for anything else
+ * touching the directory (indexer, antivirus, a slow unlink). Both fixtures go through these two
+ * helpers so a third cannot quietly reintroduce the race by calling `git(repo, "init")` directly.
+ */
+function initRepo(repo) {
+  git(repo, "init", "--quiet");
+  git(repo, "config", "gc.auto", "0");
+  git(repo, "config", "maintenance.auto", "false");
+  return repo;
+}
+
+/** Teardown that tolerates a straggler writing into the tree mid-walk. */
+function removeRepo(repo) {
+  rmSync(repo, { force: true, recursive: true, maxRetries: 10, retryDelay: 50 });
+}
+
 test("allows TAB, LF, and CR but reports every other C0 byte by offset", () => {
   const contents = Buffer.from([0x09, 0x0a, 0x0d, 0x00, 0x01, 0x1f, 0x20]);
   assert.deepEqual(findUnexpectedControlBytes(contents), [
@@ -115,9 +139,9 @@ test("every currently tracked path is selected source or a declared binary forma
 
 test("CLI ignores declared binary assets and rejects a tracked source NUL", (t) => {
   const repo = mkdtempSync(join(tmpdir(), "sceneworks-control-bytes-"));
-  t.after(() => rmSync(repo, { force: true, recursive: true }));
+  t.after(() => removeRepo(repo));
 
-  git(repo, "init", "--quiet");
+  initRepo(repo);
   writeFileSync(join(repo, "clean.mjs"), 'const separator = "\\t";\n');
   for (const extension of DECLARED_BINARY_EXTENSIONS) {
     writeFileSync(join(repo, `asset${extension}`), Buffer.from([0x00, 0x01, 0x02]));
@@ -139,11 +163,11 @@ test("CLI ignores declared binary assets and rejects a tracked source NUL", (t) 
 
 test("explicit text attributes keep a NUL-bearing source diff textual", (t) => {
   const repo = mkdtempSync(join(tmpdir(), "sceneworks-text-attribute-"));
-  t.after(() => rmSync(repo, { force: true, recursive: true }));
+  t.after(() => removeRepo(repo));
 
   writeFileSync(join(repo, ".gitattributes"), readFileSync(join(REPO_ROOT, ".gitattributes")));
   writeFileSync(join(repo, "probe.mjs"), 'export const value = "clean";\n');
-  git(repo, "init", "--quiet");
+  initRepo(repo);
   git(repo, "config", "user.email", "codex@example.invalid");
   git(repo, "config", "user.name", "Codex");
   git(repo, "add", ".");

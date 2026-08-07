@@ -1,3 +1,10 @@
+/// sc-17774: the live closure digest for the candle Krea control lane, read rather than frozen.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_control_closure_digest() -> String {
+    sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo_control")
+        .unwrap_or_default()
+}
+
 #[test]
 fn nvidia_smi_parsing_and_visible_device_filtering_match_python_worker() {
     let gpus = parse_nvidia_smi_gpus(
@@ -75,7 +82,8 @@ fn selected_compute_capability_never_borrows_a_later_gpu_row() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn nvfp4_gate_floors_at_blackwell_sm_120() {
-    use crate::gpu::compute_cap_meets_nvfp4;
+use crate::gpu::compute_cap_meets_nvfp4;
+
     // Consumer Blackwell (RTX PRO 6000 / RTX 50-series = 12.0) — the epic's target, and eligible.
     assert!(compute_cap_meets_nvfp4(Some(12.0)));
     // A hypothetical future cap above the floor stays eligible (a floor, matching the ConvRot shape).
@@ -1352,6 +1360,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             tile,
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Resident,
@@ -1370,6 +1379,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             tile,
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
@@ -1388,6 +1398,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             tile,
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
@@ -1405,6 +1416,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             tile,
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
@@ -1422,6 +1434,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             tile,
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
@@ -1439,6 +1452,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         tile,
         chunk,
         control_evidence_is_current(entry),
+        &krea_control_closure_digest(),
     ) {
         KreaControlFit::TooBig { needed_gb, .. } => {
             assert!((needed_gb - chunked_peak).abs() < 1e-6);
@@ -1467,6 +1481,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             decode_tile_save_gb(entry, "bf16"),
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
@@ -1562,6 +1577,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
             tile,
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Resident,
@@ -1580,6 +1596,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
             tile,
             chunk,
             control_evidence_is_current(entry),
+            &krea_control_closure_digest(),
         ),
         KreaControlFit::Fits {
             offload_policy: OffloadPolicy::Sequential,
@@ -1597,6 +1614,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
         tile,
         chunk,
         control_evidence_is_current(entry),
+        &krea_control_closure_digest(),
     ) {
         KreaControlFit::TooBig { needed_gb, .. } => {
             assert!((needed_gb - chunked_peak).abs() < 1e-6);

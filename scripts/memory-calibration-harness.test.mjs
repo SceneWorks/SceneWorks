@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -13,6 +14,13 @@ import {
   runProviderPlan, validateBundle, validateRecord,
 } from "./memory-calibration-harness.mjs";
 import { calibrationBinding } from "./generate-memory-matrix.mjs";
+
+// sc-17774: the runner stamps each record with the provider's inference compile-closure digest.
+// These tests drive synthetic repositories with no inference crate layout, so the derivation is
+// injected here. `inference-closure-digest.test.mjs` covers the real derivation.
+const stubClosureDigest = async (provider) =>
+  createHash("sha256").update(`closure:${provider ?? "none"}`).digest("hex");
+
 
 const execFileAsync = promisify(execFile);
 
@@ -52,7 +60,7 @@ function complete(overrides = {}) {
         dirty: false,
         matrixSourceRevision: `source-tree:${"1".repeat(64)}`,
       },
-      inference: { revision: "b".repeat(40), dirty: false },
+      inference: { revision: "b".repeat(40), dirty: false, closureDigest: "b".repeat(64) },
     },
     hardware: {
       probe: "fixture executable probe",
@@ -375,29 +383,80 @@ test("candidate evidence is permanently non-promotable", () => {
   }), "candidate");
 });
 
-test("calibration ABI binding owns SceneWorks invalidation while inference SHA remains currentness input", () => {
+test("currency follows the provider's own compile closure, never the inference pin (sc-17774)", () => {
   const record = complete({ evidenceScope: "authoritative" });
   record.logicalCaseId = logicalCaseId(record);
   record.id = recordId(record);
+  // Keyed `<backend>:<provider>` — a provider id is not unique across backends.
+  const provider = `${record.backend}:${record.target.provider}`;
+  const captured = record.repositories.inference.closureDigest;
   const revisions = {
     sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
     inference: record.repositories.inference.revision,
+    inferenceClosureDigests: { [provider]: captured },
   };
   assert.equal(evidenceSemantics(record, revisions), "current");
+
+  // The whole point: the pin may move arbitrarily far and the measurement stays in force, as long as
+  // THIS provider's closure did not move. Previously this exact case returned "historical", and it
+  // is why every calibration was demoted ~1.5 times a day.
+  assert.equal(
+    evidenceSemantics(record, { ...revisions, inference: "c".repeat(40) }),
+    "current",
+    "an unrelated inference commit must not demote a measurement",
+  );
   assert.equal(
     evidenceSemantics(record, { ...revisions, sceneWorks: "source-tree:different" }),
     "current",
     "matrixSourceRevision is exact provenance; calibrationBinding separately enforces the SceneWorks ABI fingerprint",
   );
-  assert.equal(evidenceSemantics(record, { ...revisions, inference: "c".repeat(40) }), "historical");
+
+  // ...and the unit is not blind: this provider's closure moving DOES demote it.
   assert.equal(
     evidenceSemantics(record, {
       ...revisions,
-      inference: "c".repeat(40),
-      compatibleCapturedInferenceRevisions: [record.repositories.inference.revision],
+      inferenceClosureDigests: { [provider]: "d".repeat(64) },
+    }),
+    "historical",
+  );
+
+  // Another provider's closure moving is not this provider's business at all.
+  assert.equal(
+    evidenceSemantics(record, {
+      ...revisions,
+      inferenceClosureDigests: { [provider]: captured, some_other_model: "e".repeat(64) },
     }),
     "current",
-    "an explicit provider-closure audit may admit captured provenance at one later runtime pin",
+  );
+});
+
+test("a record with no closure digest fails loudly instead of falling back to pin equality", () => {
+  // The fallback would be invisible in a green run and would silently restore the old policy.
+  const record = complete({ evidenceScope: "authoritative" });
+  delete record.repositories.inference.closureDigest;
+  assert.throws(
+    () =>
+      evidenceSemantics(record, {
+        sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+        inference: record.repositories.inference.revision,
+        inferenceClosureDigests: {
+          [`${record.backend}:${record.target.provider}`]: "f".repeat(64),
+        },
+      }),
+    /closureDigest/,
+  );
+});
+
+test("an undeclared provider fails loudly rather than being treated as current", () => {
+  const record = complete({ evidenceScope: "authoritative" });
+  assert.throws(
+    () =>
+      evidenceSemantics(record, {
+        sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+        inference: record.repositories.inference.revision,
+        inferenceClosureDigests: {},
+      }),
+    /inference-provider-closures\.json/,
   );
 });
 
@@ -602,6 +661,7 @@ test("provider execution requires one backend-specific hardware probe", async ()
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   await assert.rejects(
     runProviderPlan({
+    closureDigestFor: stubClosureDigest,
       config,
       providerCommand: [process.execPath, "must-not-start.mjs"],
       sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
@@ -658,7 +718,7 @@ test("authoritative Z-Image evidence requires dimension-specific source sessions
     capturedAt: "2026-08-01T12:00:00Z",
     repositories: {
       sceneWorks: { revision: "a".repeat(40), dirty: true },
-      inference: { revision: "b".repeat(40), dirty: false },
+      inference: { revision: "b".repeat(40), dirty: false, closureDigest: "b".repeat(64) },
     },
     hardware: { probe: "nvidia-smi", memoryBytes: 1024 },
     target: {
@@ -858,6 +918,7 @@ test("executable runner handles fragmented responses across provider processes",
     }],
   };
   const result = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: [
       process.execPath,
@@ -907,6 +968,7 @@ test("runner batches one target's five rungs into one attested model load", asyn
   const invocations = [];
   const cleanRepo = await cleanFixtureRepo();
   const result = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: [
       process.execPath,
@@ -996,6 +1058,7 @@ test("gated Qwen batch persists the canonical five rungs then serializes all rem
   const outputDir = await mkdtemp(path.join(tmpdir(), "memory-harness-output-"));
   const output = path.join(outputDir, "evidence.json");
   const result = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: [
       process.execPath,
@@ -1050,6 +1113,7 @@ test("gated Qwen resume continues after failure without repeating provenance-mat
   const firstInvocations = [];
   await assert.rejects(
     runProviderPlan({
+    closureDigestFor: stubClosureDigest,
       config,
       providerCommand: [process.execPath, fixture, state, "4"],
       sceneWorksRepo: cleanRepo,
@@ -1070,6 +1134,7 @@ test("gated Qwen resume continues after failure without repeating provenance-mat
   const checkpointLogicalIds = new Set(checkpoint.records.map((record) => record.logicalCaseId));
   const resumedInvocations = [];
   const resumed = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: [process.execPath, fixture, state],
     sceneWorksRepo: cleanRepo,
@@ -1116,6 +1181,7 @@ test("operational resume does not suppress an attempt from mismatched hardware p
     )),
   ];
   const first = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: fixtureCommand,
     sceneWorksRepo: cleanRepo,
@@ -1128,6 +1194,7 @@ test("operational resume does not suppress an attempt from mismatched hardware p
 
   const invocations = [];
   const resumed = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: fixtureCommand,
     sceneWorksRepo: cleanRepo,
@@ -1161,6 +1228,7 @@ test("runner flags provide explicit fresh and experimental batch controls", asyn
   ];
   const freshInvocations = [];
   await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: fixtureCommand,
     sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
@@ -1172,6 +1240,7 @@ test("runner flags provide explicit fresh and experimental batch controls", asyn
 
   const batchInvocations = [];
   await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: fixtureCommand,
     sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
@@ -1229,6 +1298,7 @@ test("a completed sweep retires its other parameter points before another spawn"
   const invocations = [];
   const cleanRepo = await cleanFixtureRepo();
   const result = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: [
       process.execPath,
@@ -1271,6 +1341,7 @@ test("provider execution can select every rung sharing one reproducible fixture"
     ],
   };
   const result = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     fixture: "fresh-five-rung-fixture",
     providerCommand: [
@@ -1300,6 +1371,7 @@ test("provider early exit is rejected without an unhandled stdin EPIPE", async (
   };
   await assert.rejects(
     runProviderPlan({
+    closureDigestFor: stubClosureDigest,
       config,
       providerCommand: [
         process.execPath,
@@ -1331,6 +1403,7 @@ test("expected-failure plan case produces a resumable negative record, never a c
     }],
   };
   const result = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
     config,
     providerCommand: [
       process.execPath,
@@ -1359,6 +1432,7 @@ test("provider execution rejects an adapter-attested composition that differs fr
   };
   await assert.rejects(
     runProviderPlan({
+    closureDigestFor: stubClosureDigest,
       config,
       providerCommand: [
         process.execPath,
@@ -1392,6 +1466,7 @@ test("the measured load shape is a receipt field, never copied from the plan", a
   };
   const run = (fixture) =>
     runProviderPlan({
+    closureDigestFor: stubClosureDigest,
       config: { providers: [provider] },
       providerCommand: [process.execPath, fileURLToPath(new URL(fixture, import.meta.url))],
       sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),

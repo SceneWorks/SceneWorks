@@ -84,6 +84,24 @@ jobs:
           npm run check
           npm run check:compose
           npm run check:docker:rust-api:self-test
+      - name: Verify the per-lane inference closure digests against real pinned source (sc-17774)
+        # `npm run check` only asserts that config/inference-provider-closures.json is KEYED to the
+        # live pin. It cannot tell a real digest from a hand-edited one, because the derivation needs
+        # inference's source and the SceneWorks checkout does not contain it.
+        #
+        # It does not need to be checked in blind, though: SceneWorks/inference is PUBLIC (#2164
+        # established this after the opposite premise had been believed for some time), so a shallow
+        # fetch of the pinned revision costs seconds, needs no token, and re-derives every lane's
+        # digest for real. Without this step the currency term is checked-in data nothing verifies —
+        # the same fail-open shape this epic removed one level down.
+        run: |
+          set -euo pipefail
+          pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
+          git init -q "$RUNNER_TEMP/inference"
+          git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
+          git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
+          git -C "$RUNNER_TEMP/inference" checkout -q FETCH_HEAD
+          node scripts/inference-closure-digest.mjs --repo "$RUNNER_TEMP/inference" --check
       - name: Guard against NC model weights in a published artifact (sc-10526, epic 10512)
         # SceneWorks converts weights at install and pulls them at runtime — it never
         # redistributes them. Baking a Non-Commercial family's weights (Anima /

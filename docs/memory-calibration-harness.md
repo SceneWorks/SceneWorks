@@ -20,9 +20,28 @@ requires an exact ordered match with the adapter-attested record, so a historica
 a different prerequisite graph remains visible as provenance but cannot verify the current cell.
 
 The Qwen identical-latent ladder captured at inference `1deefff` remains useful historical tolerance
-input, but lacks required phase memory and lifecycle results and is not the current inference pin.
-It is not emitted as a complete record. No MLX or Candle record may become current/Verified until the
-authoritative commands below run successfully on clean, exact-final-SHA repositories.
+input, but lacks required phase memory and lifecycle results. It is not emitted as a complete record.
+No MLX or Candle record may become current/Verified until the authoritative commands below run
+successfully on clean, exact-final-SHA repositories.
+
+### What makes a record `current` (sc-17774)
+
+Not the inference pin. A complete record is `current` when the **compile-closure digest of the
+provider it measured** still matches the live one for that `<backend>:<provider>` lane in
+`config/inference-provider-closures.json`:
+
+```js
+record.repositories.inference.closureDigest === revisions.inferenceClosureDigests[lane]
+```
+
+`repositories.inference.revision` is capture provenance and is never compared — comparing it is what
+made every inference commit, including a commit to an unrelated model, demote every calibrated
+provider at once. The runner stamps the digest at capture time from the inference checkout it is
+already given; `evidenceSemantics` fails loudly rather than falling back if a record lacks one, since
+a silent fallback would restore the old policy invisibly.
+
+Full rule, what the digest covers, what it deliberately does not see, and the pin-bump procedure:
+[calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md).
 
 ## Identities and resume
 

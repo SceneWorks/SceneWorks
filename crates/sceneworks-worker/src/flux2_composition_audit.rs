@@ -219,7 +219,11 @@ fn the_bundle_keeps_flux2_devs_memory_strategy_route_intact() {
 /// backend, and a future refactor could route the candle lane through something equally
 /// degenerate — so the generator floor pins that this is the real catalog. (It does NOT catch a
 /// lane that lost `backend-candle`: this module is cfg'd out entirely there, which is what the
-/// marker guard in `scripts/inference-artifact-audit.test.mjs` is for.)
+/// liveness guard in `scripts/platform-review-contracts.test.mjs` is for. That guard used to live in
+/// `scripts/inference-artifact-audit.test.mjs` and moved when sc-17774 deleted the flux2-only audit
+/// tooling that file graded — the guard was never about that tooling, and this check survived the
+/// removal because "which provider is registered" is a composition question, not an invalidation
+/// one.)
 #[test]
 fn the_audited_composition_is_the_full_cuda_bundle() {
     assert_eq!(runtime_cuda::PLATFORM, "cuda");

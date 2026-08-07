@@ -1,5 +1,19 @@
 # Calibration invalidation survey (sc-17775)
 
+> **STATUS — the exposure surveyed here has been removed (sc-17774).**
+>
+> This is the record of a measurement taken at pin `fbb00d6b`, and its numbers are left exactly as
+> measured. But **§2 "How invalidation actually works" no longer describes live code**: the two gates
+> and the single hardcoded `flux2_dev` escape hatch it anatomises are gone, replaced by a
+> per-provider compile-closure digest keyed `<backend>:<provider>`. Read
+> **[calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md)** for current
+> behaviour before acting on anything below.
+>
+> The survey's central finding held up and drove the fix: the unit of invalidation was the whole
+> inference repository at commit granularity, and the one escape hatch generalised to nothing. Its
+> §9.4 note — that `krea_control_fit.rs` carried a THIRD mechanism nobody had characterised — was
+> correct, and that mechanism is now on the same closure term as everything else.
+
 Every calibrated provider, and what can force a re-capture of its memory measurements without
 changing the behaviour those measurements describe.
 
