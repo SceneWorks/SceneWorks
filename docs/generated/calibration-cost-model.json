@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:43aa7f952d3fbddfc1f7a40415bdc9f25f9eac9da441866a71233d38471fb369",
-    "matrixRevision": "source-tree:be01671de60955dbdb08977e4434a218768f3a65ab1a69d3400b785ddf315ad7",
+    "sceneWorksRevision": "source-tree:3244343ca474193c1a87abcab4910f92a9f8dddbaab6e4399d3d841deea43509",
+    "matrixRevision": "source-tree:9bc7b46abb0be835c947dc7925696cf7567c1c48f1191bd2906abc976378d30e",
     "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "6d55247f427c77266a0493029fdc2ce795b044314678fcfd26a8a177223002a2"
+        "sha256": "e826d782c29466f83d8c91fec43b52f93c55b0f49b1f63804e4c96266140f8ee"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "bab7c426b22dc823375186f77675e0321932a9c40ed3f3c81b992114596da53d"
+        "sha256": "fa57495ddbde07c5395ebcb05ddee9b761a87bd6f1b5bc2ad14391d9b6ea243c"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
