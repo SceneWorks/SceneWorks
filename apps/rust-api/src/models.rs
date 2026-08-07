@@ -4433,9 +4433,16 @@ mod model_size_concurrency_tests {
         // One download row, no `platforms` scoping (both the image and video SeedVR2 lanes run on
         // macOS and on the off-Mac candle lane), so every OS gains exactly one: macOS 85 → 86,
         // windows/linux 82 → 83.
+        //
+        // sc-17634 declared `dwpose_pose_detector`, the LAST of that class and the only one that
+        // was not a Hugging Face download at all (two openmmlab `.zip` bundles, re-hosted at
+        // `SceneWorks/dwpose-onnx` so it can be installed like everything else). One download row
+        // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
+        // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
+        // 83 → 84.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 86_usize), ("windows", 83), ("linux", 83)]
+            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

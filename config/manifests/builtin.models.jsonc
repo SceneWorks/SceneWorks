@@ -5343,6 +5343,10 @@
           // sc-17774: the currency term. `inferenceRevision` above is capture provenance and is
           // no longer compared — the digest of `candle-gen-krea`'s compile closure is.
           "inferenceClosureDigest": "bdf379ae9f95302f2010f859eae6806b6382c22d9dffd36c51059d440548f03f",
+          // sc-17989: names the closure lane (`candle:` + this) so `backfill-closure-digests.mjs`
+          // can pair the two keys above and re-derive the digest under `--verify`, like every
+          // per-binding calibration. Before this key the digest was maintained by hand, ungraded.
+          "provider": "krea_2_turbo",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
@@ -6229,10 +6233,18 @@
         // `branchPackSaveGb` correction remains absent and no worker reader derives one.
         "control": {
           // sc-17774: the closure of `candle-gen-krea` these direct control measurements were
-          // taken against (1899a722). Currency compares this against the live digest for the same
-          // lane; it replaces `krea_control_fit::KREA_CONTROL_INFERENCE_REVISION`, a per-model
-          // frozen SHA that only that one lane had.
+          // taken against (1899a722, the revision named in prose below). Currency compares this
+          // against the live digest for the same lane; it replaces
+          // `krea_control_fit::KREA_CONTROL_INFERENCE_REVISION`, a per-model frozen SHA that only
+          // that one lane had.
+          //
+          // sc-17989: `inferenceRevision` and `provider` make the pair machine-readable, so
+          // `backfill-closure-digests.mjs --verify` re-derives the digest from real source at that
+          // revision instead of trusting a hand-maintained constant. The revision is capture
+          // provenance only; the digest is the compared term.
+          "inferenceRevision": "1899a7228deb99b65535745d09d4a5f5524565c4",
           "inferenceClosureDigest": "1983c17fe26dde17d6a08f2b7c606ef8c6721389259b4edf92a6b7b58c0eb48e",
+          "provider": "krea_2_turbo_control",
           // TIER INTEGRITY (sc-15799): the tier the pose branch is packed to, per BASE tier. Not a lever
           // and not budget-dependent — `gen_core::tier_integrity::control_branch_tier` is the executable
           // form and `krea_control_fit::control_branch_tier_for_key` is the worker's entry point.
@@ -12760,6 +12772,69 @@
       "ui": {
         "label": "YOLO11m Person Detector",
         "description": "Person bounding-box detection feeding ByteTrack person tracking and the segmentation prompts. Required by person-track features.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-17634 — DWPose was the ONE job-time download that did not come from Hugging Face: two
+      // `.zip` bundles pulled straight from `download.openmmlab.com` and unpacked into
+      // `<data_dir>/cache/dwpose/`, where the Models screen can neither see, size nor delete them.
+      // It could not simply be declared, either — a download row is hard-wired to
+      // `provider: "huggingface"` in four independent places (`is_supported_model_download`, this
+      // manifest's schema, `install_state_for`, `model_artifact_paths`), so a direct-URL row is
+      // silently INVISIBLE rather than an error. Re-hosting the two graphs SceneWorks actually
+      // loads removes the exception rather than building a second install path for one model.
+      //
+      // The loader half landed with it — `pose_jobs::require_dwpose_weights` is cache-only and
+      // reads this snapshot. Declaring WITHOUT that change would have been worse than leaving it
+      // alone: install state keys on the declared repo, so the entry would have flipped to "not
+      // installed", prompted a ~330 MB download the loader ignored, and then still fetched the
+      // openmmlab zips mid-job.
+      //
+      // Migration: an existing install keeps working from the legacy `cache/dwpose/` copy (or
+      // rtmlib's `~/.cache/rtmlib/hub/checkpoints/`), so nothing re-downloads. Reclaiming those
+      // ~300 MB is tracked on sc-17636 (S11), which owns delete/size coverage.
+      "id": "dwpose_pose_detector",
+      "name": "DWPose Pose Detector",
+      "family": "dwpose",
+      "type": "utility",
+      "capabilities": [],
+      "downloads": [
+        {
+          // The two ONNX graphs extracted VERBATIM from the OpenMMLab ONNX SDK archives (each
+          // archive's `end2end.onnx`, no re-export or conversion). The model card records both
+          // upstream URLs, their SHA-256s and the extraction map, so the mirror is reproducible.
+          //
+          // The revision is byte-for-byte the worker's own `DWPOSE_REVISION` (`pose_jobs.rs`).
+          // They MUST agree: a manifest that installed one revision while the loader resolved
+          // another would recreate, at the revision level, exactly the declared-vs-loaded drift
+          // this epic exists to remove. `manifest_declares_the_same_dwpose_pin_the_loader_reads`
+          // fails if they drift.
+          "provider": "huggingface",
+          "repo": "SceneWorks/dwpose-onnx",
+          "revision": "c330a9609201343576b8b69d222e38c1486d2854",
+          "files": [
+            "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx",
+            "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx"
+          ],
+          "estimatedSizeBytes": 330721274
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/dwpose-onnx"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "DWPose Pose Detector",
+        // No `promptGuide`: `type: "utility"` entries are exempt (`promptGuideRequiredForModel`)
+        // because they never reach a Studio prompt-guide surface. Provenance lives on the
+        // About→Licenses `dwpose` component instead.
+        "description": "Whole-body pose and keypoint detection (person boxes + 133-point COCO-WholeBody). Required by the Pose Library \"create from photo\" flow, OpenPose control conditioning, ControlNet pose training and catalog pose analysis.",
         "recommendedFor": []
       }
     },

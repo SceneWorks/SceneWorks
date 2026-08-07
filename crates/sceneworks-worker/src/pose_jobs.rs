@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use crate::asset_media::resolve_asset_media;
-use crate::downloads::{ensure_cached_file, verify_file_sha256, DownloadContext};
 use crate::image_sampling::sample_rgb_bilinear;
 use image::RgbImage;
 #[cfg(target_os = "macos")]
@@ -44,8 +43,7 @@ use crate::openpose_skeleton::{body_stickwidth, draw_wholebody, Keypoint};
 use crate::util::{resolve_env_file_pin, resolved_cache_paths_match};
 use crate::{
     heartbeat, normalize_app_managed_cache_path, optional_payload_string, progress_payload,
-    run_blocking_with_heartbeat, task_join_error, update_job, ApiClient, Settings, WorkerError,
-    WorkerResult,
+    run_blocking_with_heartbeat, update_job, ApiClient, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::{ProjectStore, POSE_UPLOADS_CACHE_DIR};
@@ -63,18 +61,65 @@ const PAD: f32 = 1.25;
 const SPLIT: f32 = 2.0;
 const DET_FILE: &str = "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx";
 const POSE_FILE: &str = "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx";
-const DET_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip";
-const POSE_URL: &str = "https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.zip";
-/// Pinned SHA-256 of the openmmlab .zip bundles (sc-8879). These runtime weights are
-/// fetched over the network from `download.openmmlab.com` with no digest advertised by
-/// the host, so the download is verified against these constants before extraction. A
-/// mismatch (host-side swap, corrupted transfer, MITM) fails the job with the
-/// integrity-check error instead of silently loading tampered weights. Digests were
-/// computed from the published bundles (94,223,081 B / 213,433,855 B respectively).
-pub(crate) const DET_ZIP_SHA256: &str =
-    "a000224fd8ba283202bc62d4a5fcdfe353adb9f468777dbac1ea2ada2093adde";
-pub(crate) const POSE_ZIP_SHA256: &str =
-    "a87e1af41a0a067776dba7d46e1c21c8f6e9f18e247e0e606718dd1f31e96ffd";
+/// SceneWorks-owned re-host of the two DWPose ONNX graphs (sc-17634, epic 17625). Public;
+/// declared by the `dwpose_pose_detector` catalog entry and installed from the Model Manager —
+/// NOT downloaded on first use any more.
+///
+/// # Why a re-host exists at all
+///
+/// Until sc-17634 this lane fetched two `.zip` bundles straight from `download.openmmlab.com`
+/// and unpacked them into `<data_dir>/cache/dwpose/` — the only non-Hugging-Face weight download
+/// in the product. That could never be installed from the Model Manager: a download row is
+/// hard-wired to `provider: "huggingface"` in four independent places (`is_supported_model_download`,
+/// the manifest schema's `required: ["provider","repo"]`, `install_state_for`, `model_artifact_paths`),
+/// so a direct-URL row is silently invisible rather than an error. Re-hosting the extracted graphs
+/// removes the exception instead of building a second install path for one model.
+///
+/// The files here are the `end2end.onnx` entry of each upstream archive, byte-for-byte — no
+/// re-export, no conversion, no quantization. The repo's model card records both archive URLs,
+/// their SHA-256s, and the extraction map, so the mirror is reproducible from upstream.
+const DWPOSE_REPO: &str = "SceneWorks/dwpose-onnx";
+/// Pinned DWPose ONNX revision. Even though `SceneWorks/dwpose-onnx` is a first-party repo,
+/// resolving the mutable `main` branch would mean a re-push (or a compromised token) could
+/// silently swap the graphs we load, so pin the exact commit — the same defense-in-depth as
+/// [`crate::upscale_jobs`]'s Real-ESRGAN and SeedVR2 pins.
+///
+/// This replaces the sc-8879 zip digests, and is a strictly stronger integrity story rather than
+/// a weaker one: the digests only ever covered a transfer this code no longer performs, whereas
+/// the Model Manager verifies every file against Hugging Face's `lfs.oid` at install time, and
+/// this pin then binds the load to that exact snapshot. (Both LFS oids happen to equal the
+/// SHA-256s of the graphs the old `extract_onnx` produced, so an existing install and a fresh one
+/// hold identical bytes.)
+///
+/// The `dwpose_pose_detector` catalog entry declares this SAME revision, so the Model Manager
+/// installs exactly the snapshot [`require_dwpose_weights`] then reads;
+/// `manifest_declares_the_same_dwpose_pin_the_loader_reads` fails if the two drift.
+pub(crate) const DWPOSE_REVISION: &str = "c330a9609201343576b8b69d222e38c1486d2854";
+/// Operator overrides naming a local `.onnx`, one per graph. Both are **file** pins and both keep
+/// sc-8911's hard failure: set-but-missing is an operator error (a typo silently loading different
+/// weights is the failure mode that rule exists to prevent), not a fall-through.
+///
+/// Unlike [`crate::upscale_jobs`]'s `SEEDVR2_DIR_PINS`, no strictness question arises here. That
+/// pair needed splitting because `SCENEWORKS_SEEDVR2_DIR` had been a *staging destination* the
+/// pre-migration code created and downloaded into, so an empty one was legal under its old
+/// meaning. Neither DWPose key was ever a staging path — both have always named an existing file
+/// through [`resolve_env_file_pin`] — so migrating changes nothing about how either behaves.
+const DWPOSE_FILE_PINS: [(&str, &str); 2] = [
+    ("SCENEWORKS_DWPOSE_DET", DET_FILE),
+    ("SCENEWORKS_DWPOSE_POSE", POSE_FILE),
+];
+/// Pre-migration weight roots, read-only (AC10 of sc-17598), in the order the deleted `ensure_one`
+/// consulted them before sc-17634 so an existing install resolves to exactly the file it did before.
+///
+/// * `<data_dir>/cache/dwpose/` — where the deleted download+unzip path wrote (~300 MB for the
+///   pair). App-managed, so it is joined onto `settings.data_dir`.
+/// * `~/.cache/rtmlib/hub/checkpoints/` — rtmlib's own cache, present on dev machines and on
+///   installs that predate the Rust port. NOT app-managed: it is keyed off `$HOME`, which is why
+///   it cannot be expressed as a `data_dir` subpath like the other legacy roots in this epic.
+///
+/// Nothing writes to either any more, so they only drain; reclaiming them is sc-17636 (S11).
+const DWPOSE_LEGACY_DATA_DIR_ROOT: &str = "cache/dwpose";
+const DWPOSE_LEGACY_RTMLIB_ROOT: &str = ".cache/rtmlib/hub/checkpoints";
 const DETECTOR_ID: &str = "rtmw-dw-x-l/ort";
 
 /// The hardware execution provider this build registers before the CPU fallback:
@@ -831,147 +876,96 @@ pub(crate) fn detect_and_render_skeleton(
 }
 
 // ---------------------------------------------------------------------------
-// weights provisioning (download-on-first-use parity with rtmlib)
+// weights resolution (cache-only; installed from the Model Manager)
 // ---------------------------------------------------------------------------
 
-/// Resolve the two DWPose onnx weight paths `(detector, pose)`, downloading them on first use — the
-/// public seam the ControlNet Training Studio job (epic 10159, sc-10162) uses to build a
-/// [`crate::control_preprocess::PreprocessResources`] before rendering pose conditions. Thin wrapper
-/// over the module-private [`ensure_weights`] (the same resolver `run_pose_detect_job` uses), so the
-/// studio and the pose-detect job provision the identical weights.
-pub(crate) async fn ensure_dwpose_weights(
-    api: &ApiClient,
-    settings: &Settings,
-    http_client: &reqwest::Client,
-    job: &JobSnapshot,
-) -> WorkerResult<(PathBuf, PathBuf)> {
-    ensure_weights(api, settings, http_client, job).await
-}
-
-/// Resolve the two onnx weights, downloading them on first use. Order: explicit env
-/// pin (`SCENEWORKS_DWPOSE_DET`/`POSE`), then the app cache
-/// `<data_dir>/cache/dwpose/`, then rtmlib's own cache (dev machines), else download
-/// + unzip the openmmlab bundle into the app cache.
-async fn ensure_weights(
-    api: &ApiClient,
-    settings: &Settings,
-    http_client: &reqwest::Client,
-    job: &JobSnapshot,
-) -> WorkerResult<(PathBuf, PathBuf)> {
-    let cache = settings.data_dir.join("cache").join("dwpose");
-    let download_context = DownloadContext {
-        api,
-        client: http_client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Pose detection canceled while fetching DWPose weights.",
-        fresh_download: false,
-    };
-    let det = ensure_one(
-        "SCENEWORKS_DWPOSE_DET",
-        DET_FILE,
-        DET_URL,
-        DET_ZIP_SHA256,
-        &cache,
-        &download_context,
-    )
-    .await?;
-    let pose = ensure_one(
-        "SCENEWORKS_DWPOSE_POSE",
-        POSE_FILE,
-        POSE_URL,
-        POSE_ZIP_SHA256,
-        &cache,
-        &download_context,
-    )
-    .await?;
+/// The two DWPose onnx weight paths `(detector, pose)`, or an actionable install error
+/// (sc-17634 / S10, sc-17635) — the public seam the ControlNet Training Studio job (epic 10159,
+/// sc-10162) uses to build a [`crate::control_preprocess::PreprocessResources`] before rendering
+/// pose conditions, and the same resolver `run_pose_detect_job` uses, so the studio and the
+/// pose-detect job provision identical weights.
+///
+/// Taking `&Settings` and **no `DownloadContext`** is the enforcement, not an aesthetic choice:
+/// this lane cannot reach the network any more, by construction rather than by convention
+/// (epic 17625). It replaces the former `ensure_dwpose_weights`, which fetched ~300 MB of zip
+/// bundles mid-job and unpacked them into a destination the Models screen can neither size nor
+/// delete.
+pub(crate) fn require_dwpose_weights(settings: &Settings) -> WorkerResult<(PathBuf, PathBuf)> {
+    // Destructured, not iterated: the array's LENGTH is part of its type, so emptying or extending
+    // `DWPOSE_FILE_PINS` is a compile error here rather than a silently-shorter loop. That is the
+    // sc-17632 lesson — a test that walked a legacy-dirs constant bare kept passing when the
+    // constant was emptied — answered at the type level instead of only in a test.
+    let [(det_key, det_file), (pose_key, pose_file)] = DWPOSE_FILE_PINS;
+    let det = require_dwpose_graph(det_key, det_file, settings)?;
+    let pose = require_dwpose_graph(pose_key, pose_file, settings)?;
     Ok((det, pose))
 }
 
-async fn ensure_one(
+/// Resolve one already-present DWPose graph, **cache-only** (sc-17634, epic 17625). Order is
+/// unchanged from the pre-migration `ensure_one`, minus its download tail:
+///
+/// 1. the explicit env pin for this graph ([`DWPOSE_FILE_PINS`]);
+/// 2. the **HF cache**, where the `dwpose_pose_detector` Model Manager install puts it — the
+///    pinned `snapshots/<sha>/` of [`DWPOSE_REPO`] at [`DWPOSE_REVISION`];
+/// 3. the legacy `<data_dir>/cache/dwpose/` copy, read-only;
+/// 4. the legacy `~/.cache/rtmlib/hub/checkpoints/` copy, read-only.
+///
+/// Returns `Ok(None)` when nothing is staged; [`require_dwpose_graph`] turns that into the install error.
+///
+/// # Each graph resolves independently, on purpose
+///
+/// Unlike SeedVR2's DiT+VAE pair ([`crate::upscale_jobs::resolve_seedvr2_checkpoint_dir`]), the
+/// detector and the pose model are **not** a torn-pair hazard: they are two independent
+/// single-file `ort` sessions, not one directory handed to an engine, and each filename names
+/// exactly one artifact whose bytes are identical in every root. So a box with the detector in
+/// `cache/dwpose/` and the pose model in the HF cache resolves both and loads correct weights —
+/// which is precisely the pre-migration behaviour, preserved.
+fn resolve_dwpose_graph(
     env_key: &str,
     file: &str,
-    url: &str,
-    zip_sha256: &str,
-    cache: &Path,
-    context: &DownloadContext<'_>,
-) -> WorkerResult<PathBuf> {
-    // An explicitly-set env pin must resolve to an existing file. If it's set but the
-    // path is missing, that's an operator error — surface it instead of silently falling
-    // through to the cache/network (sc-8911), which would mask a typo and load different
-    // weights than the operator intended.
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    // A set-but-missing env pin is an operator error: fail loudly instead of silently falling
+    // through to the cache and loading different weights than the operator asked for (sc-8911).
     if let Some(path) = resolve_env_file_pin(env_key, std::env::var_os(env_key), file)? {
-        return Ok(path);
+        return Ok(Some(path));
     }
-    let target = cache.join(file);
-    if target.exists() {
-        return Ok(target);
+    // The installed location: whatever the `dwpose_pose_detector` Model Manager entry cached.
+    if let Some(path) =
+        crate::downloads::resolve_hf_component_file(settings, DWPOSE_REPO, DWPOSE_REVISION, file)
+    {
+        return Ok(Some(path));
     }
-    // rtmlib's own checkpoint cache, present on dev machines / prior Python installs.
+    // Legacy pre-migration roots, read-only (AC10) — nothing writes to either any more.
+    let app_cache = settings
+        .data_dir
+        .join(DWPOSE_LEGACY_DATA_DIR_ROOT)
+        .join(file);
+    if app_cache.exists() {
+        return Ok(Some(app_cache));
+    }
+    // rtmlib's own checkpoint cache, present on dev machines / prior Python installs. Keyed off
+    // `$HOME` rather than `data_dir`, so it survives an app-data move and is not reclaimable
+    // through the Models screen.
     if let Some(home) = std::env::var_os("HOME") {
         let rtmlib = PathBuf::from(home)
-            .join(".cache/rtmlib/hub/checkpoints")
+            .join(DWPOSE_LEGACY_RTMLIB_ROOT)
             .join(file);
         if rtmlib.exists() {
-            return Ok(rtmlib);
+            return Ok(Some(rtmlib));
         }
     }
-    tokio::fs::create_dir_all(cache).await?;
-    let zip_path = target.with_extension("zip");
-    ensure_cached_file(
-        context,
-        url,
-        &zip_path,
-        &format!("DWPose {file} bundle"),
-        None,
-    )
-    .await?;
-    // The openmmlab host advertises no digest and `ensure_cached_file` only checks the
-    // transfer length, so verify the fetched bundle against the pinned SHA-256 before
-    // extracting the weights it contains (sc-8879). A mismatch removes the file and
-    // fails the job with the integrity-check error.
-    verify_file_sha256(
-        context.api,
-        context.settings,
-        context.job_id,
-        &zip_path,
-        zip_sha256,
-        &format!("DWPose {file} bundle"),
-    )
-    .await?;
-    // The openmmlab bundle is a .zip containing a single .onnx; extract it.
-    let target_clone = target.clone();
-    let zip_for_extract = zip_path.clone();
-    let file_owned = file.to_owned();
-    tokio::task::spawn_blocking(move || extract_onnx(&zip_for_extract, &file_owned, &target_clone))
-        .await
-        .map_err(|error| task_join_error("weight extract task", error))??;
-    // Drop the (large — ~90-210 MB) archive now the .onnx is extracted; keeping it just
-    // wastes cache disk (sc-8927). Best-effort: a failure here doesn't fail the job.
-    let _ = tokio::fs::remove_file(&zip_path).await;
-    Ok(target)
+    Ok(None)
 }
 
-fn extract_onnx(zip_path: &Path, file: &str, target: &Path) -> WorkerResult<()> {
-    let reader = std::fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(reader)
-        .map_err(|e| WorkerError::InvalidPayload(format!("dwpose zip: {e}")))?;
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| WorkerError::InvalidPayload(format!("dwpose zip entry: {e}")))?;
-        let name = entry.name().to_owned();
-        if name.ends_with(".onnx") {
-            let tmp = target.with_extension("onnx.tmp");
-            let mut sink = std::fs::File::create(&tmp)?;
-            std::io::copy(&mut entry, &mut sink)?;
-            std::fs::rename(&tmp, target)?;
-            return Ok(());
-        }
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "no .onnx in DWPose bundle for {file}"
-    )))
+/// [`resolve_dwpose_graph`], or an actionable install error naming the model and the env pin.
+fn require_dwpose_graph(env_key: &str, file: &str, settings: &Settings) -> WorkerResult<PathBuf> {
+    resolve_dwpose_graph(env_key, file, settings)?.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "The DWPose pose detector is not installed ({DWPOSE_REPO}/{file}). Install \"DWPose \
+             Pose Detector\" from the Model Manager, or point {env_key} at a local {file}."
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,7 +1095,6 @@ fn join_project_relative(project_path: &Path, raw: &str) -> Option<PathBuf> {
 pub(crate) async fn run_pose_detect_job(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
@@ -1161,7 +1154,7 @@ pub(crate) async fn run_pose_detect_job(
     // Run the fallible body, then clean up the temp uploads regardless of outcome before
     // propagating (defer-style). Cleanup is confined to the pose-uploads cache inside
     // `cleanup_temp_uploads`, so a project asset resolved by id is never touched.
-    let result = run_pose_detect_inner(api, settings, http_client, job, resolved, min_conf).await;
+    let result = run_pose_detect_inner(api, settings, job, resolved, min_conf).await;
     cleanup_temp_uploads(settings, &temp_upload_paths).await;
     result
 }
@@ -1170,7 +1163,6 @@ pub(crate) async fn run_pose_detect_job(
 async fn run_pose_detect_inner(
     api: &ApiClient,
     settings: &Settings,
-    http_client: &reqwest::Client,
     job: &JobSnapshot,
     resolved: Vec<PoseSource>,
     min_conf: f64,
@@ -1180,7 +1172,10 @@ async fn run_pose_detect_inner(
         &job.id,
         progress_payload(
             JobStatus::Running,
-            ProgressStage::Downloading,
+            // `Preparing`, not `Downloading`: since sc-17634 this only RESOLVES an
+            // already-installed snapshot, so reporting a download stage would tell the UI a
+            // transfer is happening that cannot occur.
+            ProgressStage::Preparing,
             0.1,
             "Loading DWPose weights.",
             None,
@@ -1189,7 +1184,7 @@ async fn run_pose_detect_inner(
         ),
     )
     .await?;
-    let (det_path, pose_path) = ensure_weights(api, settings, http_client, job).await?;
+    let (det_path, pose_path) = require_dwpose_weights(settings)?;
 
     update_job(
         api,

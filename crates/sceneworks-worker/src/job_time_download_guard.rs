@@ -202,19 +202,22 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("image_jobs/qwen_edit_candle.rs", DownloadRole::JobTime),
     // Imported-SDXL tokenizer/text-encoder components.
     ("image_jobs/sdxl_imported.rs", DownloadRole::JobTime),
-    // DWPose preprocessor weights (`ensure_cached_file`, the non-HF primitive).
-    ("pose_jobs.rs", DownloadRole::JobTime),
-    // `upscale_jobs.rs` and `video_jobs/seedvr2.rs` left this list in sc-17633 + sc-17632: the
-    // Real-ESRGAN ONNX and the SeedVR2 checkpoint are declared in the catalog and resolved with
-    // `resolve_hf_component_file`, and neither file reaches any download primitive any more.
+    // `upscale_jobs.rs` and `video_jobs/seedvr2.rs` left this list in sc-17633 + sc-17632, and
+    // `pose_jobs.rs` in sc-17634: the Real-ESRGAN ONNX, the SeedVR2 checkpoint and the two DWPose
+    // graphs are declared in the catalog and resolved with `resolve_hf_component_file`, and none of
+    // them reaches any download primitive any more. `pose_jobs.rs` retired the LAST use of
+    // `ensure_cached_file`, the non-HF (arbitrary-URL) primitive, so every remaining entry below
+    // fetches from Hugging Face.
     // -- Job-time: added by the transitive wrapper walk (sc-17637). These reach a download through a
     // wrapper more than one hop away, which the original one-hop scan could not see. -------------
     // Catalog/dataset image acquisition: fetches remote source URLs into the catalog at job time.
     ("catalog_image_fetch.rs", DownloadRole::JobTime),
     ("catalog_semantic_jobs.rs", DownloadRole::JobTime),
     ("dataset_parquet_jobs.rs", DownloadRole::JobTime),
-    // Analyzer lanes that stage the InstantID face stack or the DWPose weights mid-job.
-    ("control_training_jobs.rs", DownloadRole::JobTime),
+    // Analyzer lanes that stage the InstantID face stack mid-job. `control_training_jobs.rs` left
+    // in sc-17634: DWPose was the only weight it staged, and it now resolves that through the
+    // cache-only `pose_jobs::require_dwpose_weights`, which takes no `DownloadContext`. The three
+    // below remain because the InstantID face stack is still job-time (sc-17631).
     ("face_analysis_jobs.rs", DownloadRole::JobTime),
     ("face_likeness_compare_jobs.rs", DownloadRole::JobTime),
     ("kps_jobs.rs", DownloadRole::JobTime),
@@ -242,7 +245,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
 ///
 /// **Only ever goes down.** Each migration slice deletes its entry and lowers this in the same
 /// commit.
-const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 44;
+const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 42;
 
 /// What a `<data_dir>/cache/<subdir>` destination holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,7 +431,12 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "person-segment-sam3",
         CacheRole::Weights,
     ),
-    // DWPose preprocessor weights.
+    // DWPose preprocessor weights: the READ-ONLY legacy root (AC10), kept so a pre-sc-17634 install
+    // resolves its existing ~300 MB pair instead of re-downloading. Nothing writes here any more —
+    // the graphs install into the HF cache via the `dwpose_pose_detector` entry. Note the sibling
+    // legacy root, rtmlib's `~/.cache/rtmlib/hub/checkpoints/`, is keyed off `$HOME` rather than
+    // `data_dir`, so it is invisible to this `<data_dir>/cache/<subdir>` inventory by construction.
+    // Reclaiming both is sc-17636 (S11).
     ("worker", "pose_jobs.rs", "dwpose", CacheRole::Weights),
     // The two READ-ONLY legacy upscaler roots, both now consulted from `upscale_jobs.rs` (AC10).
     // `upscale` covers the Real-ESRGAN ONNX (`cache/upscale/`, sc-17633) and the image lane's old
