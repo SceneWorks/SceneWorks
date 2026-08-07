@@ -48,10 +48,33 @@ no build, no GPU and no weights — it reads git objects at a revision:
 | --- | --- |
 | the provider's inference crate | the code being measured |
 | that crate's transitive **first-party** path/workspace dependencies | code it compiles |
+| the local root **`[patch]` targets that closure reaches** | the vendored CUDA kernels arrive *only* this way |
+| every closure crate's **build script** | `build.rs` is a compile input, and it is what runs `nvcc` |
 | the locked external packages that closure **reaches** | a dependency bump changes codegen; the rest of `Cargo.lock` does not |
 | `rust-toolchain.toml`, `.cargo/config.toml`, root `[profile]` / `[patch]` | build inputs that change codegen for everything |
 
-Excluded on purpose: `dev-dependencies` (they do not ship), `tests/`, `benches/`, `examples/`.
+Excluded on purpose: `dev-dependencies` (they do not ship), `tests/`, `benches/`, `examples/`, and
+crate-root files that are not compile inputs (`README.md`, `VENDORED.md`).
+
+### Patch targets are resolved by reachability (sc-17935)
+
+Nothing in inference declares `candle-kernels` as a dependency. It is substituted at the workspace
+root:
+
+```toml
+[patch."https://github.com/huggingface/candle"]
+candle-kernels = { path = "crates/media/candle-gen/vendor/candle-kernels" }
+```
+
+The v2 walk read `path =` dependencies and `workspace = true`, so it never saw that tree: all 42
+files — every `.cu`/`.cuh` kernel and the `build.rs` that compiles them — could change while all five
+Candle digests held still and the calibration read `current`. The deleted artifact audit *had*
+covered this tree; sc-17919 dropped that coverage without noticing.
+
+A local patch target now joins a closure when the **lock says that closure reaches it**. `Cargo.lock`
+records `candle-kernels` under every Candle provider (through `candle-core`) and under no MLX one, so
+a kernel edit moves the five Candle lanes and none of the three MLX lanes. Sweeping every patch entry
+into every closure would also be sound, and would re-couple lanes that share nothing.
 
 Source is hashed **semantically** for `.rs` and `.toml` — whole-line comments are stripped via
 `scripts/lib/source-revision.mjs`, so a documentation-only edit absolves. Everything else (`.metal`,
@@ -115,8 +138,24 @@ that by default.
 | --- | --- |
 | `npm run check` | the closure config is **keyed** to the live Cargo pin; every complete record carries a digest |
 | `check.yml` (parity job) | re-derives every lane's digest from a `--depth=1` fetch of the pinned revision — the digests are **real**, not merely present |
+| `check.yml`, same step | re-derives the **captured** half too: `backfill-closure-digests.mjs --verify` against a shallow fetch of every revision `--revisions` reports |
 | `scripts/inference-closure-digest.test.mjs` | the derivation itself, hermetically, over a synthetic workspace |
 | `memory_strategy.rs` / `mlx_fit_gate.rs` tests | the runtime gate demotes a moved closure and admits an unmoved one, on both the ladder and the named refusal alternative |
+
+The captured-half gate exists because grading only `config/inference-provider-closures.json` left the
+other side of every comparison — 65 record digests and 31 manifest bindings — checked by nothing. That
+was not hypothetical: a constant in `scripts/sc-15833-flux2-evidence.test.mjs` carried the comment
+"derive it with …" and had never been a real derivation, and it survived the whole of sc-17774
+unnoticed. A plain dry run reports drift and still exits 0, which is right for a pin-bump preview and
+useless as a gate, so `--verify` is a separate mode that fails on any drift and ignores `--restamp`.
+
+**It does not cover the two directly-maintained digests** — `turboFit`'s and `candle.control`'s. The
+stamper locates a binding by pairing an `inferenceRevision` line with a `provider` in the same object;
+`turboFit` has no `provider` and `candle.control` has neither. Giving them those keys is not a
+one-line change: the stamper's "is a digest already here" lookup spans only the matched line and the
+one after it, so on a block whose digest sits three lines below its revision it would insert a second
+`inferenceClosureDigest` rather than update the existing one. Tracked in
+[sc-17989](https://app.shortcut.com/trefry/story/17989).
 
 The CI re-derivation matters more than it looks. Without it the currency term is checked-in data
 that nothing grades — a hand-edited digest would pass. `SceneWorks/inference` is public, so the

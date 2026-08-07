@@ -21,6 +21,7 @@ import {
   lockedClosure,
   manifestPathDependencies,
   parseCargoLock,
+  patchTargetPaths,
   providerClosureDigest,
   rootManifestSlices,
   treeBlobs,
@@ -51,6 +52,13 @@ function workspace(overrides = {}) {
       "",
       "[patch.crates-io]",
       'serde = { git = "https://example.invalid/serde" }',
+      "",
+      // The sc-17935 shape: inference reaches its vendored CUDA kernels ONLY through this table.
+      // `patched` is reached by `a` (through `only-a-uses-me`) and by nobody else; `unreachable-patch`
+      // hangs off `nobody-uses-me`, so it is a local patch target no provider compiles.
+      '[patch."https://example.invalid/upstream"]',
+      'patched = { path = "crates/vendor/patched" }',
+      'unreachable-patch = { path = "crates/vendor/unreached" }',
     ].join("\n"),
     "Cargo.lock": [
       "version = 4",
@@ -79,18 +87,37 @@ function workspace(overrides = {}) {
       'version = "1.0.0"',
       'source = "registry+https://github.com/rust-lang/crates.io-index"',
       'checksum = "aaaa"',
+      "dependencies = [",
+      ' "patched",',
+      "]",
+      "",
+      // A patched package's lock entry carries no source and no checksum — its identity is the local
+      // tree, which is exactly what nothing hashed before sc-17935.
+      "[[package]]",
+      'name = "patched"',
+      'version = "0.10.2"',
       "",
       "[[package]]",
       'name = "nobody-uses-me"',
       'version = "9.9.9"',
       'source = "registry+https://github.com/rust-lang/crates.io-index"',
       'checksum = "zzzz"',
+      "dependencies = [",
+      ' "unreachable-patch",',
+      "]",
+      "",
+      "[[package]]",
+      'name = "unreachable-patch"',
+      'version = "0.0.1"',
     ].join("\n"),
     "rust-toolchain.toml": '[toolchain]\nchannel = "1.96.0"\n',
     ".cargo/config.toml": "[build]\nrustflags = []\n",
 
     "crates/shared/Cargo.toml": '[package]\nname = "shared"\n',
     "crates/shared/src/lib.rs": "pub fn shared() {}\n",
+    // An ORDINARY closure crate's build script — sc-17935 item 2 is "never hashed, for ANY crate",
+    // so it has to be pinned somewhere other than the patch target.
+    "crates/shared/build.rs": "fn main() { println!(\"cargo:rustc-cfg=shared\"); }\n",
 
     "crates/a/Cargo.toml": [
       "[package.metadata.legacy-workspace-dependencies]",
@@ -120,6 +147,18 @@ function workspace(overrides = {}) {
       "shared = { workspace = true }",
     ].join("\n"),
     "crates/b/src/lib.rs": 'pub const ID: &str = "provider_b";\n',
+
+    // The vendored-kernel shape: a build script at the crate ROOT that compiles a non-Rust tree
+    // under `src/`, plus a README that is not a compile input.
+    "crates/vendor/patched/Cargo.toml": '[package]\nname = "patched"\n',
+    "crates/vendor/patched/build.rs": "fn main() { compile_kernels(); }\n",
+    "crates/vendor/patched/src/lib.rs": "pub fn patched() {}\n",
+    "crates/vendor/patched/src/kernel.cu": "__global__ void k() { /* v1 */ }\n",
+    "crates/vendor/patched/README.md": "# vendored\n",
+
+    "crates/vendor/unreached/Cargo.toml": '[package]\nname = "unreachable-patch"\n',
+    "crates/vendor/unreached/build.rs": "fn main() {}\n",
+    "crates/vendor/unreached/src/lib.rs": "pub fn unreached() {}\n",
 
     "crates/decoy/Cargo.toml": '[package]\nname = "decoy"\n',
     "crates/decoy/src/lib.rs": "pub fn decoy() {}\n",
@@ -192,7 +231,9 @@ function digestsFor(revisions, revision = "r1") {
 
 test("a provider's closure is its crate plus what it links, and nothing else", () => {
   const digests = digestsFor({ r1: workspace() });
-  assert.deepEqual(digests.get("provider_a").crates, ["crates/a", "crates/shared"]);
+  // `crates/vendor/patched` is linked, just not through a dependency edge — it replaces a package
+  // the lock says `a` compiles. Nothing declares it as a `path =` dependency (sc-17935 item 1).
+  assert.deepEqual(digests.get("provider_a").crates, ["crates/a", "crates/shared", "crates/vendor/patched"]);
   assert.deepEqual(digests.get("provider_b").crates, ["crates/b", "crates/shared"]);
 });
 
@@ -258,8 +299,9 @@ test("tests/ and benches/ are outside the digested source", () => {
 test("the locked set is restricted to packages the closure reaches", () => {
   const lock = parseCargoLock(workspace()["Cargo.lock"]);
   const reached = lockedClosure(lock, ["a", "shared"]).map((entry) => entry.name);
-  assert.deepEqual(reached.sort(), ["a", "only-a-uses-me", "shared"]);
+  assert.deepEqual(reached.sort(), ["a", "only-a-uses-me", "patched", "shared"]);
   assert.ok(!reached.includes("nobody-uses-me"));
+  assert.ok(!reached.includes("unreachable-patch"));
 });
 
 test("an unrelated dependency bump in Cargo.lock does not move a digest", () => {
@@ -432,6 +474,221 @@ test("closureText is stable under input ordering", () => {
     workspace: [["rust-toolchain.toml", "ddd"]],
   };
   assert.equal(closureText(base), closureText({ ...base }));
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-17935 items 1 + 2: local `[patch]` targets and build scripts.
+//
+// Before this, inference's vendored CUDA kernels were reachable ONLY through the root patch table,
+// which the dependency walk never read, and build scripts sat outside the `src/` filter. Every
+// `.cu`/`.cuh` file and the `build.rs` that compiles them could change while all five Candle digests
+// held still and the calibration reported `current`. Each test below is written as a MUTATION: the
+// edit has to move the digest, because a filter that absolves everything is indistinguishable from
+// one that works.
+// ---------------------------------------------------------------------------------------------
+
+test("a local [patch] target the closure reaches is IN the closure", () => {
+  const digests = digestsFor({ r1: workspace() });
+  assert.ok(
+    digests.get("provider_a").crates.includes("crates/vendor/patched"),
+    "provider_a reaches `patched` through the lock, so the patched tree is a compile input",
+  );
+  assert.ok(
+    !digests.get("provider_b").crates.includes("crates/vendor/patched"),
+    "provider_b never compiles it — pulling every patch target into every lane re-couples lanes",
+  );
+});
+
+test("a local [patch] target NO closure reaches is in nobody's closure", () => {
+  // `unreachable-patch` is declared in the same table and has a real tree; only lock reachability
+  // keeps it out. A filter keyed on "is it a patch entry" rather than "does this closure reach it"
+  // would sweep it into both providers.
+  for (const provider of Object.keys(PROVIDERS)) {
+    assert.ok(!digestsFor({ r1: workspace() }).get(provider).crates.includes("crates/vendor/unreached"));
+  }
+  const edited = workspace({ "crates/vendor/unreached/src/lib.rs": "pub fn unreached() { /* v2 */ }\n" });
+  const before = digestsFor({ r1: workspace() });
+  const after = digestsFor({ r1: edited });
+  for (const provider of Object.keys(PROVIDERS)) {
+    assert.equal(before.get(provider).digest, after.get(provider).digest, provider);
+  }
+});
+
+test("THE sc-17935 HEADLINE: a kernel edit in a patched tree moves every closure that reaches it", () => {
+  const edited = workspace({
+    "crates/vendor/patched/src/kernel.cu": "__global__ void k() { /* v2 */ }\n",
+  });
+  const before = digestsFor({ r1: workspace() });
+  const after = digestsFor({ r1: edited });
+  assert.notEqual(
+    before.get("provider_a").digest,
+    after.get("provider_a").digest,
+    "a CUDA kernel change must invalidate the calibration that ran on it",
+  );
+  assert.equal(before.get("provider_b").digest, after.get("provider_b").digest, "provider_b");
+});
+
+test("a patched tree's build.rs is hashed", () => {
+  const edited = workspace({
+    "crates/vendor/patched/build.rs": "fn main() { compile_kernels_with_new_flags(); }\n",
+  });
+  assert.notEqual(
+    digestsFor({ r1: workspace() }).get("provider_a").digest,
+    digestsFor({ r1: edited }).get("provider_a").digest,
+  );
+});
+
+test("an ORDINARY closure crate's build.rs is hashed too", () => {
+  // Item 2 costs nothing at the pin only because no first-party closure crate has a build script.
+  // That is luck, not design, so the property is pinned on `shared` rather than on the patch target.
+  const edited = workspace({
+    "crates/shared/build.rs": "fn main() { println!(\"cargo:rustc-cfg=shared_v2\"); }\n",
+  });
+  const before = digestsFor({ r1: workspace() });
+  const after = digestsFor({ r1: edited });
+  for (const provider of Object.keys(PROVIDERS)) {
+    assert.notEqual(before.get(provider).digest, after.get(provider).digest, provider);
+  }
+});
+
+test("a build script renamed through `build = \"…\"` is followed", () => {
+  const base = workspace({
+    "crates/shared/Cargo.toml": '[package]\nname = "shared"\nbuild = "make.rs"\n',
+    "crates/shared/make.rs": "fn main() {}\n",
+  });
+  const edited = {
+    ...base,
+    "crates/shared/make.rs": "fn main() { different(); }\n",
+  };
+  assert.notEqual(
+    digestsFor({ r1: base }).get("provider_a").digest,
+    digestsFor({ r1: edited }).get("provider_a").digest,
+  );
+});
+
+test("a comment-only edit to a build script is absolved like any other Rust source", () => {
+  const edited = workspace({
+    "crates/shared/build.rs": "// explain the cfg\nfn main() { println!(\"cargo:rustc-cfg=shared\"); }\n",
+  });
+  const before = digestsFor({ r1: workspace() });
+  const after = digestsFor({ r1: edited });
+  for (const provider of Object.keys(PROVIDERS)) {
+    assert.equal(before.get(provider).digest, after.get(provider).digest, provider);
+  }
+});
+
+test("a patched crate's non-compile files stay out of the closure", () => {
+  const edited = workspace({ "crates/vendor/patched/README.md": "# vendored, rewritten\n" });
+  assert.equal(
+    digestsFor({ r1: workspace() }).get("provider_a").digest,
+    digestsFor({ r1: edited }).get("provider_a").digest,
+  );
+});
+
+test("patchTargetPaths reads local replacements only", () => {
+  const paths = patchTargetPaths(workspace()["Cargo.toml"]);
+  assert.deepEqual(
+    [...paths].sort(),
+    [["patched", "crates/vendor/patched"], ["unreachable-patch", "crates/vendor/unreached"]],
+  );
+  // `serde = { git = … }` is a patch entry with no local tree; there is nothing here to hash for it
+  // and the lock already carries its identity.
+  assert.ok(!paths.has("serde"));
+});
+
+test("a renamed patch replacement is matched under BOTH names", () => {
+  // `replaced = { path = "…", package = "real-name" }`: the key is what is being replaced and
+  // `package` is the replacement's real name. Whichever the lock records, reachability must hit —
+  // guessing wrong here fails OPEN, which is the failure mode this whole story is about.
+  const paths = patchTargetPaths([
+    '[patch."https://example.invalid/upstream"]',
+    'replaced = { path = "crates/vendor/patched", package = "real-name" }',
+  ].join("\n"));
+  assert.equal(paths.get("replaced"), "crates/vendor/patched");
+  assert.equal(paths.get("real-name"), "crates/vendor/patched");
+});
+
+/**
+ * A workspace whose patch table chains: `patched` reaches `deep`, and `deep` is itself a local patch
+ * target. `linkThrough` controls WHERE that reach is recorded.
+ *
+ * - `"lock"` — `patched`'s own lock entry lists `deep`. `lockedClosure` is transitive, so pass 1
+ *   already reaches `deep` and both trees are admitted together.
+ * - `"manifest"` — the reach exists only as `patched`'s `path =` dependency on `local-helper`, whose
+ *   lock entry names `deep`, while `patched`'s lock entry lists nothing. Pass 1 cannot see it; only
+ *   walking `patched` in pass 2 puts `local-helper` in `packageNames` and brings `deep` into reach.
+ *   That is a lock that has drifted from the manifests — and the case the fixpoint loop exists for.
+ */
+function chainedPatchWorkspace(linkThrough) {
+  const base = workspace();
+  return workspace({
+    "Cargo.toml": base["Cargo.toml"].replace(
+      'unreachable-patch = { path = "crates/vendor/unreached" }',
+      'unreachable-patch = { path = "crates/vendor/unreached" }\ndeep = { path = "crates/vendor/deep" }',
+    ),
+    "Cargo.lock": base["Cargo.lock"].replace(
+      '[[package]]\nname = "patched"\nversion = "0.10.2"',
+      [
+        "[[package]]",
+        'name = "patched"',
+        'version = "0.10.2"',
+        ...(linkThrough === "lock" ? ["dependencies = [", ' "deep",', "]"] : []),
+        "",
+        "[[package]]",
+        'name = "local-helper"',
+        'version = "0.0.0"',
+        "dependencies = [",
+        ' "deep",',
+        "]",
+        "",
+        "[[package]]",
+        'name = "deep"',
+        'version = "0.0.1"',
+      ].join("\n"),
+    ),
+    "crates/vendor/patched/Cargo.toml": [
+      "[package]",
+      'name = "patched"',
+      "",
+      "[dependencies]",
+      'local-helper = { path = "../helper" }',
+    ].join("\n"),
+    "crates/vendor/helper/Cargo.toml": '[package]\nname = "local-helper"\n',
+    "crates/vendor/helper/src/lib.rs": "pub fn helper() {}\n",
+    "crates/vendor/deep/Cargo.toml": '[package]\nname = "deep"\n',
+    "crates/vendor/deep/src/kernel.cu": "__global__ void deep() { /* v1 */ }\n",
+  });
+}
+
+for (const linkThrough of ["lock", "manifest"]) {
+  test(`a patch target reached only through another patch target is admitted (via the ${linkThrough})`, () => {
+    const files = chainedPatchWorkspace(linkThrough);
+    assert.ok(
+      digestsFor({ r1: files }).get("provider_a").crates.includes("crates/vendor/deep"),
+      "a chained patch target is still a compile input",
+    );
+    // Mutation: editing the chained tree must move the digest, or "included" means nothing.
+    const edited = {
+      ...files,
+      "crates/vendor/deep/src/kernel.cu": "__global__ void deep() { /* v2 */ }\n",
+    };
+    assert.notEqual(
+      digestsFor({ r1: files }).get("provider_a").digest,
+      digestsFor({ r1: edited }).get("provider_a").digest,
+    );
+    // And never for a provider that does not reach the chain.
+    assert.ok(!digestsFor({ r1: files }).get("provider_b").crates.includes("crates/vendor/deep"));
+  });
+}
+
+test("the dotted-key spelling of a local patch is read too", () => {
+  // `name.path = "…"` is the same declaration in different syntax. Missing it would be a silent
+  // false green, not a parse error, which is the worst way for a walk to be incomplete.
+  const paths = patchTargetPaths([
+    '[patch."https://example.invalid/upstream"]',
+    'patched.path = "crates/vendor/patched"',
+  ].join("\n"));
+  assert.equal(paths.get("patched"), "crates/vendor/patched");
 });
 
 test("a comment-only edit to closure source does not move the digest", () => {

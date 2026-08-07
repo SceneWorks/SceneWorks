@@ -102,6 +102,20 @@ jobs:
           git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
           git -C "$RUNNER_TEMP/inference" checkout -q FETCH_HEAD
           node scripts/inference-closure-digest.mjs --repo "$RUNNER_TEMP/inference" --check
+          # sc-17935: the line above grades ONE file. The CAPTURED half of the comparison — 65 record
+          # digests in the evidence bundle and 31 calibration bindings in the shipped manifest — was
+          # graded by nothing, and the class was not hypothetical: a constant carrying the comment
+          # "derive it with …" had never been a real derivation and survived all of sc-17774 unnoticed.
+          #
+          # The backfill re-derives each of those at the revision it was captured at and exits 1 on
+          # any disagreement, so running it in dry mode IS the verification. It needs every captured
+          # revision present, not just the pin, and `--revisions` reports exactly which — from the
+          # same workload computation the check itself uses, so the two cannot drift apart.
+          while read -r rev; do
+            [ -n "$rev" ] || continue
+            git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
+          done < <(node scripts/backfill-closure-digests.mjs --revisions)
+          node scripts/backfill-closure-digests.mjs --repo "$RUNNER_TEMP/inference" --verify
       - name: Guard against NC model weights in a published artifact (sc-10526, epic 10512)
         # SceneWorks converts weights at install and pulls them at runtime — it never
         # redistributes them. Baking a Non-Commercial family's weights (Anima /

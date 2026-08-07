@@ -126,9 +126,15 @@ export async function main(argv = process.argv.slice(2)) {
     return index === -1 ? undefined : argv[index + 1];
   };
   const repo = value("--repo");
-  if (!repo) {
+  // `--revisions` needs no clone: it answers "which inference revisions must be present for this
+  // check to run at all", which is a pure function of the bundle and the manifest. CI uses it to
+  // shallow-fetch exactly those before running the verification pass below (sc-17935).
+  const listRevisions = argv.includes("--revisions");
+  if (!repo && !listRevisions) {
     console.error(
-      "usage: node scripts/backfill-closure-digests.mjs --repo <inference-checkout> [--write]",
+      "usage: node scripts/backfill-closure-digests.mjs --repo <inference-checkout> " +
+        "[--write|--verify]\n" +
+        "       node scripts/backfill-closure-digests.mjs --revisions",
     );
     return 2;
   }
@@ -156,6 +162,11 @@ export async function main(argv = process.argv.slice(2)) {
     workload.get(revision).add(key);
     return "0".repeat(64);
   });
+
+  if (listRevisions) {
+    for (const revision of [...workload.keys()].sort()) console.log(revision);
+    return 0;
+  }
 
   const derived = new Map();
   for (const [revision, providers] of workload) {
@@ -221,6 +232,33 @@ export async function main(argv = process.argv.slice(2)) {
       (restamped ? `; ${restamped} record digests RESTAMPED (--restamp)` : ""),
   );
   for (const note of manifest.skipped) console.log(`  not a calibration binding — ${note}`);
+
+  // sc-17935: `--verify` is the CI spelling. A plain dry run PRINTS what it would change and still
+  // exits 0, which is right for a pin-bump preview and useless as a gate — a hand-edited manifest
+  // binding was reported and passed. Verification has to fail on any drift, including the drift a
+  // restamp would silently absorb, so it deliberately does not honour `--restamp`.
+  if (argv.includes("--verify")) {
+    const drift = [
+      stamped ? `${stamped} record digest(s)` : null,
+      manifest.stamped.length ? `${manifest.stamped.length} manifest binding(s)` : null,
+    ].filter(Boolean);
+    if (drift.length) {
+      console.error(
+        `captured closure digests do not match their own revisions: ${drift.join(" and ")} would ` +
+          "change. A checked-in digest that disagrees with the source it was derived from grades " +
+          "nothing. Re-derive with scripts/backfill-closure-digests.mjs --repo <inference> --write.",
+      );
+      return 1;
+    }
+    // Deliberately does NOT claim to cover everything. Digests maintained directly — a block with no
+    // `provider` in its object, or none with an `inferenceRevision` at all — are invisible to the
+    // stamper and therefore to this gate; `kreaTurboFit` and `candle.control` are both.
+    console.log(
+      `captured closure digests match their revisions (${records.length} records + the manifest ` +
+        "bindings the stamper can locate; directly-maintained digests are not covered)",
+    );
+    return 0;
+  }
 
   if (!argv.includes("--write")) {
     console.log("(dry run — pass --write to update the bundle and manifest)");
