@@ -1229,3 +1229,39 @@ test("hosted required checks do not skip fork PRs into a vacuous green", async (
     "candle-worker MUST keep its same-repo guard — fork code must not execute on the cuda pool.",
   );
 });
+
+test("the FLUX.2 composition audit still runs, and is still wired into a lane", async () => {
+  // sc-17607's composition check answers "which provider is registered under `flux2_dev`" — a
+  // question no code digest can answer in either direction, which is why it is a pointer-identity
+  // test rather than part of the calibration closure. It is NOT an invalidation mechanism and
+  // survived sc-17774's removal of the per-model ones.
+  //
+  // Its liveness guard did not, at first: it lived in `scripts/inference-artifact-audit.test.mjs`,
+  // which sc-17774 deleted along with the flux2-only audit tooling that file existed to grade. The
+  // guard itself was never about that tooling, so it is restored here — in a file every lane runs.
+  //
+  // Why it has to live OUTSIDE the module: `flux2_composition_audit` is
+  // `cfg(all(test, not(macos), backend-candle))`, so no macOS or non-candle lane executes anything
+  // in it. Deleting its tests, or mistyping its cfg, would fail nothing anywhere.
+  //
+  // Named `#[test]` functions rather than keywords, because every keyword also appears in that
+  // module's own prose — a substring check would pass with all three tests deleted.
+  const composition = await source("crates/sceneworks-worker/src/flux2_composition_audit.rs");
+  for (const name of [
+    "the_bundle_routes_flux2_dev_to_the_provider_the_calibration_measured",
+    "the_bundle_keeps_flux2_devs_memory_strategy_route_intact",
+    "the_audited_composition_is_the_full_cuda_bundle",
+  ]) {
+    assert.match(
+      composition,
+      new RegExp(`#\\[test\\]\\s*\\n\\s*fn ${name}\\(`),
+      `the composition audit must still RUN ${name}, not merely mention it`,
+    );
+  }
+  const workerLib = await source("crates/sceneworks-worker/src/lib.rs");
+  assert.match(
+    workerLib,
+    /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod flux2_composition_audit;/,
+    "an undeclared module is compiled by no lane, so the composition check would vanish in silence",
+  );
+});
