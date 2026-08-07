@@ -3793,6 +3793,27 @@ mod tests {
             .expect("Z-Image declares exact MLX calibration bindings");
 
         assert_eq!(bindings.len(), 5);
+        // The digest the SHIPPED EVIDENCE says this ladder was measured under, read from the bundle
+        // rather than restated as a hex literal. A literal here is brittle in a way that matters:
+        // `--restamp` legitimately re-derives every digest on a `CLOSURE_DIGEST_VERSION` change
+        // without any measurement moving, and a pinned literal turns that no-op into a red test.
+        // Reading it back is also STRICTER — it catches the manifest binding drifting away from the
+        // record it claims, which a literal cannot see.
+        let captured = packaged_bundle()
+            .records
+            .into_iter()
+            .find(|record| {
+                matches!(record.backend, CalibrationBackend::Mlx)
+                    && record.target.provider == "z_image_turbo"
+            })
+            .and_then(|record| record.repositories.inference.closure_digest)
+            .expect("the packaged bundle carries the historical Z-Image ladder with its digest");
+        let live = live_mlx_closure_digest("z_image_turbo");
+        assert_ne!(
+            captured, live,
+            "this test is about a lane whose closure HAS moved; if z_image_turbo were recaptured \
+             current, the assertions below would be checking the opposite of their own name"
+        );
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
                 && binding.provider == "z_image_turbo"
@@ -3809,11 +3830,11 @@ mod tests {
                 // Capture provenance, pinned as a literal because it is a fact about the shipped
                 // opt-in that no pin bump may silently rewrite. It is NOT the currency term.
                 && binding.query.inference_revision == "d48023204cd3a4f3f8eb060f79803dccaddcb482"
-                // The currency term (sc-17774). The digest below is what the ladder was measured
-                // under; `mlx:z_image_turbo` has moved past it, which is why the route degrades.
-                && binding.query.inference_closure_digest
-                    == "b87b8cd858673ad724403cb721078d1742457a2c62d4337ecc65190c964964b2"
-                && binding.query.inference_closure_digest != live_mlx_closure_digest("z_image_turbo")
+                // The currency term (sc-17774), graded against three independent artifacts: the
+                // manifest binding must agree with the evidence bundle about what it measured, and
+                // must disagree with the live closure config — which is why the route degrades.
+                && binding.query.inference_closure_digest == captured
+                && binding.query.inference_closure_digest != live
         }));
         assert!(bindings.iter().all(|binding| {
             binding.query.load_shape
@@ -3860,6 +3881,54 @@ mod tests {
             Some(LegacyAdmissionReason::StaleIdentity)
         );
         assert!(route.evidence.is_empty());
+
+        // A manifest cannot LAUNDER a stale ladder current by claiming the live digest.
+        //
+        // Every conjunct above is satisfied by the shipped data, so deleting one changes nothing —
+        // they document the state rather than grade it. This does grade it. Rewriting the opt-in's
+        // `inferenceClosureDigest` to the live value walks the binding straight past the admission
+        // filter, which compares exactly that field; what stops it is `EvidenceBundle::evidence_for`
+        // finding the RECORD still stamped with the digest it was really measured under. The two
+        // comparisons look redundant and are not: one asks "is this measurement of current code?",
+        // the other asks "is this binding telling the truth about which measurement it is?".
+        let mut laundered = z_image.clone();
+        for calibration in laundered
+            .get_mut("mlx")
+            .and_then(|mlx| mlx.get_mut("calibrations"))
+            .and_then(Value::as_array_mut)
+            .expect("calibrations array")
+        {
+            calibration["inferenceClosureDigest"] = Value::from(live.clone());
+        }
+        let laundered_route = packaged_admission_route(
+            &MlxRequestPlan::for_spec_and_manifest(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                Some(&laundered),
+                Some(ResolvedArtifactProvenance {
+                    identity: crate::model_jobs::ResolvedArtifactIdentity {
+                        repository: resolved_binding.artifact_repository.clone(),
+                        revision: resolved_binding.artifact_resolved_revision.clone(),
+                        variant: resolved_binding.artifact_variant.clone(),
+                        fingerprint: resolved_binding.resolved_path_fingerprint.clone(),
+                    },
+                    fixed_artifact_tier: Some("q4".to_owned()),
+                }),
+            ),
+            &fixture_inputs(768, 768),
+            "text_to_image",
+            fixture_budget(128.0),
+            &live,
+        )
+        .expect("a laundered opt-in degrades, it does not error");
+        assert_eq!(
+            laundered_route.path,
+            AdmissionPath::Legacy,
+            "a binding claiming the live digest must not reach calibrated admission on records \
+             measured under another closure"
+        );
+        assert!(laundered_route.evidence.is_empty());
     }
 
     #[test]
