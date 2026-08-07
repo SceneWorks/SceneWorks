@@ -1,5 +1,24 @@
 # What should invalidate a packaged calibration (sc-17776)
 
+> **STATUS — research complete; the implementation went further than this recommendation (sc-17774).**
+>
+> The measurements here stand as taken. The [Recommendation](#recommendation) does **not** describe
+> what shipped, and the instruments in [Method](#method) (`scripts/research/sc-17776-*`,
+> `scripts/inference-artifact-audit.mjs`) have been **deleted** along with the mechanism they graded,
+> so those runs are not reproducible from this tree. See
+> **[calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md)**.
+>
+> What shipped instead: rather than keeping a `flux2_dev`-shaped artifact audit and adding axes to
+> it, every model-specific mechanism was deleted and replaced by one per-provider compile-closure
+> digest. This document's own framing anticipated the reason — items 1–3 of its recommendation are
+> "`flux2_dev`-shaped because the audit record is", and its last table row notes that the larger
+> exposure was the five families with no relief mechanism at all.
+>
+> Two findings here were load-bearing for what shipped: that a code digest over a crate tree
+> over-triggers on documentation (answered by hashing semantic source, for every lane rather than
+> one), and that no single unit is sound — which is why the gaps this unit does not close are named
+> explicitly rather than implied.
+
 Research and a recommendation. **No implementation** — nothing here changes the shipped record, the
 frozen constants or either validator.
 

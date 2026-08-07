@@ -113,7 +113,9 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "cargo",
     "engines",
     "imageRouting",
-    "inferenceCompatibility",
+    // sc-17774: `inferenceCompatibility` left with the flux2-only artifact audit; the per-provider
+    // closure digests that replaced it are declared here instead, for every lane.
+    "inferenceClosures",
     "instantId",
     "manifest",
     "memoryStrategy",
@@ -2122,13 +2124,18 @@ async function currentEvidenceFixture({
   keepGeometries = null,
   select = (record) => record.target.provider === "krea_2_turbo_control",
 } = {}) {
-  const [bundle, cargo] = await Promise.all([
+  const [bundle, cargo, closureBody] = await Promise.all([
     readFile(new URL(`../${SOURCE_PATHS.calibrationEvidence}`, import.meta.url), "utf8"),
     readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.inferenceClosures}`, import.meta.url), "utf8"),
   ]);
   const pin = cargo.match(
     /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/,
   )[1];
+  // sc-17774: "current" means the provider's LIVE compile closure, not the pin. Stamping only the
+  // revision — as this fixture used to — now makes a record no more current than it was, so the
+  // tests built on it would assert promotion against evidence that never became eligible.
+  const liveClosures = JSON.parse(closureBody).providers;
   const parsed = JSON.parse(bundle);
   parsed.records = parsed.records
     .filter(
@@ -2147,7 +2154,13 @@ async function currentEvidenceFixture({
         ...record,
         repositories: {
           ...record.repositories,
-          inference: { ...record.repositories.inference, revision: pin },
+          inference: {
+            ...record.repositories.inference,
+            revision: pin,
+            closureDigest:
+              liveClosures[`${record.backend}:${record.target.provider}`]?.digest ??
+              record.repositories.inference.closureDigest,
+          },
         },
       };
       return { ...restamped, id: recordId(restamped) };
@@ -2162,6 +2175,13 @@ async function currentEvidenceFixture({
 /// promote" could be asserted by simply reading the shipped matrix. Now that the evidence is
 /// current, that half has to be produced deliberately — otherwise the negative claim would quietly
 /// become untested the moment the positive one started holding.
+/// The `mlx:krea_2_turbo_control` closure digest at `96b13b66` — the revision the superseded krea
+/// records were captured at. Derive with:
+///   node scripts/inference-closure-digest.mjs --repo <inference> --revision 96b13b66 \
+///     --provider mlx:krea_2_turbo_control
+const SUPERSEDED_KREA_CLOSURE_DIGEST =
+  "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325";
+
 async function historicalEvidenceFixture({
   select = (record) => record.target.provider === "krea_2_turbo_control",
 } = {}) {
@@ -2176,9 +2196,15 @@ async function historicalEvidenceFixture({
       ...record,
       repositories: {
         ...record.repositories,
-        // A real superseded pin from this bundle's own history, not a synthetic string, so the
-        // fixture exercises the same comparison production performs.
-        inference: { ...record.repositories.inference, revision: "96b13b6630132410a29ae1bcdf4d8738db7af28a" },
+        // sc-17774: re-stamp onto a superseded CLOSURE, not a superseded pin. Both values come
+        // from this bundle's own history (the krea capture at `96b13b66`), so the fixture still
+        // exercises the exact comparison production performs — but the term that decides it is now
+        // the provider's compile closure. Moving only the revision demotes nothing, by design.
+        inference: {
+          ...record.repositories.inference,
+          revision: "96b13b6630132410a29ae1bcdf4d8738db7af28a",
+          closureDigest: SUPERSEDED_KREA_CLOSURE_DIGEST,
+        },
       },
     };
     return { ...restamped, id: recordId(restamped) };
@@ -2283,21 +2309,71 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     "current evidence cannot promote through a historical exact manifest binding",
   );
 
+  // sc-17774: moving the PIN must no longer demote anything — that was the whole defect. Moving
+  // THIS provider's compile closure must, and moving another provider's must not. All three
+  // directions are asserted, because a unit that absolved everything would be indistinguishable
+  // from a broken one.
+  const closures = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.inferenceClosures}`, import.meta.url), "utf8"),
+  );
   const cargo = await readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8");
+  const withPin = (pin) =>
+    cargo.replace(
+      /(candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*")[0-9a-f]+(")/,
+      `$1${pin}$2`,
+    );
+  const movedPin = "0".repeat(40);
+  const withClosures = (mutate) => {
+    const next = structuredClone(closures);
+    next.inferenceRevision = movedPin;
+    mutate(next.providers);
+    return JSON.stringify(next, null, 2);
+  };
+
+  const pinOnlyQwen = await buildMatrix({
+    sourceOverrides: {
+      calibrationEvidence: qwenOnCurrentPin,
+      manifest: qwenManifestOnCurrentPin,
+      cargo: withPin(movedPin),
+      inferenceClosures: withClosures(() => {}),
+    },
+  });
+  assert.equal(
+    verifiedQwen(pinOnlyQwen),
+    9,
+    "a pin move that leaves Qwen's compile closure alone must NOT demote its measurements",
+  );
+
+  const otherProviderMoved = await buildMatrix({
+    sourceOverrides: {
+      calibrationEvidence: qwenOnCurrentPin,
+      manifest: qwenManifestOnCurrentPin,
+      cargo: withPin(movedPin),
+      inferenceClosures: withClosures((providers) => {
+        providers["mlx:z_image_turbo"].digest = "f".repeat(64);
+      }),
+    },
+  });
+  assert.equal(
+    verifiedQwen(otherProviderMoved),
+    9,
+    "another model's code path moving must never demote Qwen — the defect sc-17774 removed",
+  );
+
   const staleQwen = await buildMatrix({
     sourceOverrides: {
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
-      cargo: cargo.replace(
-        /(candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*")[0-9a-f]+(")/,
-        `$1${"0".repeat(40)}$2`,
-      ),
+      cargo: withPin(movedPin),
+      inferenceClosures: withClosures((providers) => {
+        providers["mlx:qwen_image"].digest = "e".repeat(64);
+      }),
     },
   });
   assert.equal(
     verifiedQwen(staleQwen),
     0,
-    "an inference pin change must fail closed instead of carrying Qwen verification forward",
+    "Qwen's OWN compile closure moving must fail closed instead of carrying verification forward",
   );
 
   // MUTATION, and the negative half of this test's title. Re-stamping the SAME Krea records onto a

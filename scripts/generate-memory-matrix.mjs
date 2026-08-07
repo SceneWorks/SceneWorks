@@ -33,106 +33,6 @@ const RUNGS = [
   "bounded_transformer_residency",
 ];
 
-// sc-17497: the audit is layered. `auditedObjects` pins the CAPTURED side of FLUX.2's Candle/CUDA
-// compile closure — the code the measurements were taken against, immutable forever. A live pin
-// whose objects are all byte-identical is authorized by that alone, for free.
-//
-// When a path moves, object identity can no longer decide: the 42-line `//!` doc comment in
-// inference `35251a88` moved `candle-gen`'s tree while provably changing nothing that compiles.
-// `artifactProof` is then the answer — the SHA-256 of the LINKED `candle-gen-flux2` lib test binary
-// (the exact target that produced the measurements), built at both revisions under one toolchain by
-// `scripts/inference-artifact-audit.mjs`. Identical bytes there mean identical compiled code, which
-// is the claim the calibration actually depends on.
-//
-// `null` means "the live pin needs no artifact proof". Setting it demands a real CUDA build: the
-// digest is frozen HERE, in source, so the checked-in record cannot authorize itself.
-//
-// `adjudicates` is the other half, and it is not optional. A digest speaks only for the paths the
-// audited binary can answer for, and pinning that set here keeps an unchanged digest from being
-// read as proof over a path it never compiled. Since sc-17607 every closure path IS one the binary
-// compiles — `crates/bundles/runtime-cuda` was the exception and it left the closure, because a
-// crate that sits ABOVE the provider raises a composition question (which provider is registered
-// under `flux2_dev`) that no digest can answer in either direction. That question is asked of the
-// linked bundle instead, in `crates/sceneworks-worker/src/flux2_composition_audit.rs`.
-//
-// sc-17524: the set also carries the four workspace build inputs (`Cargo.toml`, `Cargo.lock`,
-// `rust-toolchain.toml`, `.cargo/config.toml`), which earn their place differently — not "compiled into the binary" but
-// "an input to the build that produced it", which is the only route they have to the measured code.
-// They are in the closure because `Cargo.lock` had already moved inside the authorized window while
-// every crate tree stayed identical, i.e. a changed build input taking the free path unexamined.
-// Exported so the tests can assert against what is FROZEN IN SOURCE rather than re-deriving their
-// expectations from the record under test — which would grade the record against itself.
-export const FLUX2_COMPATIBILITY_AUDIT = Object.freeze({
-  story: "SC-15833",
-  modelId: "flux2_dev",
-  provider: "flux2_dev",
-  capturedInferenceRevision: "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-  compatibleInferenceRevision: "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
-  // sc-17524: measured on the RTX PRO 6000 box (rustc 1.96.0, nvcc 12.9, `--features cuda`). Two
-  // closure paths moved across this window — `Cargo.lock` and `candle-gen` — and the
-  // `candle-gen-flux2` lib test binary is byte-identical at both ends, so the compiled code the
-  // measurements ran did not change. `adjudicates` is what that binary speaks for: the crate trees
-  // it compiles, plus the build inputs that reach it only through the build.
-  artifactProof: Object.freeze({
-    digest: "sha256:d80844f24dcb95f957c1cd893f9238c9d753db8e1e40c5deefe9f6b6f740f9aa",
-    adjudicates: Object.freeze([
-      "Cargo.toml",
-      "Cargo.lock",
-      "rust-toolchain.toml",
-      ".cargo/config.toml",
-      "crates/contracts/gen-core",
-      "crates/media/candle-gen/candle-gen",
-      "crates/media/candle-gen/candle-gen-pid",
-      "crates/media/candle-gen/candle-gen-flux2",
-      "crates/media/candle-gen/vendor/candle-kernels",
-    ]),
-  }),
-  // sc-17606: the resolved-feature witness, frozen here for the same reason the digest is — a
-  // record that supplies its own expectations authorizes itself.
-  //
-  // It answers what neither layer above can. The audited binary is built `-p candle-gen-flux2`,
-  // which unifies features over a strictly smaller graph than the shipped `-p runtime-cuda` bundle;
-  // a crate outside FLUX.2's closure can enable a feature on a dependency FLUX.2 SHARES and change
-  // what it executes in the shipped runtime. Features are not recorded in `Cargo.lock`, so every
-  // closure object, and the artifact digest, stay byte-identical while that happens — the change
-  // arrives exclusively on the free path. Hence a witness that is required on EVERY record, not
-  // only the ones that carry a build.
-  //
-  // `digest` is over the bundle-resolved feature set of the packages FLUX.2 links (`cargo tree`, no
-  // compile). Scoping it to those packages rather than to the whole bundle is what keeps it from
-  // becoming the ~50-crate false-positive trigger sc-17524 measured and rejected.
-  featureWitness: Object.freeze({
-    digest: "sha256:321625ed01f837fd0682b2020d92cde068e8792db103d4e8ba3bf3ff8bff500b",
-    shippedPackage: "runtime-cuda",
-    scopeRoot: "candle-gen-flux2",
-    scopeFeatures: "cuda",
-    target: "x86_64-pc-windows-msvc",
-    edges: "normal,build",
-  }),
-  // sc-17524: `Cargo.lock` and `rust-toolchain.toml` join the crate trees. They are build INPUTS
-  // rather than packages — cargo's `compiler-artifact` stream can never name them — but they feed
-  // every one of those builds, and the lockfile had already moved inside the authorized window
-  // while every tree stayed byte-identical. Leaving them out meant the free path could report
-  // "no build needed" over a `cargo update` that moved a dependency the measured binary links.
-  //
-  // sc-17607: `crates/bundles/runtime-cuda` left. Every entry below is now a path the measurement
-  // binary actually compiles (or an input to that compile), so a move here always has an answer
-  // that is not a re-capture. The two crates above the provider — the bundle and
-  // `candle-gen-catalog` between it and `candle-gen-flux2` — are named in `COMPOSITION_ONLY_CRATES`
-  // (`scripts/inference-artifact-audit.mjs`) and checked as composition, not as codegen.
-  auditedObjects: Object.freeze({
-    "Cargo.toml": "8f5af6b9d53bbfe3be5d9d79b8949364138a087c",
-    "Cargo.lock": "8ab01e00f01607a99845d875ed60275ae033450c",
-    "rust-toolchain.toml": "ae829f875c68c03c367ce92cc05e041036a92d0a",
-    ".cargo/config.toml": "61d7be37632a60aea10dc3c25b8ad5bec0a5fa45",
-    "crates/contracts/gen-core": "9a7e86f5893e584a8d0d656147abc4ae93af6922",
-    "crates/media/candle-gen/candle-gen": "e8b8b3f0787fac49539a2ef1085c48c9fdc9ec57",
-    "crates/media/candle-gen/candle-gen-pid": "f3c8db10f1a872fc8fdb2c7243e607591886a5fa",
-    "crates/media/candle-gen/candle-gen-flux2": "f91cd1a302f0d27f82bbc9c60bd4e578390e44b1",
-    "crates/media/candle-gen/vendor/candle-kernels": "3b8327cf01d346c8068a5e9d096dcdddca440e99",
-  }),
-});
-
 const GENERATION_CAPABILITIES = new Set([
   "text_to_image",
   "edit_image",
@@ -1309,185 +1209,62 @@ function declaredEvidence(model, backend, tier) {
   }));
 }
 
-const AUDIT_SCHEMA_VERSION = 5;
-const V5_AUDIT_METHOD =
-  "compiled artifact identity for changed paths, git object identity for unchanged paths, and " +
-  "shipped-bundle resolved-feature identity, across the Candle FLUX.2 measurement binary's " +
-  "compile closure and its workspace build inputs";
 
 /**
- * sc-17497: object identity is the cheap layer; the compiled-artifact layer is required exactly when
- * object identity has stopped being sufficient. `auditedArtifact` becomes MANDATORY the moment a
- * closure path moves, and it must agree with the digest frozen in `FLUX2_COMPATIBILITY_AUDIT`.
- * Freezing it in source is what stops the checked-in record from authorizing itself.
+ * The live per-provider compile-closure digests, gated against the Cargo pin (sc-17774).
  *
- * sc-17607: only v5 is accepted. v1/v2 describe sc-15833's SEVEN-path closure, which omits
- * `Cargo.lock`, `rust-toolchain.toml` and `.cargo/config.toml`; v3 describes the ten-path one but
- * never looked at the shipped feature resolution. Re-grading either would read it as evidence about
- * inputs it did not audit. v4 is the opposite case and is refused just as firmly: it audited
- * `crates/bundles/runtime-cuda`, a path this schema stopped asking about, so accepting one means
- * dropping an entry out of someone else's record to make it fit — the same unearned re-reading by
- * subtraction. The closure-identity check below would reject v1/v2/v4 on size anyway; this is the
- * loud version of the same refusal, and the only thing that catches v3.
+ * This REPLACES `compatibilityAuthorizes`, which was the only escape from pin-identity invalidation
+ * and was hardcoded to a single frozen `flux2_dev` audit object carrying one hand-verified
+ * `(captured -> compatible)` revision pair. It authorized exactly one target revision for exactly
+ * one provider, so it was spent the moment the pin moved one commit further, and it generalised to
+ * nothing. Every provider now gets the same relief from a derived digest, with no hand audit.
  *
- * Only the PROOF and the WITNESS are injectable, and only so the tests can exercise the ACCEPTING
- * side of each layer independently of what is frozen — a validator exercised solely against its own
- * default is a false green. Everything else (story, both revisions, the captured closure) is read
- * from the frozen constant and cannot be overridden, so a test cannot accidentally grade a record
- * against expectations derived from that same record.
+ * The config is derived offline so a reviewer sees a digest change in the diff rather than having it
+ * conjured at check time. That makes a stale config the obvious failure mode, so it is a hard error
+ * rather than a fallback: a config keyed to an older pin would report currency for closures nobody
+ * re-derived. Whether the digests are REAL is a separate question, graded in CI — `check.yml`
+ * re-derives them against a shallow fetch of the pinned inference revision, which is possible
+ * because SceneWorks/inference is public.
  */
-export function validatedInferenceCompatibility(
-  body,
-  expectedProof = FLUX2_COMPATIBILITY_AUDIT.artifactProof,
-  expectedWitness = FLUX2_COMPATIBILITY_AUDIT.featureWitness,
-) {
-  const expected = FLUX2_COMPATIBILITY_AUDIT;
-  const audit = JSON.parse(body);
-  if (
-    audit.schemaVersion !== AUDIT_SCHEMA_VERSION ||
-    audit.story !== expected.story ||
-    audit.capturedInferenceRevision !== expected.capturedInferenceRevision ||
-    audit.compatibleInferenceRevision !== expected.compatibleInferenceRevision ||
-    audit.method !== V5_AUDIT_METHOD ||
-    typeof audit.command !== "string" ||
-    !Array.isArray(audit.auditedObjects)
-  ) {
-    throw new Error("SC-15833 inference compatibility audit identity is invalid");
-  }
-  const objects = new Map();
-  const changed = [];
-  for (const entry of audit.auditedObjects) {
-    if (
-      !entry ||
-      typeof entry.path !== "string" ||
-      !/^[0-9a-f]{40}$/.test(entry.capturedObject ?? "") ||
-      !/^[0-9a-f]{40}$/.test(entry.compatibleObject ?? "") ||
-      objects.has(entry.path)
-    ) {
-      throw new Error("SC-15833 inference compatibility audit object pair is invalid");
-    }
-    // The CAPTURED side is what the measurements were taken against, so it is the half that is
-    // frozen. A moved compatible object is not a failure here — it is what the artifact layer below
-    // exists to adjudicate.
-    objects.set(entry.path, entry.capturedObject);
-    if (entry.capturedObject !== entry.compatibleObject) changed.push(entry.path);
-  }
-  if (
-    objects.size !== Object.keys(expected.auditedObjects).length ||
-    Object.entries(expected.auditedObjects).some(([objectPath, objectId]) => objects.get(objectPath) !== objectId)
-  ) {
-    throw new Error("SC-15833 inference compatibility audit closure is incomplete or unrecognized");
-  }
-  validatedCompatibilityArtifact(audit, changed, expectedProof);
-  validatedCompatibilityFeatureWitness(audit, expectedWitness);
-  return expected;
-}
-
-/**
- * The compiled-artifact half of a v5 record.
- * The resolved-feature half of a v5 record (sc-17606).
- *
- * Unconditional, unlike the artifact half. The gap it closes — a crate outside FLUX.2's closure
- * enabling a feature on a dependency FLUX.2 shares — moves no closure object, so it reaches this
- * validator exclusively through records whose `changedClosurePaths` is empty. A witness that were
- * only required alongside a build would have been checked on precisely the runs where the change
- * could not be present.
- *
- * `packages` is required to be a positive integer for one specific false green: a witness computed
- * over an EMPTY resolution hashes to a perfectly stable digest that is identical at every revision.
- * The emitting script refuses to produce one; this refuses to accept a hand-written one.
- */
-function validatedCompatibilityFeatureWitness(audit, expectedWitness) {
-  const witness = audit.featureWitness;
-  if (
-    !witness ||
-    expectedWitness === null ||
-    expectedWitness === undefined ||
-    !/^sha256:[0-9a-f]{64}$/.test(witness.capturedDigest ?? "") ||
-    witness.capturedDigest !== witness.compatibleDigest ||
-    witness.capturedDigest !== expectedWitness.digest ||
-    // The resolution IS the question. A witness taken over another bundle, another target triple or
-    // with dev edges folded in answers something else, and its digest would compare on equal terms.
-    witness.shippedPackage !== expectedWitness.shippedPackage ||
-    witness.scopeRoot !== expectedWitness.scopeRoot ||
-    // `cuda`, not `metal`: the provider's own feature selection is half of which code the bundle
-    // compiles for it, and it is inside the hashed text — but a record may declare anything, and an
-    // ungraded declaration next to a graded digest reads as though both were checked.
-    witness.scopeFeatures !== expectedWitness.scopeFeatures ||
-    witness.target !== expectedWitness.target ||
-    witness.edges !== expectedWitness.edges ||
-    !Number.isInteger(witness.packages) ||
-    witness.packages <= 0
-  ) {
-    throw new Error("SC-15833 inference compatibility audit resolved-feature witness is invalid");
-  }
-}
-
-/**
- * The compiled-artifact half of a v2 record.
- *
- * Only a `cuda` build can authorize a FLUX.2 calibration: the measurements come from an RTX capture,
- * and `scripts/inference-artifact-audit.mjs` can also build the same closure on Metal, which must
- * never be mistaken for proof of the CUDA artifact.
- */
-function validatedCompatibilityArtifact(audit, changed, expectedProof) {
-  const declared = audit.changedClosurePaths;
-  const declaredPaths = Array.isArray(declared) ? declared.slice().sort() : null;
-  const changedPaths = changed.slice().sort();
-  if (
-    !declaredPaths ||
-    declaredPaths.length !== changedPaths.length ||
-    declaredPaths.some((objectPath, index) => objectPath !== changedPaths[index])
-  ) {
-    throw new Error("SC-15833 inference compatibility audit misdeclares which closure paths changed");
-  }
-  if (changed.length === 0) {
-    if (expectedProof !== null) {
-      throw new Error("SC-15833 inference compatibility audit is missing its expected artifact proof");
-    }
-    return;
-  }
-  const artifact = audit.auditedArtifact;
-  if (
-    !artifact ||
-    artifact.lane !== "cuda" ||
-    artifact.package !== "candle-gen-flux2" ||
-    artifact.test !== "tests::flux2_dev_probed_generate_for_offload_ab" ||
-    artifact.profile !== "release" ||
-    !/^sha256:[0-9a-f]{64}$/.test(artifact.capturedDigest ?? "") ||
-    artifact.capturedDigest !== artifact.compatibleDigest ||
-    expectedProof === null ||
-    artifact.capturedDigest !== expectedProof.digest
-  ) {
-    throw new Error("SC-15833 inference compatibility audit compiled-artifact proof is invalid");
-  }
-  // The digest only speaks for what the binary linked. Anything else that moved is unproven.
-  //
-  // Intersected with the RECORD's own `adjudicates`, not just the frozen set: the frozen half is a
-  // human transcription, and unlike the digest — where a typo fails closed — an over-wide set fails
-  // OPEN and would authorize a path the binary never linked. Intersecting lets the record narrow the
-  // claim but never widen it, so both halves have to be wrong in the same direction to do harm.
-  const recorded = artifact.adjudicates;
-  if (!Array.isArray(recorded) || recorded.some((objectPath) => typeof objectPath !== "string")) {
-    throw new Error("SC-15833 inference compatibility audit compiled-artifact proof is invalid");
-  }
-  const unadjudicable = changed.filter(
-    (objectPath) => !expectedProof.adjudicates.includes(objectPath) || !recorded.includes(objectPath),
-  );
-  if (unadjudicable.length > 0) {
+export function validatedInferenceClosures(body, pin) {
+  const closures = JSON.parse(body);
+  if (closures.inferenceRevision !== pin) {
     throw new Error(
-      `SC-15833 inference compatibility audit cannot adjudicate ${unadjudicable.join(", ")}: the audited ` +
-        "artifact does not link it",
+      `${"config/inference-provider-closures.json"} is keyed to ` +
+        `${closures.inferenceRevision?.slice(0, 8) ?? "(unset)"} but Cargo pins ${pin.slice(0, 8)}. ` +
+        "Re-run: node scripts/inference-closure-digest.mjs --repo <inference> --write",
     );
   }
+  const digests = new Map();
+  for (const [provider, entry] of Object.entries(closures.providers ?? {})) {
+    if (!/^[0-9a-f]{64}$/.test(entry.digest ?? "")) {
+      throw new Error(`inference closure entry for ${provider} has no usable digest`);
+    }
+    digests.set(provider, entry.digest);
+  }
+  if (!digests.size) throw new Error("config/inference-provider-closures.json declares no providers");
+  return digests;
 }
 
-function compatibilityAuthorizes(binding, { modelId, provider, inferenceRevision, audit }) {
-  return modelId === audit.modelId &&
-    provider === audit.provider &&
-    binding.inferenceRevision === audit.capturedInferenceRevision &&
-    binding.compatibleInferenceRevision === audit.compatibleInferenceRevision &&
-    inferenceRevision === audit.compatibleInferenceRevision;
+/**
+ * A calibration binding is current when THIS PROVIDER'S closure digest is unchanged — never when the
+ * inference pin happens to match. `binding.inferenceRevision` stays as capture provenance.
+ */
+function closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }) {
+  const live = inferenceClosureDigests.get(`${backend}:${provider}`);
+  if (!live) {
+    throw new Error(
+      `provider "${provider}" has a bound calibration but no entry in ` +
+        "config/inference-provider-closures.json. Declare its inference crate and regenerate.",
+    );
+  }
+  if (!binding.inferenceClosureDigest) {
+    throw new Error(
+      `a ${provider} calibration binding carries no inferenceClosureDigest. Run ` +
+        "node scripts/backfill-closure-digests.mjs --repo <inference> --write",
+    );
+  }
+  return binding.inferenceClosureDigest === live;
 }
 
 function strategyStatus({
@@ -1502,8 +1279,7 @@ function strategyStatus({
   overlay,
   rung4Survey,
   manifestById,
-  inferenceRevision,
-  inferenceCompatibilityAudit,
+  inferenceClosureDigests,
 }) {
   // `z_image_edit` is a catalog alias, not an inference provider. Its MLX jobs resolve to the
   // `z_image_turbo` descriptor and therefore must consume that provider's static contract just as
@@ -1551,14 +1327,8 @@ function strategyStatus({
       binding.rung === rung &&
       staticRung4Allowed,
   );
-  const currentDeclaredCalibrations = allDeclaredCalibrations.filter(
-    (binding) => binding.inferenceRevision === inferenceRevision ||
-      compatibilityAuthorizes(binding, {
-        modelId: model.id,
-        provider,
-        inferenceRevision,
-        audit: inferenceCompatibilityAudit,
-      }),
+  const currentDeclaredCalibrations = allDeclaredCalibrations.filter((binding) =>
+    closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }),
   );
   const calibrationStatus = (bindings, source, evidenceAdmissionCurrent) => {
     const fingerprints = sortedUnique(bindings.map((binding) => binding.fingerprint));
@@ -1584,16 +1354,10 @@ function strategyStatus({
       engagedRungs: staticImplementation?.engagedRungs,
       requiresCurrentCalibrationBinding: true,
       evidenceAdmissionCurrent,
-      compatibleCapturedInferenceRevisions: sortedUnique(
-        bindings
-          .filter((binding) => compatibilityAuthorizes(binding, {
-            modelId: model.id,
-            provider,
-            inferenceRevision,
-            audit: inferenceCompatibilityAudit,
-          }))
-          .map((binding) => binding.inferenceRevision),
-      ),
+      // sc-17774: the record-side currency term. It replaces
+      // `compatibleCapturedInferenceRevisions`, which listed the revisions one frozen `flux2_dev`
+      // audit had hand-authorized; currency is now decided per provider by this digest.
+      inferenceClosureDigest: inferenceClosureDigests.get(`${backend}:${provider}`),
     };
   };
   if (currentDeclaredCalibrations.length) {
@@ -1911,7 +1675,7 @@ export const SOURCE_PATHS = Object.freeze({
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
   calibrationEvidence: "docs/generated/memory-calibration-evidence.json",
   calibrationPlan: "config/memory-calibration-plan.json",
-  inferenceCompatibility: "docs/calibration/sc-15833/inference-compatibility-a4f4.json",
+  inferenceClosures: "config/inference-provider-closures.json",
   rung4Survey: "config/rung4-applicability-survey.json",
   cargo: "Cargo.toml",
 });
@@ -1957,9 +1721,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
   const calibrationPlan = JSON.parse(bodies.calibrationPlan);
-  const inferenceCompatibilityAudit = validatedInferenceCompatibility(
-    bodies.inferenceCompatibility,
+  // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
+  // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
+  const inferenceClosureDigests = validatedInferenceClosures(
+    bodies.inferenceClosures,
+    inferencePin(cargoBody),
   );
+  const closureDigestsByProvider = Object.fromEntries(inferenceClosureDigests);
   const rung4Survey = parseRung4Survey(bodies.rung4Survey, { familyGroups: familyGroup });
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's
@@ -2070,8 +1838,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                 overlay,
                 rung4Survey,
                 manifestById,
-                inferenceRevision: pin,
-                inferenceCompatibilityAudit,
+                inferenceClosureDigests,
               });
               const fingerprint =
                 status.state === "Missing"
@@ -2151,23 +1918,19 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
                   },
                 }).eligible,
               );
+              const semantics = (record) =>
+                evidenceSemantics(record, {
+                  sceneWorks: sceneWorksRevision,
+                  inference: pin,
+                  inferenceClosureDigests: closureDigestsByProvider,
+                });
               const historicalRuns = eligibleRuns.filter(
-                (record) =>
-                  evidenceSemantics(record, {
-                    sceneWorks: sceneWorksRevision,
-                    inference: pin,
-                    compatibleCapturedInferenceRevisions:
-                      status.compatibleCapturedInferenceRevisions,
-                  }) === "historical",
+                (record) => semantics(record) === "historical",
               );
               const currentRuns = eligibleRuns.filter(
                 (record) =>
-                  evidenceSemantics(record, {
-                    sceneWorks: sceneWorksRevision,
-                    inference: pin,
-                    compatibleCapturedInferenceRevisions:
-                      status.compatibleCapturedInferenceRevisions,
-                  }) === "current" && ["complete", "runtime_complete"].includes(record.status),
+                  semantics(record) === "current" &&
+                  ["complete", "runtime_complete"].includes(record.status),
               );
               const currentFullRuns = currentRuns.filter((record) => record.status === "complete");
               const currentRuntimeRuns = currentRuns.filter(
@@ -2282,6 +2045,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
         : evidenceSemantics(record, {
             sceneWorks: sceneWorksRevision,
             inference: pin,
+            inferenceClosureDigests: closureDigestsByProvider,
           }),
       record,
     };

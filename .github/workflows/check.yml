@@ -37,8 +37,8 @@ jobs:
   parity:
     runs-on: ubuntu-latest
     env:
-      # Fetch the private inference source once with a scoped credential, then force every build
-      # and build.rs process offline so the token is absent from their environment.
+      # Fetch the pinned inference source once, then force every build and build.rs process
+      # offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
     # A stalled step (e.g. a transient `docker compose up --build` layer/registry
     # hang in the Docker smoke) otherwise rides GitHub's 6-hour default timeout,
@@ -62,12 +62,9 @@ jobs:
           toolchain: "1.97.1"
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
@@ -87,6 +84,38 @@ jobs:
           npm run check
           npm run check:compose
           npm run check:docker:rust-api:self-test
+      - name: Verify the per-lane inference closure digests against real pinned source (sc-17774)
+        # `npm run check` only asserts that config/inference-provider-closures.json is KEYED to the
+        # live pin. It cannot tell a real digest from a hand-edited one, because the derivation needs
+        # inference's source and the SceneWorks checkout does not contain it.
+        #
+        # It does not need to be checked in blind, though: SceneWorks/inference is PUBLIC (#2164
+        # established this after the opposite premise had been believed for some time), so a shallow
+        # fetch of the pinned revision costs seconds, needs no token, and re-derives every lane's
+        # digest for real. Without this step the currency term is checked-in data nothing verifies —
+        # the same fail-open shape this epic removed one level down.
+        run: |
+          set -euo pipefail
+          pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
+          git init -q "$RUNNER_TEMP/inference"
+          git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
+          git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
+          git -C "$RUNNER_TEMP/inference" checkout -q FETCH_HEAD
+          node scripts/inference-closure-digest.mjs --repo "$RUNNER_TEMP/inference" --check
+          # sc-17935: the line above grades ONE file. The CAPTURED half of the comparison — 65 record
+          # digests in the evidence bundle and 31 calibration bindings in the shipped manifest — was
+          # graded by nothing, and the class was not hypothetical: a constant carrying the comment
+          # "derive it with …" had never been a real derivation and survived all of sc-17774 unnoticed.
+          #
+          # The backfill re-derives each of those at the revision it was captured at and exits 1 on
+          # any disagreement, so running it in dry mode IS the verification. It needs every captured
+          # revision present, not just the pin, and `--revisions` reports exactly which — from the
+          # same workload computation the check itself uses, so the two cannot drift apart.
+          while read -r rev; do
+            [ -n "$rev" ] || continue
+            git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
+          done < <(node scripts/backfill-closure-digests.mjs --revisions)
+          node scripts/backfill-closure-digests.mjs --repo "$RUNNER_TEMP/inference" --verify
       - name: Guard against NC model weights in a published artifact (sc-10526, epic 10512)
         # SceneWorks converts weights at install and pulls them at runtime — it never
         # redistributes them. Baking a Non-Commercial family's weights (Anima /
@@ -181,8 +210,6 @@ jobs:
             node scripts/docker-smoke-relevance.mjs --expected-count "$changed_file_count"
       - name: Smoke default Rust API Docker runtime
         if: steps.docker_smoke_gate.outputs.run == 'true'
-        env:
-          SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
         run: npm run check:docker:rust-api
 
   # THE CANDLE TYPECHECK, ON A HOSTED BOX. The merge queue's whole job is catching semantic
@@ -214,8 +241,8 @@ jobs:
   candle:
     runs-on: ubuntu-latest
     env:
-      # Same posture as `parity`: fetch the private inference source once with a scoped credential,
-      # then force every build and build.rs process offline so the token is absent from them.
+      # Same posture as `parity`: fetch the pinned inference source once, then force every build
+      # and build.rs process offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
     # The three cargo invocations are two `check`s and one `clippy`, all warm-cached after the first
     # run. Sized like `parity` so a wedge fails in minutes rather than riding the 6-hour default
@@ -234,12 +261,9 @@ jobs:
           # A distinct key from `parity`'s: this job compiles the same crates under a different
           # feature set, so sharing one cache would thrash both.
           key: candle
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       - name: Typecheck the candle backend configuration
         # No `--allow-skip`: this host is Linux, so `not(target_os = "macos")` holds natively and

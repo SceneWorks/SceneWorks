@@ -1,25 +1,25 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:745c75831ecbb117511273df6b9b4d1b4f37fb679a2449271225e7fa09399126",
-    "matrixRevision": "source-tree:133b0d069eed71fafed323502abe15b79f6f392c59006eed06d7fd3fbf97f08d",
+    "sceneWorksRevision": "source-tree:e8f0ec95d1f470859fd78765961a260e712724ee72ab98a6c5bd1ca81923d6b1",
+    "matrixRevision": "source-tree:596db7997dc883a9d9ac638070d0e72157eb2abc603ab613463f3b101e3baac4",
     "inferenceRevision": "fbb00d6b4147bd220fe324050534708c12fb022d",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "ea59e9620d0b728803186d693d1727ef58fa5736df37663528a0ac57d8d9d78a"
+        "sha256": "2282c0987d44e38cf65048fceb4adfcc19434f191ea821494a117e6a78ba3fb2"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "b4f383e59ebac2864a30152b746c27c489a2d02cd2af5311211255029086f880"
+        "sha256": "bab7c426b22dc823375186f77675e0321932a9c40ed3f3c81b992114596da53d"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
-        "sha256": "5dc5c1fb59be44fd64fe95e1b2f5c8742a4a5e7a5ff710ee89029ae4c809e13b"
+        "sha256": "b647846bf51fafc3a8ba84cc2b20d75a55752fddc4cf7cd18e59a46ce110c8e1"
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "bf42e9d7229dc24c749b49964ec321a4ed63848c1bf0cadf176ad8c074dc454a"
+        "sha256": "968eb512a8861c5812475b4424ed755a270f847a7f1fa5bd3cdb6a508c2df18f"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -35,11 +35,11 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "04524551b09626d6f172f6606346210818b5c2ce72b4512a6f4335b3289cd4ef"
+        "sha256": "b66db4590ff547a467812fbd27bb31c5b21138aebdc613d3b83cf7bc4ce5c1dd"
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "69b5bce3921a5a1d79241b5e6ffa24f5ccd618a0169f2a5ab6f4fcb4427a2b7d"
+        "sha256": "acb6acab8ddd7bd4cd0af542570f4e0b4574d205fa40e94a956cdba9a32613ce"
       },
       "candleAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/candle.rs",

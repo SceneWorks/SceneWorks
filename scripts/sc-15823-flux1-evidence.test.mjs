@@ -39,7 +39,18 @@ test("SC-15823 emits ten current, exact base-only FLUX.1 records", () => {
     assert.equal(record.target.mode, "text_to_image");
     assert.equal(record.target.tier, "q4");
     assert.deepEqual(record.target.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
-    assert.equal(evidenceSemantics(record, { inference: INFERENCE_REVISION }), "current");
+    // sc-17774: currency is the lane's compile closure, not the pin. Feeding the record's own
+    // captured digest back as the live one is what "nothing has moved" means under the new policy.
+    assert.equal(
+      evidenceSemantics(record, {
+        inference: INFERENCE_REVISION,
+        inferenceClosureDigests: {
+          [`${record.backend}:${record.target.provider}`]:
+            record.repositories.inference.closureDigest,
+        },
+      }),
+      "current",
+    );
     assert.equal(record.artifact.resolvedRevision, EXPECTED[record.target.provider].revision);
     assert.equal(record.artifact.inventorySha256, EXPECTED[record.target.provider].inventory);
     assert.equal(record.scenarios.find(({ name }) => name === "overlay").result, "not_applicable");

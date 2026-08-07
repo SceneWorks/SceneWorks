@@ -14,6 +14,14 @@ const PLAN = path.join(ROOT, "config/memory-calibration-plan.json");
 const SCENEWORKS_REVISION = "f936e7e6a17a0b592752f634d21db17f5e8f2db7";
 const MATRIX_SOURCE_REVISION = "source-tree:2b3918cffd38e603f3a934229ee46948c3817b9710f5a0e4ed0ead7744c5c3d5";
 const INFERENCE_REVISION = "5f973a73bf00307240afd81d2778ba9d89349e51";
+// sc-17774: the compile-closure digest of each FLUX.1 lane AT `INFERENCE_REVISION` — the term
+// currency actually compares. The revision above stays as capture provenance. Re-derive with:
+//   node scripts/inference-closure-digest.mjs --repo <inference> --revision 5f973a73 \
+//     --provider candle:flux1_dev
+const INFERENCE_CLOSURE_DIGESTS = Object.freeze({
+  flux1_dev: "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
+  flux1_schnell: "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
+});
 const FINGERPRINT = "flux1-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v1";
 
 const HARDWARE = {
@@ -121,7 +129,11 @@ function makeRecord(model, [rung, peak, driverTenthsGb, outputSha256, capturedAt
       ? "deferred_materialization" : "eager_materialization",
     repositories: {
       sceneWorks: { revision: SCENEWORKS_REVISION, dirty: false, matrixSourceRevision: MATRIX_SOURCE_REVISION },
-      inference: { revision: INFERENCE_REVISION, dirty: false },
+      inference: {
+        revision: INFERENCE_REVISION,
+        dirty: false,
+        closureDigest: INFERENCE_CLOSURE_DIGESTS[model.provider],
+      },
     },
     hardware: HARDWARE,
     artifact: {

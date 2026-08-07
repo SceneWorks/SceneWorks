@@ -116,7 +116,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -341,7 +342,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8"
         },
         "sceneWorks": {
           "dirty": false,
@@ -550,7 +552,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
         },
         "sceneWorks": {
           "dirty": false,
@@ -799,7 +802,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
+          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
+          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1022,7 +1026,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1247,7 +1252,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1462,7 +1468,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1679,7 +1686,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1913,7 +1921,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2136,7 +2145,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2361,7 +2371,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2564,7 +2575,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2765,7 +2777,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2997,7 +3010,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3193,7 +3207,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3405,7 +3420,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3602,7 +3618,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3827,7 +3844,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
+          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
+          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4049,7 +4067,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4266,7 +4285,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4478,7 +4498,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4694,7 +4715,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4893,7 +4915,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5171,7 +5194,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5368,7 +5392,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5584,7 +5609,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5800,7 +5826,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6024,7 +6051,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6237,7 +6265,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6499,7 +6528,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6779,7 +6809,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6978,7 +7009,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7195,7 +7227,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7420,7 +7453,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7638,7 +7672,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7874,7 +7909,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8098,7 +8134,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8301,7 +8338,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8485,7 +8523,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8706,7 +8745,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8889,7 +8929,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
         },
         "sceneWorks": {
           "dirty": false,
@@ -9131,7 +9172,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -9368,7 +9410,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -9670,7 +9713,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
         },
         "sceneWorks": {
           "dirty": false,
@@ -9903,7 +9947,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10063,7 +10108,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10222,7 +10268,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10425,7 +10472,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10589,7 +10637,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10787,7 +10836,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11024,7 +11074,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11259,7 +11310,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11462,7 +11514,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11659,7 +11712,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11856,7 +11910,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12078,7 +12133,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12285,7 +12341,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12580,7 +12637,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12807,7 +12865,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13023,7 +13082,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13239,7 +13299,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13419,7 +13480,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13654,7 +13716,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13869,7 +13932,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
         },
         "sceneWorks": {
           "dirty": false,
@@ -14085,7 +14149,8 @@
       "repositories": {
         "inference": {
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
         },
         "sceneWorks": {
           "dirty": false,

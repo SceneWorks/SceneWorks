@@ -16,7 +16,8 @@
         },
         "inference": {
           "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "dirty": false
+          "dirty": false,
+          "closureDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         }
       },
       "hardware": {

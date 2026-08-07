@@ -61,12 +61,7 @@ RUN mkdir -p \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=secret,id=inference_token,required=true \
-    token="$(cat /run/secrets/inference_token)" \
-    && GIT_CONFIG_COUNT=1 \
-       GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/SceneWorks/inference.insteadOf" \
-       GIT_CONFIG_VALUE_0="https://github.com/SceneWorks/inference" \
-       cargo fetch --locked
+    cargo fetch --locked
 
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
@@ -204,12 +199,7 @@ RUN mkdir -p \
       crates/sceneworks-memory-adapter/src/bin/mlx.rs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=secret,id=inference_token,required=true \
-    token="$(cat /run/secrets/inference_token)" \
-    && GIT_CONFIG_COUNT=1 \
-       GIT_CONFIG_KEY_0="url.https://x-access-token:${token}@github.com/SceneWorks/inference.insteadOf" \
-       GIT_CONFIG_VALUE_0="https://github.com/SceneWorks/inference" \
-       cargo fetch --locked
+    cargo fetch --locked
 
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
