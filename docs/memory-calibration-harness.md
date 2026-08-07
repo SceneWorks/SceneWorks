@@ -40,6 +40,14 @@ provider at once. The runner stamps the digest at capture time from the inferenc
 already given; `evidenceSemantics` fails loudly rather than falling back if a record lacks one, since
 a silent fallback would restore the old policy invisibly.
 
+The lane is derived from the SELECTED plan entries as `<backend>:<provider>` — `provider.backend`
+plus `provider.target.provider`, never the plan entry's `name` and never the `--provider` flag, which
+carries that name. One run writes one `repositories` receipt into every record it produces, so it can
+stamp exactly one lane: an authoritative run that selects more than one provider closure is refused
+and must be narrowed with `--provider` or `--fixture`. A capture whose lane is not declared in
+`config/inference-provider-closures.json` is refused too — declare its inference crate first, which
+is the first thing any newly calibrated model needs.
+
 Full rule, what the digest covers, what it deliberately does not see, and the pin-bump procedure:
 [calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md).
 
@@ -154,7 +162,9 @@ required when the config contains both backends. Omitting it from a mixed plan f
 the adapter. `--provider <plan-provider-name>` optionally selects one named provider block; use it
 to run the current Krea v1 production point separately from non-promotable v2 candidates.
 `--fixture <fixture-name>` selects every provider block sharing that fixture, which is the intended
-way to execute a multi-rung reference ladder as one reproducible capture.
+way to execute a multi-rung reference ladder as one reproducible capture. Either flag also narrows an
+authoritative run to the single `<backend>:<provider>` closure it stamps (see above); a backend-wide
+authoritative run spanning several is refused rather than stamped under one of them.
 `--fresh-per-case` overrides scheduling for an oracle capture; `--batch-rungs` forces one target's
 rungs into an experimental batch. Compare the two bundles with the committed larger-of tolerance
 (256 MiB absolute or 5% relative for every phase/metric):

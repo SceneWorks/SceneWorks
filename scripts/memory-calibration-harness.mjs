@@ -913,8 +913,8 @@ export async function runProviderPlan({
   });
   // sc-17774: stamp the provider's compile-closure digest AT CAPTURE TIME. The runner already has a
   // live inference checkout, so the captured half of the currency comparison is derived here rather
-  // than backfilled later. `providerName` decides which closure is measured — a record stamped with
-  // another provider's digest would compare against the wrong code path forever.
+  // than backfilled later. The closure KEY decides which code path is measured — a record stamped
+  // with another provider's digest would compare against the wrong code path forever.
   const closureDigest =
     closureDigestFor ??
     (async (provider, revision) => {
@@ -935,32 +935,6 @@ export async function runProviderPlan({
         crateDir,
       }).digest;
     });
-  // Only an AUTHORITATIVE capture can ever be `current`, so only it needs a real closure digest.
-  // `evidenceSemantics` short-circuits fixture and candidate scopes before the comparison is
-  // reached. Deriving unconditionally made the schema-mutation suite fail outright: it drives this
-  // runner against a synthetic repo that has no provider crate to derive a closure from, and no
-  // `config/inference-provider-closures.json` to declare one — a fixture capture cannot supply
-  // either, and should not have to.
-  const capturesAuthoritativeEvidence = (config.providers ?? []).some(
-    (provider) => provider.evidenceScope === "authoritative",
-  );
-  const probeRepositories = async () => {
-    const inference = await gitState(inferenceRepo);
-    return {
-      sceneWorks: await gitState(sceneWorksRepo, true),
-      inference: {
-        ...inference,
-        ...(capturesAuthoritativeEvidence
-          ? { closureDigest: await closureDigest(providerName, inference.revision) }
-          : {}),
-      },
-    };
-  };
-  const repositories = await probeRepositories();
-  const assertRepositoriesStable = async () => {
-    const after = await probeRepositories();
-    if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
-  };
   const existing = resume
     ? validateBundle(resume)
     : { schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
@@ -996,6 +970,60 @@ export async function runProviderPlan({
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
+  // Only an AUTHORITATIVE capture can ever be `current`, so only it needs a real closure digest.
+  // `evidenceSemantics` short-circuits fixture and candidate scopes before the comparison is
+  // reached. Deriving unconditionally made the schema-mutation suite fail outright: it drives this
+  // runner against a synthetic repo that has no provider crate to derive a closure from, and no
+  // `config/inference-provider-closures.json` to declare one — a fixture capture cannot supply
+  // either, and should not have to.
+  //
+  // The key is `<backend>:<provider>` DERIVED FROM THE SELECTED PLAN ENTRIES, and it has to be
+  // derived here rather than above because that is the first point where the selection exists. This
+  // used to pass `providerName` — the `--provider` flag — straight through, which is a plan entry
+  // name (`mlx-z-image-q4-fresh-reference-resident`) and never a closure key, so the lookup was
+  // always undefined and every authoritative capture aborted; the documented `--backend`+`--fixture`
+  // invocation passed `undefined` and aborted the same way. Passing the closure key as `--provider`
+  // instead could not work either, because the same value is matched against `provider.name` when
+  // the plan is filtered. Both halves of the key live on the plan entry, so take them from there.
+  // `config/inference-provider-closures.json` derives its digests under this exact key string
+  // (`digestsAtRevision` passes the map key through to `closureText`'s `# provider:` line), so
+  // anything else would compute a digest that can never equal the declared one.
+  const authoritativeClosureKeys = [
+    ...new Set(
+      selectedCases
+        .filter((planned) => planned.evidenceScope === "authoritative")
+        .map((planned) => `${planned.backend}:${planned.target.provider}`),
+    ),
+  ].sort();
+  // One run stamps ONE `repositories` receipt into every record it produces, so it can carry exactly
+  // one closure digest. Both documented ways to narrow a run — `--provider <plan entry>` and
+  // `--fixture <fixture>` — select a single target, so this only trips on an unnarrowed backend-wide
+  // run, which could not have produced a correct digest under any single key.
+  if (authoritativeClosureKeys.length > 1) {
+    fail(
+      "provider run selected authoritative cases for more than one provider closure " +
+        `(${authoritativeClosureKeys.join(", ")}); a capture stamps one closure digest, so narrow ` +
+        "it with --provider <plan-provider-name> or --fixture <fixture-name>",
+    );
+  }
+  const [authoritativeClosureKey] = authoritativeClosureKeys;
+  const probeRepositories = async () => {
+    const inference = await gitState(inferenceRepo);
+    return {
+      sceneWorks: await gitState(sceneWorksRepo, true),
+      inference: {
+        ...inference,
+        ...(authoritativeClosureKey
+          ? { closureDigest: await closureDigest(authoritativeClosureKey, inference.revision) }
+          : {}),
+      },
+    };
+  };
+  const repositories = await probeRepositories();
+  const assertRepositoriesStable = async () => {
+    const after = await probeRepositories();
+    if (!equal(repositories, after)) fail("repository HEAD or dirty state changed during provider execution");
+  };
   const probe = JSON.parse(await execute(
     providerCommand[0],
     providerCommand.slice(1),

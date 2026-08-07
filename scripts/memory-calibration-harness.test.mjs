@@ -14,6 +14,7 @@ import {
   runProviderPlan, validateBundle, validateRecord,
 } from "./memory-calibration-harness.mjs";
 import { calibrationBinding } from "./generate-memory-matrix.mjs";
+import { providerClosureDigest } from "./inference-closure-digest.mjs";
 
 // sc-17774: the runner stamps each record with the provider's inference compile-closure digest.
 // These tests drive synthetic repositories with no inference crate layout, so the derivation is
@@ -24,19 +25,48 @@ const stubClosureDigest = async (provider) =>
 
 const execFileAsync = promisify(execFile);
 
-async function cleanFixtureRepo() {
+/**
+ * A committed SceneWorks-shaped checkout. `files` adds further committed paths — the default closure
+ * derivation reads `config/inference-provider-closures.json` from this repo, and it has to be
+ * committed rather than merely written, or the capture is `dirty` and the adapter gates it.
+ */
+async function cleanFixtureRepo(files = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "memory-harness-repo-"));
-  await mkdir(path.join(root, "docs/generated"), { recursive: true });
-  await writeFile(
-    path.join(root, "docs/generated/memory-matrix.json"),
-    JSON.stringify({ generatedFrom: { sceneWorksRevision: `source-tree:${"1".repeat(64)}` } }),
-  );
+  const contents = {
+    "docs/generated/memory-matrix.json": JSON.stringify({
+      generatedFrom: { sceneWorksRevision: `source-tree:${"1".repeat(64)}` },
+    }),
+    ...files,
+  };
+  for (const [file, body] of Object.entries(contents)) {
+    if (body === undefined) continue;
+    await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+    await writeFile(path.join(root, file), body);
+  }
   await execFileAsync("git", ["init", root]);
   await execFileAsync("git", ["-C", root, "config", "user.email", "fixture@example.invalid"]);
   await execFileAsync("git", ["-C", root, "config", "user.name", "Fixture"]);
-  await execFileAsync("git", ["-C", root, "add", "docs/generated/memory-matrix.json"]);
+  await execFileAsync("git", ["-C", root, "add", "-A"]);
   await execFileAsync("git", ["-C", root, "commit", "-m", "fixture"]);
   return root;
+}
+
+/**
+ * A committed inference-shaped checkout carrying the minimum `providerClosureDigest` reads: both
+ * workspace build inputs, a root manifest, a parseable lock, and the declared crate's own source.
+ * The bodies are synthetic; what the default-lookup tests assert is which crate the harness resolves
+ * and digests, not what a real inference tree hashes to.
+ */
+async function inferenceFixtureRepo(crateDir, crateName = "fixture-provider-crate") {
+  return cleanFixtureRepo({
+    "docs/generated/memory-matrix.json": undefined,
+    "Cargo.toml": '[workspace]\nmembers = ["*"]\n\n[profile.release]\nlto = "thin"\n',
+    "Cargo.lock": `version = 4\n\n[[package]]\nname = "${crateName}"\nversion = "0.0.0"\n`,
+    "rust-toolchain.toml": '[toolchain]\nchannel = "1.96.0"\n',
+    ".cargo/config.toml": "[build]\nrustflags = []\n",
+    [`${crateDir}/Cargo.toml`]: `[package]\nname = "${crateName}"\nversion = "0.0.0"\n`,
+    [`${crateDir}/src/lib.rs`]: 'pub const PROVIDER: &str = "krea_2_turbo";\n',
+  });
 }
 
 const phase = (value) => ({
@@ -934,6 +964,132 @@ test("executable runner handles fragmented responses across provider processes",
   assert.equal(expandPlan(config, result.records).length, clean ? 0 : 2);
   assert.equal(result.records[0].hardware.deviceId, "fixture:0");
   assert.match(result.records[0].repositories.sceneWorks.revision, /^[0-9a-f]{40}$/);
+});
+
+// The three tests below are the only coverage of the DEFAULT closure derivation. Every other
+// `runProviderPlan` call in this file injects `closureDigestFor`, which is exactly why the default
+// shipped keying its lookup on `--provider` — a plan entry name — against a config keyed
+// `<backend>:<provider>`. That lookup was undefined for every possible input, so no authoritative
+// capture could complete, and no test noticed.
+const KREA_CLOSURE_KEY = "candle:krea_2_turbo";
+const KREA_PLAN_ENTRY = "candle-krea-production-current-v1";
+
+async function realPlan() {
+  return JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
+}
+
+async function realClosureDeclarations() {
+  return JSON.parse(
+    await readFile(new URL("../config/inference-provider-closures.json", import.meta.url), "utf8"),
+  );
+}
+
+test("the default closure lookup keys on <backend>:<provider>, never the plan entry name", async () => {
+  const declarations = await realClosureDeclarations();
+  const crateDir = declarations.providers[KREA_CLOSURE_KEY].crate;
+  // Guards the premise the whole derivation rests on: a plan entry's name is not, and must never
+  // become, a closure key. If these key spaces ever converge the bug becomes untestable.
+  assert.ok(!Object.keys(declarations.providers).includes(KREA_PLAN_ENTRY));
+
+  const inferenceRepo = await inferenceFixtureRepo(crateDir);
+  const sceneWorksRepo = await cleanFixtureRepo({
+    // The shipped declarations verbatim, so the test resolves the real crate pointer under the real
+    // key rather than a hand-written stand-in that could agree with a wrong derivation.
+    "config/inference-provider-closures.json": await readFile(
+      new URL("../config/inference-provider-closures.json", import.meta.url),
+      "utf8",
+    ),
+  });
+  const result = await runProviderPlan({
+    config: await realPlan(),
+    providerName: KREA_PLAN_ENTRY,
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    ],
+    sceneWorksRepo,
+    inferenceRepo,
+  });
+  assert.equal(result.records.length, 1);
+  const [record] = result.records;
+  assert.equal(record.evidenceScope, "authoritative");
+  assert.equal(record.status, "complete");
+
+  const expected = providerClosureDigest({
+    repo: inferenceRepo,
+    revision: record.repositories.inference.revision,
+    provider: KREA_CLOSURE_KEY,
+    crateDir,
+  }).digest;
+  assert.equal(record.repositories.inference.closureDigest, expected);
+  // `providerClosureDigest` hashes the provider string it is handed into the closure text, so a
+  // digest derived under any other key could never equal the declared one. Close the loop the
+  // capture exists to serve: this record must read as `current` against its own live digest.
+  assert.equal(
+    evidenceSemantics(record, {
+      sceneWorks: record.repositories.sceneWorks.matrixSourceRevision,
+      inference: record.repositories.inference.revision,
+      inferenceClosureDigests: { [KREA_CLOSURE_KEY]: expected },
+    }),
+    "current",
+  );
+  assert.notEqual(
+    expected,
+    providerClosureDigest({
+      repo: inferenceRepo,
+      revision: record.repositories.inference.revision,
+      provider: KREA_PLAN_ENTRY,
+      crateDir,
+    }).digest,
+  );
+});
+
+test("an authoritative capture of an undeclared provider closure fails closed", async () => {
+  const declarations = await realClosureDeclarations();
+  const inferenceRepo = await inferenceFixtureRepo(declarations.providers[KREA_CLOSURE_KEY].crate);
+  const sceneWorksRepo = await cleanFixtureRepo({
+    // Declared under the plan entry name — the shape the broken lookup expected. It must not
+    // satisfy the derivation.
+    "config/inference-provider-closures.json": JSON.stringify({
+      digestVersion: declarations.digestVersion,
+      inferenceRevision: declarations.inferenceRevision,
+      providers: { [KREA_PLAN_ENTRY]: declarations.providers[KREA_CLOSURE_KEY] },
+    }),
+  });
+  await assert.rejects(
+    runProviderPlan({
+      config: await realPlan(),
+      providerName: KREA_PLAN_ENTRY,
+      providerCommand: [process.execPath, "must-not-start.mjs"],
+      sceneWorksRepo,
+      inferenceRepo,
+    }),
+    new RegExp(`provider "${KREA_CLOSURE_KEY}" has no entry in config/inference-provider-closures\\.json`),
+  );
+});
+
+test("an unnarrowed authoritative run refuses to stamp one closure digest for many providers", async () => {
+  // One run writes one `repositories` receipt into every record it produces, so a backend-wide
+  // selection spanning several provider closures has no single honest digest to stamp.
+  const config = await realPlan();
+  const spanned = [
+    ...new Set(
+      expandPlan(config)
+        .filter((planned) => planned.backend === "mlx" && planned.evidenceScope === "authoritative")
+        .map((planned) => `${planned.backend}:${planned.target.provider}`),
+    ),
+  ];
+  assert.ok(spanned.length > 1, "the plan must span several mlx provider closures for this to bite");
+  await assert.rejects(
+    runProviderPlan({
+      config,
+      backend: "mlx",
+      providerCommand: [process.execPath, "must-not-start.mjs"],
+      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    }),
+    /more than one provider closure .*--provider .*--fixture/s,
+  );
 });
 
 test("runner batches one target's five rungs into one attested model load", async () => {
