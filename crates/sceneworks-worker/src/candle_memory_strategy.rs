@@ -1171,20 +1171,27 @@ mod tests {
         )
         .expect("FLUX.2-dev safe-device-peak evaluation");
 
-        // sc-17774: there is no compatibility WINDOW any more, and no pin term in admission.
-        // This block used to skip the rest of the test whenever the live pin had moved past
-        // `FLUX2_COMPATIBLE_INFERENCE_REVISION` — so the real assertions below stopped running after
-        // any pin bump, and the one lane with a hand-audited hatch was also the one whose selector
-        // test quietly went dark. Admission now turns on `flux2_dev`'s own compile closure, which
-        // the packaged binding and the packaged closure table agree on, so the assertions always run.
-        let evaluation = evaluation.expect("bounded decode must fit");
-        assert_eq!(
-            evaluation.context.selection.strategy,
-            MemoryStrategy::BoundedDecode
-        );
-        assert_eq!(
-            (evaluation.predicted_peak_gb * BYTES_PER_GIB).round() as u64,
-            34_700_000_000
+        // sc-17774: everything above is closure-independent — the packaged evidence is RETAINED
+        // whatever the pin is, which is why `verified_candidates` still returns all five rungs.
+        // ADMISSION is the step that carries the currency term.
+        //
+        // `flux2_dev`'s packaged bindings were captured at `5ffd7612`, and its compile closure HAS
+        // moved since. That is not a defect in this branch and not a fixture problem: sc-17760
+        // reached the identical verdict by an independent method (a linked-artifact digest on the
+        // RTX box, ARTIFACTS DIFFER), and `main`'s own generated matrix already shows those five q4
+        // cells at `Implemented/unverified`. The demotion stands until sc-15922 re-captures.
+        //
+        // So the honest assertion is that admission REFUSES, and the reason is the closure. An
+        // earlier revision of this branch asserted a fit here on the belief that the binding and the
+        // packaged closure table agreed — they do not, and the belief was never checked.
+        //
+        // This replaces a block that skipped the rest of the test whenever the pin had moved past
+        // the audited window, which meant the one lane with a hand-audited hatch was also the one
+        // whose selector test went dark after every bump. Refusal is asserted rather than skipped.
+        assert!(
+            evaluation.is_none(),
+            "flux2_dev's closure moved since 5ffd7612, so its packaged evidence must not admit an \
+             optimized strategy at the live pin"
         );
     }
 
