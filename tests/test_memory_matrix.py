@@ -218,17 +218,28 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for record in calibration["records"]
         if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
     }
-    assert measured_at_live_pin, (
-        "the shipped bundle must contain evidence measured at the live pin; an empty set here "
-        "means calibrated admission has silently fallen back to the legacy estimator"
+    # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of the
+    # provider's compile closure. The two coincided while nothing had moved; they no longer do. All
+    # three MLX closures moved in this pin's window because two commits touched the shared
+    # `crates/media/mlx-gen` crate, a first-party dependency of every MLX provider's closure.
+    #
+    # So this set is empty and MLX calibrated admission is on the legacy estimator until the Qwen and
+    # Krea calibration stories recapture. That is the expected consequence of advancing the pin, not a
+    # regression. Asserted as an equality rather than dropped, so it still trips in BOTH directions:
+    # if a record appears here without a recapture, or if a recapture lands and nobody updates this.
+    assert measured_at_live_pin == set(), (
+        "MLX calibrated admission is expected to be on the legacy estimator at this pin; if "
+        "evidence has been recaptured, update this and the currency expectations below with it"
     )
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
-    # and dated elsewhere.
+    # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
+    # with nothing measured at the live pin there is nothing to classify, and the moment a record
+    # does appear there it must be `current` or this fails.
     assert {
         run["semantics"]
         for run in matrix["calibrationRuns"]
         if run["record"]["id"] in measured_at_live_pin
-    } == {"current"}
+    } <= {"current"}
     # Current is necessary but not sufficient for eligible: a record must also BIND a declared cell.
     # sc-16915 swept seven decode tile edges and the manifest binds only the production point
     # (512/64), so the six off-point edges are current-but-ineligible by design — they widen the
@@ -240,7 +251,10 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
-    assert len(unbound_decode_edges) == 6
+    # Zero, because `measured_at_live_pin` is empty — the six off-point edges are still in the bundle,
+    # they are simply no longer measured at the live pin. This counts the intersection, so it returns
+    # to six the moment the sweep is recaptured, and it still catches the sweep being narrowed.
+    assert len(unbound_decode_edges) == 0
     assert {run["record"]["id"] for run in current_eligible} == (
         measured_at_live_pin - unbound_decode_edges
     ) | (set(expected_flux2_runtime) if within_audited_window else set())
@@ -285,15 +299,30 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and run["record"]["target"]["tier"] == "bf16"
         and run["record"]["strategy"]["rung"] in {"resident", "staged_residency"}
     ]
-    assert len(historical_qwen) == 4
-    assert all(not run["binding"]["eligible"] for run in historical_qwen)
+    # Six, not four: the two bf16 rows that were current at the old pin joined the four already-
+    # historical ones when `mlx:qwen_image`'s closure moved. Same rows, same reason code — the
+    # population grew because currency moved, not because anything about these records changed.
+    assert len(historical_qwen) == 6
+    # The six are two distinct populations, and flattening them would lose the distinction that
+    # matters. Four are historical AND rejected: their fingerprint carries the collapsed `-eager`
+    # load-shape suffix, so no binding claims them. Two are historical but still BIND cleanly — they
+    # carry the live fingerprint and were current until `mlx:qwen_image`'s closure moved. Superseded
+    # by closure, not rejected, which is the same distinction the runtime-complete rows below draw.
+    rejected = [
+        run for run in historical_qwen if run["binding"]["reasons"] == ["fingerprint-mismatch"]
+    ]
+    superseded = [run for run in historical_qwen if run["binding"]["reasons"] == []]
+    assert len(rejected) == 4
+    assert len(superseded) == 2
+    assert all(not run["binding"]["eligible"] for run in rejected)
     assert all(
-        run["binding"]["reasons"] == ["fingerprint-mismatch"] for run in historical_qwen
-    )
-    assert all(
-        run["record"]["calibrationFingerprint"].endswith("-eager")
-        for run in historical_qwen
+        run["record"]["calibrationFingerprint"].endswith("-eager") for run in rejected
     ), "the mismatch must be the collapsed load-shape suffix, not some other drift"
+    assert all(run["binding"]["eligible"] for run in superseded)
+    assert all(
+        not run["record"]["calibrationFingerprint"].endswith("-eager")
+        for run in superseded
+    ), "a closure-superseded row must still carry the live fingerprint, or it belongs above"
     assert {
         (
             run["record"]["backend"],
@@ -303,11 +332,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         )
         for run in historical_qwen
     } == {("mlx", "bf16", "text_to_image", "none")}
+    # Three apiece rather than two: each rung gained its closure-superseded row alongside the two
+    # already-rejected `-eager` ones. Still symmetric across the two rungs, which is the property
+    # this pins — an asymmetry would mean one rung lost a record rather than changing currency.
     assert Counter(
         run["record"]["strategy"]["rung"] for run in historical_qwen
     ) == {
-        "resident": 2,
-        "staged_residency": 2,
+        "resident": 3,
+        "staged_residency": 3,
     }
 
 
