@@ -954,6 +954,56 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_stale_control_closure_falls_back_instead_of_reporting_a_fit() {
+        // sc-17774. Before this, the control lane's currency check compared
+        // `KREA_CONTROL_INFERENCE_REVISION` (as `expected_inference_revision`) against evidence this
+        // module had stamped with THE SAME CONSTANT — so the shared staleness check compared a
+        // constant to itself and could never fire. The manifest's `measured`/`supersededBy` booleans
+        // were not the primary gate; they were the only one. The ladder had been measured at
+        // `1899a722` with the pin hundreds of commits past it, and nothing noticed.
+        //
+        // Both sides are now read rather than frozen: `expected` is the live digest for
+        // `candle:krea_2_turbo_control` from the packaged closure table, and the candidate carries
+        // `candle.control.inferenceClosureDigest` from the manifest. This test drives them apart.
+        //
+        // The correct outcome is BestEffort, NOT a reject: a stale row is an unverified upper bound,
+        // and refusing on it would assert a non-fit nobody measured. Staging as far as the measured
+        // rungs allow and letting the reactive OOM backstop decide is the contract the lane already
+        // applies when the Sequential row is absent.
+        let budget = Some(budget(20.0));
+        let fresh = super::fit_ladder(
+            "q4",
+            Some(10.0),
+            Some(10.0),
+            budget,
+            Some(5.0),
+            Some(2.0),
+            true,
+            &live_test_closure_digest(),
+        );
+        assert!(
+            matches!(fresh, KreaControlFit::Fits { .. }),
+            "control point: an unmoved closure must still report a fit, or the assertion below \
+             proves nothing about staleness: {fresh:?}"
+        );
+
+        let stale = super::fit_ladder(
+            "q4",
+            Some(10.0),
+            Some(10.0),
+            budget,
+            Some(5.0),
+            Some(2.0),
+            true,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(
+            matches!(stale, KreaControlFit::BestEffort { .. }),
+            "a control ladder whose provider closure moved must not report a fit: {stale:?}"
+        );
+    }
+
     /// The big-card fast path: monolithic decode, unchunked attention, nothing engaged.
     fn fits_nothing_engaged() -> KreaControlFit {
         KreaControlFit::Fits {
