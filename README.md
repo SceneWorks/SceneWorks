@@ -547,6 +547,14 @@ baseline so the AppImage stays compatible with 22.04 and 24.04:
 npm --prefix apps/desktop run build:linux
 ```
 
+**Install `ffmpeg` and put it on your PATH before running a source build.** The
+packaged installers bundle a static ffmpeg and point the worker at it via
+`SCENEWORKS_FFMPEG`, but a dev/pre-bundle run resolves no bundled copy and falls
+back to PATH. Without it, every job that decodes or muxes video — frame
+sampling, frame extract, timeline export, and all video generation — fails with
+`Failed to start FFmpeg. Ensure ffmpeg is installed and on PATH`. Point
+`SCENEWORKS_FFMPEG` at a specific binary to override the PATH lookup.
+
 The Rust backend workspace is shared across desktop and server. Install a Rust
 toolchain with `rustfmt` and `clippy`, then:
 
