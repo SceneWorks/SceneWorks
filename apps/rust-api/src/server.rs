@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::{header, HeaderMap, Request, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::json;
@@ -390,7 +390,66 @@ struct BootstrapState {
     startup_maintenance: StartupMaintenance,
 }
 
-fn bootstrap_router(
+/// Self-refreshing holding page served to browser navigations that arrive before
+/// readiness-critical startup finishes (sc-15591). The SPA lives at `/` on the
+/// ready router, so until that router is installed a navigation lands on the
+/// fallback below — and rendering the raw `api_initializing` JSON leaves the tab
+/// permanently parked on machine-readable text that never re-navigates itself.
+/// The `<meta http-equiv="refresh">` costs nothing while starting and turns into
+/// the app on the first poll after `api_ready`.
+const INITIALIZING_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="refresh" content="2" />
+    <title>Starting SceneWorks…</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+      html, body { margin: 0; height: 100%; }
+      body { display: grid; place-items: center; background: #0f1117; color: #e7e9ee; }
+      main { width: min(32rem, 88vw); padding: 2rem; text-align: center; }
+      h1 { margin: 0 0 0.5rem; font-size: 1.5rem; letter-spacing: -0.01em; font-weight: 600; }
+      p { margin: 0; color: #9aa1ad; font-size: 0.95rem; line-height: 1.5; }
+      .spinner {
+        width: 1.4rem; height: 1.4rem; margin: 0 auto 1.25rem;
+        border: 2px solid #2a2f3a; border-top-color: #6c8cff; border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="spinner"></div>
+      <h1>Starting SceneWorks…</h1>
+      <p>Preparing your library. This page loads the app automatically when startup finishes.</p>
+    </main>
+  </body>
+</html>
+"#;
+
+/// Whether the caller is a browser navigating to a page rather than an API client
+/// reading JSON. Only an explicit `text/html` in `Accept` counts: a `*/*`-only
+/// client (curl, the worker, a health probe) keeps the machine-readable 503.
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|entry| {
+                entry
+                    .split(';')
+                    .next()
+                    .is_some_and(|media| media.trim().eq_ignore_ascii_case("text/html"))
+            })
+        })
+}
+
+/// `pub(crate)` so the startup tests can drive the pre-readiness surface directly
+/// (an empty `ready_app` is exactly the window this router exists to cover).
+pub(crate) fn bootstrap_router(
     settings: Settings,
     ready_app: Arc<OnceLock<Router>>,
     startup_maintenance: StartupMaintenance,
@@ -454,6 +513,18 @@ async fn bootstrap_dispatch(
             "tokenHeader": "X-SceneWorks-Token",
         }))
         .into_response(),
+        // Everything else — including `/`, where the SPA lives once the ready
+        // router is installed. A browser gets the self-refreshing holding page so
+        // the tab becomes the app on its own; API clients get the unchanged
+        // machine-readable 503 with `retry-after`.
+        _ if accepts_html(request.headers()) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            // `no-store`: the holding page must never be what a later navigation
+            // replays from cache once the app is up. `Html` sets the content type.
+            [("retry-after", "1"), ("cache-control", "no-store")],
+            Html(INITIALIZING_PAGE),
+        )
+            .into_response(),
         _ => (
             StatusCode::SERVICE_UNAVAILABLE,
             [("retry-after", "1")],

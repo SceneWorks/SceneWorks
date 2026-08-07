@@ -1,5 +1,45 @@
 use super::support::*;
 
+/// The pre-readiness surface: a bootstrap router whose `ready_app` is never set,
+/// i.e. the exact window between `api_listening` and `api_ready` (sc-14788).
+fn bootstrap_app(settings: Settings) -> axum::Router {
+    crate::server::bootstrap_router(
+        settings,
+        std::sync::Arc::new(std::sync::OnceLock::new()),
+        crate::startup::StartupMaintenance::pending(),
+    )
+}
+
+/// Like `request_with_headers`, but returns the raw body + content type instead of
+/// parsing JSON — the holding page is HTML, so a JSON-parsing helper would panic.
+async fn raw_request(
+    app: axum::Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String, String) {
+    let mut builder = Request::builder().method("GET").uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(Body::empty()).expect("request builds");
+    let response = app.oneshot(request).await.expect("response returns");
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body buffers");
+    (
+        status,
+        content_type,
+        String::from_utf8(bytes.to_vec()).expect("body is utf-8"),
+    )
+}
+
 fn write_stale_asset_upload(data_dir: &std::path::Path) -> std::path::PathBuf {
     let upload_root = data_dir.join("cache/uploads");
     std::fs::create_dir_all(&upload_root).expect("upload root creates");
@@ -222,4 +262,95 @@ async fn deferred_upload_sweeps_preserve_orphan_first_list_and_asset_mutation() 
     assert_eq!(after_mutation.as_array().expect("assets array").len(), 1);
     assert_eq!(after_mutation[0]["id"], "current");
     hook.release();
+}
+
+/// sc-15591 (GH #1937). A browser that navigates to the app root before readiness
+/// finishes must get a page that becomes the app on its own. Before this, `/`
+/// answered the `api_initializing` JSON to everyone — so the desktop window (and
+/// any LAN/Compose tab) rendered that JSON as text and stayed there forever, since
+/// nothing re-navigates a webview.
+#[tokio::test]
+async fn browser_navigation_before_readiness_gets_a_self_refreshing_page() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = bootstrap_app(test_settings(&temp_dir));
+
+    for uri in ["/", "/projects/some-deep-link"] {
+        let (status, content_type, body) = raw_request(
+            app.clone(),
+            uri,
+            // What Chromium/WebView2 actually sends on a top-level navigation.
+            &[(
+                "accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{uri} stays a 503");
+        assert!(
+            content_type.starts_with("text/html"),
+            "{uri} is rendered as a page, not as text: {content_type}"
+        );
+        assert!(
+            body.contains(r#"http-equiv="refresh""#),
+            "{uri} retries on its own, so the tab becomes the app once startup ends"
+        );
+        assert!(
+            !body.contains("api_initializing"),
+            "{uri} never shows the raw error payload to a human"
+        );
+    }
+}
+
+/// The other half of the negotiation: an API client is unchanged. A `*/*`-only
+/// caller (curl, the GPU worker, a health probe) must keep the machine-readable
+/// 503 + `retry-after` rather than being handed a page it cannot parse.
+#[tokio::test]
+async fn api_clients_before_readiness_keep_the_machine_readable_error() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = bootstrap_app(test_settings(&temp_dir));
+
+    for accept in [None, Some("*/*"), Some("application/json")] {
+        // `None` sends no Accept header at all.
+        let headers: Vec<(&str, &str)> =
+            accept.into_iter().map(|value| ("accept", value)).collect();
+        let (status, content_type, body) =
+            raw_request(app.clone(), "/api/v1/projects", &headers).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "accept={accept:?}");
+        assert!(
+            content_type.starts_with("application/json"),
+            "accept={accept:?} keeps JSON: {content_type}"
+        );
+        let payload: Value = serde_json::from_str(&body).expect("json body parses");
+        assert_eq!(payload["code"], "api_initializing", "accept={accept:?}");
+    }
+}
+
+/// The bootstrap health body is what the desktop's window gate classifies, so it
+/// has to be distinguishable from the ready router's. `status`/`readiness.status`
+/// are the two markers `probe_health` reads; if either stopped moving, the gate
+/// would navigate early again and land on the holding page instead of the app.
+#[tokio::test]
+async fn bootstrap_health_is_distinguishable_from_ready_health() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let bootstrap = bootstrap_app(settings.clone());
+
+    let (status, starting) = request(bootstrap, "GET", "/api/v1/health", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "the trust probe still gets a 200");
+    // The three fields the desktop uses to decide the responder is genuinely ours.
+    assert_eq!(starting["service"], "sceneworks-api");
+    assert_eq!(starting["runtime"], "rust");
+    // …and the two that say it is not ready to be rendered yet.
+    assert_eq!(starting["status"], "starting");
+    assert_eq!(starting["readiness"]["status"], "initializing");
+
+    let (ready_app, _state) = create_app_with_state(settings).expect("ready app creates");
+    let (status, ready) = request(ready_app, "GET", "/api/v1/health", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ready["service"], "sceneworks-api");
+    assert_eq!(ready["runtime"], "rust");
+    assert_eq!(ready["status"], "ok");
+    assert_eq!(ready["readiness"]["status"], "ready");
 }
