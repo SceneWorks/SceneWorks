@@ -2185,7 +2185,7 @@ async function currentEvidenceFixture({
 ///   node scripts/inference-closure-digest.mjs --repo <inference> --revision 96b13b66 \
 ///     --provider mlx:krea_2_turbo_control
 const SUPERSEDED_KREA_CLOSURE_DIGEST =
-  "bf8af1af1b742fb8f4f1d0bdf44a72b12aceebac6beb485ecbcf8eba3910f400";
+  "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325";
 
 async function historicalEvidenceFixture({
   select = (record) => record.target.provider === "krea_2_turbo_control",

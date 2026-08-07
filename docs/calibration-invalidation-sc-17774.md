@@ -31,6 +31,14 @@ non-merge commits demoted everything.** Re-capture costs ~47.6 GB.
 
 Under the closure unit, on the same window, each lane sees roughly **9–10.5%** of those commits.
 
+Two more places survived that first sweep and were converted in sc-17726: the `identity_matches`
+filter in `mlx_fit_gate::evidence_admission_route` and the same conjunct in
+`verified_lower_alternative`. Both compared `binding.query.inference_revision` against
+`catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION` — the raw Cargo pin — so **every** MLX binding
+was excluded the moment the pin moved, whether or not that provider's closure had. It reproduced
+exactly: bumping the pin alone, with `config/inference-provider-closures.json` untouched so no
+closure moved, turned four `mlx_fit_gate` tests red on the old code and none on the new.
+
 ## What a closure is
 
 Derived in [`scripts/inference-closure-digest.mjs`](../scripts/inference-closure-digest.mjs), with
@@ -40,10 +48,33 @@ no build, no GPU and no weights — it reads git objects at a revision:
 | --- | --- |
 | the provider's inference crate | the code being measured |
 | that crate's transitive **first-party** path/workspace dependencies | code it compiles |
+| the local root **`[patch]` targets that closure reaches** | the vendored CUDA kernels arrive *only* this way |
+| every closure crate's **build script** | `build.rs` is a compile input, and it is what runs `nvcc` |
 | the locked external packages that closure **reaches** | a dependency bump changes codegen; the rest of `Cargo.lock` does not |
 | `rust-toolchain.toml`, `.cargo/config.toml`, root `[profile]` / `[patch]` | build inputs that change codegen for everything |
 
-Excluded on purpose: `dev-dependencies` (they do not ship), `tests/`, `benches/`, `examples/`.
+Excluded on purpose: `dev-dependencies` (they do not ship), `tests/`, `benches/`, `examples/`, and
+crate-root files that are not compile inputs (`README.md`, `VENDORED.md`).
+
+### Patch targets are resolved by reachability (sc-17935)
+
+Nothing in inference declares `candle-kernels` as a dependency. It is substituted at the workspace
+root:
+
+```toml
+[patch."https://github.com/huggingface/candle"]
+candle-kernels = { path = "crates/media/candle-gen/vendor/candle-kernels" }
+```
+
+The v2 walk read `path =` dependencies and `workspace = true`, so it never saw that tree: all 42
+files — every `.cu`/`.cuh` kernel and the `build.rs` that compiles them — could change while all five
+Candle digests held still and the calibration read `current`. The deleted artifact audit *had*
+covered this tree; sc-17919 dropped that coverage without noticing.
+
+A local patch target now joins a closure when the **lock says that closure reaches it**. `Cargo.lock`
+records `candle-kernels` under every Candle provider (through `candle-core`) and under no MLX one, so
+a kernel edit moves the five Candle lanes and none of the three MLX lanes. Sweeping every patch entry
+into every closure would also be sound, and would re-couple lanes that share nothing.
 
 Source is hashed **semantically** for `.rs` and `.toml` — whole-line comments are stripped via
 `scripts/lib/source-revision.mjs`, so a documentation-only edit absolves. Everything else (`.metal`,
@@ -73,6 +104,29 @@ leave the closure config behind, and names both commands.
 **Lanes whose closure did not move stay `current` across the bump.** Only the ones that actually
 changed are demoted, and the regenerated files show which.
 
+## What a demotion costs at runtime
+
+A lane whose closure moved **degrades to the legacy estimator. It is not refused.** An expired
+calibration is epistemically the same as no calibration, and every uncalibrated model already renders
+on the generic formula; turning a routine pin bump into a product outage on ~10% of commits is not a
+safety posture. `z_image_turbo` ships in exactly this state today and renders.
+
+That places the comparison ahead of the admission-path decision on both backends, for different
+structural reasons:
+
+| | where currency is applied | why there |
+| --- | --- | --- |
+| candle | `memory_strategy::candidate_exclusion` | the resident baseline is always in the candidate pool, so excluding the calibrated cells leaves something to select |
+| mlx | `mlx_fit_gate::evidence_admission_route`, before entering `AdmissionPath::Evidence` | that path withholds the resident baseline on purpose, so a stale binding admitted into it has nothing to fall back to and kills the request |
+
+`candidate_exclusion` still applies the same comparison on the MLX lane and remains the fail-closed
+backstop for a candidate reaching the selector another way. "The gate refuses a moved closure" means
+it refuses to admit that **candidate** — not that the request dies.
+
+`verified_lower_alternative` is the exception that has to carry its own copy: the geometry it names
+in a refusal never becomes a `Candidate`, so nothing downstream grades it. Left unfiltered it would
+name a smaller geometry that the very next request refuses for the identical staleness.
+
 `--restamp` exists for a `CLOSURE_DIGEST_VERSION` change, which legitimately re-derives the same
 underlying fact. It is not a way past a genuine conflict: rewriting a captured digest that disagrees
 with its own revision would launder a stale measurement into a current one, and the backfill refuses
@@ -84,8 +138,24 @@ that by default.
 | --- | --- |
 | `npm run check` | the closure config is **keyed** to the live Cargo pin; every complete record carries a digest |
 | `check.yml` (parity job) | re-derives every lane's digest from a `--depth=1` fetch of the pinned revision — the digests are **real**, not merely present |
+| `check.yml`, same step | re-derives the **captured** half too: `backfill-closure-digests.mjs --verify` against a shallow fetch of every revision `--revisions` reports |
 | `scripts/inference-closure-digest.test.mjs` | the derivation itself, hermetically, over a synthetic workspace |
-| `memory_strategy.rs` / `mlx_fit_gate.rs` tests | the runtime gate refuses a moved closure and admits an unmoved one |
+| `memory_strategy.rs` / `mlx_fit_gate.rs` tests | the runtime gate demotes a moved closure and admits an unmoved one, on both the ladder and the named refusal alternative |
+
+The captured-half gate exists because grading only `config/inference-provider-closures.json` left the
+other side of every comparison — 65 record digests and 31 manifest bindings — checked by nothing. That
+was not hypothetical: a constant in `scripts/sc-15833-flux2-evidence.test.mjs` carried the comment
+"derive it with …" and had never been a real derivation, and it survived the whole of sc-17774
+unnoticed. A plain dry run reports drift and still exits 0, which is right for a pin-bump preview and
+useless as a gate, so `--verify` is a separate mode that fails on any drift and ignores `--restamp`.
+
+**It does not cover the two directly-maintained digests** — `turboFit`'s and `candle.control`'s. The
+stamper locates a binding by pairing an `inferenceRevision` line with a `provider` in the same object;
+`turboFit` has no `provider` and `candle.control` has neither. Giving them those keys is not a
+one-line change: the stamper's "is a digest already here" lookup spans only the matched line and the
+one after it, so on a block whose digest sits three lines below its revision it would insert a second
+`inferenceClosureDigest` rather than update the existing one. Tracked in
+[sc-17989](https://app.shortcut.com/trefry/story/17989).
 
 The CI re-derivation matters more than it looks. Without it the currency term is checked-in data
 that nothing grades — a hand-edited digest would pass. `SceneWorks/inference` is public, so the
@@ -143,3 +213,9 @@ stopped grading anything.
    the live digest — precisely the value the request compares against — so an unplaceable candidate
    became automatically current. Digests are now carried from their push sites; there is no lookup
    to miss. Pinned by `a_moved_provider_closure_demotes_the_calibrated_ladder`, mutation-checked.
+4. **Two pin comparisons outlived the sweep** (sc-17726, above). A per-model unit of invalidation is
+   only worth what its *narrowest* remaining term is: while `evidence_admission_route` still keyed on
+   the pin, the whole MLX lane invalidated repository-wide no matter what the digests said. Both are
+   now the closure comparison, mutation-checked in each direction — dropping either conjunct, or
+   restoring the compare-against-self shape of defect 1, turns tests red including one driven by the
+   real shipped `z_image_turbo` opt-in.

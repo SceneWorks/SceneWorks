@@ -13,6 +13,8 @@
 //
 //   provider -> its inference crate -> that crate's transitive first-party path-dependency closure
 //            -> the source blobs of those crates
+//            + the LOCAL `[patch]` targets that closure reaches (the vendored kernels), walked and
+//              digested the same way
 //            + the locked external packages that closure actually reaches
 //            + the workspace inputs that change codegen for everything (`[profile]`, `[patch]`,
 //              `rust-toolchain.toml`, `.cargo/config.toml`)
@@ -58,7 +60,11 @@ import path from "node:path";
 
 import { canonicalSourceText, stripInertLines } from "./lib/source-revision.mjs";
 
-export const CLOSURE_DIGEST_VERSION = "inference-closure-digest v2";
+// v3 (sc-17935) widened the unit: local `[patch]` targets are resolved into the closure and build
+// scripts are hashed. A v2 digest and a v3 digest answer different questions, so they must never be
+// compared — the version is inside the hashed text precisely so a missed regeneration reads
+// `historical` (re-capture demanded) instead of silently `current`.
+export const CLOSURE_DIGEST_VERSION = "inference-closure-digest v3";
 
 /**
  * Languages whose whole-line comments are stripped before hashing.
@@ -187,14 +193,69 @@ function tomlSections(body) {
  * would be a false green of the worst kind: the shared contract could change under a provider while
  * its closure digest held still. `[package.metadata.legacy-workspace-dependencies]` in the crate
  * manifests is inert metadata that looks exactly like the real thing; it is deliberately not read.
+ *
+ * Both the inline table `name = { path = "…" }` and the dotted key `name.path = "…"` are read, for
+ * the reason given on `patchTargetPaths`: missing a spelling drops a whole subtree — `gen-core`, in
+ * the worst case — from every closure, silently and with no parse error.
  */
 export function workspaceDependencyPaths(rootManifestBody) {
   const paths = new Map();
   for (const section of tomlSections(rootManifestBody)) {
     if (section.header !== "workspace.dependencies") continue;
     for (const line of section.lines) {
-      const match = line.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}]*\bpath\s*=\s*"([^"]+)"/);
+      const match =
+        line.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}]*\bpath\s*=\s*"([^"]+)"/) ??
+        line.match(/^\s*([A-Za-z0-9_-]+)\.path\s*=\s*"([^"]+)"/);
       if (match) paths.set(match[1], path.posix.normalize(match[2]));
+    }
+  }
+  return paths;
+}
+
+/**
+ * `patched package name -> repo-relative crate dir` for every LOCAL entry in the root `[patch.*]`
+ * tables. Non-local replacements (`{ git = … }`, `{ version = … }`) are deliberately absent: there is
+ * no tree in this repository to hash for them, and the lock already carries their identity.
+ *
+ * This is the hole sc-17935 closes. Inference does not reach its vendored CUDA kernels through a
+ * `path =` dependency or `workspace = true` — nothing declares `candle-kernels` at all. It arrives
+ * through the root patch table:
+ *
+ *     [patch."https://github.com/huggingface/candle"]
+ *     candle-kernels = { path = "crates/media/candle-gen/vendor/candle-kernels" }
+ *
+ * so the dependency walk never saw it, and `candle-kernels` was absent from every lane's closure.
+ * Every `.cu`/`.cuh` kernel and the `build.rs` that compiles them could change without moving a
+ * single Candle digest, and the calibration would keep reading `current` — the exact false green this
+ * epic must not introduce. The deleted artifact audit did cover this tree; sc-17919 dropped that
+ * coverage without noticing.
+ *
+ * `[patch]` paths are relative to the manifest that declares them, which is the workspace root, so
+ * they are already repo-relative. The `name = { path = "…", package = "other" }` rename form is
+ * recorded under BOTH names: the table key is the package being replaced and `package` is the
+ * replacement's real name, and which of the two a lock entry carries is not worth guessing when
+ * guessing wrong fails OPEN. Matching either only over-includes.
+ *
+ * Both spellings of a local replacement are read — the inline table `name = { path = "…" }` and the
+ * dotted key `name.path = "…"`. TOML requires an inline table to sit on one line, so a line-oriented
+ * match is complete for the first; the second is a different syntax for the same declaration and
+ * missing it would be a silent false green rather than a parse error.
+ */
+export function patchTargetPaths(rootManifestBody) {
+  const paths = new Map();
+  for (const section of tomlSections(rootManifestBody)) {
+    if (!/^patch(\.|$)/.test(section.header)) continue;
+    for (const line of section.lines) {
+      const inline = line.match(/^\s*([A-Za-z0-9_-]+)\s*=\s*\{([^}]*\bpath\s*=\s*"([^"]+)"[^}]*)/);
+      if (inline) {
+        const dir = path.posix.normalize(inline[3]);
+        paths.set(inline[1], dir);
+        const alias = inline[2].match(/\bpackage\s*=\s*"([^"]+)"/)?.[1];
+        if (alias) paths.set(alias, dir);
+        continue;
+      }
+      const dotted = line.match(/^\s*([A-Za-z0-9_-]+)\.path\s*=\s*"([^"]+)"/);
+      if (dotted) paths.set(dotted[1], path.posix.normalize(dotted[2]));
     }
   }
   return paths;
@@ -233,14 +294,24 @@ export function manifestPathDependencies(body, crateDir, workspacePaths = new Ma
 }
 
 /**
- * Transitive first-party closure of `crateDir`, as sorted repo-relative crate directories.
+ * Transitive first-party closure of `crateDir` (plus any `extraRoots`), as sorted repo-relative
+ * crate directories, together with every crate's build-script path.
+ *
+ * A build script is a compile input like any other — `candle-kernels/build.rs` is what actually
+ * invokes `nvcc` over the `.cu` tree — but it sits at the crate ROOT, outside the `src/` filter, so
+ * before sc-17935 no crate's build script was hashed at all. Cargo's convention is `build.rs`; a
+ * `build = "…"` key in `[package]` overrides it, and both are collected so a renamed script cannot
+ * hide a change. `build = false` disables the script entirely, which only over-includes.
  *
  * Cycles are impossible in cargo and would loop here; the `seen` set makes that moot either way.
  */
-export function firstPartyClosure({ repo, revision, crateDir, blobs, workspacePaths, runGit = git }) {
+export function firstPartyClosure({
+  repo, revision, crateDir, extraRoots = [], blobs, workspacePaths, runGit = git,
+}) {
   const seen = new Set();
   const names = new Map();
-  const stack = [crateDir];
+  const buildScripts = new Set();
+  const stack = [crateDir, ...extraRoots];
   while (stack.length) {
     const dir = stack.pop();
     if (seen.has(dir)) continue;
@@ -253,10 +324,13 @@ export function firstPartyClosure({ repo, revision, crateDir, blobs, workspacePa
     if (!name) throw new Error(`${manifest} at ${revision} declares no package name`);
     seen.add(dir);
     names.set(dir, name);
+    buildScripts.add(path.posix.normalize(path.posix.join(dir, "build.rs")));
+    const declared = body.match(/^\s*build\s*=\s*"([^"]+)"/m)?.[1];
+    if (declared) buildScripts.add(path.posix.normalize(path.posix.join(dir, declared)));
     for (const dependency of manifestPathDependencies(body, dir, workspacePaths)) stack.push(dependency);
   }
   const crates = [...seen].sort();
-  return { crates, packageNames: crates.map((dir) => names.get(dir)) };
+  return { crates, packageNames: crates.map((dir) => names.get(dir)), buildScripts };
 }
 
 /**
@@ -361,29 +435,58 @@ export function closureText({ provider, crateDir, crates, files, locked, rootSli
  * Compute one provider's closure digest at one revision.
  *
  * `crateDir` is the provider's inference crate, declared in
- * `config/inference-provider-closures.json`. Every source blob under each closure crate's `src/`
- * plus its `Cargo.toml` is digested; `tests/`, `benches/`, `examples/` and `testdata/` are outside
- * the shipped closure and excluded, which is the `#[cfg(test)]` class sc-17776 measured the shipped
- * artifact unit refusing on.
+ * `config/inference-provider-closures.json`. Every source blob under each closure crate's `src/`,
+ * plus its `Cargo.toml` and its build script, is digested; `tests/`, `benches/`, `examples/` and
+ * `testdata/` are outside the shipped closure and excluded, which is the `#[cfg(test)]` class
+ * sc-17776 measured the shipped artifact unit refusing on. A crate-root `README.md` is excluded for
+ * the same reason: it is not a compile input.
  */
 export function providerClosureDigest({
   repo, revision, provider, crateDir, blobs, lock, rootManifest, readBodies, runGit = git,
 }) {
   const resolvedBlobs = blobs ?? treeBlobs(repo, revision, { runGit });
   const resolvedRootManifest = rootManifest ?? readFileAt(repo, revision, "Cargo.toml", runGit);
-  const { crates, packageNames } = firstPartyClosure({
-    repo,
-    revision,
-    crateDir,
-    blobs: resolvedBlobs,
-    workspacePaths: workspaceDependencyPaths(resolvedRootManifest),
-    runGit,
-  });
+  const resolvedLock = lock ?? parseCargoLock(readFileAt(repo, revision, "Cargo.lock", runGit));
+  const workspacePaths = workspaceDependencyPaths(resolvedRootManifest);
+  const patchPaths = patchTargetPaths(resolvedRootManifest);
+
+  // Local `[patch]` targets are pulled in by REACHABILITY, not unconditionally: the lock records
+  // `candle-kernels` under every Candle provider (via `candle-core`) and under no MLX one, so a
+  // kernel edit moves all five Candle digests and none of the three MLX digests. Sweeping every
+  // patch target into every closure would be sound but would re-couple lanes that share nothing,
+  // which is the coupling this module exists to remove.
+  //
+  // Iterated to a fixpoint rather than run once. With a CONSISTENT `Cargo.lock` one pass is already
+  // enough, because `lockedClosure` is itself transitive: if the lock says this closure reaches
+  // `patched`, it has also walked `patched`'s own dependency list, so a patch target reachable only
+  // *through* another patch target is admitted in the same pass. The loop exists for the case that
+  // argument does not cover — a newly admitted crate whose own `path =` dependencies introduce a
+  // package name the lock walk had not reached, which is what a lock that has drifted from the
+  // manifests looks like. Under-including there would be a false green, so it costs one extra
+  // comparison to rule out rather than assume. It terminates: every pass that does not break adds at
+  // least one directory from the finite `patchPaths`.
+  let walked;
+  let locked;
+  const patchRoots = [];
+  for (;;) {
+    walked = firstPartyClosure({
+      repo, revision, crateDir, extraRoots: patchRoots, blobs: resolvedBlobs, workspacePaths, runGit,
+    });
+    locked = lockedClosure(resolvedLock, walked.packageNames);
+    const reached = new Set(locked.map((entry) => entry.name));
+    const added = [...patchPaths]
+      .filter(([name, dir]) => reached.has(name) && !walked.crates.includes(dir))
+      .map(([, dir]) => dir);
+    if (!added.length) break;
+    patchRoots.push(...added);
+  }
+  const { crates, buildScripts } = walked;
 
   // A crate directory can be the PARENT of its siblings (`crates/media/mlx-gen` hosts
   // `mlx-gen-qwen-image`), so a bare prefix match would sweep unrelated crates into the closure and
   // resurrect the cross-model coupling this module exists to remove. Match each crate's own `src/`.
   const owned = (file) =>
+    buildScripts.has(file) ||
     crates.some((crate) => file === `${crate}/Cargo.toml` || file.startsWith(`${crate}/src/`));
   const owned_files = [...resolvedBlobs].filter(([file]) => owned(file)).sort(([a], [b]) => a.localeCompare(b));
   if (!owned_files.length) throw new Error(`closure for ${provider} matched no source files at ${revision}`);
@@ -402,8 +505,6 @@ export function providerClosureDigest({
     );
   }
 
-  const resolvedLock = lock ?? parseCargoLock(readFileAt(repo, revision, "Cargo.lock", runGit));
-  const locked = lockedClosure(resolvedLock, packageNames);
   const rootSlices = rootManifestSlices(resolvedRootManifest);
 
   const text = closureText({

@@ -40,6 +40,17 @@ provider at once. The runner stamps the digest at capture time from the inferenc
 already given; `evidenceSemantics` fails loudly rather than falling back if a record lacks one, since
 a silent fallback would restore the old policy invisibly.
 
+The runner derives **one digest per authoritative lane it is about to capture**, keyed on each
+selected plan entry's own `<backend>:<target.provider>` — never on `--provider`, which names a plan
+entry (`candle-krea-q4-fresh-reference-resident`), not a lane. A run that selects several lanes
+(`--backend candle` with no `--fixture`) stamps each record with its own lane's digest. A selection
+that is entirely `fixture`/`candidate` scope derives nothing: those records can never be `current`,
+so they need neither a declarations entry nor an inference crate layout. Derivation happens **before
+the first capture invocation**, so an undeclared lane fails in seconds rather than after a multi-hour
+GPU sweep. Every authoritative lane in `config/memory-calibration-plan.json` must therefore have an
+entry in `config/inference-provider-closures.json`; `memory-calibration-harness.test.mjs` asserts
+that, and that every `--fixture` a checked-in capture workflow names still exists in the plan.
+
 Full rule, what the digest covers, what it deliberately does not see, and the pin-bump procedure:
 [calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md).
 
