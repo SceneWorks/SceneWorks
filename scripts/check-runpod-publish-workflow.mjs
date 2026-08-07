@@ -54,8 +54,6 @@ for (const contract of [
   "target: runpod",
   "platforms: linux/amd64",
   "push: true",
-  "inference_token=${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}",
-  "x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}@github.com",
   "npm run check",
   "npm run check:runpod:image-contract",
   "scripts/check-gen-core-skew.sh --self-test",
@@ -84,14 +82,21 @@ assert.equal(
   1,
   "latest must have exactly one guarded metadata rule",
 );
+// sc-17879: this lane used to inject an inference read token twice -- once as a `url.…insteadOf`
+// rewrite for the host `cargo fetch`, once as a BuildKit secret the Dockerfile turned into the same
+// rewrite. `SceneWorks/inference` is public and always was, so both bought nothing; the guard is now
+// that NEITHER exists, in either place. Both fetches resolve the pinned revision anonymously.
 assert.ok(
-  !/build-args:[\s\S]*SCENEWORKS_INFERENCE_READ_TOKEN/.test(workflow),
-  "private inference token must be a BuildKit secret, never a build arg",
+  !/SCENEWORKS_INFERENCE_READ_TOKEN/.test(workflow),
+  "the inference repo is public; this workflow must carry no inference credential (sc-17879)",
 );
-assert.equal(
-  workflow.match(/secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)?.length,
-  2,
-  "host fetch and BuildKit must both use the dedicated-token/GITHUB_TOKEN fallback",
+assert.ok(
+  !/inference_token/.test(workflow) && !/inference_token/.test(dockerfile),
+  "the vestigial inference BuildKit secret must not come back (sc-17879)",
+);
+assert.ok(
+  !/x-access-token:/.test(workflow) && !/x-access-token:/.test(dockerfile),
+  "no credential rewrite for the public inference repo, in the workflow or the Dockerfile (sc-17879)",
 );
 assert.ok(
   !/(?:echo|printf)[^\n]*\$\{\{\s*(?:secrets\.|github\.token)/.test(workflow),

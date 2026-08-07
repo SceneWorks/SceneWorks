@@ -44,6 +44,8 @@ MACOSX_DEPLOYMENT_TARGET = "26.2"
 # See docs/rust-mlx-build.md.
 
 [net]
-# The canonical inference workspace is a private SceneWorks repository. Use the system Git client so
-# Cargo honors the same credential helper as `git clone` and `gh auth setup-git`.
+# Route git dependencies (the canonical `SceneWorks/inference` workspace among them) through the
+# system Git client rather than Cargo's built-in transport, so they resolve exactly the way
+# `git clone` does. The inference repo is PUBLIC, so no credential is involved: the pinned revision
+# fetches with no token, no credential helper, GIT_CONFIG_NOSYSTEM=1 and an empty HOME (sc-17879).
 git-fetch-with-cli = true

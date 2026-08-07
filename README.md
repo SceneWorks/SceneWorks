@@ -173,15 +173,13 @@ For the full per-job-kind breakdown of which capability each build advertises an
 the routing rules that decide, see the
 [Worker Capability Matrix](crates/sceneworks-worker/ARCHITECTURE.md).
 
-Developer builds require read access to the private
-[`SceneWorks/inference`](https://github.com/SceneWorks/inference) repository. Authenticate the
-system Git client (for example with `gh auth login` followed by `gh auth setup-git`) before running
-Cargo. GitHub Actions Rust/package jobs use the repository secret
-`SCENEWORKS_INFERENCE_READ_TOKEN`, scoped to read that repository. The product repository remains
-public and the inference repository remains private; unauthenticated source builds therefore cannot
-fetch the runtime at this cutover boundary. Container builds additionally read that same environment
-variable through a BuildKit secret mount during `cargo fetch`; the value is not persisted in an
-image layer or exposed to Rust build scripts.
+Developer builds fetch the canonical runtime from
+[`SceneWorks/inference`](https://github.com/SceneWorks/inference). Both repositories are public, so
+Cargo resolves the pinned revision anonymously — no GitHub identity, credential helper, or CI secret
+is involved in any build lane, on the host or inside a container build. Fork pull requests therefore
+build the Rust lanes with nothing configured. (Two workflows still name a
+`SCENEWORKS_INFERENCE_READ_TOKEN` secret, but only on the dispatch-only memory-calibration
+`actions/checkout`, and it falls back to `github.token`.)
 
 ## LoRA training
 
@@ -318,13 +316,10 @@ error instead of waiting forever.
 To build a production API image that serves the React SPA, static assets, and
 `/api/v1/*` from the same process and origin, use the opt-in `rust-api-embed`
 target. The plain `rust-api` target remains the non-embedded image used by
-Compose. The build needs a read token for the private inference dependency; this
-PowerShell example reuses the authenticated GitHub CLI token without writing it
-to disk:
+Compose:
 
 ```powershell
-$env:SCENEWORKS_INFERENCE_READ_TOKEN = gh auth token
-docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
+docker build `
   --file docker/rust.Dockerfile `
   --target rust-api-embed `
   --build-arg BIN=sceneworks-rust-api `
@@ -349,7 +344,7 @@ exclusions, and measured large-response CPU tradeoff are documented in
 [API response compression](docs/api-response-compression.md).
 
 ```powershell
-docker build --secret id=inference_token,env=SCENEWORKS_INFERENCE_READ_TOKEN `
+docker build `
   --file docker/rust.Dockerfile `
   --target runpod `
   --tag sceneworks-runpod:local .

@@ -110,7 +110,7 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     "name: Disable unstable sccache wrapper for the heavy Candle lane",
   );
   const isolate = workflow.indexOf("name: Isolate Cargo dependency checkout");
-  const fetch = workflow.indexOf("name: Fetch the private inference release");
+  const fetch = workflow.indexOf("name: Fetch the pinned inference release");
   assert.ok(
     prepare >= 0 && prepare < disableWrapper && disableWrapper < isolate && isolate < fetch,
   );
@@ -339,10 +339,13 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     inferenceCheckout,
     /token: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}/,
   );
-  assert.match(
-    workflow,
-    /x-access-token:\$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token \}\}@github\.com\/SceneWorks\/inference\.insteadOf/,
-  );
+  // The Cargo fetch itself carries NO credential (sc-17879). `SceneWorks/inference` is public, so
+  // the `url.…insteadOf` rewrite this lane used to inject bought nothing, and on a fork -- where
+  // `secrets.*` expands to empty -- it emitted `https://x-access-token:@github.com/...` and broke
+  // the fetch outright. The dispatch-only calibration checkout above is a separate mechanism and
+  // keeps its `|| github.token` fallback.
+  assert.doesNotMatch(workflow, /x-access-token:/);
+  assert.doesNotMatch(workflow, /GIT_CONFIG_(?:COUNT|KEY_0|VALUE_0)/);
   assert.match(workflow, /--backend mlx/);
   assert.match(workflow, /QWEN_SEED=15511/);
   assert.match(workflow, /QWEN_SEED=16353/);

@@ -37,8 +37,8 @@ jobs:
   parity:
     runs-on: ubuntu-latest
     env:
-      # Fetch the private inference source once with a scoped credential, then force every build
-      # and build.rs process offline so the token is absent from their environment.
+      # Fetch the pinned inference source once, then force every build and build.rs process
+      # offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
     # A stalled step (e.g. a transient `docker compose up --build` layer/registry
     # hang in the Docker smoke) otherwise rides GitHub's 6-hour default timeout,
@@ -62,12 +62,9 @@ jobs:
           toolchain: "1.97.1"
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
@@ -181,8 +178,6 @@ jobs:
             node scripts/docker-smoke-relevance.mjs --expected-count "$changed_file_count"
       - name: Smoke default Rust API Docker runtime
         if: steps.docker_smoke_gate.outputs.run == 'true'
-        env:
-          SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}
         run: npm run check:docker:rust-api
 
   # THE CANDLE TYPECHECK, ON A HOSTED BOX. The merge queue's whole job is catching semantic
@@ -214,8 +209,8 @@ jobs:
   candle:
     runs-on: ubuntu-latest
     env:
-      # Same posture as `parity`: fetch the private inference source once with a scoped credential,
-      # then force every build and build.rs process offline so the token is absent from them.
+      # Same posture as `parity`: fetch the pinned inference source once, then force every build
+      # and build.rs process offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
     # The three cargo invocations are two `check`s and one `clippy`, all warm-cached after the first
     # run. Sized like `parity` so a wedge fails in minutes rather than riding the 6-hour default
@@ -234,12 +229,9 @@ jobs:
           # A distinct key from `parity`'s: this job compiles the same crates under a different
           # feature set, so sharing one cache would thrash both.
           key: candle
-      - name: Fetch the private inference release
+      - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
-          GIT_CONFIG_COUNT: "1"
-          GIT_CONFIG_KEY_0: "url.https://x-access-token:${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN }}@github.com/SceneWorks/inference.insteadOf"
-          GIT_CONFIG_VALUE_0: "https://github.com/SceneWorks/inference"
         run: cargo fetch --locked
       - name: Typecheck the candle backend configuration
         # No `--allow-skip`: this host is Linux, so `not(target_os = "macos")` holds natively and
