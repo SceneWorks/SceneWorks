@@ -1039,8 +1039,10 @@ mod tests {
                 && binding["mode"] == "text_to_image"
                 && binding["overlay"] == "none"
                 && binding["inferenceRevision"] == "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
-                && binding["compatibleInferenceRevision"]
-                    == "a4f409ae8ce73eda2ee8117b89b5f479666606b8"
+                // sc-17774: `compatibleInferenceRevision` is gone — it was flux2_dev's one-shot
+                // hand-audited hatch. The binding now carries the closure digest it was captured
+                // under, which is what currency compares.
+                && binding["inferenceClosureDigest"].is_string()
         }));
 
         let geometry = MemoryGeometry {

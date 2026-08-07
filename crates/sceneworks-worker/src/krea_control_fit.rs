@@ -914,6 +914,10 @@ mod tests {
     }
 
     /// Flip a fixture's control block to CURRENT evidence (what sc-16013 ships).
+    ///
+    /// sc-17774: "current" now includes the closure term, so this stamps the LIVE digest for the
+    /// lane. Read rather than frozen — a literal would go stale on the next pin bump and every
+    /// ladder test below would quietly become a staleness test instead.
     fn current_evidence(mut entry: JsonObject) -> JsonObject {
         let control = entry
             .get_mut("candle")
@@ -922,6 +926,10 @@ mod tests {
             .and_then(Value::as_object_mut)
             .expect("control block");
         control.insert("measured".to_owned(), json!(true));
+        control.insert(
+            "inferenceClosureDigest".to_owned(),
+            json!(live_test_closure_digest()),
+        );
         control.remove("supersededBy");
         entry
     }

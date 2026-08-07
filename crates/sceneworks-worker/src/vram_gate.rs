@@ -1821,6 +1821,38 @@ mod tests {
         }))
     }
 
+    /// The shipped Krea entry with its `turboFit` closure digest overridden to the LIVE one.
+    ///
+    /// sc-17774: the shipped ladder declares the digest it was actually measured under, and that is
+    /// currently behind the pin — `candle-gen-krea` itself has not moved, but `gen-core` has, so the
+    /// currency gate (correctly, for a source-level unit) reports it stale. Every test below is about
+    /// which RUNG the ladder selects, which is a different axis; leaving them to trip over currency
+    /// would stop them testing the ladder at all. Currency itself is covered by
+    /// `krea_control_fit::tests::a_stale_control_closure_falls_back_instead_of_reporting_a_fit`.
+    ///
+    /// Read, never frozen — a literal would go stale on the next pin bump.
+    fn builtin_krea_turbo_manifest_at_live_closure() -> JsonObject {
+        let mut manifest = builtin_krea_turbo_manifest();
+        if let Some(fit) = manifest
+            .get_mut("candle")
+            .and_then(Value::as_object_mut)
+            .and_then(|candle| candle.get_mut("turboFit"))
+            .and_then(Value::as_object_mut)
+        {
+            fit.insert(
+                "inferenceClosureDigest".to_owned(),
+                json!(
+                    sceneworks_core::memory_calibration::packaged_closure_digest(
+                        "candle",
+                        "krea_2_turbo"
+                    )
+                    .unwrap_or_default()
+                ),
+            );
+        }
+        manifest
+    }
+
     fn builtin_krea_turbo_manifest() -> JsonObject {
         let jsonc = include_str!("../../../config/manifests/builtin.models.jsonc");
         let parsed: Value =
@@ -1837,7 +1869,7 @@ mod tests {
     }
 
     fn builtin_krea_turbo_manifest_with_original_fingerprint() -> JsonObject {
-        let mut manifest = builtin_krea_turbo_manifest();
+        let mut manifest = builtin_krea_turbo_manifest_at_live_closure();
         manifest["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
         manifest
@@ -1927,7 +1959,7 @@ mod tests {
     /// `unsupported: krea_2_turbo: calibration handshake mismatch`.
     #[test]
     fn builtin_krea_turbo_calibration_abi_tracks_the_pinned_provider() {
-        let manifest = builtin_krea_turbo_manifest();
+        let manifest = builtin_krea_turbo_manifest_at_live_closure();
         let shipped = manifest["candle"]["turboFit"]["calibrationAbi"]
             .as_u64()
             .expect("shipped calibrationAbi");
@@ -1950,7 +1982,7 @@ mod tests {
     /// manifest is read unpatched.
     #[test]
     fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
-        let manifest = builtin_krea_turbo_manifest();
+        let manifest = builtin_krea_turbo_manifest_at_live_closure();
         let turbo_fit = manifest["candle"]["turboFit"]
             .as_object()
             .expect("Krea turbo fit");
@@ -2800,7 +2832,7 @@ mod tests {
 
     #[test]
     fn builtin_krea_q8_curves_conservatively_cover_every_measured_phase_sample() {
-        let manifest = builtin_krea_turbo_manifest();
+        let manifest = builtin_krea_turbo_manifest_at_live_closure();
         let samples = [
             (
                 MemoryStrategy::StagedResidency,
@@ -2878,7 +2910,7 @@ mod tests {
 
     #[test]
     fn builtin_krea_q8_and_bf16_slopes_are_fitted_from_same_tier_samples() {
-        let manifest = builtin_krea_turbo_manifest();
+        let manifest = builtin_krea_turbo_manifest_at_live_closure();
         let turbo_fit = &manifest["candle"]["turboFit"];
         let samples = [
             ("q8", "threeStage", MemoryStrategy::StagedResidency),
@@ -3068,7 +3100,7 @@ mod tests {
 
     #[test]
     fn builtin_krea_bf16_curves_conservatively_cover_every_measured_phase_sample() {
-        let manifest = builtin_krea_turbo_manifest();
+        let manifest = builtin_krea_turbo_manifest_at_live_closure();
         let samples = [
             (
                 MemoryStrategy::StagedResidency,

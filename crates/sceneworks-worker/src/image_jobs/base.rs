@@ -6831,6 +6831,14 @@ mod krea_turbo_memory_route_tests {
             .expect("Krea 2 Turbo manifest entry");
         model["candle"]["turboFit"]["calibrationFingerprint"] =
             Value::String("krea-turbo-cuda-phase-curves-v1".into());
+        // sc-17774: these tests make the ladder historical through the FINGERPRINT, which is their
+        // subject. Stamp the live closure so currency is not a second, unintended historical axis —
+        // the shipped digest is behind the pin (`gen-core` moved), and letting that decide too would
+        // stop these tests exercising the fingerprint path they are named for.
+        model["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String(
+            sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
+                .unwrap_or_default(),
+        );
         // sc-17097 removed the ABI re-stamp that used to sit here. Overwriting the shipped
         // `calibrationAbi` with the current constant is what kept every selector test green while
         // production rejected the same manifest: no test in the tree ever read the shipped value.
