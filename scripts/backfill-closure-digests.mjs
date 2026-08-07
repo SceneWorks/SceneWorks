@@ -49,7 +49,6 @@ export function digestWorkload(records) {
 const REVISION_KEY = /"inferenceRevision":\s*"([0-9a-f]{40})"(\s*,)?/;
 const DIGEST_KEY = /"inferenceClosureDigest":\s*"([0-9a-f]{64})"/;
 const PROVIDER_KEY = /"provider":\s*"([^"]+)"/;
-const BACKEND_KEY = /^\s*"(mlx|candle)":\s*\{/;
 
 /**
  * Column at which this line's `//` comment tail begins, or `Infinity`.
@@ -102,12 +101,6 @@ function maskLine(line) {
     }
   }
   return masked.join("");
-}
-
-/** Regex match on the code part of a line — a match inside a comment tail is not a match. */
-function codeMatch(line, pattern) {
-  const match = line.match(pattern);
-  return match && match.index < commentColumn(line) ? match : null;
 }
 
 /**
