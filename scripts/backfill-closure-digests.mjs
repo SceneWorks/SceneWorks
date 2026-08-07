@@ -46,78 +46,358 @@ export function digestWorkload(records) {
   return byRevision;
 }
 
+const REVISION_KEY = /"inferenceRevision":\s*"([0-9a-f]{40})"(\s*,)?/;
+const DIGEST_KEY = /"inferenceClosureDigest":\s*"([0-9a-f]{64})"/;
+const PROVIDER_KEY = /"provider":\s*"([^"]+)"/;
+const BACKEND_KEY = /^\s*"(mlx|candle)":\s*\{/;
+
+/**
+ * Column at which this line's `//` comment tail begins, or `Infinity`.
+ *
+ * Quote-aware, because the manifest is full of `"https://…"` values and `"q4/*"` globs — a naive
+ * `indexOf("//")` would declare half of those lines commented.
+ */
+function commentColumn(line) {
+  let inString = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (inString) {
+      if (char === "\\") index += 1;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "/" && line[index + 1] === "/") return index;
+  }
+  return Infinity;
+}
+
+/**
+ * Same-length copy of `line` with string contents and the comment tail blanked out.
+ *
+ * Brace depth is counted off this, never off the raw line. Both kinds of decoration in this file
+ * carry braces that are not structure: prose comments quote shapes while explaining them (see the
+ * `branchTierByBaseTier` note above `candle.control`), and string values hold globs like `"q4/*"`
+ * and URLs. Counting either would move an object boundary and silently mis-scope a binding.
+ */
+function maskLine(line) {
+  const masked = line.split("");
+  let inString = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (inString) {
+      masked[index] = " ";
+      if (char === "\\") {
+        if (index + 1 < line.length) masked[index + 1] = " ";
+        index += 1;
+      } else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      masked[index] = " ";
+      inString = true;
+    } else if (char === "/" && line[index + 1] === "/") {
+      for (let tail = index; tail < line.length; tail += 1) masked[tail] = " ";
+      return masked.join("");
+    }
+  }
+  return masked.join("");
+}
+
+/** Regex match on the code part of a line — a match inside a comment tail is not a match. */
+function codeMatch(line, pattern) {
+  const match = line.match(pattern);
+  return match && match.index < commentColumn(line) ? match : null;
+}
+
+/**
+ * Refuse to touch a manifest containing `/* … *\/` block comments.
+ *
+ * Everything here is line-scoped, so a comment spanning lines would be read as code: its braces
+ * would move object boundaries and a 64-hex value quoted inside it would be rewritten as if it
+ * were a digest. JSONC permits them and `scripts/lib/jsonc.mjs` reads them, so "the manifest has
+ * none today" is a fact about today. Failing loudly is the honest response to syntax this cannot
+ * scope correctly; corrupting shipped runtime data is not.
+ */
+function assertNoBlockComments(lines) {
+  const line = lines.findIndex((text) => maskLine(text).includes("/*"));
+  if (line !== -1) {
+    throw new Error(
+      `line ${line + 1}: the manifest contains a /* block comment, which this line-based stamper ` +
+        "cannot scope. Rewrite it as // comments, or teach commentColumn/maskLine to carry block " +
+        "state across lines.",
+    );
+  }
+}
+
+/**
+ * Every `[line, from, to]` slice that lies DIRECTLY inside the object enclosing `lines[index]`,
+ * walking outward in both directions from column `anchor` and stopping at the braces that open and
+ * close that object.
+ *
+ * "Directly" is the whole point: slices nested one level deeper are excluded, so a sub-object's
+ * `inferenceClosureDigest` is never mistaken for the binding's own, and the walk stops dead at the
+ * enclosing close, so a sibling's is never claimed either. sc-17989: the previous version stopped
+ * at the first line merely BEGINNING with `}` or `]`, which is a nested close as often as the real
+ * one — it broke early on any block with a nested sub-object above its digest (inserting a second
+ * `inferenceClosureDigest`) and ran on past the real close when a sibling object opened mid-line.
+ */
+function enclosingSpans(lines, index, anchorStart, anchorEnd) {
+  const spans = [];
+  const clipped = (line, from, to) => [line, from, Math.min(to, commentColumn(lines[line]))];
+
+  let depth = 0;
+  for (let scan = index; scan < lines.length; scan += 1) {
+    const masked = maskLine(lines[scan]);
+    let start = scan === index ? anchorEnd : 0;
+    let spanStart = start;
+    let closed = false;
+    for (let column = start; column < masked.length; column += 1) {
+      const char = masked[column];
+      if (char === "{" || char === "[") {
+        if (depth === 0) spans.push(clipped(scan, spanStart, column));
+        depth += 1;
+      } else if (char === "}" || char === "]") {
+        depth -= 1;
+        if (depth < 0) {
+          spans.push(clipped(scan, spanStart, column));
+          closed = true;
+          break;
+        }
+        if (depth === 0) spanStart = column + 1;
+      }
+    }
+    if (closed) break;
+    if (depth === 0) spans.push(clipped(scan, spanStart, lines[scan].length));
+  }
+
+  depth = 0;
+  for (let scan = index; scan >= 0; scan -= 1) {
+    const masked = maskLine(lines[scan]);
+    const end = scan === index ? anchorStart : lines[scan].length;
+    let spanEnd = end;
+    let opened = false;
+    for (let column = end - 1; column >= 0; column -= 1) {
+      const char = masked[column];
+      if (char === "}" || char === "]") {
+        if (depth === 0) spans.push(clipped(scan, column + 1, spanEnd));
+        depth += 1;
+      } else if (char === "{" || char === "[") {
+        depth -= 1;
+        if (depth < 0) {
+          spans.push(clipped(scan, column + 1, spanEnd));
+          opened = true;
+          break;
+        }
+        if (depth === 0) spanEnd = column;
+      }
+    }
+    if (opened) break;
+    if (depth === 0) spans.push(clipped(scan, 0, spanEnd));
+  }
+
+  return spans;
+}
+
+/**
+ * First match of `pattern` inside `spans`, as `{ line, column, value }` with `column` absolute on
+ * that line. Absolute because a digest is rewritten by position, not by `String.replace` — the same
+ * 64-hex value can legitimately appear twice on one line and only one of them is this binding's.
+ */
+function findInSpans(lines, spans, pattern) {
+  for (const [line, from, to] of spans) {
+    if (to <= from) continue;
+    const match = lines[line].slice(from, to).match(pattern);
+    if (match) return { line, column: from + match.index, value: match[1] };
+  }
+  return null;
+}
+
+/**
+ * The `"mlx"` / `"candle"` block this binding sits in, or `null`.
+ *
+ * Walks OUTWARD by brace depth rather than scanning up line by line. A line scan finds the nearest
+ * `"mlx": {` header above the binding whether or not that block is still open — the module header
+ * below records this exact failure from the first draft, where a `candle` header was paired with an
+ * `mlx` binding further down and invented a `candle:qwen_image` lane that does not exist.
+ */
+function enclosingBackend(lines, index, anchor) {
+  let depth = 0;
+  for (let scan = index; scan >= 0; scan -= 1) {
+    const masked = maskLine(lines[scan]);
+    const end = scan === index ? anchor : lines[scan].length;
+    for (let column = Math.min(end, masked.length) - 1; column >= 0; column -= 1) {
+      const char = masked[column];
+      if (char === "}" || char === "]") depth += 1;
+      else if (char === "{" || char === "[") {
+        if (depth > 0) {
+          depth -= 1;
+          continue;
+        }
+        // Crossed the brace that opens the enclosing object: if it belongs to a backend key this is
+        // the answer, otherwise carry on outward at the parent's level.
+        const backend = lines[scan].slice(0, column).match(/"(mlx|candle)":\s*$/)?.[1];
+        if (backend) return backend;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Stamp `inferenceClosureDigest` onto every calibration binding in the JSONC manifest.
  *
  * Line-based on purpose: the manifest is JSONC and its comments carry the reasoning for individual
  * bindings, so a parse/serialise round trip would silently delete them. Each binding is located by
- * its `inferenceRevision` line and paired with the `provider` line inside the same object.
+ * its `inferenceRevision` key and paired with the `provider` key in the same object — see
+ * `enclosingSpans` for what "the same object" means and why the naive version of it corrupts data.
  *
- * `kreaTurboFit` also carries an `inferenceRevision` and is not stamped HERE, because it is not a
- * per-binding calibration: it is a whole-block fit whose `inferenceClosureDigest` sits beside its
- * `inferenceRevision` and is maintained directly (as is `candle.control`'s, for the Krea control
- * lane). Both were separate per-model invalidation mechanisms — survey sc-17775 §9.4 — and both are
- * now on the same closure term as everything else; only the stamping route differs. Any
- * `inferenceRevision` line with no `provider` in its object is reported rather than skipped quietly.
+ * Comment tails are excluded from every match, not just from brace counting. The manifest narrates
+ * digest provenance in prose ("the closure of `candle-gen-krea` these measurements were taken
+ * against"), so a scan that reads comments will happily rewrite a 64-hex value quoted inside one
+ * and leave the block with no real digest key at all.
+ *
+ * `turboFit` and `candle.control` (the two whole-block fits, formerly separate per-model
+ * invalidation mechanisms — survey sc-17775 §9.4) are stamped here too, since sc-17989 gave them
+ * the `provider`/`inferenceRevision` keys the locator pairs on.
+ *
+ * Returns `stamped` (bindings whose digest was written or rewritten), `skipped` (an
+ * `inferenceRevision` this cannot pair with a provider or a backend) and `orphans` (an
+ * `inferenceClosureDigest` no located binding reached — a digest that has fallen out of the gate,
+ * which is what losing an `inferenceRevision` or even just its trailing comma looks like).
  */
 export function stampManifest(body, digestFor) {
   const lines = body.split("\n");
-  const out = [];
+  assertNoBlockComments(lines);
   const stamped = [];
   const skipped = [];
+  // Keyed by `line:column` of the `"inferenceClosureDigest"` key, not by line. Two bindings can
+  // share a line — the five flux1 bindings already pack revision and digest together, so packing
+  // two records onto one line is the same editorial style one step further — and a line-granular
+  // set would mark BOTH digests reached the moment one binding claimed either.
+  const claimed = new Set();
+
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
     // Two shapes occur: `inferenceRevision` alone on its line, and packed mid-line alongside
     // `sceneWorksRevision`/`matrixSourceRevision` (the five flux1 bindings). Inserting immediately
-    // after the key handles both without reflowing anyone's formatting.
-    const match = line.match(/"inferenceRevision":\s*"([0-9a-f]{40})",/);
-    if (!match) {
-      out.push(line);
-      continue;
-    }
-    const revision = match[1];
-    // Find this object's provider: it may sit later on the same line, or on a following line before
-    // the object closes.
-    let provider = line.slice(match.index).match(/"provider":\s*"([^"]+)"/)?.[1] ?? null;
-    for (let scan = index + 1; !provider && scan < lines.length; scan += 1) {
-      if (/^\s*[}\]]/.test(lines[scan])) break;
-      provider = lines[scan].match(/"provider":\s*"([^"]+)"/)?.[1] ?? null;
-    }
-    if (!provider) {
-      skipped.push(`line ${index + 1}: ${revision.slice(0, 8)} has no provider in its object`);
-      out.push(line);
-      continue;
-    }
-    // A provider id is not unique across backends, so find the enclosing `"mlx"` / `"candle"` block.
-    let backend = null;
-    for (let scan = index; !backend && scan >= 0; scan -= 1) {
-      backend = lines[scan].match(/^\s*"(mlx|candle)":\s*\{/)?.[1] ?? null;
-    }
-    if (!backend) {
-      skipped.push(`line ${index + 1}: ${revision.slice(0, 8)} is in no mlx/candle block`);
-      out.push(line);
-      continue;
-    }
-    const key = `${backend}:${provider}`;
-    const already = line.match(/"inferenceClosureDigest":\s*"([0-9a-f]{64})",/)?.[1]
-      ?? lines[index + 1]?.match(/"inferenceClosureDigest":\s*"([0-9a-f]{64})",/)?.[1];
-    if (already) {
-      const wanted = digestFor(key, revision);
-      if (already === wanted) {
-        out.push(line);
+    // after the key handles both without reflowing anyone's formatting. The cursor loop is what
+    // makes a SECOND binding on the same line visible; matching once per line silently left it
+    // unstamped and — because its digest looked claimed — unreported.
+    for (let cursor = 0; cursor < lines[index].length; ) {
+      const limit = commentColumn(lines[index]);
+      const match = lines[index].slice(cursor).match(REVISION_KEY);
+      if (!match) break;
+      const start = cursor + match.index;
+      if (start >= limit) break;
+      const end = start + match[0].length;
+      cursor = end;
+
+      const revision = match[1];
+      const spans = enclosingSpans(lines, index, start, end);
+      const provider = findInSpans(lines, spans, PROVIDER_KEY)?.value ?? null;
+      if (!provider) {
+        skipped.push(`line ${index + 1}: ${revision.slice(0, 8)} has no provider in its object`);
         continue;
       }
-      // Re-derive in place on a digest-version bump rather than appending a second key.
-      out.push(line.replace(already, wanted));
-      if (!lines[index + 1]?.includes(already)) stamped.push(`${key}@${revision.slice(0, 8)}`);
-      continue;
+      // A provider id is not unique across backends, so find the enclosing mlx/candle block.
+      const backend = enclosingBackend(lines, index, start);
+      if (!backend) {
+        skipped.push(`line ${index + 1}: ${revision.slice(0, 8)} is in no mlx/candle block`);
+        continue;
+      }
+
+      const key = `${backend}:${provider}`;
+      const found = findInSpans(lines, spans, DIGEST_KEY);
+      if (found) {
+        const seen = `${found.line}:${found.column}`;
+        if (claimed.has(seen)) {
+          skipped.push(
+            `line ${index + 1}: ${revision.slice(0, 8)} shares its digest with another ` +
+              `inferenceRevision in the same object (line ${found.line + 1})`,
+          );
+          continue;
+        }
+        claimed.add(seen);
+        const wanted = digestFor(key, revision);
+        if (found.value !== wanted) {
+          // Re-derive in place on a digest-version bump rather than appending a second key. By
+          // position, not `String.replace` — the same hex can appear twice on one line.
+          const at = lines[found.line].indexOf(found.value, found.column);
+          lines[found.line] =
+            lines[found.line].slice(0, at) + wanted + lines[found.line].slice(at + found.value.length);
+          stamped.push(`${key}@${revision.slice(0, 8)}`);
+        }
+        continue;
+      }
+      // No digest yet. Insert one right after the revision key, supplying the separating comma when
+      // the revision is the object's last key and therefore has none of its own.
+      const lead = match[2] ? ' "' : ', "';
+      const digest = match[2]
+        ? ` "inferenceClosureDigest": "${digestFor(key, revision)}",`
+        : `, "inferenceClosureDigest": "${digestFor(key, revision)}"`;
+      lines[index] = lines[index].slice(0, end) + digest + lines[index].slice(end);
+      claimed.add(`${index}:${end + lead.length - 1}`);
+      stamped.push(`${key}@${revision.slice(0, 8)}`);
+      cursor = end + digest.length;
     }
-    const insertAt = match.index + match[0].length;
-    const digest = ` "inferenceClosureDigest": "${digestFor(key, revision)}",`;
-    out.push(line.slice(0, insertAt) + digest + line.slice(insertAt));
-    stamped.push(`${key}@${revision.slice(0, 8)}`);
   }
-  return { body: out.join("\n"), stamped, skipped };
+
+  // A digest no binding reached is outside the gate even though it looks graded. That is what a
+  // dropped `inferenceRevision` leaves behind, and reporting it is the difference between "the gate
+  // covers everything" being enforced and being asserted. Scanned per occurrence rather than per
+  // line, for the same reason `claimed` is keyed by column.
+  const orphans = [];
+  lines.forEach((line, index) => {
+    const limit = commentColumn(line);
+    for (const match of line.matchAll(new RegExp(DIGEST_KEY, "g"))) {
+      if (match.index >= limit) break;
+      if (claimed.has(`${index}:${match.index}`)) continue;
+      orphans.push(
+        `line ${index + 1}: an inferenceClosureDigest no inferenceRevision/provider pair reaches`,
+      );
+    }
+  });
+
+  return { body: lines.join("\n"), stamped, skipped, orphans };
+}
+
+/**
+ * The `--verify` verdict for one run: an exit code and the lines explaining it.
+ *
+ * Split out of `main` so the gate's decision — the whole point of this script — is reachable
+ * without a real inference clone, and therefore testable. `main` only prints what this returns.
+ *
+ * Coverage is checked BEFORE drift on purpose: "this digest is not graded at all" outranks "this
+ * graded digest moved", and a run reporting only the second while the first is true is how
+ * `turboFit` and `candle.control` sat outside the gate through the whole of sc-17774.
+ */
+export function verifyOutcome({ recordDrift, manifest }) {
+  const ungated = [...manifest.skipped, ...manifest.orphans];
+  if (ungated.length) {
+    return {
+      code: 1,
+      errors: [
+        "manifest digests are outside this gate — an `inferenceRevision` the stamper cannot pair " +
+          "with a `provider`, or an `inferenceClosureDigest` no such pair reaches:",
+        ...ungated.map((note) => `  ${note}`),
+      ],
+    };
+  }
+  const drift = [
+    recordDrift ? `${recordDrift} record digest(s)` : null,
+    manifest.stamped.length ? `${manifest.stamped.length} manifest binding(s)` : null,
+  ].filter(Boolean);
+  if (drift.length) {
+    return {
+      code: 1,
+      errors: [
+        `captured closure digests do not match their own revisions: ${drift.join(" and ")} would ` +
+          "change. A checked-in digest that disagrees with the source it was derived from grades " +
+          "nothing. Re-derive with scripts/backfill-closure-digests.mjs --repo <inference> --write.",
+      ],
+    };
+  }
+  return { code: 0, errors: [] };
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -231,33 +511,26 @@ export async function main(argv = process.argv.slice(2)) {
     `manifest bindings: ${manifest.stamped.length} stamped` +
       (restamped ? `; ${restamped} record digests RESTAMPED (--restamp)` : ""),
   );
+  // Printed on BOTH paths and before any failure return, so one run reports every problem it can
+  // see. Reporting these only after the drift check would hide a fallen-out digest behind an
+  // unrelated drift, and only surface it on the re-run after that drift was fixed.
   for (const note of manifest.skipped) console.log(`  not a calibration binding — ${note}`);
+  for (const note of manifest.orphans) console.log(`  ungraded digest — ${note}`);
 
   // sc-17935: `--verify` is the CI spelling. A plain dry run PRINTS what it would change and still
   // exits 0, which is right for a pin-bump preview and useless as a gate — a hand-edited manifest
   // binding was reported and passed. Verification has to fail on any drift, including the drift a
   // restamp would silently absorb, so it deliberately does not honour `--restamp`.
   if (argv.includes("--verify")) {
-    const drift = [
-      stamped ? `${stamped} record digest(s)` : null,
-      manifest.stamped.length ? `${manifest.stamped.length} manifest binding(s)` : null,
-    ].filter(Boolean);
-    if (drift.length) {
-      console.error(
-        `captured closure digests do not match their own revisions: ${drift.join(" and ")} would ` +
-          "change. A checked-in digest that disagrees with the source it was derived from grades " +
-          "nothing. Re-derive with scripts/backfill-closure-digests.mjs --repo <inference> --write.",
+    const outcome = verifyOutcome({ recordDrift: stamped, manifest });
+    for (const line of outcome.errors) console.error(line);
+    if (outcome.code === 0) {
+      console.log(
+        `captured closure digests match their revisions (${records.length} records + every one of ` +
+          "the manifest's digests, none unreachable)",
       );
-      return 1;
     }
-    // Deliberately does NOT claim to cover everything. Digests maintained directly — a block with no
-    // `provider` in its object, or none with an `inferenceRevision` at all — are invisible to the
-    // stamper and therefore to this gate; `kreaTurboFit` and `candle.control` are both.
-    console.log(
-      `captured closure digests match their revisions (${records.length} records + the manifest ` +
-        "bindings the stamper can locate; directly-maintained digests are not covered)",
-    );
-    return 0;
+    return outcome.code;
   }
 
   if (!argv.includes("--write")) {

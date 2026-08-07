@@ -5343,6 +5343,10 @@
           // sc-17774: the currency term. `inferenceRevision` above is capture provenance and is
           // no longer compared — the digest of `candle-gen-krea`'s compile closure is.
           "inferenceClosureDigest": "bdf379ae9f95302f2010f859eae6806b6382c22d9dffd36c51059d440548f03f",
+          // sc-17989: names the closure lane (`candle:` + this) so `backfill-closure-digests.mjs`
+          // can pair the two keys above and re-derive the digest under `--verify`, like every
+          // per-binding calibration. Before this key the digest was maintained by hand, ungraded.
+          "provider": "krea_2_turbo",
           "measured": true,
           "verification": {
             "hardware": "RTX PRO 6000 Blackwell (sm_120)",
@@ -6229,10 +6233,18 @@
         // `branchPackSaveGb` correction remains absent and no worker reader derives one.
         "control": {
           // sc-17774: the closure of `candle-gen-krea` these direct control measurements were
-          // taken against (1899a722). Currency compares this against the live digest for the same
-          // lane; it replaces `krea_control_fit::KREA_CONTROL_INFERENCE_REVISION`, a per-model
-          // frozen SHA that only that one lane had.
+          // taken against (1899a722, the revision named in prose below). Currency compares this
+          // against the live digest for the same lane; it replaces
+          // `krea_control_fit::KREA_CONTROL_INFERENCE_REVISION`, a per-model frozen SHA that only
+          // that one lane had.
+          //
+          // sc-17989: `inferenceRevision` and `provider` make the pair machine-readable, so
+          // `backfill-closure-digests.mjs --verify` re-derives the digest from real source at that
+          // revision instead of trusting a hand-maintained constant. The revision is capture
+          // provenance only; the digest is the compared term.
+          "inferenceRevision": "1899a7228deb99b65535745d09d4a5f5524565c4",
           "inferenceClosureDigest": "1983c17fe26dde17d6a08f2b7c606ef8c6721389259b4edf92a6b7b58c0eb48e",
+          "provider": "krea_2_turbo_control",
           // TIER INTEGRITY (sc-15799): the tier the pose branch is packed to, per BASE tier. Not a lever
           // and not budget-dependent — `gen_core::tier_integrity::control_branch_tier` is the executable
           // form and `krea_control_fit::control_branch_tier_for_key` is the worker's entry point.

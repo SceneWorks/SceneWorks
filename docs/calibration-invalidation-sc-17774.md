@@ -107,8 +107,9 @@ that by default.
 | --- | --- |
 | `npm run check` | the closure config is **keyed** to the live Cargo pin; every complete record carries a digest |
 | `check.yml` (parity job) | re-derives every lane's digest from a `--depth=1` fetch of the pinned revision — the digests are **real**, not merely present |
-| `check.yml`, same step | re-derives the **captured** half too: `backfill-closure-digests.mjs --verify` against a shallow fetch of every revision `--revisions` reports |
+| `check.yml`, same step | re-derives the **captured** half too: `backfill-closure-digests.mjs --verify` against a shallow fetch of every revision `--revisions` reports — 65 record digests and all 33 manifest digests, with none left directly maintained |
 | `scripts/inference-closure-digest.test.mjs` | the derivation itself, hermetically, over a synthetic workspace |
+| `scripts/backfill-closure-digests.test.mjs` | the stamper's locator over synthetic JSONC (comment-separated digest updated not duplicated, nested and sibling objects never claimed, a hex value inside a comment never mistaken for a key), and the `--verify` verdict itself |
 | `memory_strategy.rs` / `mlx_fit_gate.rs` tests | the runtime gate refuses a moved closure and admits an unmoved one |
 
 The captured-half gate exists because grading only `config/inference-provider-closures.json` left the
@@ -118,13 +119,41 @@ was not hypothetical: a constant in `scripts/sc-15833-flux2-evidence.test.mjs` c
 unnoticed. A plain dry run reports drift and still exits 0, which is right for a pin-bump preview and
 useless as a gate, so `--verify` is a separate mode that fails on any drift and ignores `--restamp`.
 
-**It does not cover the two directly-maintained digests** — `turboFit`'s and `candle.control`'s. The
-stamper locates a binding by pairing an `inferenceRevision` line with a `provider` in the same object;
-`turboFit` has no `provider` and `candle.control` has neither. Giving them those keys is not a
-one-line change: the stamper's "is a digest already here" lookup spans only the matched line and the
-one after it, so on a block whose digest sits three lines below its revision it would insert a second
-`inferenceClosureDigest` rather than update the existing one. Tracked in
-[sc-17989](https://app.shortcut.com/trefry/story/17989).
+sc-17989 brought the last two digests under it. `turboFit`'s and `candle.control`'s were maintained
+by hand and invisible to the stamper, which locates a binding by pairing an `inferenceRevision` key
+with a `provider` in the same object — `turboFit` had no `provider` and `candle.control` had neither
+key. They have both now, so the gate grades all 33 of the manifest's digests rather than 31.
+
+Widening the locator was the substance of that change, not a detail of it. Three properties are
+load-bearing, and each replaced something that silently corrupted or silently passed:
+
+- **Object boundaries come from brace depth**, counted off a copy of each line with string contents
+  and comment tails blanked out. The previous version stopped at the first line *beginning* with `}`
+  or `]`, which is a nested close as often as the real one — it broke early on any block with a
+  sub-object above its digest and inserted a second `inferenceClosureDigest`, and it ran past the
+  real close when a sibling opened mid-line and rewrote that sibling's digest instead.
+- **Comment tails are excluded from every match**, not just from brace counting. This file narrates
+  digest provenance in prose, so a scan that reads comments rewrites a 64-hex value quoted inside
+  one and leaves the block with no real digest key at all.
+- **The walk goes both directions** from the revision key, so a digest or a `provider` written above
+  it is found rather than duplicated.
+
+Coverage is now enforced rather than asserted. `--verify` fails on an `inferenceRevision` it cannot
+pair with a `provider`, *and* on an orphan — an `inferenceClosureDigest` that no located pair
+reaches. The orphan check is what makes "every digest is graded" a fact: dropping an
+`inferenceRevision`, or merely its trailing comma, leaves a digest that still looks graded and is
+checked by nothing, and the skipped-block check alone does not see either. Both are checked before
+drift, because "this digest is not covered" outranks "this covered digest moved".
+
+Two test-fixture constants were the same shape of hole and are now derived instead of transcribed:
+`SUPERSEDED_KREA_CLOSURE_DIGEST` (`scripts/generate-memory-matrix.test.mjs`) and the sc-15833
+constant (`scripts/sc-15833-flux2-evidence.test.mjs`) are read out of the evidence bundle through
+`recordsNeedingDigest` — the gate's own eligibility predicate — so they inherit the CI derivation
+rather than sitting beside it. A wrong value in either did not fail anything; it made the test assert
+the right verdict for the wrong reason, which is exactly how `820bf106…` hid. By contrast the two
+constants in `scripts/sc-15823-flux1-evidence.mjs` are deliberately left as they are: that script
+*feeds* the evidence bundle, so its values land in records the gate re-derives and a drift there
+already surfaces.
 
 The CI re-derivation matters more than it looks. Without it the currency term is checked-in data
 that nothing grades — a hand-edited digest would pass. `SceneWorks/inference` is public, so the
