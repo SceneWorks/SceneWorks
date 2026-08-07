@@ -5,7 +5,6 @@ import test from "node:test";
 import { deflateSync } from "node:zlib";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { buildMatrix } from "./generate-memory-matrix.mjs";
 import { validateRecord } from "./memory-calibration-harness.mjs";
 import {
   flux2CalibrationPlans,

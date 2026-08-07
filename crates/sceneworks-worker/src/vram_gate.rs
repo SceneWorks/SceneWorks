@@ -2277,9 +2277,11 @@ mod tests {
             )
         };
 
+        // sc-17774: mutate the term that DECIDES currency. This used to set
+        // `compatibleInferenceRevision`, which is deleted — leaving the mutation inert and the
+        // fail-closed assertion passing vacuously.
         let mut stale = krea_fit_manifest();
-        stale["candle"]["turboFit"]["evidenceRecords"][0]["compatibleInferenceRevision"] =
-            Value::String("1111111111111111111111111111111111111111".into());
+        stale["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String("1".repeat(64));
         assert_eq!(
             fit(&stale),
             Some(KreaTurboFit::Unverified {

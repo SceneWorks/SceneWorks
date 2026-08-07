@@ -1100,8 +1100,9 @@ mod tests {
             .as_array_mut()
             .expect("mutable FLUX.2-dev calibration bindings")
         {
-            binding["compatibleInferenceRevision"] =
-                json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            // sc-17774: as above — the deleted hatch cannot make a binding unaudited any more, so
+            // move the mutation onto the closure digest currency actually compares.
+            binding["inferenceClosureDigest"] = json!("a".repeat(64));
         }
         assert!(verified_candidates(
             &unaudited_manifest,

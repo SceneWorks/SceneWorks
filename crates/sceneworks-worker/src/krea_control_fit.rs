@@ -1769,6 +1769,9 @@ mod tests {
                     assert_eq!(
                         fit_ladder_for_entry(&m, tier, b),
                         // `super::` — the module's real 6-arg ladder, not this test module's 4-arg helper.
+                        // The seam derives its digest from the manifest, so the direct call must
+                        // read the SAME one — otherwise this compares two different currency states
+                        // rather than the ladder logic it exists to pin (sc-17774).
                         super::fit_ladder(
                             tier,
                             predicted_control_peak_gb(&m, tier),
@@ -1777,7 +1780,7 @@ mod tests {
                             decode_tile_save_gb(&m, tier),
                             chunk_attn_save_gb(&m),
                             control_evidence_is_current(&m),
-                            &live_test_closure_digest(),
+                            control_closure_digest(&m),
                         ),
                         "{tier} @ {free} GB free: the seam must not change a priced decision"
                     );
