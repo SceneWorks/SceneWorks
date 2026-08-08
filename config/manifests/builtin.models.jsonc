@@ -7563,7 +7563,36 @@
         // never quantizes its T5), so NO denseTextEncoderTier. standardTierLayout drives the
         // standard_tier_subdir packed-load path.
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-15520: the shared mlx-gen-chroma memory-strategy contract, declared per entry because
+        // each Chroma1 variant is its own provider id. See the `chroma1_base` entry for the full
+        // mechanism, the measured ladder (28.0779 -> 19.2065 -> 14.6932 GiB on Base q4 at 1024^2),
+        // the equal-peak cadence domain [1, 2, 5, 10] (ordering unresolvable, inference sc-17679),
+        // the measured `Dit` scope default (TextEncoder is -0.00% because rung 1 already shed
+        // T5-XXL), and why rungs 2 and 3 are Missing WITH measurements (rung 2 withheld on an
+        // unresolved 53/255-vs-48 drift margin that reseeds to 28..82; rung 3 -2.27% at a seam that
+        // does not bind, -0.001% on the request). HD shares the code path and the contract shape but
+        // owes its own evidence: the production calibration key below only ever matches
+        // chroma1_base's measured q4 tier and fails closed on this entry (inference sc-17695), and
+        // no `mlx.calibrations` bindings exist for chroma (epic 18093 posture). `overlays` is
+        // ["none"] because streamability requires the clean route.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "chroma1_hd",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "defaults": {
         // True classifier-free guidance with negative prompts: ~40 steps, guidance 3.0.
@@ -7653,7 +7682,90 @@
         // never quantizes its T5), so NO denseTextEncoderTier. standardTierLayout drives the
         // standard_tier_subdir packed-load path.
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-15520: pinned export of the shared memory-strategy contract implemented by
+        // mlx-gen-chroma. All three catalog entries (chroma1_hd, chroma1_base, chroma1_flash) are
+        // the SAME provider route -- one architecture (the FLUX MMDiT skeleton with pruned adaLN:
+        // 19 double + 38 single blocks whose modulation comes from a dense
+        // `distilled_guidance_layer` Approximator), one loader, one contract shape -- differing only
+        // in checkpoint, sampler default and schedule. THIS entry is the measured one: every number
+        // below is Chroma1-Base q4 at 1024^2, 4 steps, true CFG 4.0 (Apple/Metal), from
+        // `tests/memory_ladder_real_weights.rs`, never inherited from FLUX.1 or a sibling family.
+        //
+        // The ladder as measured: resident 28.0779 GiB -> rung 1 staged 19.2065 GiB (-31.60%) ->
+        // rung 4 windowed 14.6932 GiB (-23.50% on rung 1), byte-identical output at every cadence.
+        // Rung 4's saving is attributed rather than assumed: the 4.5133 GiB measured drop matches
+        // the 4.5125 GiB windowable block weight set read from the snapshot's own safetensors
+        // `data_offsets` -- the whole set, to within 0.8 MiB.
+        //
+        // The cadence domain [1, 2, 5, 10] is EQUAL-PEAK ALTERNATIVES, not a latency frontier: all
+        // four bound the request peak to 14.6932 GiB, and the ms/step ordering is unresolvable on
+        // this instrument (times move with execution-order slots; inference sc-17679). The default 1
+        // therefore rests on being the tightest weight bound, not on a latency argument.
+        //
+        // The rung-4 SCOPE domain is [Dit, TextEncoder, Both], default `Dit`, and the default is
+        // MEASURED rather than inherited (`the_window_component_scopes_are_measured_not_inherited`):
+        // against the 19.2065 GiB rung-1 control, `TextEncoder` moves the request peak -0.00%,
+        // `Dit` -23.50% (14.6932 GiB) and `Both` matches `Dit` to the fourth decimal -- equal peak
+        // for a wider scope, so the narrower `Dit` wins (no wall-clock claim is made here: ms/step
+        // ordering is unresolvable on this instrument, inference sc-17679). T5-XXL IS the largest
+        // single component (dense bf16 at 10.15 GiB against a 7.14 GiB packed DiT) -- but rung 1
+        // has already shed it before the heavy
+        // phase loads, so bounding it moves nothing. This verdict is coupled to rung 2's: a bounded
+        // decode would drop the heavy phase below conditioning and flip the binding scope
+        // (Kolors/SC-15521 is the same arithmetic with a different decode).
+        //
+        // RUNGS 2 AND 3 ARE `Missing` WITH MEASUREMENTS, not unattempted, so they are deliberately
+        // absent from `implementations` rather than silently omitted:
+        //   * rung 2 (tiled FLUX.1 16-ch VAE decode) is withheld on an UNRESOLVED MARGIN, not a
+        //     clean failure. The mechanism works and the saving is large (-11.4% to -72.4% of the
+        //     decode phase across 28 swept geometries at the variant's real 28-step schedule), but
+        //     the best cell (edge 832 / overlap 256) drifts 53/255 against the 48/255 bar the
+        //     closest sibling admits -- and resampling that one geometry across five production
+        //     latents gives max-drift 28..82, a 2.9x spread that straddles the bar. Nothing in that
+        //     supports admission, and calling it a clean rejection would overstate the evidence;
+        //     resolving it needs a quality methodology (perceptual or family-derived bar) the epic
+        //     has not agreed on.
+        //   * rung 3 (`sdpa_budgeted_bhsd` on both block stacks) measured -2.27% at the DiT seam
+        //     (7.1679 -> 7.0053 GiB, bit-exact) -- but the seam sits ~12 GiB inside the staged
+        //     request peak, so the REQUEST moves -0.001%, which per the epic is not a saving. MLX's
+        //     fused SDPA streams its scores (no materialized [B,H,Sq,Sk] to bound), and Chroma's
+        //     MMDiT mask is a per-query [B,1,S,S] tensor (85 MiB per CFG branch at 1024^2) the
+        //     bounded kernel must narrow per chunk, adding transients on the wrong side of the
+        //     ledger.
+        //
+        // `overlays` is ["none"] because `structurally_streamable` requires the CLEAN route: any
+        // adapter/control/ip-adapter/identity/external-TE/PiD axis fails the window closed rather
+        // than being silently treated as clean. Streamability also requires Sequential +
+        // DeferredMaterialization and `quantize == None` at load -- true of all three shipped tiers,
+        // since q4/q8 are pre-packed (the loader packed-detects `{base}.scales`) and bf16 loads
+        // dense; only a dense source packed in place at load time (a re-quantizing window) is
+        // refused.
+        //
+        // The production calibration key `chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1` is
+        // deliberately EXACT: it names chroma1_base with the tier directory's own packed marker at
+        // 4 bits, bf16 precision, Sequential, clean route -- and every other axis (the sibling
+        // entries, q8/bf16 tiers, every overlay) fails closed until it has its own evidence
+        // (inference sc-17695). No `mlx.calibrations` bindings are declared here: no packaged
+        // calibration records exist for chroma, and under epic 18093's posture none are required for
+        // the static capability inventory.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "chroma1_base",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "defaults": {
         // Neutral finetuning foundation: ~40 steps, guidance 3.0, true CFG + negative prompts.
@@ -7743,7 +7855,36 @@
         // never quantizes its T5), so NO denseTextEncoderTier. standardTierLayout drives the
         // standard_tier_subdir packed-load path.
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-15520: the shared mlx-gen-chroma memory-strategy contract, declared per entry because
+        // each Chroma1 variant is its own provider id. See the `chroma1_base` entry for the full
+        // mechanism, the measured ladder (28.0779 -> 19.2065 -> 14.6932 GiB on Base q4 at 1024^2),
+        // the equal-peak cadence domain [1, 2, 5, 10] (ordering unresolvable, inference sc-17679),
+        // the measured `Dit` scope default (TextEncoder is -0.00% because rung 1 already shed
+        // T5-XXL), and why rungs 2 and 3 are Missing WITH measurements (rung 2 withheld on an
+        // unresolved 53/255-vs-48 drift margin that reseeds to 28..82; rung 3 -2.27% at a seam that
+        // does not bind, -0.001% on the request). Flash shares the code path and the contract shape
+        // but owes its own evidence: the production calibration key below only ever matches
+        // chroma1_base's measured q4 tier and fails closed on this entry (inference sc-17695), and
+        // no `mlx.calibrations` bindings exist for chroma (epic 18093 posture). `overlays` is
+        // ["none"] because streamability requires the clean route.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "chroma1_flash",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "defaults": {
         // CFG baked: Heun at ~12 steps, guidance 1.0 (CFG off, negative prompt ignored).

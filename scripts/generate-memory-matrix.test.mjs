@@ -1219,8 +1219,14 @@ test("the two rung-4 findings stay separate: structural applicability never impl
       // family moves it -6.97% (q4) to -21.40% (bf16) per entry per tier; Kolors moves it -7.21% /
       // -12.72% / -21.37% by tier, and its `TextEncoder`/`Both` scopes move it a further -22.22% /
       // -60.02% at bf16/512 where conditioning carries the peak.
+      //
+      // SC-15520 (Chroma1) joins with its MLX ladder: rung 4 at `Dit` scope moves the staged request
+      // peak 19.2065 -> 14.6932 GiB (-23.50%) on Chroma1-Base q4 at 1024^2, byte-identical output at
+      // every cadence in [1, 2, 5, 10]. The measured scope is exactly one cell
+      // (chroma1_base/q4/text_to_image/none); the family row reads `moves` through that scope while
+      // every sibling entry, tier, mode and overlay stays `unmeasured`.
       "15510:candle", "15510:mlx", "15511:mlx", "15512:candle", "15512:mlx", "15517:candle", "15517:mlx",
-      "15519:candle", "15521:mlx", "15524:mlx", "15525:mlx",
+      "15519:candle", "15520:mlx", "15521:mlx", "15524:mlx", "15525:mlx",
     ],
   );
   assert.equal(
