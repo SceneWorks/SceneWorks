@@ -3,15 +3,23 @@
 //! Providers own capabilities and lifecycle hooks. Evidence owns measured request cells. The worker
 //! owns live-budget arithmetic and the normative strategy order. Optimized candidates are admitted
 //! only through gen-core's canonical evidence validator.
+//!
+//! Closure-digest currency is a signal, not a gate (sc-18095, epic 18093): a fully-verified
+//! measured cell whose provider closure moved stays eligible with its peak widened by the
+//! backend's stale-measured margin from [`crate::ladder_margin_policy`], and current evidence is
+//! strictly preferred over stale for the same key. Structural verdicts (`Invalid`,
+//! `OutOfEnvelope`, `CompositionMismatch`, unverified conformance) still exclude.
 
 use std::collections::BTreeSet;
 
 use gen_core::{
-    MemoryCleanupSemantics, MemoryEvidence, MemoryEvidenceDimension, MemoryEvidenceVerdict,
-    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryProviderContract, MemorySelection,
-    MemoryStrategy, MemoryStrategySupport,
+    MemoryBackend, MemoryCleanupSemantics, MemoryEvidence, MemoryEvidenceDimension,
+    MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryProviderContract,
+    MemorySelection, MemoryStrategy, MemoryStrategySupport,
 };
 use sceneworks_core::memory_calibration::StrategyRung;
+
+use crate::ladder_margin_policy::{CANDLE_STALE_MEASURED_MARGIN, MLX_STALE_MEASURED_MARGIN};
 
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
@@ -226,10 +234,41 @@ pub struct Candidate<'a> {
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-/// Evidence stores an integer byte ceiling. Admission converts that canonical value to GiB exactly
-/// once; callers cannot submit a second floating-point estimate with a lower coefficient.
-fn evidence_peak_gb(evidence: &MemoryEvidence) -> f64 {
-    evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB
+/// Evidence stores an integer byte ceiling. Admission converts that canonical value (after any
+/// stale-margin widening, which happens in integer bytes) to GiB exactly once; callers cannot
+/// submit a second floating-point estimate with a lower coefficient.
+fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
+    peak_bytes as f64 / BYTES_PER_GIB
+}
+
+/// How a non-excluded candidate passed [`candidate_exclusion`] (sc-18095): with evidence measured
+/// under the request's live compile closure, or with stale-closure evidence that stays eligible
+/// behind the widened stale-measured margin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateCurrency {
+    Current,
+    StaleClosure,
+}
+
+/// The stale-measured margin for one backend (sc-18094 derivation, consumed here by sc-18095).
+///
+/// Matched on the canonical [`MemoryBackend`] family so a new backend cannot compile without
+/// choosing a margin.
+const fn stale_measured_margin(backend: MemoryBackend) -> f64 {
+    match backend {
+        MemoryBackend::Candle => CANDLE_STALE_MEASURED_MARGIN,
+        MemoryBackend::Mlx => MLX_STALE_MEASURED_MARGIN,
+    }
+}
+
+/// Widen a stale-closure candidate's canonical byte ceiling by the backend's stale-measured margin
+/// (sc-18095). The widening happens in integer bytes with a ceil, so the admitted ceiling is never
+/// under the exact `peak * (1 + margin)` product and the GiB conversion stays a single downstream
+/// step.
+fn widened_stale_peak_bytes(peak_bytes: u64, stale_margin: f64) -> u64 {
+    (peak_bytes as f64 * (1.0 + stale_margin))
+        .ceil()
+        .clamp(0.0, u64::MAX as f64) as u64
 }
 
 /// Worker-owned live budget. Headroom is removed once from the live/reclaimable pool and once from
@@ -322,7 +361,7 @@ fn candidate_exclusion(
     request: RequestScope<'_>,
     contract: &MemoryProviderContract,
     candidate: &Candidate<'_>,
-) -> Option<MemoryEvidenceVerdict> {
+) -> Result<CandidateCurrency, MemoryEvidenceVerdict> {
     if request.resolved_route != contract.provider_id
         || request.backend != contract.backend.backend_id()
         || candidate.evidence.key.resolved_route != request.resolved_route
@@ -333,7 +372,7 @@ fn candidate_exclusion(
         || candidate.evidence.key.strategy != candidate.selection.strategy
         || candidate.evidence.key.parameters != candidate.selection.parameters
     {
-        return Some(MemoryEvidenceVerdict::Invalid);
+        return Err(MemoryEvidenceVerdict::Invalid);
     }
     let key = &candidate.evidence.key;
     if key.backend.as_key() != request.backend
@@ -341,18 +380,12 @@ fn candidate_exclusion(
         || key.overlay.as_deref() != request.overlay
         || key.geometry != request.geometry
     {
-        return Some(MemoryEvidenceVerdict::OutOfEnvelope);
-    }
-    // sc-17774: the provider's own compiled closure, not an inference revision. `evidence
-    // .inference_revision` stays as capture provenance and is deliberately not compared — comparing
-    // it is what let a commit to one model stale every other model's measurements.
-    if candidate.closure_digest != request.expected_closure_digest {
-        return Some(MemoryEvidenceVerdict::Stale);
+        return Err(MemoryEvidenceVerdict::OutOfEnvelope);
     }
     if contract.validate_selection(&candidate.selection).is_err() {
-        return Some(MemoryEvidenceVerdict::Invalid);
+        return Err(MemoryEvidenceVerdict::Invalid);
     }
-    candidate
+    if let Some(reason) = candidate
         .evidence
         .optimized_eligibility(contract)
         .err()
@@ -365,6 +398,23 @@ fn candidate_exclusion(
                 reason
             }
         })
+    {
+        return Err(reason);
+    }
+    // sc-17774: the provider's own compiled closure, not an inference revision. `evidence
+    // .inference_revision` stays as capture provenance and is deliberately not compared — comparing
+    // it is what let a commit to one model stale every other model's measurements.
+    //
+    // sc-18095 (epic 18093): a mismatch no longer EXCLUDES the candidate. Currency is a signal, not
+    // a gate: measured evidence whose closure moved stays eligible with its peak widened by the
+    // backend's stale-measured margin (`crate::ladder_margin_policy`), applied by the selector.
+    // Every structural exclusion above still runs first, so `Invalid`, `OutOfEnvelope`, and
+    // `CompositionMismatch` exclude a stale candidate exactly as they exclude a current one — only
+    // fully-verified measured cells reach the stale-admission path.
+    if candidate.closure_digest != request.expected_closure_digest {
+        return Ok(CandidateCurrency::StaleClosure);
+    }
+    Ok(CandidateCurrency::Current)
 }
 
 /// Select the first fitting candidate in the normative resident → staged → bounded-decode →
@@ -396,6 +446,7 @@ pub fn select_strategy(
     let available_bytes = (available_gb * BYTES_PER_GIB)
         .ceil()
         .clamp(0.0, u64::MAX as f64) as u64;
+    let stale_margin = stale_measured_margin(contract.backend.backend_kind());
     let mut deepest = None;
     let mut first_unknown = None;
     for strategy in MemoryStrategy::ALL {
@@ -419,22 +470,65 @@ pub fn select_strategy(
             accumulate_reason(&mut first_unknown, MemoryEvidenceVerdict::Missing);
             continue;
         }
-        let mut eligible = Vec::new();
+        let mut eligible: Vec<(&Candidate<'_>, CandidateCurrency, u64)> = Vec::new();
         let mut first_exclusion = None;
         for candidate in rung_candidates {
-            if let Some(reason) = candidate_exclusion(request, contract, candidate) {
-                accumulate_reason(&mut first_exclusion, reason);
-                tracing::warn!(
-                    route = request.resolved_route,
-                    backend = request.backend,
-                    ?strategy,
-                    ?reason,
-                    "memory-strategy candidate excluded"
-                );
-            } else {
-                eligible.push(candidate);
+            match candidate_exclusion(request, contract, candidate) {
+                Err(reason) => {
+                    accumulate_reason(&mut first_exclusion, reason);
+                    tracing::warn!(
+                        route = request.resolved_route,
+                        backend = request.backend,
+                        ?strategy,
+                        ?reason,
+                        "memory-strategy candidate excluded"
+                    );
+                }
+                Ok(currency) => {
+                    let admitted_peak_bytes = match currency {
+                        CandidateCurrency::Current => candidate.evidence.predicted_peak_bytes,
+                        CandidateCurrency::StaleClosure => widened_stale_peak_bytes(
+                            candidate.evidence.predicted_peak_bytes,
+                            stale_margin,
+                        ),
+                    };
+                    if currency == CandidateCurrency::StaleClosure {
+                        // sc-18095: record the admission and the widened peak so a later OOM under
+                        // this selection is attributable to stale-closure evidence.
+                        tracing::info!(
+                            route = request.resolved_route,
+                            backend = request.backend,
+                            ?strategy,
+                            raw_peak_bytes = candidate.evidence.predicted_peak_bytes,
+                            widened_peak_bytes = admitted_peak_bytes,
+                            stale_margin,
+                            candidate_closure_digest = candidate.closure_digest,
+                            expected_closure_digest = request.expected_closure_digest,
+                            "stale-closure memory-strategy candidate admitted with widened margin"
+                        );
+                    }
+                    eligible.push((candidate, currency, admitted_peak_bytes));
+                }
             }
         }
+        // sc-18095: current evidence is strictly preferred over stale for the same key — a stale
+        // cell whose exact key was re-measured under the live closure never competes with the
+        // re-measurement.
+        let eligible = {
+            let superseded_by_current = |candidate: &Candidate<'_>| {
+                eligible.iter().any(|(current, currency, _)| {
+                    *currency == CandidateCurrency::Current
+                        && current.evidence.key == candidate.evidence.key
+                })
+            };
+            eligible
+                .iter()
+                .filter(|(candidate, currency, _)| {
+                    *currency == CandidateCurrency::Current || !superseded_by_current(candidate)
+                })
+                .copied()
+                .collect::<Vec<_>>()
+        };
         if eligible.is_empty() {
             accumulate_reason(
                 &mut first_unknown,
@@ -442,7 +536,7 @@ pub fn select_strategy(
             );
             continue;
         }
-        let parameter_preference = |candidate: &&Candidate<'_>| {
+        let parameter_preference = |candidate: &Candidate<'_>| {
             let parameters = candidate.selection.parameters;
             (
                 parameters.decode_tile_edge.unwrap_or(0),
@@ -451,17 +545,35 @@ pub fn select_strategy(
                 parameters.decode_overlap.unwrap_or(0),
             )
         };
-        if let Some(candidate) = eligible
+        if let Some((candidate, currency, admitted_peak_bytes)) = eligible
             .iter()
-            .filter(|candidate| candidate.evidence.predicted_peak_bytes <= available_bytes)
-            .max_by(|left, right| {
-                left.evidence
-                    .predicted_peak_bytes
-                    .cmp(&right.evidence.predicted_peak_bytes)
-                    .then_with(|| parameter_preference(left).cmp(&parameter_preference(right)))
-            })
+            .filter(|(_, _, admitted_peak_bytes)| *admitted_peak_bytes <= available_bytes)
+            .max_by(
+                |(left, left_currency, left_peak), (right, right_currency, right_peak)| {
+                    left_peak
+                        .cmp(right_peak)
+                        // Current outranks stale between distinct keys too; on an all-current set this
+                        // arm is always `Equal`, so pre-sc-18095 selection is byte-for-byte unchanged.
+                        .then_with(|| {
+                            (*left_currency == CandidateCurrency::Current)
+                                .cmp(&(*right_currency == CandidateCurrency::Current))
+                        })
+                        .then_with(|| parameter_preference(left).cmp(&parameter_preference(right)))
+                },
+            )
         {
-            let needed_gb = evidence_peak_gb(candidate.evidence);
+            let needed_gb = peak_bytes_to_gb(*admitted_peak_bytes);
+            if *currency == CandidateCurrency::StaleClosure {
+                tracing::warn!(
+                    route = request.resolved_route,
+                    backend = request.backend,
+                    ?strategy,
+                    raw_peak_bytes = candidate.evidence.predicted_peak_bytes,
+                    widened_peak_bytes = *admitted_peak_bytes,
+                    stale_margin,
+                    "memory-strategy selection uses stale-closure evidence at the widened peak"
+                );
+            }
             return Selection::Selected {
                 selection: candidate.selection,
                 needed_gb,
@@ -470,7 +582,7 @@ pub fn select_strategy(
         }
         let minimum = eligible
             .iter()
-            .map(|candidate| evidence_peak_gb(candidate.evidence))
+            .map(|(_, _, admitted_peak_bytes)| peak_bytes_to_gb(*admitted_peak_bytes))
             .min_by(f64::total_cmp)
             .expect("eligible rung is non-empty");
         deepest = Some(deepest.map_or(minimum, |current: f64| current.min(minimum)));
@@ -982,12 +1094,12 @@ mod tests {
 
     #[test]
     fn excluded_cheaper_rung_does_not_block_a_verified_deeper_fit() {
-        let mut stale_staged = evidence(MemoryStrategy::StagedResidency);
-        // sc-17774: staleness is a CLOSURE mismatch now, so the candidate below carries a digest
-        // that is not the request's. Mutating `inference_revision` no longer stales anything — that
-        // field is capture provenance — and leaving this test written that way would have quietly
-        // stopped exercising the excluded-rung path at all.
-        stale_staged.inference_revision = "1111111111111111111111111111111111111111".into();
+        let mut excluded_staged = evidence(MemoryStrategy::StagedResidency);
+        // sc-18095: a stale CLOSURE no longer excludes (it admits with a widened margin), so this
+        // test's excluded cheaper rung is now structurally `Invalid` — its evidence key names the
+        // wrong backend family. Leaving it written against staleness would have quietly stopped
+        // exercising the excluded-rung path at all, exactly as the sc-17774 rewrite before it.
+        excluded_staged.key.backend = gen_core::MemoryBackend::Mlx;
         let mut bounded_decode = evidence(MemoryStrategy::BoundedDecode);
         bounded_decode.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
         let mut provider = contract();
@@ -1003,7 +1115,7 @@ mod tests {
                 .unwrap()
                 .support = MemoryStrategySupport::Missing;
         }
-        rekey_composition(&mut stale_staged, &provider);
+        rekey_composition(&mut excluded_staged, &provider);
         rekey_composition(&mut bounded_decode, &provider);
         let candidates = [
             Candidate {
@@ -1012,8 +1124,8 @@ mod tests {
                     parameters: Default::default(),
                     tier: tier(),
                 },
-                evidence: &stale_staged,
-                closure_digest: STALE_CLOSURE,
+                evidence: &excluded_staged,
+                closure_digest: INF,
             },
             Candidate {
                 selection: MemorySelection {
@@ -1750,15 +1862,14 @@ mod tests {
 
         // 4. The caveat, asserted rather than asserted-away: excluding a cheaper rung's evidence does
         //    NOT stop the walk, so rung 4 is reachable while rung 3's peak still fits. The alternative
-        //    is `Unverified` — still no render — which is why the conclusion survives. Stale is the
-        //    realistic trigger: a change to THIS provider's compile closure invalidates its evidence
-        //    (sc-17774 — it used to be every inference pin bump, for every provider at once).
-        let mut stale_attention = evidences[3].clone();
-        // sc-17774: as above — the stale candidate is marked by its closure digest, not its revision.
-        stale_attention.inference_revision = "0000000000000000000000000000000000000000".into();
-        let mut with_stale = candidates.clone();
-        with_stale[3].evidence = &stale_attention;
-        with_stale[3].closure_digest = STALE_CLOSURE;
+        //    is `Unverified` — still no render — which is why the conclusion survives. The trigger is
+        //    structural (`Invalid` here, via an evidence key naming the wrong backend family): as of
+        //    sc-18095 a stale closure is no longer an exclusion at all — it admits the candidate at a
+        //    widened peak — so only the structural verdicts still open this path.
+        let mut invalid_attention = evidences[3].clone();
+        invalid_attention.key.backend = gen_core::MemoryBackend::Mlx;
+        let mut with_invalid = candidates.clone();
+        with_invalid[3].evidence = &invalid_attention;
         let selection = select_strategy(
             request(),
             &provider,
@@ -1768,7 +1879,7 @@ mod tests {
                 total_gb: 48.0,
                 reserved_headroom_gb: 0.0,
             }),
-            &with_stale,
+            &with_invalid,
         );
         assert!(
             matches!(
@@ -1982,5 +2093,433 @@ mod tests {
                 "select_strategy verdict for {probe:?} under a Missing rung 1"
             );
         }
+    }
+
+    // ── sc-18095: currency as a signal — stale-closure evidence admits behind a widened margin ──
+
+    /// Regression pin: an all-current candidate set selects byte-for-byte as before sc-18095. The
+    /// exact-boundary fit is the sharp edge — if the selector widened CURRENT evidence by any
+    /// margin at all, an 8 GiB peak would stop fitting an 8 GiB budget, and `needed_gb` would stop
+    /// being the raw evidence ceiling.
+    #[test]
+    fn exact_current_selection_is_byte_for_byte_unchanged_and_never_widened() {
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
+        staged.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
+            parameters: Default::default(),
+            tier: tier(),
+        };
+        assert_eq!(
+            select_strategy(
+                request(),
+                &provider,
+                Some(Budget {
+                    available_gb: 8.0,
+                    reclaimable_gb: 0.0,
+                    total_gb: 8.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &[Candidate {
+                    selection,
+                    evidence: &staged,
+                    closure_digest: INF,
+                }],
+            ),
+            Selection::Selected {
+                selection,
+                needed_gb: 8.0,
+                available_gb: 8.0,
+            }
+        );
+    }
+
+    /// sc-18095: a stale-only cell stays eligible, graded at exactly the policy-widened peak. The
+    /// expected value is recomputed here from the POLICY constant rather than the selector's own
+    /// helper, so a selector that stops widening (or widens by the wrong number) turns this red.
+    #[test]
+    fn stale_closure_evidence_is_admitted_at_exactly_the_policy_widened_peak() {
+        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
+        staged.predicted_peak_bytes = raw_peak_bytes;
+        let result = select_strategy(
+            request(),
+            &provider,
+            Some(Budget {
+                available_gb: 11.0,
+                reclaimable_gb: 0.0,
+                total_gb: 11.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &[Candidate {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    parameters: Default::default(),
+                    tier: tier(),
+                },
+                evidence: &staged,
+                closure_digest: STALE_CLOSURE,
+            }],
+        );
+        let Selection::Selected { needed_gb, .. } = result else {
+            panic!("a stale-only cell must stay eligible under sc-18095: {result:?}");
+        };
+        assert!(
+            needed_gb > peak_bytes_to_gb(raw_peak_bytes),
+            "the admitted peak must be WIDENED past the raw measurement, got {needed_gb}"
+        );
+        let expected_widened_bytes =
+            (raw_peak_bytes as f64 * (1.0 + CANDLE_STALE_MEASURED_MARGIN)).ceil();
+        assert_eq!(needed_gb, expected_widened_bytes / BYTES_PER_GIB);
+    }
+
+    /// sc-18095 acceptance: a fully stale ladder still reaches a deep rung instead of collapsing to
+    /// the legacy rung-1/2 fallback — the demotion this story retires. Peaks descend with the
+    /// ladder and only rung 4's widened peak fits the budget.
+    #[test]
+    fn a_fully_stale_ladder_can_still_select_a_deep_rung() {
+        let peaks = [40.0, 30.0, 20.0, 10.0, 2.0];
+        let evidences = MemoryStrategy::ALL
+            .into_iter()
+            .zip(peaks)
+            .map(|(strategy, gb)| {
+                let mut record = evidence(strategy);
+                record.key.parameters = cumulative_params(strategy);
+                record.predicted_peak_bytes = (gb * BYTES_PER_GIB) as u64;
+                record.observed_peak_bytes = Some(record.predicted_peak_bytes);
+                record
+            })
+            .collect::<Vec<_>>();
+        let candidates = MemoryStrategy::ALL
+            .into_iter()
+            .zip(&evidences)
+            .map(|(strategy, record)| Candidate {
+                selection: MemorySelection {
+                    strategy,
+                    parameters: cumulative_params(strategy),
+                    tier: tier(),
+                },
+                evidence: record,
+                closure_digest: STALE_CLOSURE,
+            })
+            .collect::<Vec<_>>();
+        let selection = select_strategy(
+            request(),
+            &contract(),
+            Some(Budget {
+                available_gb: 3.0,
+                reclaimable_gb: 0.0,
+                total_gb: 48.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &candidates,
+        );
+        assert!(
+            matches!(
+                selection,
+                Selection::Selected {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::BoundedTransformerResidency,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "a stale ladder must stay walkable down to rung 4: {selection:?}"
+        );
+    }
+
+    /// Mutation check demanded by the story: prove the widening is APPLIED, not just plumbed. This
+    /// stale cell's raw peak fits the budget exactly — a selector whose stale margin is zeroed (or
+    /// that forgets to widen) selects it, flipping this test red. The real selector grades it at
+    /// the widened peak, which overflows the budget into `Reject`.
+    #[test]
+    fn zeroing_the_stale_margin_would_flip_this_rejection_into_a_selection() {
+        let raw_peak_bytes: u64 = 8 * 1024 * 1024 * 1024;
+        let budget = Budget {
+            available_gb: 8.0,
+            reclaimable_gb: 0.0,
+            total_gb: 8.0,
+            reserved_headroom_gb: 0.0,
+        };
+        // The zero-margin outcome would FIT: the raw peak is exactly the effective budget.
+        assert!(raw_peak_bytes <= (8.0 * BYTES_PER_GIB) as u64);
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
+        staged.predicted_peak_bytes = raw_peak_bytes;
+        let result = select_strategy(
+            request(),
+            &provider,
+            Some(budget),
+            &[Candidate {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    parameters: Default::default(),
+                    tier: tier(),
+                },
+                evidence: &staged,
+                closure_digest: STALE_CLOSURE,
+            }],
+        );
+        let Selection::Reject { needed_gb, .. } = result else {
+            panic!(
+                "a stale cell must be graded at its WIDENED peak; selecting at the raw peak means \
+                 the stale margin was not applied: {result:?}"
+            );
+        };
+        assert!(
+            needed_gb > 8.0,
+            "the reported requirement must carry the widening: {needed_gb}"
+        );
+    }
+
+    /// sc-18095: current evidence is strictly preferred over stale FOR THE SAME KEY, even when the
+    /// stale cell's widened peak would otherwise win the within-rung largest-fitting-peak choice —
+    /// and the preference is declaration-order invariant.
+    #[test]
+    fn current_evidence_beats_stale_for_the_same_key_in_either_declaration_order() {
+        let provider = staged_only_provider();
+        let mut current = evidence(MemoryStrategy::StagedResidency);
+        rekey_composition(&mut current, &provider);
+        current.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
+        // Same evidence KEY, different measurement: the stale capture saw a larger peak, and its
+        // widened value is larger still — the naive max-by-peak winner.
+        let mut stale = current.clone();
+        stale.predicted_peak_bytes = 9 * 1024 * 1024 * 1024;
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
+            parameters: Default::default(),
+            tier: tier(),
+        };
+        let current_candidate = Candidate {
+            selection,
+            evidence: &current,
+            closure_digest: INF,
+        };
+        let stale_candidate = Candidate {
+            selection,
+            evidence: &stale,
+            closure_digest: STALE_CLOSURE,
+        };
+        let budget = Some(Budget {
+            available_gb: 10.0,
+            reclaimable_gb: 0.0,
+            total_gb: 10.0,
+            reserved_headroom_gb: 0.0,
+        });
+        let forward = select_strategy(
+            request(),
+            &provider,
+            budget,
+            &[current_candidate, stale_candidate],
+        );
+        let reverse = select_strategy(
+            request(),
+            &provider,
+            budget,
+            &[stale_candidate, current_candidate],
+        );
+        assert_eq!(forward, reverse);
+        assert!(
+            matches!(forward, Selection::Selected { needed_gb: 8.0, .. }),
+            "the current re-measurement must win over the stale cell with the same key: {forward:?}"
+        );
+    }
+
+    /// sc-18095: staleness is not a bypass — a stale candidate that also fails a structural check
+    /// is excluded with the structural verdict, exactly like a current one. `CompositionMismatch`
+    /// and `Invalid` both still exclude.
+    #[test]
+    fn structural_exclusions_still_exclude_a_stale_candidate() {
+        // CompositionMismatch: the contract grew an engagement edge the captured composition lacks.
+        let captured = evidence(MemoryStrategy::BoundedDecode);
+        let mut changed_contract = contract();
+        changed_contract.additional_prerequisites.push((
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
+        let budget = Some(Budget {
+            available_gb: 10.0,
+            reclaimable_gb: 0.0,
+            total_gb: 10.0,
+            reserved_headroom_gb: 0.0,
+        });
+        assert_eq!(
+            select_strategy(
+                request(),
+                &changed_contract,
+                budget,
+                &[Candidate {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::BoundedDecode,
+                        parameters: params(MemoryStrategy::BoundedDecode),
+                        tier: tier(),
+                    },
+                    evidence: &captured,
+                    closure_digest: STALE_CLOSURE,
+                }],
+            ),
+            Selection::Unverified {
+                reason: MemoryEvidenceVerdict::CompositionMismatch,
+            }
+        );
+
+        // Invalid: the evidence key names the wrong backend family.
+        let provider = staged_only_provider();
+        let mut wrong_backend = evidence(MemoryStrategy::StagedResidency);
+        rekey_composition(&mut wrong_backend, &provider);
+        wrong_backend.key.backend = gen_core::MemoryBackend::Mlx;
+        assert_eq!(
+            select_strategy(
+                request(),
+                &provider,
+                budget,
+                &[Candidate {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::StagedResidency,
+                        parameters: Default::default(),
+                        tier: tier(),
+                    },
+                    evidence: &wrong_backend,
+                    closure_digest: STALE_CLOSURE,
+                }],
+            ),
+            Selection::Unverified {
+                reason: MemoryEvidenceVerdict::Invalid,
+            }
+        );
+    }
+
+    /// sc-18095: the stale margin is per-backend. The budget sits between the candle-widened and
+    /// mlx-widened peaks of the same 10 GiB cell, so grading an MLX lane with the (narrower) candle
+    /// margin — or with no margin — flips the first arm.
+    #[test]
+    fn mlx_stale_admission_uses_the_mlx_margin() {
+        let mut provider = staged_only_provider();
+        provider.backend = MemoryBackendRealization::MlxMetal {
+            bounded_wired_residency: true,
+            lazy_or_mmap_materialization: true,
+            explicit_evaluation_and_synchronization: true,
+            cache_eviction: true,
+        };
+        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        staged.key.backend = gen_core::MemoryBackend::Mlx;
+        rekey_composition(&mut staged, &provider);
+        staged.predicted_peak_bytes = raw_peak_bytes;
+        let mut scope = request();
+        scope.backend = "mlx";
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &staged,
+            closure_digest: STALE_CLOSURE,
+        };
+        let budget = |available_gb| {
+            Some(Budget {
+                available_gb,
+                reclaimable_gb: 0.0,
+                total_gb: 48.0,
+                reserved_headroom_gb: 0.0,
+            })
+        };
+        // candle widening: 10.2 GiB; mlx widening: 10.5 GiB. 10.3 GiB must NOT fit on mlx.
+        assert!(
+            matches!(
+                select_strategy(scope, &provider, budget(10.3), &[candidate]),
+                Selection::Reject { .. }
+            ),
+            "10.3 GiB fits a candle-widened 10 GiB cell but must not fit the MLX-widened one"
+        );
+        let Selection::Selected { needed_gb, .. } =
+            select_strategy(scope, &provider, budget(11.0), &[candidate])
+        else {
+            panic!("the MLX-widened peak fits an 11 GiB budget");
+        };
+        let expected_widened_bytes =
+            (raw_peak_bytes as f64 * (1.0 + MLX_STALE_MEASURED_MARGIN)).ceil();
+        assert_eq!(needed_gb, expected_widened_bytes / BYTES_PER_GIB);
+    }
+
+    /// sc-18095: the selector's tracing records the stale admission and the widened peak it used,
+    /// so a later OOM under this selection is attributable to stale-closure evidence.
+    #[test]
+    fn tracing_records_stale_admission_and_the_widened_peak() {
+        use std::io::Write;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
+        let mut staged = evidence(MemoryStrategy::StagedResidency);
+        let provider = staged_only_provider();
+        rekey_composition(&mut staged, &provider);
+        staged.predicted_peak_bytes = raw_peak_bytes;
+        let result = tracing::subscriber::with_default(subscriber, || {
+            select_strategy(
+                request(),
+                &provider,
+                Some(Budget {
+                    available_gb: 11.0,
+                    reclaimable_gb: 0.0,
+                    total_gb: 11.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &[Candidate {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::StagedResidency,
+                        parameters: Default::default(),
+                        tier: tier(),
+                    },
+                    evidence: &staged,
+                    closure_digest: STALE_CLOSURE,
+                }],
+            )
+        });
+        assert!(matches!(result, Selection::Selected { .. }), "{result:?}");
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        let widened_peak_bytes =
+            (raw_peak_bytes as f64 * (1.0 + CANDLE_STALE_MEASURED_MARGIN)).ceil() as u64;
+        assert!(
+            output.contains("stale-closure memory-strategy candidate admitted with widened margin"),
+            "admission event missing from trace output: {output}"
+        );
+        assert!(
+            output.contains(&format!("widened_peak_bytes={widened_peak_bytes}")),
+            "widened peak missing from trace output: {output}"
+        );
+        assert!(
+            output.contains("memory-strategy selection uses stale-closure evidence"),
+            "stale-selection event missing from trace output: {output}"
+        );
     }
 }
