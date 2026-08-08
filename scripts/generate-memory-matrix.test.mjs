@@ -2321,8 +2321,8 @@ const SUPERSEDED_KREA_REVISION = "96b13b6630132410a29ae1bcdf4d8738db7af28a";
 /// It used to be a hardcoded 64-hex constant under a "derive it with `inference-closure-digest.mjs`"
 /// comment, which nothing re-derived. A wrong value there does not fail — it makes every test built
 /// on this fixture assert "historical evidence does not promote" for the wrong reason, because ANY
-/// digest that is not the live one demotes. That is exactly how `820bf106…` hid in
-/// `sc-15833-flux2-evidence.test.mjs` through the whole of sc-17774.
+/// digest that is not the live one demotes. That is exactly how `820bf106…` hid in the sc-15833
+/// FLUX.2 evidence one-shot's test through the whole of sc-17774 (deleted in sc-18100).
 ///
 /// Reading it from the bundle inherits a real gate: `backfill-closure-digests.mjs --verify` in
 /// `check.yml` re-derives every record digest from inference source at the revision it names, so a
@@ -2930,6 +2930,61 @@ test("the elision is counted, never silent (sc-18099)", async () => {
         )
         .map((cell) => cell.modelId),
     ).size,
+  );
+});
+
+// sc-18100: rehomed from `calibration-cost-model.test.mjs`, the only place that ever re-derived the
+// published headline counts from raw inputs. The generator computes `currentCalibrationRuns` by
+// summing `cell.evidence.currentEnvironmentVerification`; this recomputes it straight from the
+// evidence bundle and the closure ledger, so a promotion bug in that path cannot agree with itself.
+// The sc-17774 rule under test: a record authorizes the live runtime only while its provider's
+// compile closure is unchanged — the pin is not the term.
+test("the published summary re-derives from the evidence bundle and the closure ledger (sc-17774)", async () => {
+  const root = new URL("../", import.meta.url);
+  const matrix = JSON.parse(await readFile(new URL("docs/generated/memory-matrix.json", root)));
+  const evidence = JSON.parse(
+    await readFile(new URL("docs/generated/memory-calibration-evidence.json", root)),
+  );
+  const closures = JSON.parse(
+    await readFile(new URL("config/inference-provider-closures.json", root)),
+  );
+
+  const tally = { complete: 0, runtimeComplete: 0 };
+  for (const record of evidence.records) {
+    if (record.status === "complete") tally.complete += 1;
+    if (record.status === "runtime_complete") tally.runtimeComplete += 1;
+  }
+  assert.deepEqual(matrix.summary.calibrationRunsByStatus, tally);
+  assert.equal(matrix.summary.calibrationRuns, tally.complete + tally.runtimeComplete);
+
+  // `binding.eligible` is the generator's own coordinate match; everything else here is recomputed.
+  const eligibleByRecord = new Map(
+    matrix.calibrationRuns.map(({ binding, record }) => [record.id, binding.eligible]),
+  );
+  const currentRuns = (providers) => evidence.records.filter((record) => {
+    if (!["complete", "runtime_complete"].includes(record.status)) return false;
+    if (["fixture", "candidate"].includes(record.evidenceScope)) return false;
+    if (!eligibleByRecord.get(record.id)) return false;
+    const lane = `${record.backend}:${record.target.provider}`;
+    return record.repositories.inference.closureDigest === providers[lane]?.digest;
+  }).length;
+
+  assert.equal(matrix.summary.currentCalibrationRuns, currentRuns(closures.providers));
+
+  // The recomputation is currently in its fail-closed state (every eligible record sits at a
+  // superseded closure, so both sides are 0). Prove it is a live derivation rather than a constant:
+  // re-stamping the ledger with each record's own captured digest must move it off zero.
+  const asCaptured = Object.fromEntries(
+    evidence.records
+      .filter((record) => eligibleByRecord.get(record.id))
+      .map((record) => [
+        `${record.backend}:${record.target.provider}`,
+        { digest: record.repositories.inference.closureDigest },
+      ]),
+  );
+  assert.ok(
+    currentRuns(asCaptured) > matrix.summary.currentCalibrationRuns,
+    "the currency recomputation must respond to the closure ledger, not report a constant",
   );
 });
 

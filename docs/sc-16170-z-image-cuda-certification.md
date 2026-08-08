@@ -114,12 +114,16 @@ The inference repository provides `control_vram_probe`, `sequential_vram_probe`,
 suite. SceneWorks validates the historical sources and writes the fail-closed current bundle with:
 
 ```powershell
-node scripts/sc-16170-certification.mjs --write
-node scripts/sc-16170-certification.mjs
 node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json
 node scripts/generate-memory-matrix.mjs
-node scripts/calibration-cost-model.mjs
 ```
+
+> **sc-18100.** The first two steps used to be `node scripts/sc-16170-certification.mjs --write` and a
+> bare re-run of the same script; a fifth step regenerated the calibration cost model. All three
+> scripts were one-shots and are deleted. The evidence they wrote is committed, and the transcript
+> hashes they recomputed are now re-verified for every campaign by
+> `scripts/memory-calibration-harness.test.mjs`
+> (`"every committed source session binds an immutable log whose bytes match its recorded hash"`).
 
 The check command reconstructs all 90 historical cases from every committed transcript and inventory
 log, recomputes each transcript's exact-byte hash and every inventory digest, and verifies that the
