@@ -87,32 +87,35 @@ export function buildPlan(matrix = loadMatrix(), expect = EXPECT) {
     mlx: { story: "mlxStory", family: "family" },
     candle: { story: "candleStory", family: "candleFamily" },
   };
-  for (const cell of matrix.cells ?? []) {
-    let entry = byModel.get(cell.modelId);
-    if (!entry) {
-      entry = {
-        model: cell.modelId,
-        mlxStory: null,
-        family: null,
-        candleStory: null,
-        candleFamily: null,
-        backends: new Set(),
-      };
-      byModel.set(cell.modelId, entry);
+  // sc-18099: read `models`, not `cells`. The matrix now publishes only the planned-or-evidenced
+  // subset of the cross-product, so an entry can legitimately have ZERO cells — and a plan derived
+  // from cells would then simply lose that entry, fail the `totalModels` invariant, and (worse, if
+  // the invariant ever drifted) create no Candle twin for it. `models[]` is the durable per-entry
+  // ownership record the generator has published since sc-15812: one row per catalog entry, with
+  // `owningModelStories`/`owningFamilyStories` keyed by advertised backend. It is also the source
+  // the cells were stamped FROM, so this is the same fact read one level closer to its origin, and
+  // `validateMatrix` already proves each map covers exactly the entry's advertised backends.
+  for (const model of matrix.models ?? []) {
+    const entry = {
+      model: model.id,
+      mlxStory: null,
+      family: null,
+      candleStory: null,
+      candleFamily: null,
+      backends: new Set(model.backends ?? []),
+    };
+    for (const backend of entry.backends) {
+      const keys = OWNERSHIP[backend];
+      if (!keys) planFail(`${model.id}: unknown backend ${backend}`);
+      const story = model.owningModelStories?.[backend];
+      const family = model.owningFamilyStories?.[backend];
+      if (!Number.isInteger(story) || !Number.isInteger(family)) {
+        planFail(`${model.id}: no ${backend} owning story/family — regenerate the matrix`);
+      }
+      entry[keys.story] = story;
+      entry[keys.family] = family;
     }
-    entry.backends.add(cell.backend);
-    const keys = OWNERSHIP[cell.backend];
-    if (!keys) planFail(`${cell.modelId}: unknown cell backend ${cell.backend}`);
-    if (entry[keys.story] === null) {
-      entry[keys.story] = cell.owningModelStory;
-      entry[keys.family] = cell.owningFamilyStory;
-    } else if (
-      // A model whose same-backend cells disagree about ownership means the generator changed under us.
-      entry[keys.story] !== cell.owningModelStory ||
-      entry[keys.family] !== cell.owningFamilyStory
-    ) {
-      planFail(`${cell.modelId}: ${cell.backend} cells disagree about owning story/family — regenerate the matrix`);
-    }
+    byModel.set(model.id, entry);
   }
 
   const models = [...byModel.values()].map((m) => ({ ...m, backends: [...m.backends].sort() }));

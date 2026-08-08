@@ -561,7 +561,17 @@ test("published cost model distinguishes complete history from runtime-current e
     new RegExp(`${expectedCurrentRuns} current calibration run\\(s\\)`),
   );
   assert.match(model.completedBaseline.note, /Exact records remain narrower/);
-  assert.match(model.biggestUncertainties[0].why, /Only 9 of 53 catalog entries/);
+  // sc-18099: located by gate id, not by rank. The matrix now publishes only planned-or-evidenced
+  // coordinates, so the modelled population no longer contains the entries that have no provider
+  // adapter at all — the adapter-coverage gap is therefore no longer the largest blocker BY CELL
+  // COUNT in this document, while the catalog fact it states ("9 of 53 entries have an adapter") is
+  // unchanged and still published. Pinning rank 0 would assert the population, which sc-18100 is
+  // about to delete along with this model; pinning the gate asserts the fact.
+  const adapterCoverage = model.biggestUncertainties.find(
+    (entry) => entry.gate === "no-provider-adapter",
+  );
+  assert.ok(adapterCoverage, "the adapter-coverage gap must still be ranked");
+  assert.match(adapterCoverage.why, /Only 9 of 53 catalog entries/);
   const allProse = JSON.stringify(model);
   assert.doesNotMatch(
     allProse,

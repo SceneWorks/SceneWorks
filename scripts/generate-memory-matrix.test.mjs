@@ -8,11 +8,18 @@ import {
   MODEL_STORIES,
   SOURCE_PATHS,
   assertCellOwnershipIsBackendScoped,
+  assertCalibrationPlanTargetsResolvedCoordinates,
   assertCellInventoryMatchesCatalog,
+  assertPublishedDocumentIsClosed,
+  hoistManifestScopes,
+  planEntryTargetsCoordinate,
   assertTwinCoverage,
   backendScopes,
   buildMatrix,
   buildStoryBackendScope,
+  isImplemented,
+  isPublishableCell,
+  plannedCellIds,
   RUNG4_APPLICABILITIES,
   RUNG4_IMPLEMENTATIONS,
   RUNG4_REQUEST_PEAKS,
@@ -33,13 +40,15 @@ import { routedLanes } from "./check-tier-integrity.mjs";
 test("a comment-only manifest edit produces no generated matrix change", async () => {
   const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
   const manifest = await readFile(manifestUrl, "utf8");
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
   const commentOnly = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       manifest: `${manifest}\n// SC-16129 regression: provenance-only comment\n`,
     },
   });
   const withoutAnyComments = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       // This also removes every comment block introduced by #1977, proving replacements and
       // deletions are inert rather than covering only an appended-comment special case.
@@ -63,8 +72,9 @@ test("runtime-only CUDA telemetry surfaces its measured active-byte peak", () =>
 test("self-stamped manifest matrix revisions do not rotate the source fingerprint", async () => {
   const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
   const manifest = await readFile(manifestUrl, "utf8");
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
   const mutated = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       manifest: manifest.replaceAll(
         /"matrixSourceRevision":\s*"source-tree:[0-9a-f]{64}"/g,
@@ -140,7 +150,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "vramGate",
   ]);
 
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(matrix.generatedFrom.sources).map(([name, entry]) => [name, entry.path]),
@@ -151,11 +161,12 @@ test("the fingerprint covers every declared source, and the artifact publishes t
 
 test("a comment-only Rust or Cargo edit produces no generated matrix change", async () => {
   const sources = await readRustSources();
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
 
   for (const [name, body] of Object.entries(sources)) {
     const marker = name === "cargo" ? "#" : "//";
     const appended = await buildMatrix({
+      publish: false,
       sourceOverrides: {
         [name]: `${body}\n${marker} sc-16268 regression: semantically inert comment\n`,
       },
@@ -170,8 +181,9 @@ test("the matrix regenerates identically from fully comment-stripped sources", a
   // just the hash, so a future comment-anchored regex (there was one — `parseMlxSequentialEngines`)
   // fails here instead of silently letting a semantic change slip past the staleness tripwire.
   const sources = await readRustSources();
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
   const stripped = await buildMatrix({
+    publish: false,
     sourceOverrides: Object.fromEntries(
       Object.entries(sources).map(([name, body]) => [
         name,
@@ -188,10 +200,11 @@ test("a Rust value the generator never parses still rotates the source fingerpri
   // MLX staged-residency number depends on it: the fingerprint is a whole-source tripwire, and
   // narrowing it to only-parsed-values would trade noisy-but-safe for quiet-and-stale.
   const sources = await readRustSources();
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
   const headroom = sources.mlxFitGate.match(/const HEADROOM_GB: f64 = ([0-9.]+);/);
   assert.ok(headroom, "fixture needs the HEADROOM_GB constant in mlx_fit_gate.rs");
   const mutated = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       mlxFitGate: sources.mlxFitGate.replace(
         headroom[0],
@@ -214,8 +227,9 @@ test("a commented-out line carrying a string literal still rotates the source fi
   // The quote guard. A comment that could feed one of the generator's `"([^"]+)"` parsers is not
   // inert, so it stays hashed even though it is a comment.
   const sources = await readRustSources();
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
   const quoted = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       engines: `${sources.engines}\n// "some_commented_out_id",\n`,
     },
@@ -230,8 +244,8 @@ test("a commented-out line carrying a string literal still rotates the source fi
 test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
-  const matrix = await buildMatrix();
-  assert.equal(matrix.schemaVersion, 6);
+  const matrix = await buildMatrix({ publish: false });
+  assert.equal(matrix.schemaVersion, 7);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -246,11 +260,12 @@ test("provenance is stamped once on the document, never per row", async () => {
 });
 
 test("catalog-relative inventory guard rejects whole-scope loss without freezing today's total", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const candleCells = matrix.cells.filter((cell) => cell.backend === "candle");
   assert.ok(candleCells.length > matrix.cells.length / 4, "mutation must drop a substantial fraction");
   await assert.rejects(
     buildMatrix({
+      publish: false,
       // Preserve the bespoke tier-override scope so its older, narrower guard does not mask the new
       // catalog-wide assertion. Every other Candle scope disappears from the real generator path.
       cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
@@ -323,7 +338,7 @@ test("a calibration-relevant manifest value rotates affected fallback fingerprin
   const manifestUrl = new URL("../config/manifests/builtin.models.jsonc", import.meta.url);
   const manifest = await readFile(manifestUrl, "utf8");
   const parsed = JSON.parse(stripJsoncComments(manifest));
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
   const model = parsed.models.find((candidate) =>
     ["mlx", "candle"].some(
       (backend) =>
@@ -340,6 +355,7 @@ test("a calibration-relevant manifest value rotates affected fallback fingerprin
   const tier = Object.keys(model[backend].vramGbByTier)[0];
   model[backend].vramGbByTier[tier] += 0.01;
   const changed = await buildMatrix({
+    publish: false,
     sourceOverrides: { manifest: JSON.stringify(parsed) },
   });
 
@@ -389,7 +405,7 @@ test("Krea bounded-decode and bounded-attention matrix identities match their cu
     }
   }
 
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const affected = matrix.cells.filter(
     (cell) =>
       cell.modelId === "krea_2_turbo" &&
@@ -470,7 +486,7 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
   )));
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const qwenEntries = [
     "qwen_image",
     "qwen_image_edit_2511",
@@ -529,6 +545,7 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // carrying a superseded one. Overriding only the evidence leaves the pair mismatched, so nothing
   // promotes and this test reads as a scope regression when it is really a stale fixture.
   const onCurrentPin = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: await qwenRung4OnCurrentPin(),
       manifest: await currentManifestCalibrationFixture({
@@ -623,7 +640,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
   )));
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const zImageIds = ["z_image", "z_image_edit", "z_image_turbo"];
   const boundedRungs = [
     "bounded_decode",
@@ -1020,7 +1037,18 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
 });
 
 test("a shipping control lane is declared, not inferred from having been measured (sc-16069)", async () => {
-  const matrix = JSON.parse(
+  // sc-18099 slimmed the ARTIFACT to planned-or-evidenced cells, so the committed file no longer
+  // carries a cell for every declared-but-unmeasured control coordinate — which is the very thing
+  // this test is about. Two sources are read, deliberately:
+  //
+  //   * the RESOLVED document (`publish: false`) for the state and provider-binding claims, so a
+  //     declared lane's cells are still there to assert on. Slimming must not quietly turn this test
+  //     into a scan of whatever survived.
+  //   * the COMMITTED artifact for the existence claim, through `models[].axes`, because "a shipping
+  //     lane must not be invisible in the published matrix" is a property OF the artifact and would
+  //     be untested if this test moved off it entirely.
+  const matrix = await buildMatrix({ publish: false });
+  const published = JSON.parse(
     await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
   );
   const control = matrix.cells.filter((cell) => cell.overlay === "control");
@@ -1091,23 +1119,42 @@ test("a shipping control lane is declared, not inferred from having been measure
   }
 
   // Every declared lane is represented on every backend the entry advertises — the declaration is what
-  // generates cells now, so a lane can be unmeasured without being invisible.
+  // generates cells now, so a lane can be unmeasured without being invisible. Asserted against BOTH
+  // the resolved cells and the published `axes`: the artifact is where a reader looks, and a lane the
+  // slim made unreadable there is the sc-16069 defect all over again.
   for (const id of CONTROL_LANE_MODELS) {
     const model = matrix.models.find((entry) => entry.id === id);
+    const publishedModel = published.models.find((entry) => entry.id === id);
     assert.ok(model, `${id} must be a catalog entry`);
+    assert.ok(publishedModel, `${id} must be a catalog entry in the published artifact`);
     for (const backend of model.backends) {
       assert.ok(
         control.some((cell) => cell.modelId === id && cell.backend === backend),
         `${id}/${backend} ships a control lane, so it must have control cells`,
       );
+      assert.ok(
+        publishedModel.axes[backend].overlays.includes("control"),
+        `${id}/${backend} ships a control lane, so the published axes must show it`,
+      );
     }
   }
 
-  // No control cells for anything undeclared: the overlay axis must not grow by accident.
+  // No control cells for anything undeclared: the overlay axis must not grow by accident. Checked on
+  // the published axes too, so an undeclared lane cannot appear there either.
   const undeclared = [...new Set(control.map((cell) => cell.modelId))].filter(
     (id) => !CONTROL_LANE_MODELS.includes(id),
   );
   assert.deepEqual(undeclared, [], "control cells exist only for declared lanes");
+  assert.deepEqual(
+    published.models
+      .filter((entry) =>
+        Object.values(entry.axes).some((axes) => axes.overlays.includes("control")),
+      )
+      .map((entry) => entry.id)
+      .filter((id) => !CONTROL_LANE_MODELS.includes(id)),
+    [],
+    "the published axes advertise a control lane only for declared lanes",
+  );
 
   // Declaring a lane must NOT fabricate evidence. The current Z-Image captures measure the base
   // no-overlay provider, so none may attach to the distinct control providers; every declared
@@ -1153,7 +1200,7 @@ test("every advertised MLX and Candle control route must be declared (sc-16073)"
     assert.ok(imageRouting.includes(marker), `fixture needs ${sourceName}`);
     const mutated = imageRouting.replace(marker, `${marker}\n    "lens",`);
     await assert.rejects(
-      buildMatrix({ sourceOverrides: { imageRouting: mutated } }),
+      buildMatrix({ publish: false, sourceOverrides: { imageRouting: mutated } }),
       new RegExp(
         `${sourceName.includes("MLX") ? "mlx" : "candle"} control routes and ` +
           "CONTROL_LANE_MODELS disagree .*advertised but undeclared=lens",
@@ -1174,7 +1221,7 @@ async function surveyFixture() {
 }
 
 test("every advertised family/backend has a rung-4 verdict, and it reaches its cells", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const rung4 = matrix.cells.filter(
     (cell) => cell.rung === "bounded_transformer_residency",
   );
@@ -1209,7 +1256,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   // The epic's non-negotiable in test form. `partial`/`full` says the architecture CAN be windowed;
   // it must never be readable as evidence that doing so is worth selecting. Only families with
   // measured request-peak evidence may claim `moves`.
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const moves = matrix.rung4SurveyRows.filter((row) => row.requestPeak === "moves");
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
@@ -1250,7 +1297,7 @@ test("the two rung-4 findings stay separate: structural applicability never impl
 });
 
 test("partial applicability is recorded rather than rounded to Implemented or Structurally N/A", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
 
   // SDXL is the story's named trap: a U-Net whose lowest-resolution level is a genuine 10-deep
   // transformer stack. Rounding it to Structurally N/A would exempt it from the ladder outright.
@@ -1262,14 +1309,16 @@ test("partial applicability is recorded rather than rounded to Implemented or St
     (cell) => cell.modelId === "sdxl" && cell.rung === "bounded_transformer_residency",
   );
   assert.equal(sdxlCell.state, "Missing", "applicable-but-unimplemented is Missing, not N/A");
+  // sc-18099: the block-stack inventory is a family-level fact and now rides `rung4SurveyRows`, so
+  // it survives an entry whose every rung-4 cell is elided — which is SDXL's case exactly.
   assert.ok(
-    sdxlCell.rung4Survey.blockStacks.some(
+    sdxl.blockStacks.some(
       (stack) => stack.windowable && /10 per Transformer2D/.test(stack.blocks),
     ),
     "the windowable sub-stack must be named, since that is what makes it partial rather than N/A",
   );
   assert.ok(
-    sdxlCell.rung4Survey.blockStacks.some((stack) => !stack.windowable),
+    sdxl.blockStacks.some((stack) => !stack.windowable),
     "and so must the remainder that stays resident",
   );
 
@@ -1282,7 +1331,7 @@ test("partial applicability is recorded rather than rounded to Implemented or St
 });
 
 test("an implemented family is Implemented/unverified only where the provider actually exposes it", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const implemented = matrix.cells.filter(
     (cell) =>
       cell.rung === "bounded_transformer_residency" &&
@@ -1530,7 +1579,7 @@ test("an implemented family is Implemented/unverified only where the provider ac
 });
 
 test("Candle PuLID exposes every rung only for its exact identity route", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const pulid = matrix.cells.filter(
     (cell) => cell.modelId === "pulid_flux_dev" && cell.backend === "candle",
   );
@@ -1558,7 +1607,7 @@ test("Candle PuLID exposes every rung only for its exact identity route", async 
 });
 
 test("PuLID's closed overlay contract does not redefine legacy Candle resident coverage", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const expectedResident = [
     "flux_dev:flux1_dev:candle:q4:text_to_image:lora:resident",
     "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
@@ -1583,7 +1632,7 @@ test("PuLID's closed overlay contract does not redefine legacy Candle resident c
 });
 
 test("Mage Candle bounded decode is structurally exempt rather than advertised or left Missing", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const cells = matrix.cells.filter(
     (cell) =>
       cell.modelId.startsWith("mage_flow") &&
@@ -1606,7 +1655,7 @@ test("Mage Candle bounded decode is structurally exempt rather than advertised o
 });
 
 test("Candle Krea's Implemented cells report the shared backend that makes them reachable", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const source = await surveyFixture();
   const sourceReport = source.families["15517"].backends.candle;
   const krea = matrix.rung4SurveyRows.find(
@@ -1623,7 +1672,7 @@ test("Candle Krea's Implemented cells report the shared backend that makes them 
 
   assert.equal(krea.implementation, "shared-primitive");
   assert.equal(report.implementation, "shared-primitive");
-  assert.match(report.summary, /candle_gen::block_window::run_windowed/);
+  assert.match(krea.summary, /candle_gen::block_window::run_windowed/);
   assert.ok(
     sourceReport.evidence.some(
       (item) =>
@@ -1642,7 +1691,7 @@ test("rung 4 is not claimed on MLX where its declared rung-1 prerequisite is abs
   // gen_core::memory_strategy makes rung 1 a prerequisite of rung 4, so a family with a perfectly
   // windowable trunk still reports Missing where the entry cannot stage its phases. Mage-Flow and
   // SenseNova are the epic's own uncovered-rung-1 MLX families; Candle capability is independent.
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   for (const modelId of ["mage_flow", "sensenova_u1_8b"]) {
     const staged = matrix.cells.filter(
       (cell) =>
@@ -1685,6 +1734,7 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
     verdict.implementedEntries = [entry];
     verdict.strategyParameters = { transformerWindowSize: 1 };
     const matrix = await buildMatrix({
+      publish: false,
       sourceOverrides: { rung4Survey: JSON.stringify(survey) },
     });
     const of = (rung) =>
@@ -1721,7 +1771,7 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
 });
 
 test("overlay incompatibility is a provider fact, applied where evidenced and nowhere else", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const na = matrix.cells.filter(
     (cell) =>
       cell.rung === "bounded_transformer_residency" && cell.state === "Structurally N/A",
@@ -1783,7 +1833,7 @@ test("a Structurally N/A survey verdict without structural evidence is rejected"
   const survey = await surveyFixture();
   survey.families["15525"].backends.mlx.structuralApplicability = "none";
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
     /static provider evidence/,
   );
 
@@ -1793,6 +1843,7 @@ test("a Structurally N/A survey verdict without structural evidence is rejected"
     { source: "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/mod.rs", reason: "fixture" },
   ];
   const matrix = await buildMatrix({
+    publish: false,
     sourceOverrides: { rung4Survey: JSON.stringify(survey) },
   });
   const cells = matrix.cells.filter(
@@ -1818,56 +1869,56 @@ test("a survey that contradicts itself or misses a family fails generation", asy
   const missing = await surveyFixture();
   delete missing.families["15525"];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(missing) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(missing) } }),
     /no rung-4 survey verdict/,
   );
 
   const contradictory = await surveyFixture();
   contradictory.families["15509"].backends.mlx.implementedEntries = ["mage_flow"];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(contradictory) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(contradictory) } }),
     /the two must agree/,
   );
 
   const foreign = await surveyFixture();
   foreign.families["15510"].backends.mlx.implementedEntries.push("qwen_image");
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(foreign) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(foreign) } }),
     /belongs to another family/,
   );
 
   const unknown = await surveyFixture();
   unknown.families["15509"].backends.mlx.structuralApplicability = "probably";
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(unknown) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(unknown) } }),
     /unknown structuralApplicability/,
   );
 
   const unevidenced = await surveyFixture();
   unevidenced.families["15509"].backends.mlx.evidence = [];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(unevidenced) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(unevidenced) } }),
     /cite at least one source/,
   );
 
   const emptyTiers = await surveyFixture();
   emptyTiers.families["15517"].backends.mlx.implementedTiers = [];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(emptyTiers) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(emptyTiers) } }),
     /implementedTiers is empty/,
   );
 
   const unknownOverlay = await surveyFixture();
   unknownOverlay.families["15517"].backends.mlx.implementedOverlays = ["mystery"];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(unknownOverlay) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(unknownOverlay) } }),
     /implementedOverlays contains an overlay outside the matrix vocabulary/,
   );
 
   const emptyScope = await surveyFixture();
   emptyScope.families["15512"].backends.mlx.implementationScopes[0].entries = [];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(emptyScope) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(emptyScope) } }),
     /entries must name at least one catalog entry/,
   );
 
@@ -1878,35 +1929,36 @@ test("a survey that contradicts itself or misses a family fails generation", asy
     strategyParameters: { transformerWindowSize: 2 },
   });
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(overlappingScopes) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(overlappingScopes) } }),
     /overlaps implementationScopes\[0\]/,
   );
 
   const foreignScope = await surveyFixture();
   foreignScope.families["15512"].backends.mlx.implementationScopes[0].entries = ["qwen_image"];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(foreignScope) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(foreignScope) } }),
     /belongs to another family/,
   );
 
   const mixedSelectors = await surveyFixture();
   mixedSelectors.families["15512"].backends.mlx.implementedEntries = ["lens"];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(mixedSelectors) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(mixedSelectors) } }),
     /either legacy implementedEntries fields or exact implementationScopes/,
   );
 
   // Positive control: the shipped survey builds.
-  await buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+  await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
 });
 
 test("a survey edit rotates the source fingerprint", async () => {
   // The survey is now a generated-matrix input, so it has to be inside the staleness tripwire.
   // Without this, editing a verdict would leave `sceneWorksRevision` claiming the same provenance.
-  const baseline = await buildMatrix();
+  const baseline = await buildMatrix({ publish: false });
   const survey = await surveyFixture();
   survey.families["15523"].backends.mlx.summary = `${survey.families["15523"].backends.mlx.summary}.`;
   const edited = await buildMatrix({
+    publish: false,
     sourceOverrides: { rung4Survey: JSON.stringify(survey) },
   });
   assert.notEqual(
@@ -1952,20 +2004,22 @@ test("the survey vocabulary, the generator's enums and the published schema agre
 });
 
 test("a block stack may not name another family's catalog entry", async () => {
-  // `blockStacks[].entries` is published onto every rung-4 cell of the family, so a typo'd or foreign
-  // id becomes a per-entry "fact" about entries that are not in the family at all. `implementedEntries`
-  // was checked from the start; this field was added later and inherited nothing.
+  // `blockStacks[].entries` is published on the family's `rung4SurveyRows` row (sc-18099 moved it
+  // there from every rung-4 cell), so a typo'd or foreign id becomes a per-entry "fact" about entries
+  // that are not in the family at all. `implementedEntries` was checked from the start; this field
+  // was added later and inherited nothing. Moving where it is published changes nothing about that:
+  // the id is still asserted to belong to the owning family at generation time.
   const foreign = await surveyFixture();
   foreign.families["15522"].backends.mlx.blockStacks[0].entries = ["qwen_image"];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(foreign) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(foreign) } }),
     /blockStacks.*names qwen_image, which belongs to another family/,
   );
 
   const invented = await surveyFixture();
   invented.families["15522"].backends.mlx.blockStacks[0].entries = ["totally_made_up_entry"];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(invented) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(invented) } }),
     /names totally_made_up_entry/,
   );
 });
@@ -1974,7 +2028,7 @@ test("every control-advertising family inventories its control-branch stack", as
   // A control route holds a SECOND transformer resident alongside the trunk, which is exactly the
   // quantity a partial verdict exists to state. z-image was inventoried first and the rest were not,
   // so the inventory said different things about the same shape depending on the family.
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const controlFamilies = new Set(
     matrix.cells
       .filter((cell) => cell.rung === "bounded_transformer_residency" && cell.overlay === "control")
@@ -1982,13 +2036,15 @@ test("every control-advertising family inventories its control-branch stack", as
   );
   assert.ok(controlFamilies.size >= 10);
   for (const key of controlFamilies) {
-    const cell = matrix.cells.find(
-      (candidate) =>
-        candidate.rung === "bounded_transformer_residency" &&
-        candidate.overlay === "control" &&
-        `${familyGroup(candidate.modelId)}:${candidate.backend}` === key,
+    // sc-18099: block stacks are family-level and live on `rung4SurveyRows`. The key is already the
+    // family/backend pair the control cells resolved to, so the row is the same verdict the cell
+    // carried, read where it is now published.
+    const [familyStory, backend] = key.split(":");
+    const row = matrix.rung4SurveyRows.find(
+      (candidate) => candidate.familyStory === Number(familyStory) && candidate.backend === backend,
     );
-    const controlStacks = cell.rung4Survey.blockStacks.filter((stack) =>
+    assert.ok(row, `${key}: advertises a control overlay but has no rung-4 survey row`);
+    const controlStacks = row.blockStacks.filter((stack) =>
       /control|ControlNet|IdentityNet/i.test(stack.name),
     );
     assert.ok(
@@ -1999,7 +2055,7 @@ test("every control-advertising family inventories its control-branch stack", as
 });
 
 test("only the independently wired base Z-Image Candle control route exposes staged residency", async () => {
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const cells = matrix.cells.filter(
     (cell) =>
       ["z_image", "z_image_turbo"].includes(cell.modelId) &&
@@ -2026,7 +2082,7 @@ test("a survey verdict that reaches no cell is rejected, not silently carried", 
     summary: "fixture: cuda is not a matrix backend",
   };
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
     /the verdict reaches no cell/,
   );
 });
@@ -2045,7 +2101,7 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   delete bare.families["15511"].backends.mlx.implementedOverlays;
   bare.families["15511"].backends.mlx.findings = [];
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(bare) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(bare) } }),
     /must state the shape gap as a finding/,
   );
 
@@ -2053,7 +2109,7 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   contradictory.families["15510"].backends.mlx.structuralApplicability =
     "requires-different-primitive";
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(contradictory) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(contradictory) } }),
     /declaring the primitive's shape insufficient/,
   );
 
@@ -2068,6 +2124,7 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   delete stated.families["15511"].backends.mlx.implementedOverlays;
   stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
   const matrix = await buildMatrix({
+    publish: false,
     sourceOverrides: { rung4Survey: JSON.stringify(stated) },
   });
   const cells = matrix.cells.filter(
@@ -2081,10 +2138,16 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
     cells.every(
       (cell) =>
         cell.state === "Missing" &&
-        cell.rung4Survey.structuralApplicability === "requires-different-primitive" &&
-        cell.rung4Survey.findings.length > 0,
+        cell.rung4Survey.structuralApplicability === "requires-different-primitive",
     ),
   );
+  // The finding is what separates this value from a bare N/A, so it must actually be published —
+  // on the family row since sc-18099, where it survives the family's cells being elided.
+  const row = matrix.rung4SurveyRows.find(
+    (candidate) => candidate.familyStory === 15511 && candidate.backend === "mlx",
+  );
+  assert.equal(row.structuralApplicability, "requires-different-primitive");
+  assert.ok(row.findings.length > 0);
 });
 
 test("`does-not-move` is carried through to the cell rather than collapsed into `unmeasured`", async () => {
@@ -2096,6 +2159,7 @@ test("`does-not-move` is carried through to the cell rather than collapsed into 
     reason: "fixture",
   };
   const matrix = await buildMatrix({
+    publish: false,
     sourceOverrides: { rung4Survey: JSON.stringify(survey) },
   });
   assert.ok(
@@ -2131,6 +2195,7 @@ test("request-peak measurements can be scoped to the exact entry, mode, and over
     ],
   };
   const matrix = await buildMatrix({
+    publish: false,
     sourceOverrides: { rung4Survey: JSON.stringify(survey) },
   });
   const qwen = matrix.cells.filter(
@@ -2160,14 +2225,14 @@ test("request-peak tier overrides fail closed", async () => {
   const badTier = await surveyFixture();
   badTier.families["15512"].backends.mlx.requestPeak.byTier = { fp8: "moves" };
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(badTier) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(badTier) } }),
     /requestPeak\.byTier contains a tier outside the matrix vocabulary/,
   );
 
   const badFinding = await surveyFixture();
   badFinding.families["15512"].backends.mlx.requestPeak.byTier = { q4: "phase-only" };
   await assert.rejects(
-    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(badFinding) } }),
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(badFinding) } }),
     /requestPeak\.byTier\.q4 has unknown finding/,
   );
 });
@@ -2375,7 +2440,7 @@ const qwenRung4OnCurrentPin = () =>
   });
 
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
-  const shipped = await buildMatrix();
+  const shipped = await buildMatrix({ publish: false });
   const shippedCell = shipped.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
   // sc-16915 re-collected both families at the then-current pin, so the POSITIVE half of this test
   // was briefly observable on the shipped matrix. It has gone back to `Implemented/unverified`, and
@@ -2407,6 +2472,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     select: (binding) => binding.provider === "qwen_image",
   });
   const promotedQwen = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
@@ -2424,6 +2490,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   );
 
   const evidenceOnlyZ = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({
         select: (record) => record.target.provider === "z_image_turbo",
@@ -2461,6 +2528,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   };
 
   const pinOnlyQwen = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
@@ -2475,6 +2543,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   );
 
   const otherProviderMoved = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
@@ -2491,6 +2560,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   );
 
   const staleQwen = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
@@ -2518,6 +2588,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   // a no-op, since the shipped cell was already `Implemented/unverified`). Anchoring the baseline to
   // a promoted fixture makes the pair meaningful regardless of what the shipped bundle happens to be.
   const promotedKrea = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture(),
       manifest: await currentManifestCalibrationFixture(),
@@ -2535,6 +2606,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   );
 
   const demoted = await buildMatrix({
+    publish: false,
     sourceOverrides: { calibrationEvidence: await historicalEvidenceFixture() },
   });
   const demotedCell = demoted.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
@@ -2563,6 +2635,7 @@ test("Verified never implies geometry coverage — one point certifies one point
   // cell will be asked to render. Under the old single-field model this cell read as certified
   // across all 17 advertised resolutions on the strength of one 768x768 capture.
   const single = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({ keepGeometries: ["768x768"] }),
       manifest: await currentManifestCalibrationFixture(),
@@ -2596,6 +2669,7 @@ test("Verified never implies geometry coverage — one point certifies one point
 
 test("a second geometry is what makes a curve determinable (sc-16060)", async () => {
   const fitted = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({
         keepGeometries: ["768x768", "896x896"],
@@ -2611,6 +2685,7 @@ test("a second geometry is what makes a curve determinable (sc-16060)", async ()
   // MUTATION: drop one geometry. `fitted` must fall back to `point` and surrender its bound — a
   // status that survived losing half its evidence would be asserting nothing.
   const single = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({ keepGeometries: ["896x896"] }),
       manifest: await currentManifestCalibrationFixture(),
@@ -2630,7 +2705,7 @@ test("the shipped Krea tiers report their recovered two-point fits (sc-16514)", 
   // SC-16514 recovered the 768² q8/bf16 captures into the manifest records, so the generated claim
   // must promote all three tier curves together. Dropping either recovered record mutates this back
   // to `point` through the general one-vs-two-point test above.
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const status = (tier) =>
     matrix.cells.find(
       (cell) => cell.id === `krea_2_turbo:krea_2_turbo:candle:${tier}:text_to_image:none:bounded_decode`,
@@ -2643,6 +2718,7 @@ test("the shipped Krea tiers report their recovered two-point fits (sc-16514)", 
 
 test("promotion is available only to an implemented cell (sc-16060)", async () => {
   const matrix = await buildMatrix({
+    publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture(),
       manifest: await currentManifestCalibrationFixture(),
@@ -2673,7 +2749,7 @@ test("every conformance and characterization state carries a definition (sc-1606
   // no definition anywhere in the artifact, the generator, or the docs — and two parts of the
   // pipeline answered "does one geometry certify the envelope?" differently without either being
   // wrong about a rule that had never been written down.
-  const matrix = await buildMatrix();
+  const matrix = await buildMatrix({ publish: false });
   const states = new Set(matrix.cells.map((cell) => cell.state));
   for (const state of states) {
     const declared = matrix.conformanceStates.find((entry) => entry.state === state);
@@ -2689,4 +2765,459 @@ test("every conformance and characterization state carries a definition (sc-1606
   // is what produced this story.
   assert.equal(matrix.claims.state.geometrySensitive, false);
   assert.equal(matrix.claims.memoryCharacterization.geometrySensitive, true);
+});
+
+// ── sc-18099: publication ──────────────────────────────────────────────────────────────────────
+//
+// Everything above asserts GENERATION and reads `publish: false`, because most coordinates are
+// elided and asserting them against the published subset would quietly hollow out thirteen
+// behavioural tests. These assert the publication step itself, and are the only tests here that read
+// the published document.
+
+test("publication keeps every planned, measured, bound and cited coordinate — and nothing else", async () => {
+  const resolved = await buildMatrix({ publish: false });
+  const publishedDocument = await buildMatrix();
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
+  );
+
+  const planned = plannedCellIds(plan, resolved.cells);
+  assert.ok(planned.size > 100, "the shipped plan must target a substantial set of coordinates");
+  const calibrationRunCellIds = new Set(resolved.calibrationRuns.map((run) => run.cellId));
+  assert.ok(calibrationRunCellIds.size > 0);
+
+  const expected = resolved.cells
+    .filter((cell) => isPublishableCell(cell, { plannedCellIds: planned, calibrationRunCellIds }))
+    .map((cell) => cell.id);
+  assert.deepEqual(publishedDocument.cells.map((cell) => cell.id), expected);
+
+  // Both directions of the predicate, spelled out rather than inferred from the set equality above:
+  // an arm that silently stopped matching would still produce a self-consistent document.
+  const publishedIds = new Set(expected);
+  for (const cell of resolved.cells) {
+    const reasons = [
+      planned.has(cell.id),
+      calibrationRunCellIds.has(cell.id),
+      cell.memoryCharacterization.status !== "unmeasured",
+      cell.evidence.historicalVerification.length > 0,
+      cell.evidence.currentEnvironmentVerification.length > 0,
+      cell.evidence.strategyParameterVerification.length > 0,
+      cell.evidence.structural.length > 0,
+    ];
+    assert.equal(
+      publishedIds.has(cell.id),
+      reasons.some(Boolean),
+      `${cell.id}: publication disagrees with the stated predicate`,
+    );
+  }
+
+  // Six of the seven arms must actually carry cells of their own. An arm that admitted nothing would
+  // be a dead clause, and the predicate would then mean something narrower than it says.
+  for (const [name, arm] of [
+    ["planned", (cell) => planned.has(cell.id)],
+    ["bound to a record", (cell) => calibrationRunCellIds.has(cell.id)],
+    ["measured", (cell) => cell.memoryCharacterization.status !== "unmeasured"],
+    ["historical evidence", (cell) => cell.evidence.historicalVerification.length > 0],
+    ["strategy parameters", (cell) => cell.evidence.strategyParameterVerification.length > 0],
+    ["structural evidence", (cell) => cell.evidence.structural.length > 0],
+  ]) {
+    assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
+  }
+
+  // The seventh arm, `currentEnvironmentVerification`, admits ZERO coordinates at this pin, and
+  // saying so out loud is the honest version of leaving it off the list above. Two facts keep that
+  // from being a hole:
+  //
+  //   1. It is empty for a REASON, not because it is broken. sc-17774 made currency the provider's
+  //      compile closure, and every closure carrying a promotion moved in this pin's window. The
+  //      promotion path itself is live and is driven against a fixture in "current evidence promotes
+  //      a cell to Verified, and historical evidence does not (sc-16060)".
+  //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
+  //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
+  //      measured arm already admits it. The arm being empty therefore cannot elide anything.
+  //
+  // Asserted as an exact count so a recapture flips this test rather than silently passing, and the
+  // field's presence is asserted separately so a rename cannot make the arm quietly vanish.
+  assert.equal(
+    resolved.cells.filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0).length,
+    0,
+    "no lane is measured at a current provider closure at this pin; if one was recaptured, update this",
+  );
+  assert.ok(
+    resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
+    "the arm's field must exist on every cell, or a rename would silently retire it",
+  );
+  assert.ok(
+    resolved.cells.every(
+      (cell) =>
+        cell.evidence.currentEnvironmentVerification.length === 0 ||
+        cell.memoryCharacterization.status !== "unmeasured",
+    ),
+    "current evidence must imply measured geometry, which is what makes the empty arm harmless",
+  );
+
+  // A Structurally N/A verdict may never be elided: an absent coordinate reads as "nobody has done
+  // this yet", and that verdict says the opposite.
+  const exempt = resolved.cells.filter((cell) => cell.state === "Structurally N/A");
+  assert.ok(exempt.length > 0);
+  assert.ok(exempt.every((cell) => publishedIds.has(cell.id)));
+
+  // And a bare route declaration is NOT a reason on its own — otherwise the slim would republish the
+  // cross-product under another name.
+  assert.ok(
+    resolved.cells.some((cell) => isImplemented(cell.state) && !publishedIds.has(cell.id)),
+    "an implemented-but-unplanned, unmeasured, uncited coordinate must still be elided",
+  );
+});
+
+test("the elision is counted, never silent (sc-18099)", async () => {
+  const resolved = await buildMatrix({ publish: false });
+  const matrix = await buildMatrix();
+
+  assert.equal(matrix.summary.cells, resolved.cells.length, "`cells` stays the resolved total");
+  assert.equal(matrix.summary.publishedCells, matrix.cells.length);
+  assert.equal(matrix.summary.publishedCells + matrix.summary.elidedCells, matrix.summary.cells);
+  assert.ok(matrix.summary.elidedCells > 0, "this artifact does elide, so the count must be real");
+  assert.equal(
+    Object.values(matrix.summary.elidedByState).reduce((total, count) => total + count, 0),
+    matrix.summary.elidedCells,
+  );
+  assert.match(matrix.summary.publicationPredicate, /PLANNED/);
+
+  // The census answers every coverage question the cross-product used to, including for lanes that
+  // published nothing at all.
+  const censusStates = new Map();
+  for (const row of matrix.coverage) {
+    for (const [state, count] of Object.entries(row.states)) {
+      censusStates.set(state, (censusStates.get(state) ?? 0) + count);
+    }
+  }
+  const resolvedStates = new Map();
+  for (const cell of resolved.cells) {
+    resolvedStates.set(cell.state, (resolvedStates.get(cell.state) ?? 0) + 1);
+  }
+  assert.deepEqual([...censusStates].sort(), [...resolvedStates].sort());
+  assert.equal(
+    matrix.coverage.reduce((total, row) => total + row.implemented, 0),
+    resolved.cells.filter((cell) => isImplemented(cell.state)).length,
+  );
+
+  // A lane the slim published nothing from is still fully described. Without this the artifact would
+  // report absence for a lane that is merely unmeasured — the sc-16069 failure, reintroduced.
+  const silent = matrix.coverage.filter((row) => row.published === 0);
+  assert.ok(silent.length > 0, "some lane must publish nothing, or this asserts nothing");
+  for (const row of silent) {
+    assert.equal(row.elided, row.coordinates);
+    const model = matrix.models.find((entry) => entry.id === row.modelId);
+    assert.ok(model.axes[row.backend].rungs.includes(row.rung));
+  }
+
+  // `mlxStagedStaticCoverage` is a claim about all 53 entries and must not shrink to the published
+  // sample. Recomputed here from the census with the generator's own implementation predicate.
+  const stagedFromCensus = new Set(
+    matrix.coverage
+      .filter((row) => row.backend === "mlx" && row.rung === "staged_residency" && row.implemented > 0)
+      .map((row) => row.modelId),
+  );
+  assert.equal(stagedFromCensus.size, matrix.summary.mlxStagedStaticCoverage);
+  assert.equal(
+    stagedFromCensus.size,
+    new Set(
+      resolved.cells
+        .filter(
+          (cell) =>
+            cell.backend === "mlx" && cell.rung === "staged_residency" && isImplemented(cell.state),
+        )
+        .map((cell) => cell.modelId),
+    ).size,
+  );
+});
+
+test("the published document is closed: no reference outlives its row (sc-18099)", async () => {
+  const matrix = await buildMatrix();
+  const publishedIds = new Set(matrix.cells.map((cell) => cell.id));
+
+  assert.ok(matrix.calibrationRuns.length > 0);
+  for (const run of matrix.calibrationRuns) {
+    assert.ok(publishedIds.has(run.cellId), `${run.record.id}: dangling cellId ${run.cellId}`);
+    assert.match(run.record.source, /^docs\/generated\/memory-calibration-evidence\.json#/);
+    assert.ok(run.record.source.endsWith(run.record.id));
+  }
+  for (const [modelId, slice] of Object.entries(matrix.modelSlices)) {
+    for (const id of slice) assert.ok(publishedIds.has(id), `${modelId}: dangling slice id ${id}`);
+  }
+  assert.deepEqual(
+    Object.keys(matrix.modelSlices).sort(),
+    matrix.models.map((model) => model.id).sort(),
+    "every entry keeps a slice, even an empty one — a missing key would read as a missing entry",
+  );
+
+  // The closure guard is a real gate, not a formality: a dangling reference must fail generation.
+  assert.throws(
+    () =>
+      assertPublishedDocumentIsClosed(
+        {
+          ...matrix,
+          cells: matrix.cells.filter((cell) => cell.id !== matrix.calibrationRuns[0].cellId),
+        },
+        matrix.summary.cells,
+      ),
+    /calibration run names cell .* which the slim did not publish/,
+  );
+  assert.throws(
+    () =>
+      assertPublishedDocumentIsClosed(
+        { ...matrix, coverage: matrix.coverage.slice(1) },
+        matrix.summary.cells,
+      ),
+    /coverage census covers .* but the catalog resolved/,
+  );
+
+  // The census breakdown is gated too, in both directions: a marginal that no longer accounts for
+  // the count it explains, and a breakdown present or absent on the wrong kind of row.
+  const mixedIndex = matrix.coverage.findIndex((row) => Object.hasOwn(row, "implementedBy"));
+  assert.ok(mixedIndex >= 0);
+  const withBadMarginal = matrix.coverage.map((row, index) =>
+    index === mixedIndex
+      ? { ...row, implementedBy: { ...row.implementedBy, overlay: { none: row.implemented + 1 } } }
+      : row,
+  );
+  assert.throws(
+    () => assertPublishedDocumentIsClosed({ ...matrix, coverage: withBadMarginal }, matrix.summary.cells),
+    /implementedBy\.overlay sums to/,
+  );
+  const withoutBreakdown = matrix.coverage.map((row, index) => {
+    if (index !== mixedIndex) return row;
+    const { implementedBy, ...rest } = row;
+    return rest;
+  });
+  assert.throws(
+    () => assertPublishedDocumentIsClosed({ ...matrix, coverage: withoutBreakdown }, matrix.summary.cells),
+    /implementedBy must be present on exactly the rows/,
+  );
+
+  // ...and so is the manifest-scope join, from both ends.
+  const orphanCell = matrix.cells.map((cell, index) =>
+    index === 0 ? { ...cell, evidence: { ...cell.evidence, manifestScope: "not:a:scope" } } : cell,
+  );
+  assert.throws(
+    () => assertPublishedDocumentIsClosed({ ...matrix, cells: orphanCell }, matrix.summary.cells),
+    /evidence\.manifestScope not:a:scope is not published/,
+  );
+  assert.throws(
+    () =>
+      assertPublishedDocumentIsClosed(
+        { ...matrix, manifestScopes: { ...matrix.manifestScopes, "orphan:mlx:q4": { declaredCalibration: [], loadability: [] } } },
+        matrix.summary.cells,
+      ),
+    /manifestScopes\.orphan:mlx:q4 is referenced by no published cell/,
+  );
+});
+
+test("the published axes are the cross-product, so no lane can be invisible (sc-18099)", async () => {
+  const resolved = await buildMatrix({ publish: false });
+  const matrix = await buildMatrix();
+
+  for (const model of matrix.models) {
+    for (const [backend, axes] of Object.entries(model.axes)) {
+      const lane = resolved.cells.filter(
+        (cell) => cell.modelId === model.id && cell.backend === backend,
+      );
+      assert.deepEqual(axes.tiers, [...new Set(lane.map((cell) => cell.tier))].sort());
+      assert.deepEqual(axes.modes, [...new Set(lane.map((cell) => cell.mode))].sort());
+      assert.deepEqual(axes.overlays, [...new Set(lane.map((cell) => cell.overlay))].sort());
+      assert.equal(
+        axes.tiers.length * axes.modes.length * axes.overlays.length * axes.rungs.length,
+        lane.length,
+      );
+    }
+  }
+
+  // The concrete case: InstantID's Candle lane resolves to bf16 only, and publishes no cell at all.
+  // Reading its tiers off `cells` would now return the empty set.
+  const instantId = matrix.models.find((model) => model.id === "instantid_realvisxl");
+  assert.deepEqual(instantId.axes.candle.tiers, ["bf16"]);
+  assert.equal(
+    matrix.cells.filter(
+      (cell) => cell.modelId === "instantid_realvisxl" && cell.backend === "candle",
+    ).length,
+    0,
+  );
+});
+
+test("a calibration-plan entry that addresses no coordinate fails generation (sc-18099)", async () => {
+  // The defect: nine sc-15817 entries carried `mode: "edit"` while the catalog's mode axis spells
+  // that capability `edit_image`, so they matched ZERO coordinates. Nothing caught it —
+  // `expectedEngagedRungs` just returned null, and `memory-calibration.schema.json` types `mode` as a
+  // free string — and a capture run against them would have produced records binding to nothing.
+  const plan = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
+  );
+
+  // The shipped plan is clean, which is the property worth pinning: every entry addresses something.
+  const resolved = await buildMatrix({ publish: false });
+  assert.doesNotThrow(() => assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells));
+
+  // And the guard discriminates, on each axis independently — a guard that only caught `mode` would
+  // be a fix for one typo rather than for the class.
+  for (const [axis, mutate] of [
+    ["mode", (entry) => { entry.target.mode = "edit"; }],
+    ["tier", (entry) => { entry.target.tier = "fp8"; }],
+    ["modelId", (entry) => { entry.target.modelId = "not_a_catalog_entry"; }],
+    ["provider", (entry) => { entry.target.provider = "not_a_provider"; }],
+    ["backend", (entry) => { entry.backend = "rocm"; }],
+    ["rung", (entry) => { entry.rung = "resident_but_wrong"; }],
+  ]) {
+    const broken = JSON.parse(JSON.stringify(plan));
+    mutate(broken.providers[0]);
+    assert.throws(
+      () => assertCalibrationPlanTargetsResolvedCoordinates(broken, resolved.cells),
+      (error) =>
+        /match no resolved matrix coordinate/.test(error.message) &&
+        error.message.includes(broken.providers[0].name),
+      `a plan entry with an unresolvable ${axis} must fail closed`,
+    );
+  }
+
+  // Wired into generation, not just exported: a bad plan must stop the artifact being written.
+  const badPlan = JSON.parse(JSON.stringify(plan));
+  badPlan.providers[0].target.mode = "edit";
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { calibrationPlan: JSON.stringify(badPlan) } }),
+    /match no resolved matrix coordinate/,
+  );
+
+  // The nine sc-15817 entries specifically: they resolve now, and their targets are published.
+  const qwenEdit = plan.providers.filter((entry) => entry.name.startsWith("candle-qwen-edit"));
+  assert.equal(qwenEdit.length, 9);
+  assert.ok(qwenEdit.every((entry) => entry.target.mode === "edit_image"));
+  const matrix = await buildMatrix();
+  for (const entry of qwenEdit) {
+    assert.ok(
+      matrix.cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
+      `${entry.name} is a shipped plan target, so its coordinate must be published`,
+    );
+  }
+});
+
+test("a partially implemented lane says WHICH coordinates, per axis (sc-18099)", async () => {
+  // A census row spans tier x mode x overlay, so a bare `implemented` count is unambiguous only at 0
+  // or `coordinates`. In between it hid the sc-16069 question: `krea_2_turbo:mlx` rung 4 reads
+  // implemented 12/18 while its CONTROL overlay is 0/6, and before the slim that was answered by a
+  // published `Missing` control cell.
+  const resolved = await buildMatrix({ publish: false });
+  const matrix = await buildMatrix();
+
+  const mixed = matrix.coverage.filter(
+    (row) => row.implemented > 0 && row.implemented < row.coordinates,
+  );
+  assert.ok(mixed.length > 0, "some lane must be partially implemented, or this asserts nothing");
+  assert.ok(
+    matrix.coverage.every(
+      (row) =>
+        Object.hasOwn(row, "implementedBy") ===
+        (row.implemented > 0 && row.implemented < row.coordinates),
+    ),
+    "implementedBy rides exactly the rows a bare count cannot answer",
+  );
+
+  // Every marginal accounts for the whole count, and every axis value present in the lane appears —
+  // including the zeroes, which are the answer the sc-16069 case needs.
+  for (const row of mixed) {
+    const lane = resolved.cells.filter(
+      (cell) =>
+        cell.modelId === row.modelId && cell.backend === row.backend && cell.rung === row.rung,
+    );
+    for (const axis of ["tier", "mode", "overlay"]) {
+      const counts = row.implementedBy[axis];
+      assert.deepEqual(
+        Object.keys(counts).sort(),
+        [...new Set(lane.map((cell) => cell[axis]))].sort(),
+        `${row.modelId}:${row.backend}:${row.rung}: implementedBy.${axis} must name every value the lane spans`,
+      );
+      assert.equal(
+        Object.values(counts).reduce((sum, count) => sum + count, 0),
+        row.implemented,
+      );
+      for (const [value, count] of Object.entries(counts)) {
+        assert.equal(
+          count,
+          lane.filter((cell) => cell[axis] === value && isImplemented(cell.state)).length,
+          `${row.modelId}:${row.backend}:${row.rung}: implementedBy.${axis}.${value} must be the real count`,
+        );
+      }
+    }
+  }
+
+  // The named case, asserted directly: a control lane that publishes NO cell is still legible as
+  // "declared but not implemented at this rung" rather than as "not there".
+  const krea = matrix.coverage.find(
+    (row) =>
+      row.modelId === "krea_2_turbo" &&
+      row.backend === "mlx" &&
+      row.rung === "bounded_transformer_residency",
+  );
+  assert.ok(krea.implemented > 0 && krea.implemented < krea.coordinates);
+  assert.equal(krea.implementedBy.overlay.control, 0);
+  assert.ok(krea.implementedBy.overlay.none > 0);
+  assert.ok(
+    matrix.models
+      .find((model) => model.id === "krea_2_turbo")
+      .axes.mlx.overlays.includes("control"),
+    "and the lane itself is still declared, which is what makes the zero readable",
+  );
+  assert.equal(
+    matrix.cells.filter(
+      (cell) =>
+        cell.modelId === "krea_2_turbo" &&
+        cell.backend === "mlx" &&
+        cell.overlay === "control" &&
+        cell.rung === "bounded_transformer_residency",
+    ).length,
+    0,
+    "no published cell answers this — the census is the only thing that does",
+  );
+});
+
+test("manifest-derived evidence is published once per scope, and the join is closed (sc-18099)", async () => {
+  const resolved = await buildMatrix({ publish: false });
+  const matrix = await buildMatrix();
+
+  // The hoist is lossless: each published cell's scope carries exactly what the resolved cell had.
+  for (const cell of matrix.cells) {
+    const source = resolved.cells.find((candidate) => candidate.id === cell.id);
+    const scope = matrix.manifestScopes[cell.evidence.manifestScope];
+    assert.ok(scope, `${cell.id}: unpublished manifestScope`);
+    assert.equal(cell.evidence.manifestScope, `${cell.modelId}:${cell.backend}:${cell.tier}`);
+    assert.deepEqual(scope.declaredCalibration, source.evidence.declaredCalibration);
+    assert.deepEqual(scope.loadability, source.evidence.loadability);
+    assert.ok(!Object.hasOwn(cell.evidence, "declaredCalibration"));
+    assert.ok(!Object.hasOwn(cell.evidence, "loadability"));
+  }
+  // Worth doing at all: far fewer scopes than cells.
+  assert.ok(Object.keys(matrix.manifestScopes).length < matrix.cells.length / 3);
+  // No orphan scopes either — a table that outgrew its references is the same defect mirrored.
+  assert.deepEqual(
+    Object.keys(matrix.manifestScopes).sort(),
+    [...new Set(matrix.cells.map((cell) => cell.evidence.manifestScope))].sort(),
+  );
+  // `evidenceDimensions` still names all six: the change is where two of them are written.
+  assert.ok(matrix.evidenceDimensions.includes("declaredCalibration"));
+  assert.ok(matrix.evidenceDimensions.includes("loadability"));
+
+  // The hoist is only sound because these really are functions of (entry, backend, tier). If that
+  // stopped being true the generator must refuse rather than publish whichever copy it saw first.
+  const drifted = resolved.cells
+    .filter((cell) => cell.modelId === matrix.cells[0].modelId)
+    .map((cell, index) =>
+      index === 1
+        ? { ...cell, evidence: { ...cell.evidence, loadability: [{ repository: "drift", revision: null, variant: null }] } }
+        : cell,
+    );
+  if (drifted.length > 1) {
+    assert.throws(
+      () => hoistManifestScopes(drifted),
+      /manifest-derived evidence differs between coordinates of scope/,
+    );
+  }
 });
