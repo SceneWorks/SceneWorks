@@ -11,6 +11,7 @@ import {
   buildStaleLaneReport,
   evidenceBindings,
   formatReport,
+  laneModelAttribution,
   loadSources,
   manifestBindings,
   rankLanes,
@@ -18,11 +19,17 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUST_POLICY_PATH = path.join(ROOT, "crates", "sceneworks-worker", "src", "ladder_margin_policy.rs");
+const MANIFEST_PATH = path.join(ROOT, "config", "manifests", "builtin.models.jsonc");
 
 const digest = (seed) => seed.repeat(64).slice(0, 64);
 const LIVE_MLX = digest("a");
 const LIVE_CANDLE = digest("b");
 const OLD = digest("c");
+const REVISION = "1".repeat(40);
+
+function binding(provider, closureDigest) {
+  return { provider, inferenceRevision: REVISION, inferenceClosureDigest: closureDigest };
+}
 
 function record({ id, backend, provider, modelId, closureDigest, rung = "resident" }) {
   return {
@@ -34,8 +41,24 @@ function record({ id, backend, provider, modelId, closureDigest, rung = "residen
   };
 }
 
-function manifest(models) {
-  return { models };
+/**
+ * Assemble a fixture whose parsed manifest and raw JSONC body are the SAME object.
+ *
+ * The body matters: `manifestBindings` locates the binding population with the CI gate's own
+ * line-based locator (`backfill-closure-digests.mjs#stampManifest`), so a fixture that supplied only
+ * a parsed object would exercise none of it. `JSON.stringify(_, null, 2)` is valid JSONC and puts
+ * `"mlx": {` / `"candle": {` at end of line, which is what the locator's backend walk pairs on.
+ */
+function fixtureFrom({ models, records, lanes }) {
+  return {
+    liveDigests: new Map(lanes),
+    declarations: Object.fromEntries(
+      lanes.map(([lane]) => [lane, { crate: `crates/${lane.replace(":", "-")}` }]),
+    ),
+    records,
+    manifest: { models },
+    manifestBody: JSON.stringify({ models }, null, 2),
+  };
 }
 
 /**
@@ -45,53 +68,42 @@ function manifest(models) {
  * margin the runtime actually widens each lane by (mlx 5% vs candle 2%), mlx leads. Any future
  * ranking that drops the margin term reds `ranking weighs the margin, not just the count`.
  */
-function twoLaneFixture() {
-  const records = [
-    record({ id: "r-mlx-1", backend: "mlx", provider: "alpha", modelId: "alpha_model", closureDigest: OLD }),
-    record({ id: "r-mlx-2", backend: "mlx", provider: "alpha", modelId: "alpha_model", closureDigest: OLD, rung: "bounded_decode" }),
-    record({ id: "r-candle-1", backend: "candle", provider: "beta", modelId: "beta_model", closureDigest: OLD }),
-  ];
-  const models = [
-    {
-      id: "alpha_model",
-      mlx: {
-        calibrations: [
-          { provider: "alpha", inferenceClosureDigest: OLD },
-          { provider: "alpha", inferenceClosureDigest: OLD },
-          { provider: "alpha", inferenceClosureDigest: OLD },
-        ],
-      },
-    },
-    {
-      id: "beta_model",
-      candle: {
-        calibrations: [
-          { provider: "beta", inferenceClosureDigest: OLD },
-          { provider: "beta", inferenceClosureDigest: OLD },
-          { provider: "beta", inferenceClosureDigest: OLD },
-          { provider: "beta", inferenceClosureDigest: OLD },
-          { provider: "beta", inferenceClosureDigest: OLD },
-        ],
-      },
-    },
-  ];
-  return {
-    liveDigests: new Map([
-      ["mlx:alpha", LIVE_MLX],
-      ["candle:beta", LIVE_CANDLE],
-    ]),
-    declarations: { "mlx:alpha": { crate: "crates/alpha" }, "candle:beta": { crate: "crates/beta" } },
-    records,
-    manifest: manifest(models),
-  };
+function twoLaneFixture({
+  mlxBindings = [OLD, OLD, OLD],
+  candleBindings = [OLD, OLD, OLD, OLD, OLD],
+  mlxRecords = [OLD, OLD],
+  candleRecords = [OLD],
+  extraModels = [],
+  extraLanes = [],
+} = {}) {
+  return fixtureFrom({
+    models: [
+      { id: "alpha_model", mlx: { calibrations: mlxBindings.map((item) => binding("alpha", item)) } },
+      { id: "beta_model", candle: { calibrations: candleBindings.map((item) => binding("beta", item)) } },
+      ...extraModels,
+    ],
+    records: [
+      ...mlxRecords.map((item, index) =>
+        record({
+          id: `r-mlx-${index}`,
+          backend: "mlx",
+          provider: "alpha",
+          modelId: "alpha_model",
+          closureDigest: item,
+          rung: index ? "bounded_decode" : "resident",
+        }),
+      ),
+      ...candleRecords.map((item, index) =>
+        record({ id: `r-candle-${index}`, backend: "candle", provider: "beta", modelId: "beta_model", closureDigest: item }),
+      ),
+    ],
+    lanes: [["mlx:alpha", LIVE_MLX], ["candle:beta", LIVE_CANDLE], ...extraLanes],
+  });
 }
 
 test("a lane whose captured digest differs from the live one is reported stale", () => {
   const report = buildStaleLaneReport(twoLaneFixture());
-  assert.deepEqual(
-    report.staleLanes.map((lane) => lane.lane).sort(),
-    ["candle:beta", "mlx:alpha"],
-  );
+  assert.deepEqual(report.staleLanes.map((lane) => lane.lane).sort(), ["candle:beta", "mlx:alpha"]);
   assert.equal(report.totals.staleLanes, 2);
   assert.equal(report.totals.staleBindings, 8);
   assert.equal(report.totals.staleRecords, 3);
@@ -99,10 +111,9 @@ test("a lane whose captured digest differs from the live one is reported stale",
 });
 
 test("a lane whose captured digest matches the live one is current, and is not ranked", () => {
-  const fixture = twoLaneFixture();
-  for (const item of fixture.records) if (item.backend === "mlx") item.repositories.inference.closureDigest = LIVE_MLX;
-  for (const binding of fixture.manifest.models[0].mlx.calibrations) binding.inferenceClosureDigest = LIVE_MLX;
-  const report = buildStaleLaneReport(fixture);
+  const report = buildStaleLaneReport(
+    twoLaneFixture({ mlxBindings: [LIVE_MLX, LIVE_MLX, LIVE_MLX], mlxRecords: [LIVE_MLX, LIVE_MLX] }),
+  );
   assert.deepEqual(report.staleLanes.map((lane) => lane.lane), ["candle:beta"]);
   assert.deepEqual(report.currentLanes.map((lane) => lane.lane), ["mlx:alpha"]);
   assert.equal(report.totals.staleBindings, 5);
@@ -110,10 +121,9 @@ test("a lane whose captured digest matches the live one is current, and is not r
 });
 
 test("a lane with a mixture is partially-stale, and only the stale half counts as impact", () => {
-  const fixture = twoLaneFixture();
-  fixture.records[0].repositories.inference.closureDigest = LIVE_MLX;
-  fixture.manifest.models[0].mlx.calibrations[0].inferenceClosureDigest = LIVE_MLX;
-  const report = buildStaleLaneReport(fixture);
+  const report = buildStaleLaneReport(
+    twoLaneFixture({ mlxBindings: [LIVE_MLX, OLD, OLD], mlxRecords: [LIVE_MLX, OLD] }),
+  );
   const mlx = report.staleLanes.find((lane) => lane.lane === "mlx:alpha");
   assert.equal(mlx.status, "partially-stale");
   assert.deepEqual(mlx.bindings, { total: 3, stale: 2, current: 1 });
@@ -121,14 +131,44 @@ test("a lane with a mixture is partially-stale, and only the stale half counts a
 });
 
 test("a declared lane with no measurement is unmeasured, never stale", () => {
-  const fixture = twoLaneFixture();
-  fixture.liveDigests.set("candle:gamma", digest("d"));
-  fixture.declarations["candle:gamma"] = { crate: "crates/gamma" };
-  const report = buildStaleLaneReport(fixture);
+  const report = buildStaleLaneReport(twoLaneFixture({ extraLanes: [["candle:gamma", digest("d")]] }));
   assert.deepEqual(report.unmeasuredLanes.map((lane) => lane.lane), ["candle:gamma"]);
   assert.ok(!report.staleLanes.some((lane) => lane.lane === "candle:gamma"));
   assert.equal(report.totals.unmeasuredLanes, 1);
   assert.equal(report.totals.declaredLanes, 3);
+});
+
+test("a whole-block fit outside calibrations[] is a binding, not an unmeasured lane", () => {
+  // The regression this test exists to prevent. `turboFit` and `candle.control` carry
+  // `provider`/`inferenceRevision`/`inferenceClosureDigest` directly on the block, outside any
+  // `calibrations[]` array, and the worker reads them (`vram_gate.rs`, `krea_control_fit.rs`). The
+  // first version of this report walked `calibrations[]` and printed both of their lanes as
+  // "declared but never captured" while they were stale production bindings — reopening in a new
+  // file exactly the hole sc-17989 closed.
+  const report = buildStaleLaneReport(
+    twoLaneFixture({
+      extraModels: [{ id: "gamma_model", candle: { turboFit: binding("gamma", OLD) } }],
+      extraLanes: [["candle:gamma", LIVE_CANDLE]],
+    }),
+  );
+  const gamma = report.staleLanes.find((lane) => lane.lane === "candle:gamma");
+  assert.ok(gamma, "the whole-block fit's lane must be reported stale, not unmeasured");
+  assert.deepEqual(gamma.bindings, { total: 1, stale: 1, current: 0 });
+  assert.deepEqual(gamma.records, { total: 0, stale: 0, current: 0 });
+  assert.deepEqual(report.unmeasuredLanes, []);
+  assert.deepEqual(gamma.models, ["gamma_model"]);
+});
+
+test("the located population and the parsed attribution must agree, or the report refuses", () => {
+  // The attribution walk feeds only the MODELS column, but a silent disagreement with the locator
+  // would mean one of the two cannot see a binding shape. Simulated by handing `manifest` a model
+  // the raw body does not contain.
+  const fixture = twoLaneFixture();
+  fixture.manifest.models.push({ id: "ghost_model", candle: { calibrations: [binding("ghost", OLD)] } });
+  assert.throws(
+    () => buildStaleLaneReport(fixture),
+    /manifest binding walks disagree on candle:ghost: the locator found 0, the parsed attribution found 1/,
+  );
 });
 
 test("ranking weighs the margin, not just the count", () => {
@@ -157,19 +197,25 @@ test("equal admission surface falls through to evidence surface, then to the lan
 });
 
 test("the lane key carries the backend, so one provider id on two backends stays two lanes", () => {
-  const bindings = manifestBindings(
-    manifest([
-      {
-        id: "krea_2_turbo",
-        mlx: { calibrations: [{ provider: "krea_2_turbo_control", inferenceClosureDigest: OLD }] },
-        candle: { calibrations: [{ provider: "krea_2_turbo_control", inferenceClosureDigest: OLD }] },
-      },
-    ]),
-  );
-  assert.deepEqual(bindings.map((binding) => binding.lane).sort(), [
+  const models = [
+    {
+      id: "krea_2_turbo",
+      mlx: { calibrations: [binding("krea_2_turbo_control", OLD)] },
+      candle: { control: binding("krea_2_turbo_control", OLD) },
+    },
+  ];
+  const bindings = manifestBindings({
+    manifest: { models },
+    manifestBody: JSON.stringify({ models }, null, 2),
+  });
+  assert.deepEqual(bindings.map((item) => item.lane).sort(), [
     "candle:krea_2_turbo_control",
     "mlx:krea_2_turbo_control",
   ]);
+  assert.deepEqual(
+    [...laneModelAttribution({ models }).keys()].sort(),
+    ["candle:krea_2_turbo_control", "mlx:krea_2_turbo_control"],
+  );
   assert.deepEqual(
     evidenceBindings([
       record({ id: "x", backend: "candle", provider: "krea_2_turbo_control", modelId: "krea_2_turbo", closureDigest: OLD }),
@@ -202,9 +248,23 @@ test("the margin column is the derivation's, not a literal in this script", asyn
   assert.equal(code.match(/0\.0[0-9]+/g), null, "no margin-shaped literal in the report's code");
 });
 
+test("the located binding population covers every closure digest the manifest carries", async () => {
+  // Derived from the manifest, not pinned to a number: a NEW whole-block fit lands as one more
+  // `inferenceClosureDigest` occurrence, and a population walk that cannot see it reds here. Same
+  // "derive coverage from the source" discipline the pre-push trigger test applies. A
+  // `calibrations[]`-only walk fails this by two on the shipped manifest.
+  const manifestBody = await readFile(MANIFEST_PATH, "utf8");
+  const { manifest } = await loadSources();
+  const located = manifestBindings({ manifestBody, manifest });
+  const occurrences = [...manifestBody.matchAll(/"inferenceClosureDigest":\s*"[0-9a-f]{64}"/g)].length;
+  assert.ok(occurrences > 0, "the manifest carries closure digests at all");
+  assert.equal(located.length, occurrences, "every manifest closure digest is in the population");
+  assert.ok(located.every((item) => /^(mlx|candle):.+/.test(item.lane)));
+  assert.ok(located.every((item) => item.digest === null || /^[0-9a-f]{64}$/.test(item.digest)));
+});
+
 test("the real corpus reports the margins the worker actually applies", async () => {
-  const sources = await loadSources();
-  const report = buildStaleLaneReport(sources);
+  const report = buildStaleLaneReport(await loadSources());
   const rust = {};
   for (const match of (await readFile(RUST_POLICY_PATH, "utf8")).matchAll(
     /pub const ([A-Z0-9_]+): f64 = ([0-9.]+);/g,
@@ -216,30 +276,75 @@ test("the real corpus reports the margins the worker actually applies", async ()
     candle: { stale: rust.CANDLE_STALE_MEASURED_MARGIN, estimate: rust.CANDLE_ESTIMATE_MARGIN },
   };
   assert.ok(expected.mlx.stale > 0 && expected.candle.stale > 0, "the Rust policy constants parsed");
-  for (const lane of report.staleLanes) {
+  for (const lane of [...report.staleLanes, ...report.currentLanes]) {
     assert.equal(lane.margin.staleMeasuredMargin, expected[lane.backend].stale, lane.lane);
     assert.equal(lane.margin.estimateMargin, expected[lane.backend].estimate, lane.lane);
   }
 });
 
-test("the real corpus is entirely stale today, and the report says so", async () => {
+test("the real corpus report is internally consistent, whatever the corpus currently is", async () => {
+  // INVARIANTS ONLY — deliberately no snapshot of how stale the corpus happens to be today. This
+  // file runs in `npm run check` on every PR, so a pin like "0 lanes are current" or "qwen ranks
+  // first" would red the moment someone lands a re-capture: the reverse-direction friction epic
+  // 18093 exists to remove, installed by the very report that surfaces it. The ones that already
+  // exist elsewhere are recorded on sc-18104; this must not add another.
   const sources = await loadSources();
   const report = buildStaleLaneReport(sources);
-  // Not a target — an observation, and the reason this report is worth having: as of this corpus
-  // NO lane's captured closure matches the live derivation, and CI is green anyway (sc-18098).
-  assert.equal(report.totals.currentLanes, 0);
-  assert.ok(report.totals.staleLanes > 0);
-  assert.equal(report.totals.staleRecords, sources.records.length);
-  assert.equal(report.staleLanes[0].lane, "mlx:qwen_image", "the largest measured lane leads");
-  for (const lane of report.staleLanes) {
-    assert.match(lane.liveDigest, /^[0-9a-f]{64}$/);
+  const all = [...report.staleLanes, ...report.currentLanes, ...report.unmeasuredLanes];
+
+  assert.equal(all.length, report.totals.declaredLanes);
+  assert.equal(all.length, sources.liveDigests.size);
+  assert.equal(
+    report.totals.declaredLanes,
+    report.totals.staleLanes + report.totals.currentLanes + report.totals.unmeasuredLanes,
+  );
+  assert.equal(report.totals.staleBindings, all.reduce((sum, lane) => sum + lane.bindings.stale, 0));
+  assert.equal(report.totals.staleRecords, all.reduce((sum, lane) => sum + lane.records.stale, 0));
+  assert.equal(
+    all.reduce((sum, lane) => sum + lane.records.total, 0),
+    sources.records.length,
+    "every evidence record is attributed to exactly one declared lane",
+  );
+  assert.equal(
+    all.reduce((sum, lane) => sum + lane.bindings.total, 0),
+    manifestBindings(sources).length,
+    "every manifest binding is attributed to exactly one declared lane",
+  );
+
+  for (const lane of all) {
+    assert.match(lane.liveDigest, /^[0-9a-f]{64}$/, lane.lane);
     assert.ok(lane.crate, `${lane.lane} resolves its declared crate`);
+    assert.ok(lane.margin, `${lane.lane} carries a margin`);
+    assert.equal(lane.bindings.stale + lane.bindings.current, lane.bindings.total, lane.lane);
+    assert.equal(lane.records.stale + lane.records.current, lane.records.total, lane.lane);
+  }
+  for (const lane of report.staleLanes) {
+    assert.ok(["stale", "partially-stale"].includes(lane.status), lane.lane);
+    assert.ok(lane.bindings.stale + lane.records.stale > 0, `${lane.lane} is ranked for a reason`);
     assert.ok(lane.models.length, `${lane.lane} names the models it affects`);
+    if (lane.status === "stale") {
+      assert.ok(
+        !lane.capturedDigests.includes(lane.liveDigestShort),
+        `${lane.lane} is fully stale, so no captured digest may equal the live one`,
+      );
+    }
   }
+  for (const lane of report.currentLanes) {
+    assert.equal(lane.bindings.stale + lane.records.stale, 0, lane.lane);
+    assert.ok(lane.bindings.total + lane.records.total > 0, `${lane.lane} is current because it was measured`);
+  }
+  // The POSITIVE form of the classification check. Asserting "unmeasured lanes have 0 bindings"
+  // instead passed happily while the population walk was blind to whole-block fits — it was a
+  // consequence of the bug, not a check on it.
+  const bound = new Set(manifestBindings(sources).map((item) => item.lane));
+  const measured = new Set(sources.records.map((item) => `${item.backend}:${item.target.provider}`));
   for (const lane of report.unmeasuredLanes) {
-    assert.equal(lane.records.total, 0);
-    assert.equal(lane.bindings.total, 0);
+    assert.ok(!bound.has(lane.lane), `${lane.lane} has a manifest binding, so it is not unmeasured`);
+    assert.ok(!measured.has(lane.lane), `${lane.lane} has evidence records, so it is not unmeasured`);
   }
+  // Ranking is monotone in the declared primary key.
+  const surfaces = report.staleLanes.map((lane) => lane.impact.widenedAdmissionSurface);
+  assert.deepEqual(surfaces, [...surfaces].sort((left, right) => right - left));
 });
 
 test("the human report names the ranked lanes, the widening, and its provenance", () => {

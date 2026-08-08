@@ -31,10 +31,26 @@
  *
  *   RECORDS  — `docs/generated/memory-calibration-evidence.json`. The measurement corpus. What a
  *              re-capture would have to reproduce.
- *   BINDINGS — `<model>.<backend>.calibrations[]` in `config/manifests/builtin.models.jsonc`. The
+ *   BINDINGS — every `inferenceClosureDigest` in `config/manifests/builtin.models.jsonc`. The
  *              SHIPPED admission surface: these are what the worker's fit gates actually consult, so
  *              a stale binding is a production decision running under a widened margin today, while
  *              a stale record is only corpus debt. They are ranked in that order for that reason.
+ *
+ * THE BINDING POPULATION IS THE LOCATOR'S, NOT THIS FILE'S
+ *
+ * The first version of this report walked `<model>.<backend>.calibrations[]` and called it the
+ * admission surface. That is 31 of the manifest's 33 bindings. The missing two are `turboFit` and
+ * `candle.control` — whole-block fits that sit OUTSIDE `calibrations[]`, are read by
+ * `vram_gate.rs` and `krea_control_fit.rs`, and are exactly the pair sc-17989 dragged back under the
+ * closure gate after they had sat outside it for the whole of sc-17774. Re-deriving the population
+ * reopened that hole in a new file: `candle:krea_2_turbo` and `candle:krea_2_turbo_control` printed
+ * as "declared but never captured" while both were stale production bindings.
+ *
+ * So the population comes from `backfill-closure-digests.mjs#stampManifest` — the CI gate's own
+ * locator, brace-depth accurate and orphan-checked — and this file refuses to run if that locator
+ * reports a skipped or orphaned digest. Model attribution (the MODELS column) is read off the
+ * parsed manifest and cross-checked against the locator's per-lane counts, so the cosmetic walk
+ * cannot quietly disagree with the authoritative one.
  *
  * MARGIN: DERIVED, NEVER RESTATED
  *
@@ -52,6 +68,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { stampManifest } from "./backfill-closure-digests.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
 import { validatedInferenceClosures } from "./generate-memory-matrix.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
@@ -76,25 +93,77 @@ export function laneOf(backend, provider) {
 }
 
 /**
- * Every manifest calibration binding, flattened to `{ lane, modelId, digest }`.
+ * Which catalog models declare a binding on each lane, for the MODELS column only.
  *
- * Bindings are read from the model's own per-backend block, so the lane key is composed the same way
- * `closureIsCurrent` composes it — a provider id alone is not unique across backends.
+ * A binding is ANY object under a model's `mlx`/`candle` block carrying both `provider` and
+ * `inferenceRevision` — the same shape `stampManifest`'s locator pairs on, at any depth, so
+ * `turboFit` and `candle.control` are included by construction rather than by enumeration. This is
+ * attribution, not population: `manifestBindings` cross-checks the per-lane counts against the
+ * locator and throws if the two walks disagree.
  */
-export function manifestBindings(manifest) {
-  const bindings = [];
+export function laneModelAttribution(manifest) {
+  const byLane = new Map();
+  const visit = (value, lane) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, lane);
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    if (typeof value.provider === "string" && typeof value.inferenceRevision === "string") {
+      lane(value.provider);
+    }
+    for (const child of Object.values(value)) visit(child, lane);
+  };
   for (const model of manifest.models ?? []) {
     for (const backend of ["mlx", "candle"]) {
-      for (const binding of model[backend]?.calibrations ?? []) {
-        bindings.push({
-          lane: laneOf(backend, binding.provider),
-          modelId: model.id,
-          digest: binding.inferenceClosureDigest ?? null,
-        });
-      }
+      if (!model[backend]) continue;
+      visit(model[backend], (provider) => {
+        const key = laneOf(backend, provider);
+        if (!byLane.has(key)) byLane.set(key, { models: new Set(), count: 0 });
+        byLane.get(key).models.add(model.id);
+        byLane.get(key).count += 1;
+      });
     }
   }
-  return bindings;
+  return byLane;
+}
+
+/**
+ * Every manifest closure binding, flattened to `{ lane, modelId, digest }`.
+ *
+ * The population is `stampManifest`'s — the CI gate's own locator (see the module header for why
+ * this file must not re-derive it). Its coverage checks are load-bearing here too: a `skipped`
+ * revision or an `orphan` digest means part of the admission surface is invisible, and a report that
+ * silently omitted it would understate exactly what it exists to surface.
+ */
+export function manifestBindings({ manifestBody, manifest }) {
+  // The locator is a stamper; it is used here purely as a scanner, so the rewritten body is
+  // discarded and the replacement digest is an inert constant that never reaches disk.
+  const { located, skipped, orphans } = stampManifest(manifestBody, () => "0".repeat(64));
+  if (skipped.length || orphans.length) {
+    throw new Error(
+      "the manifest closure locator cannot see the whole admission surface, so the stale-lane " +
+        `report would understate it:\n  ${[...skipped, ...orphans].join("\n  ")}`,
+    );
+  }
+  const attribution = laneModelAttribution(manifest);
+  const counted = new Map();
+  for (const binding of located) counted.set(binding.key, (counted.get(binding.key) ?? 0) + 1);
+  for (const lane of new Set([...counted.keys(), ...attribution.keys()])) {
+    const authoritative = counted.get(lane) ?? 0;
+    const attributed = attribution.get(lane)?.count ?? 0;
+    if (authoritative !== attributed) {
+      throw new Error(
+        `manifest binding walks disagree on ${lane}: the locator found ${authoritative}, the parsed ` +
+          `attribution found ${attributed}. One of the two is missing a binding shape.`,
+      );
+    }
+  }
+  return located.map((binding) => ({
+    lane: binding.key,
+    modelId: [...(attribution.get(binding.key)?.models ?? [])].sort().join("+") || null,
+    digest: binding.digest,
+  }));
 }
 
 /** Every evidence record, flattened to `{ lane, modelId, digest }`. */
@@ -153,11 +222,12 @@ export function rankLanes(lanes) {
  * @param liveDigests  `Map<lane, digest>` from `validatedInferenceClosures`.
  * @param declarations the `providers` block of the closure config (for the crate pointer).
  * @param records      the evidence bundle's records.
- * @param manifest     the parsed builtin model manifest.
+ * @param manifest     the parsed builtin model manifest (model attribution only).
+ * @param manifestBody the raw JSONC body — the authoritative binding population is located in it.
  */
-export function buildStaleLaneReport({ liveDigests, declarations, records, manifest, meta = {} }) {
+export function buildStaleLaneReport({ liveDigests, declarations, records, manifest, manifestBody, meta = {} }) {
   const margins = deriveMargins(records);
-  const bindings = manifestBindings(manifest);
+  const bindings = manifestBindings({ manifestBody, manifest });
   const evidence = evidenceBindings(records);
 
   const lanes = [];
@@ -244,6 +314,7 @@ export async function loadSources(root = ROOT) {
     declarations: closures.providers,
     records: JSON.parse(evidenceBody).records,
     manifest: JSON.parse(stripJsoncComments(manifestBody)),
+    manifestBody,
     meta: { inferenceRevision: closures.inferenceRevision, digestVersion: closures.digestVersion },
   };
 }

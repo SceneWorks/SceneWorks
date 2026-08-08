@@ -229,12 +229,17 @@ Three classes, and only the first would be re-measurement pressure:
 | --- | --- | --- |
 | **currency / re-measurement** | *(none)* | nothing in the composite demands a re-capture, and nothing may be added that does |
 | **integrity of the evidence and the table** | `check:memory-calibration` (schema + well-formedness of every record, `harnessVersion`, `evidenceSemantics`'s fail-closed "record carries no digest" / "lane is undeclared"); `inference-closure-digest.mjs --check` and `backfill-closure-digests.mjs --verify` in `check.yml`; `bump-inference.mjs`'s refusal of a pin bump that leaves `config/inference-provider-closures.json` un-regenerated | **stays.** These answer "is this data real and well-formed", never "is it recent" |
-| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:calibration-cost-model`, `check:tier-integrity`) in `check`, `rust:check` and pre-push | **stays.** A closure digest that rotates changes the matrix's *content*; the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
+| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:calibration-cost-model`, `check:tier-integrity`) in `check`, `rust:check` and pre-push | **stays.** A closure digest that rotates changes the matrix's *source fingerprint* (and its content when a lane's currency actually flips); the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
 
-Measured on the corpus at `40fa7583`: **every** calibrated lane is stale — 9 declared lanes, 6 with
-measurements, 0 of them closure-current, 65/65 evidence records and 31/31 manifest bindings serving
-under the widened margin — and the full composite is green. That is the requirement demonstrated on
-the shipped state rather than argued.
+Measured on the corpus at `40fa7583`: **every** measured lane is stale — 9 declared lanes, 8 of them
+carrying at least one binding or record, 0 of those closure-current, 1 declared but never captured;
+65/65 evidence records and 33/33 manifest bindings serving under the widened margin — and the full
+composite is green. That is the requirement demonstrated on the shipped state rather than argued.
+
+The manifest figure is 33, not 31: `turboFit` and `candle.control` are whole-block fits that sit
+outside `calibrations[]`, and sc-17989 brought them under the closure gate. Anything reading the
+admission surface must take its population from `backfill-closure-digests.mjs#stampManifest` rather
+than walk `calibrations[]` — the report below reopened that hole once and now shares the locator.
 
 `npm run report:stale-lanes` (`scripts/stale-lane-report.mjs`, `--json` for machines) is where the
 signal is read: stale lanes ranked by widened admission surface (stale manifest bindings x the

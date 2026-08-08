@@ -255,15 +255,25 @@ function enclosingBackend(lines, index, anchor) {
  * the `provider`/`inferenceRevision` keys the locator pairs on.
  *
  * Returns `stamped` (bindings whose digest was written or rewritten), `skipped` (an
- * `inferenceRevision` this cannot pair with a provider or a backend) and `orphans` (an
+ * `inferenceRevision` this cannot pair with a provider or a backend), `orphans` (an
  * `inferenceClosureDigest` no located binding reached — a digest that has fallen out of the gate,
- * which is what losing an `inferenceRevision` or even just its trailing comma looks like).
+ * which is what losing an `inferenceRevision` or even just its trailing comma looks like), and
+ * `located`.
+ *
+ * `located` is the binding POPULATION this locator found — `{ key, revision, digest, line }` per
+ * binding, `digest` being the value already present (`null` when one had to be inserted). It is
+ * reported so a reader of the manifest's admission surface can take THIS population rather than
+ * re-deriving one: sc-18098's stale-lane report did re-derive it, walked only
+ * `<model>.<backend>.calibrations[]`, and thereby missed `turboFit` and `candle.control` — the
+ * exact two whole-block fits sc-17989 brought under the gate, reported as "never captured" while
+ * they were stale production bindings. Coverage belongs to one locator, and this is it.
  */
 export function stampManifest(body, digestFor) {
   const lines = body.split("\n");
   assertNoBlockComments(lines);
   const stamped = [];
   const skipped = [];
+  const located = [];
   // Keyed by `line:column` of the `"inferenceClosureDigest"` key, not by line. Two bindings can
   // share a line — the five flux1 bindings already pack revision and digest together, so packing
   // two records onto one line is the same editorial style one step further — and a line-granular
@@ -311,6 +321,7 @@ export function stampManifest(body, digestFor) {
           continue;
         }
         claimed.add(seen);
+        located.push({ key, revision, digest: found.value, line: index + 1 });
         const wanted = digestFor(key, revision);
         if (found.value !== wanted) {
           // Re-derive in place on a digest-version bump rather than appending a second key. By
@@ -325,6 +336,7 @@ export function stampManifest(body, digestFor) {
       // No digest yet. Insert one right after the revision key, supplying the separating comma when
       // the revision is the object's last key and therefore has none of its own.
       const lead = match[2] ? ' "' : ', "';
+      located.push({ key, revision, digest: null, line: index + 1 });
       const digest = match[2]
         ? ` "inferenceClosureDigest": "${digestFor(key, revision)}",`
         : `, "inferenceClosureDigest": "${digestFor(key, revision)}"`;
@@ -351,7 +363,7 @@ export function stampManifest(body, digestFor) {
     }
   });
 
-  return { body: lines.join("\n"), stamped, skipped, orphans };
+  return { body: lines.join("\n"), stamped, skipped, orphans, located };
 }
 
 /**
