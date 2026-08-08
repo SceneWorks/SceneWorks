@@ -415,6 +415,21 @@ pub struct StaleSweep {
     pub jobs: Vec<JobSnapshot>,
 }
 
+/// Outcome of [`JobsStore::heartbeat_worker`] (sc-18182).
+///
+/// The heartbeat can terminate a job as a side effect: an idle heartbeat from a
+/// restarted worker orphans the job its previous incarnation was running. Callers
+/// must be able to see that job, because an API caller has to publish `job.updated`
+/// for it — the web client is SSE-driven and does not poll, so an unannounced
+/// terminal transition leaves its progress bar frozen forever.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkerHeartbeatOutcome {
+    /// The refreshed worker snapshot (this call's primary result).
+    pub worker: WorkerSnapshot,
+    /// The previously-active job this heartbeat marked `interrupted`, if any.
+    pub interrupted_job: Option<JobSnapshot>,
+}
+
 impl JobsStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -1456,12 +1471,18 @@ impl JobsStore {
         Ok(worker)
     }
 
-    pub fn heartbeat_worker(&self, request: WorkerHeartbeat) -> JobsStoreResult<WorkerSnapshot> {
+    pub fn heartbeat_worker(
+        &self,
+        request: WorkerHeartbeat,
+    ) -> JobsStoreResult<WorkerHeartbeatOutcome> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
         let now = utc_now();
+        // Reported to the caller so it can publish `job.updated` for the job this
+        // heartbeat terminated (sc-18182).
+        let mut interrupted_job = None;
         if request.current_job_id.is_none() {
             if let Some(previous_job_id) = worker.current_job_id {
                 let previous_job = self.get_job_on_connection(&transaction, &previous_job_id)?;
@@ -1488,6 +1509,8 @@ impl JobsStore {
                         ",
                         params![now, previous_job_id],
                     )?;
+                    interrupted_job =
+                        Some(self.get_job_on_connection(&transaction, &previous_job_id)?);
                 }
             }
         }
@@ -1528,7 +1551,10 @@ impl JobsStore {
         }
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
         transaction.commit()?;
-        Ok(worker)
+        Ok(WorkerHeartbeatOutcome {
+            worker,
+            interrupted_job,
+        })
     }
 
     pub fn mark_stale_workers_interrupted(
