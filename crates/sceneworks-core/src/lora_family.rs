@@ -2096,6 +2096,20 @@ fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static
         "chroma" => &["flux"],
         "flux2-klein" | "flux2-dev" => &["flux2"],
         "krea-realtime" => &["wan-video"],
+        // SCAIL-2's DiT is Wan2.1-I2V-14B-derived and ships the raw I2V module names — the same
+        // `blocks.{i}.self_attn.{q,k,v,o}` / `ffn` / qk-norm targets — so a Wan2.1-I2V LoRA's tensor
+        // keys resolve against it. That is not incidental: the bundled `scail2_lightning` speed
+        // toggle IS a lightx2v Wan2.1-I2V step-distill LoRA, applied cross-architecture on purpose
+        // (the engine merges every compatible target and deliberately skips the one that differs,
+        // the in_dim-36 `patch_embedding` vs SCAIL-2's in_dim 20). Because the file is a genuine Wan
+        // LoRA, `detect_lora_family` reports `wan-video` — correctly — so without this entry the
+        // job-creation gate rejects the very transplant the engine exists to perform (sc-18200).
+        // Declared HERE rather than as `wan-video` in the model's own `loraCompatibility.families`
+        // for the same reason as krea-realtime above: family membership is read by every other
+        // family-keyed gate too (tier/repo resolution, adapter routing, training bases), and SCAIL-2
+        // is not a Wan model for any of those. One-directional as usual — a Wan LoRA loads on
+        // SCAIL-2; a SCAIL-2 LoRA is not thereby declared loadable on a Wan model.
+        "scail2" => &["wan-video"],
         _ => &[],
     }
 }
@@ -4743,6 +4757,38 @@ mod tests {
             Some("krea_realtime_14b"),
         )
         .is_ok());
+    }
+
+    /// sc-18200: SCAIL-2's DiT is Wan2.1-I2V-derived and ships the raw I2V module names, and the
+    /// bundled `scail2_lightning` toggle IS a lightx2v Wan2.1-I2V LoRA — so a Wan LoRA must load on
+    /// a SCAIL-2 model. Same shape as the krea-realtime entry above, and asserted the same way so
+    /// it DISCRIMINATES: dropping the registry entry leaves `[scail2]` (and the job-creation gate
+    /// then rejects the lightning LoRA outright), while declaring `wan-video` as SCAIL-2's own
+    /// family would make the FIRST element `wan-video`, which this pins against.
+    #[test]
+    fn scail2_accepts_wan_loras_one_directionally() {
+        assert_eq!(
+            accepted_lora_families("scail2"),
+            vec!["scail2".to_owned(), "wan-video".to_owned()]
+        );
+        // Not symmetric: a Wan model does not thereby accept a scail2 LoRA.
+        assert!(!accepted_lora_families("wan-video").contains(&"scail2".to_owned()));
+        // The pre-flight accepts a Wan-declared LoRA on a SCAIL-2 job.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "scail2_lightning", "family": "wan-video" })],
+            Some("scail2"),
+            "scail2",
+            Some("scail2_14b"),
+        )
+        .is_ok());
+        // ...and still refuses an unrelated architecture.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "wrong", "family": "flux" })],
+            Some("scail2"),
+            "scail2",
+            Some("scail2_14b"),
+        )
+        .is_err());
     }
 
     #[test]
