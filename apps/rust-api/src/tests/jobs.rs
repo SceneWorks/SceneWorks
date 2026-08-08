@@ -5405,6 +5405,138 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
 }
 
 #[tokio::test]
+async fn worker_heartbeat_broadcasts_job_updated_for_the_job_it_interrupts() {
+    // sc-18182: sc-8186 gave the time-based stale sweep a `job.updated` broadcast, but the
+    // OTHER path that terminates a job behind the client's back — the idle heartbeat of a
+    // RESTARTED worker reclaiming its previous incarnation's job — kept publishing only
+    // `worker.updated`. The web client is SSE-driven and does not poll jobs, so that job went
+    // terminal in the DB while the studio showed "generating" forever. This is the exact
+    // sequence a Mac MLX worker produces after being OOM-killed mid-render.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": null,
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    // Establish the job's first heartbeat, so the idle heartbeat below is treated as a
+    // genuine restart rather than a claim race.
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/worker-1/heartbeat",
+        json!({ "status": "busy", "currentJobId": job_id, "loadedModels": [] }),
+    )
+    .await;
+
+    // Subscribe only now, so we observe the restart heartbeat's events and nothing before it.
+    let mut events = state.events.subscribe();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/worker-1/heartbeat",
+        json!({ "status": "idle", "currentJobId": null, "loadedModels": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let restart_events = drain_event_names(&mut events).await;
+    assert!(
+        restart_events.iter().any(|name| name == "job.updated"),
+        "a restart heartbeat must broadcast job.updated for the job it interrupts, \
+         or an SSE-only client never leaves the generating state: {restart_events:?}"
+    );
+    assert!(
+        restart_events.iter().any(|name| name == "queue.updated"),
+        "the queue must be refreshed too, so the job leaves the active queue view: \
+         {restart_events:?}"
+    );
+
+    let (status, job) = request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["status"], "interrupted");
+}
+
+#[tokio::test]
+async fn worker_heartbeat_without_an_interrupt_broadcasts_no_job_event() {
+    // Guard the other side of sc-18182: the ordinary busy heartbeat that every worker sends
+    // every few seconds must NOT publish job.updated/queue.updated. Getting this wrong would
+    // put the whole queue on the SSE bus at heartbeat cadence.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": null,
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+
+    let mut events = state.events.subscribe();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/worker-1/heartbeat",
+        json!({ "status": "busy", "currentJobId": job_id, "loadedModels": [] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let heartbeat_events = drain_event_names(&mut events).await;
+    assert!(
+        !heartbeat_events.iter().any(|name| name == "job.updated"),
+        "a routine busy heartbeat interrupts nothing and must not publish job.updated: \
+         {heartbeat_events:?}"
+    );
+}
+
+#[tokio::test]
 async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
     // sc-8186: the heartbeat stale-sweep marks an in-flight job `interrupted` in the DB, but
     // (unlike a worker-reported terminal status) emitted no per-job event — so a live client's
