@@ -832,6 +832,9 @@ pub(super) async fn generate_candle_krea_control_stream(
             offload_policy: gen_core::OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
+            // Measured or estimate-scoped (sc-18097) — the knobs are identical; only
+            // `incurred_peak_gb_with_adapter_bytes` (computed above) distinguishes them.
+            estimate_scoped: _,
         } => (gen_core::OffloadPolicy::Resident, false, false),
         // Constrained card: the fit ladder engaged the cheapest sufficient set of rungs to fit —
         // sequential residency (sc-12176), the seam-free tiled VAE decode (sc-11744), and query-row
@@ -840,6 +843,7 @@ pub(super) async fn generate_candle_krea_control_stream(
             offload_policy,
             tile_vae_decode: tile,
             chunk_attention: chunk,
+            estimate_scoped: _,
         } => {
             tracing::info!(
                 model = %request.model,

@@ -124,12 +124,16 @@ changed are demoted, and the regenerated files show which.
 > are claims that the evidence was ALREADY known non-current when recorded, and they still
 > exclude via `optimized_eligibility`.
 >
-> One deliberate boundary on the signal (sc-18096): a stale-closure record keeps serving its OWN
-> measured cell behind the stale margin, but it is **not** a legitimate basis for a fitted-curve
-> ESTIMATE — the estimate margin was derived over same-closure re-capture variance plus
-> extrapolation error, and cannot also absorb closure drift, so
-> `mlx_fit_gate::collect_estimate_bases` restricts extrapolation bases to closure-current
-> records.
+> One deliberate boundary on the signal (sc-18096/sc-18097): a stale-closure record keeps serving
+> its OWN measured cell behind the stale margin, but it is **not** a legitimate basis for a
+> fitted-curve ESTIMATE — the estimate margin was derived over same-closure re-capture variance
+> plus extrapolation error, and cannot also absorb closure drift. `mlx_fit_gate::collect_estimate_bases`
+> restricts extrapolation bases to closure-current records, and the candle Krea-turbo synthesis
+> (`vram_gate.rs`, sc-18097) enforces the same rule through its anchor-eligibility check (the
+> anchor record must reach full measured eligibility at its own geometry, which carries the
+> closure-currency conjunct). The candle manifest-row FLOORS (`candle_memory_strategy.rs`,
+> `krea_control_fit.rs`) have no measured cell in their extrapolation basis and are exempt, per
+> the scope sentence on `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`.
 
 A lane whose closure moved **degrades to the legacy estimator. It is not refused.** An expired
 calibration is epistemically the same as no calibration, and every uncalibrated model already renders

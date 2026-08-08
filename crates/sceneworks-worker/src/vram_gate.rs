@@ -342,6 +342,15 @@ pub(crate) enum KreaTurboFit {
         needed_gb: f64,
         selection: gen_core::MemorySelection,
         memory: gen_core::GenerationMemory,
+        /// The rung was carried by a synthesized fitted-curve ESTIMATE, not by an exact measured
+        /// record of this cell (sc-18097). True exactly when the request geometry has no
+        /// `exact_request` record: a rung's measured candidates come only from that record, and a
+        /// rung whose record exists but is structurally excluded emits no estimate either (the
+        /// whole-tier fail-closed rule in `krea_turbo_fit_with_runtime`), so those are the only
+        /// two states. Consumed by [`krea_turbo_smaller_fit_with_runtime`], which — mirroring
+        /// `mlx_fit_gate::verified_lower_alternative` — must not offer an estimate-backed
+        /// geometry as refusal advice.
+        estimate_scoped: bool,
     },
     Reject {
         phases: KreaTurboPhasePeaks,
@@ -547,6 +556,35 @@ fn krea_rung_phase_peaks(
     })
 }
 
+/// The per-phase predicted peaks a measured evidence record declares for one rung — the measured
+/// basis a fitted-curve estimate extrapolates from (sc-18097). `None` when the record does not
+/// carry a complete phase triple for the rung, which fails the estimate closed.
+fn krea_record_phase_peaks(record: &Value, manifest_rung: &str) -> Option<KreaTurboPhasePeaks> {
+    let phases = record.get("predictedPhasesGb")?.get(manifest_rung)?;
+    Some(KreaTurboPhasePeaks {
+        text_gb: phases.get("text").and_then(json_f64)?,
+        denoise_gb: phases.get("denoise").and_then(json_f64)?,
+        decode_gb: phases.get("decode").and_then(json_f64)?,
+    })
+}
+
+/// The phase index (0 text, 1 denoise, 2 decode) carrying the peak of a phase triple (sc-18097).
+/// Ties resolve to the LATER phase deterministically, mirroring the MLX gate's `binding_phase`
+/// (sc-18096); the comparison below only ever contrasts two triples produced by the same per-phase
+/// curves, so tie handling cannot manufacture a flip on its own.
+fn krea_binding_phase(peaks: KreaTurboPhasePeaks) -> u8 {
+    let mut phase = 0_u8;
+    let mut peak = peaks.text_gb;
+    if peaks.denoise_gb >= peak {
+        phase = 1;
+        peak = peaks.denoise_gb;
+    }
+    if peaks.decode_gb >= peak {
+        phase = 2;
+    }
+    phase
+}
+
 fn krea_rung_parameters(
     turbo_fit: &Value,
     strategy: gen_core::MemoryStrategy,
@@ -592,6 +630,12 @@ fn krea_rung_parameters(
 ///
 /// Returns `None` when live budget or complete measured manifest evidence is absent. This is distinct
 /// from `Reject`: unknown evidence must not masquerade as proof that a configuration cannot fit.
+///
+/// Since sc-18097 (epic 18093 R1b) an in-envelope request geometry with no exact measured record
+/// no longer freezes to `Unverified`: each optimized rung carries a fitted-curve ESTIMATE
+/// candidate anchored to a verified measured record, graded by the shared selector behind the
+/// candle estimate margin — see the synthesis block below for the anchoring and binding-phase
+/// rules.
 pub(crate) fn krea_turbo_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
@@ -687,20 +731,34 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         return None;
     }
     let bytes = |gb: f64| (gb * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64;
-    let evidence_record = turbo_fit
+    let tier_records = turbo_fit
         .get("evidenceRecords")?
         .as_array()?
         .iter()
-        .find(|record| {
+        .filter(|record| {
             record.get("evidenceScope").and_then(Value::as_str) == Some("exact_request")
                 && record.get("tier").and_then(Value::as_str) == Some(tier)
-                && record.get("width").and_then(Value::as_u64) == Some(u64::from(width))
-                && record.get("height").and_then(Value::as_u64) == Some(u64::from(height))
-        });
+        })
+        .filter_map(|record| {
+            let record_width = u32::try_from(record.get("width")?.as_u64()?).ok()?;
+            let record_height = u32::try_from(record.get("height")?.as_u64()?).ok()?;
+            Some((record, record_width, record_height))
+        })
+        .collect::<Vec<_>>();
+    let evidence_record = tier_records
+        .iter()
+        .find(|(_, record_width, record_height)| *record_width == width && *record_height == height)
+        .map(|(record, _, _)| *record);
+    // `record`/`at_geometry` are parameters rather than captures (sc-18097): the request cell's
+    // candidates are graded against the request's own record and geometry, while the estimate
+    // synthesis below re-grades a DIFFERENT record at its own measured geometry to decide whether
+    // it is a verified extrapolation anchor.
     let make_evidence = |selection: MemorySelection,
                          manifest_rung: Option<&str>,
                          fallback_predicted_peak_gb: f64,
-                         fallback_phases: Option<KreaTurboPhasePeaks>| {
+                         fallback_phases: Option<KreaTurboPhasePeaks>,
+                         evidence_record: Option<&Value>,
+                         at_geometry: MemoryGeometry| {
         let record_peak = |field: &str| {
             let rung = manifest_rung?;
             evidence_record?.get(field)?.get(rung).and_then(json_f64)
@@ -932,7 +990,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 mode: gen_core::MemoryMode::TextToImage,
                 // The existing measurements cover ordinary T2I only.
                 overlay: None,
-                geometry,
+                geometry: at_geometry,
                 strategy: selection.strategy,
                 engaged_composition,
                 parameters: selection.parameters,
@@ -975,6 +1033,8 @@ pub(crate) fn krea_turbo_fit_with_runtime(
         None,
         resident_peak_gb,
         None,
+        evidence_record,
+        geometry,
     )];
     let mut selections = vec![resident_selection];
     let mut measured = Vec::new();
@@ -994,10 +1054,175 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             Some(krea_turbo_manifest_key(strategy)),
             phase_peak_gb,
             Some(phases),
+            evidence_record,
+            geometry,
         ));
         selections.push(selection);
     }
-    let candidates = selections
+    // ── sc-18097 (epic 18093 R1b): fitted-curve estimate candidates for unmeasured cells. ──
+    //
+    // The candle mirror of `mlx_fit_gate::synthesize_estimate_ladder`'s fitted arm. The manifest's
+    // per-phase curves ARE the fitted model over this tier's measured cells, so an in-envelope
+    // request geometry nobody measured gets an estimate candidate per optimized rung at the
+    // curve-predicted peak, graded by the shared selector behind the candle ESTIMATE margin
+    // (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`). Where the exact request cell has a
+    // verified record, the selector's measured-supersedes-estimate rule keeps admission
+    // byte-for-byte unchanged.
+    //
+    // A rung's fitted estimate is emitted only when EVERY `exact_request` record of this tier —
+    // graded at ITS OWN geometry through the same `make_evidence` conjuncts as the request path —
+    // passes the full measured eligibility predicate (`optimized_eligibility`). Whole-tier rather
+    // than best-anchor, because the curve is fitted across every cell (see the fail-closed note at
+    // the loop head). That check carries every restriction sc-18096 established for extrapolation
+    // bases —
+    // closure-CURRENT capture (a stale record may serve its own cell behind the stale margin but
+    // may not seed an extrapolation; the estimate margin was derived over same-closure re-capture
+    // variance and cannot also absorb closure drift), the loaded contract's calibration identity
+    // (a drifted provider must not receive fitted candidates built from another identity's
+    // records), artifact + hardware loadability, measured-composition agreement, parity, and
+    // curve↔record phase agreement at the anchor cell (so a mutated curve that no longer describes
+    // the measurement cannot smuggle its numbers back in as an estimate).
+    //
+    // `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` (sc-18094) is honored at this synthesis
+    // seam: if the curve moves the request peak onto a different phase than the anchor record's
+    // binding phase, the fitted candidate is NOT emitted. No weights+headroom floor path exists on
+    // this lane (the constraint's scope exemption is therefore never exercised here): every rung
+    // always has a curve, and a floor from the resident row could never admit deeper than the
+    // resident baseline it equals, so a suppressed rung honestly falls out of estimate admission.
+    let mut estimates: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
+    for (strategy, phases, _, selection) in &measured {
+        let manifest_rung = krea_turbo_manifest_key(*strategy);
+        let record_is_eligible = |record: &Value, record_width: u32, record_height: u32| {
+            let Some(anchor_phases) =
+                krea_rung_phase_peaks(manifest_entry, tier, *strategy, record_width, record_height)
+            else {
+                return false;
+            };
+            let anchor_geometry = MemoryGeometry {
+                width: record_width,
+                height: record_height,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
+            // The FULL measured-eligibility predicate, not just `Verified` conformance: it
+            // additionally requires the record's measured composition to agree with the loaded
+            // contract's and the calibration identity to match (the mirror of
+            // `mlx_fit_gate::collect_estimate_bases`' engaged-composition filter).
+            make_evidence(
+                *selection,
+                Some(manifest_rung),
+                anchor_phases.peak_gb(),
+                Some(anchor_phases),
+                Some(record),
+                anchor_geometry,
+            )
+            .optimized_eligibility(&provider_contract)
+            .is_ok()
+        };
+        // FAIL CLOSED ON THE WHOLE TIER (sc-18097 review, major finding). The tier's phase curves
+        // are fitted across EVERY measured cell, and the measured path's own
+        // `exact_strategy_parameters` conjunct requires the record peak and the curve to agree
+        // within 0.01 GiB — so the curve evaluated at an excluded cell's geometry reproduces that
+        // cell's number. Anchoring on a surviving SIBLING record would therefore let a
+        // structurally excluded cell (composition mismatch, drifted identity, stale capture) be
+        // re-admitted at its own numbers behind nothing but the 4% estimate margin, laundering
+        // the per-cell structural exclusion the epic requires to keep excluding. So a rung emits
+        // fitted candidates only when EVERY `exact_request` record of the tier is eligible for it:
+        // one bad row disqualifies the tier's curve for that rung, not merely that row.
+        if let Some((_, bad_width, bad_height)) = tier_records
+            .iter()
+            .find(|(record, width, height)| !record_is_eligible(record, *width, *height))
+        {
+            tracing::info!(
+                route = "krea_2_turbo",
+                backend = "candle",
+                ?strategy,
+                ineligible_record_geometry = format!("{bad_width}x{bad_height}"),
+                "fitted-curve estimates suppressed for this rung: a measured record of this tier \
+                 is structurally excluded, and the tier's curve is fitted across it"
+            );
+            continue;
+        }
+        let anchor = tier_records
+            .iter()
+            .copied()
+            // Prefer the largest measured cell: the curve is fitted within `maxMeasuredPixels`,
+            // and the top sample is the anchor closest to that envelope.
+            .max_by_key(|(_, record_width, record_height)| {
+                u64::from(*record_width) * u64::from(*record_height)
+            });
+        let Some((anchor_record, anchor_width, anchor_height)) = anchor else {
+            continue;
+        };
+        let measured_binding =
+            krea_record_phase_peaks(anchor_record, manifest_rung).map(krea_binding_phase);
+        let request_binding = krea_binding_phase(*phases);
+        if crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE
+            && measured_binding != Some(request_binding)
+        {
+            // The pinned sc-18094 constraint: the corpus shows a per-phase re-capture spread no
+            // margin in the policy absorbs, so a curve that moves the request peak onto a
+            // different phase than the one the anchor measured is refused rather than margined.
+            tracing::info!(
+                route = "krea_2_turbo",
+                backend = "candle",
+                ?strategy,
+                anchor_geometry = format!("{anchor_width}x{anchor_height}"),
+                ?measured_binding,
+                request_binding,
+                "fitted-curve estimate rejected: the curve moves the request peak onto a \
+                 different phase than the measured anchor's \
+                 (ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE)"
+            );
+            continue;
+        }
+        let predicted_peak_bytes = bytes(phases.peak_gb());
+        tracing::info!(
+            route = "krea_2_turbo",
+            backend = "candle",
+            ?strategy,
+            anchor_geometry = format!("{anchor_width}x{anchor_height}"),
+            raw_peak_bytes = predicted_peak_bytes,
+            "synthesized fitted-curve estimate candidate from the anchored phase curves"
+        );
+        estimates.push((
+            *selection,
+            MemoryEvidence {
+                key: MemoryEvidenceKey {
+                    resolved_route: "krea_2_turbo".to_owned(),
+                    backend: gen_core::MemoryBackend::Candle,
+                    tier: numeric_tier,
+                    load_shape: provider_contract.load_shape,
+                    mode: gen_core::MemoryMode::TextToImage,
+                    overlay: None,
+                    geometry,
+                    strategy: selection.strategy,
+                    engaged_composition: provider_contract.engaged_composition(selection.strategy),
+                    parameters: selection.parameters,
+                },
+                conformance: MemoryConformanceState::ImplementedUnverified,
+                dimensions: MemoryEvidenceDimensions {
+                    static_implementation: MemoryEvidenceVerdict::Satisfied,
+                    declared_calibration: MemoryEvidenceVerdict::Missing,
+                    historical_verification: MemoryEvidenceVerdict::Missing,
+                    current_environment_verification: MemoryEvidenceVerdict::Missing,
+                    canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+                    exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+                },
+                calibration_abi,
+                calibration_fingerprint: calibration_fingerprint.to_owned(),
+                sceneworks_revision: scene_works_revision.to_owned(),
+                inference_revision: inference_revision.to_owned(),
+                harness_version: String::new(),
+                predicted_peak_bytes,
+                observed_peak_bytes: None,
+                parity: MemoryParityContract::Exact,
+                parity_result: MemoryParityResult::NotRun,
+            },
+        ));
+    }
+    let mut candidates = selections
         .iter()
         .zip(&evidence)
         .map(|(selection, evidence)| Candidate {
@@ -1007,6 +1232,14 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             basis: memory_strategy::CandidateBasis::Measured,
         })
         .collect::<Vec<_>>();
+    // Synthesized under (and anchored to) the live closure — there is nothing for currency to
+    // invalidate, exactly like the MLX gate's synthesized candidates (sc-18096).
+    candidates.extend(estimates.iter().map(|(selection, evidence)| Candidate {
+        selection: *selection,
+        evidence,
+        closure_digest: &live_closure_digest,
+        basis: memory_strategy::CandidateBasis::EstimateFittedCurve,
+    }));
     let selection = memory_strategy::select_strategy(
         request,
         &provider_contract,
@@ -1056,6 +1289,10 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 needed_gb: needed_gb + HEADROOM_GB,
                 selection: selected,
                 memory,
+                // See the field doc: with no `exact_request` record at this geometry the rung's
+                // measured candidates are structurally excluded, so only a synthesized estimate
+                // can have carried it.
+                estimate_scoped: evidence_record.is_none(),
             })
         }
         Selection::Reject { needed_gb, .. } => {
@@ -1065,6 +1302,12 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 needed_gb: needed_gb + HEADROOM_GB,
             })
         }
+        // sc-18097 narrowed this arm's meaning: an in-envelope unmeasured geometry now carries a
+        // fitted-curve estimate per rung, so the selector lands here only when a rung has NO
+        // eligible candidate at all — a stale-closure or otherwise unverifiable manifest (whose
+        // records may not seed extrapolation), a mutated record/curve pair, a binding-phase flip,
+        // or an overlay the measurements do not cover. Those remain the explicit fallback to the
+        // established generic gate, exactly as before.
         Selection::Unverified { reason } => Some(KreaTurboFit::Unverified { reason }),
     }
 }
@@ -1093,6 +1336,14 @@ fn krea_turbo_fit(
 /// Highest lower-pixel manifest bucket that the deepest available Krea Turbo rung can actually fit.
 /// Used only to make rejection copy truthful: if this returns `None`, lowering resolution is not
 /// presented as an escape hatch.
+///
+/// The advice is restricted to MEASURED admissions (sc-18097): an estimate-scoped `Fits` — the
+/// fitted-curve admission of a geometry nobody measured — is not offered here, mirroring
+/// `mlx_fit_gate::verified_lower_alternative` ("no formula, interpolation, tier heuristic, or
+/// aspect-ratio rewrite is admitted"). Naming a fallback that itself rests on an estimate invites
+/// a second refusal at the geometry the user was just told to switch to. `Resident` keeps its
+/// pre-sc-18097 acceptance: that verdict is the manifest's geometry-independent `vramGbByTier`
+/// row, which this helper has always been allowed to quote.
 pub(crate) fn krea_turbo_smaller_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
@@ -1126,7 +1377,13 @@ pub(crate) fn krea_turbo_smaller_fit_with_runtime(
                 allow_streamed_blocks,
                 runtime,
             ),
-            Some(KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. })
+            Some(
+                KreaTurboFit::Resident { .. }
+                    | KreaTurboFit::Fits {
+                        estimate_scoped: false,
+                        ..
+                    }
+            )
         )
     })
 }
@@ -2465,6 +2722,252 @@ mod tests {
         ));
     }
 
+    /// sc-18097 headline (epic 18093 R1b): an in-envelope geometry with NO exact measured record —
+    /// the cell that used to freeze to `Unverified` and fall back to the resident-only generic
+    /// gate — now admits through fitted-curve estimates, deep rungs included, with the measured
+    /// strategy parameters, and refuses honestly below the widened margins.
+    ///
+    /// Fixture arithmetic at 896² (0.802816 Mpx; fixture curves in [`krea_fit_manifest`]), all
+    /// binding phases matching the 1024² anchor record's:
+    ///   threeStage  peak 15.817 (decode-bound) → widened ×1.04 ≈ 16.450
+    ///   tiledVae    peak 15.606 (denoise)      → ≈ 16.230
+    ///   chunkedAttention peak 13.606 (denoise) → ≈ 14.150
+    ///   streamedBlocks   peak 10.606 (decode)  → ≈ 11.030
+    #[test]
+    fn krea_turbo_unmeasured_geometry_admits_by_fitted_estimate_and_refuses_below_margin() {
+        let manifest = krea_fit_manifest();
+        let fit = |free_gb: f64| {
+            krea_turbo_fit(
+                &manifest,
+                "q4",
+                896,
+                896,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: free_gb,
+                }),
+                true,
+            )
+        };
+
+        // 20 GiB free (18 effective): the cheapest fitting estimate rung is the staged floor.
+        match fit(20.0) {
+            Some(KreaTurboFit::Fits { selection, .. }) => {
+                assert_eq!(selection.strategy, MemoryStrategy::StagedResidency);
+            }
+            other => panic!("896² must admit by the staged fitted estimate, got {other:?}"),
+        }
+
+        // 13.2 GiB free (11.2 effective): only the deep rung's widened estimate (~11.03) fits —
+        // and the selection must carry the measured sweep parameters and translate to the engine
+        // knobs the engaged composition names.
+        match fit(13.2) {
+            Some(KreaTurboFit::Fits {
+                selection, memory, ..
+            }) => {
+                assert_eq!(
+                    selection.strategy,
+                    MemoryStrategy::BoundedTransformerResidency
+                );
+                assert_eq!(selection.parameters.decode_tile_edge, Some(512));
+                assert_eq!(selection.parameters.decode_overlap, Some(128));
+                assert_eq!(selection.parameters.attention_chunk_size, Some(134_217_728));
+                assert_eq!(selection.parameters.transformer_window_size, Some(1));
+                assert!(memory.tile_vae_decode);
+                assert!(memory.chunk_attention);
+                assert!(memory.stream_transformer_blocks);
+            }
+            other => panic!("only the deep estimate rung fits 11.2 GiB effective, got {other:?}"),
+        }
+
+        // Margin mutation arm: at 12.9 GiB free (10.9 effective) the RAW deep-rung peak (10.606)
+        // fits but the widened one (~11.03) does not — a selector whose estimate margin is zeroed
+        // admits here and flips this arm red. The refusal quotes the widened requirement plus the
+        // 2 GiB admission headroom, recomputed from the POLICY constant so a narrower margin
+        // cannot sneak in.
+        match fit(12.9) {
+            Some(KreaTurboFit::Reject { needed_gb, .. }) => {
+                let streamed_peak_gb = 9.0 + 2.0 * 0.802816;
+                let expected = streamed_peak_gb
+                    * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+                    + HEADROOM_GB;
+                assert!(
+                    (needed_gb - expected).abs() < 1e-3,
+                    "the refusal must quote the margin-widened deep-rung estimate: needed \
+                     {needed_gb}, expected {expected}"
+                );
+            }
+            other => panic!("below every widened estimate the request must reject, got {other:?}"),
+        }
+    }
+
+    /// sc-18097 review: refusal ADVICE stays measured-only. `krea_turbo_smaller_fit_with_runtime`
+    /// mirrors `mlx_fit_gate::verified_lower_alternative` and must not name a geometry whose own
+    /// admission rests on a fitted estimate — telling a user to drop to a resolution that was
+    /// itself only guessed invites a second refusal there.
+    ///
+    /// The shipped-data assertions elsewhere cannot pin this (the reviewer's finding): q8/bf16's
+    /// binding streamed floors are resolution-INDEPENDENT (`text` is `fixedGb` 5.01 / `perMpxGb`
+    /// 0), so no smaller geometry fits those budgets with or without the filter, and the fixture's
+    /// 2048²→1024² case resolves to a cell that HAS an exact record. This fixture arm is built to
+    /// discriminate:
+    ///
+    /// * 1024² carries an exact record, so its streamed rung is graded at the MEASURED 11.097 GiB
+    ///   — which does not fit a 10.9 GiB effective budget: the largest lower bucket rejects.
+    /// * 768² has no record, so its streamed rung is a fitted estimate at the curve peak 10.180
+    ///   GiB, widened to 10.587 — which DOES fit. Both facts are asserted directly below, so the
+    ///   discrimination is visible in this test rather than inferred: with the filter removed the
+    ///   helper necessarily returns `Some((768, 768))` from the very call it makes.
+    #[test]
+    fn krea_turbo_smaller_fit_never_names_an_estimate_backed_geometry() {
+        let manifest = krea_fit_manifest();
+        let budget = |free_gb: f64| {
+            Some(VramBudget {
+                free_gb,
+                total_gb: free_gb,
+            })
+        };
+
+        // The two facts that make the filter load-bearing at this budget.
+        assert!(
+            matches!(
+                krea_turbo_fit(&manifest, "q4", 1024, 1024, budget(12.9), true),
+                Some(KreaTurboFit::Reject { .. })
+            ),
+            "the largest lower bucket must reject at its MEASURED peak, or the helper would stop \
+             there and never reach the estimate-backed one"
+        );
+        match krea_turbo_fit(&manifest, "q4", 768, 768, budget(12.9), true) {
+            Some(KreaTurboFit::Fits {
+                estimate_scoped,
+                selection,
+                ..
+            }) => {
+                assert!(
+                    estimate_scoped,
+                    "768² has no exact record, so its admission must be estimate-scoped"
+                );
+                assert_eq!(
+                    selection.strategy,
+                    MemoryStrategy::BoundedTransformerResidency
+                );
+            }
+            other => panic!(
+                "768² must ADMIT by fitted estimate here — that is what the filter has to \
+                 suppress: {other:?}"
+            ),
+        }
+        // …so the advice must be silent rather than name 768².
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "q4", 1536, 1536, budget(12.9), true),
+            None,
+            "an estimate-backed geometry may not be offered as the lower-resolution escape hatch"
+        );
+
+        // Control: a MEASURED lower cell is still named, so the filter withholds estimates rather
+        // than silencing the advice outright. At 14 GiB free (12 effective) 1024²'s measured
+        // streamed rung (11.097) fits.
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "q4", 1536, 1536, budget(14.0), true),
+            Some((1024, 1024)),
+            "a measured lower cell must still be offered"
+        );
+    }
+
+    /// sc-18094/sc-18097: `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` is honored at the
+    /// candle synthesis seam. At 512² the fixture's threeStage curve moves the request peak onto
+    /// DENOISE (14.524 against 12.573 decode) while its 1024² anchor record binds on DECODE
+    /// (17.291) — so the staged fitted estimate is refused and the ladder's first admissible rung
+    /// is bounded decode, whose binding phase is denoise at BOTH geometries. Both rungs' widened
+    /// peaks fit the 17.5 GiB effective budget and the staged rung is walked first, so a mutation
+    /// that drops the binding-phase gate selects `StagedResidency` and turns this red.
+    #[test]
+    fn krea_turbo_fitted_estimates_honor_the_measured_binding_phase_constraint() {
+        let manifest = krea_fit_manifest();
+        match krea_turbo_fit(
+            &manifest,
+            "q4",
+            512,
+            512,
+            Some(VramBudget {
+                free_gb: 19.5,
+                total_gb: 19.5,
+            }),
+            true,
+        ) {
+            Some(KreaTurboFit::Fits { selection, .. }) => {
+                assert_eq!(
+                    selection.strategy,
+                    MemoryStrategy::BoundedDecode,
+                    "a binding-phase flip must refuse the staged FITTED estimate per \
+                     ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE"
+                );
+            }
+            other => panic!("the no-flip bounded-decode estimate must admit 512², got {other:?}"),
+        }
+    }
+
+    /// sc-18097: the estimate bases obey the sc-18096 restrictions — a stale-closure manifest may
+    /// not seed fitted extrapolation (its measured cells keep serving their OWN geometry behind
+    /// the stale margin, but the estimate margin was derived over same-closure re-capture variance
+    /// and cannot also absorb closure drift), and a calibration fingerprint that drifted from the
+    /// loaded provider's identity loses the bases entirely. Both mutations are WELL-FORMED (the
+    /// digest is a valid 64-hex string, the fingerprint keeps the shipped token grammar), so the
+    /// refusals below are the anchor-eligibility gate's work, not a parse failure — and the
+    /// registered contract is asserted conformance-CLEAN so the fingerprint arm cannot pass by a
+    /// grammar-conformance accident (the sc-18096 finding).
+    #[test]
+    fn krea_turbo_estimate_bases_require_current_closure_and_loaded_identity() {
+        let admit = |manifest: &JsonObject| {
+            krea_turbo_fit(
+                manifest,
+                "q4",
+                896,
+                896,
+                Some(VramBudget {
+                    free_gb: 20.0,
+                    total_gb: 20.0,
+                }),
+                true,
+            )
+        };
+        // Control point: the unmutated manifest admits this cell by fitted estimate.
+        assert!(
+            matches!(admit(&krea_fit_manifest()), Some(KreaTurboFit::Fits { .. })),
+            "the unmutated fixture must admit 896² by estimate, or the arms below prove nothing"
+        );
+
+        let mut stale = krea_fit_manifest();
+        stale["candle"]["turboFit"]["inferenceClosureDigest"] = Value::String("1".repeat(64));
+        assert!(
+            matches!(admit(&stale), Some(KreaTurboFit::Unverified { .. })),
+            "a stale-closure record must not seed a fitted extrapolation"
+        );
+
+        let provider_contract = crate::inference_runtime::media()
+            .memory_strategy_contract(
+                "krea_2_turbo",
+                &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(std::path::PathBuf::new())),
+            )
+            .expect("Krea contract lookup succeeds")
+            .expect("Krea contract exists");
+        assert!(
+            provider_contract.conformance_errors().is_empty(),
+            "the loaded contract must be conformance-clean so the fingerprint arm exercises the \
+             anchor identity gate, not format validation"
+        );
+        let mut drifted = krea_fit_manifest();
+        drifted["candle"]["turboFit"]["calibrationFingerprint"] =
+            Value::String("krea-turbo-cuda-phase-curves-v2".into());
+        assert_eq!(
+            admit(&drifted),
+            Some(KreaTurboFit::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::FingerprintMismatch,
+            }),
+            "a fingerprint drifted from the loaded identity loses the fitted bases"
+        );
+    }
+
     #[test]
     fn builtin_krea_evidence_is_keyed_by_the_measured_engaged_composition() {
         let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
@@ -2588,24 +3091,34 @@ mod tests {
                 other => panic!("{tier} expected {probe_rung:?}, got {other:?}"),
             }
 
+            // sc-18097: the fail-closed claim survives estimate admission because the synthesis
+            // fails closed on the WHOLE TIER — the tier's phase curves are fitted across every
+            // measured cell, and the measured path requires each record's peak to agree with the
+            // curve within 0.01 GiB, so a sibling-anchored estimate would reproduce the excluded
+            // cell's own number behind nothing but the 4% margin. Both corruption shapes are
+            // therefore asserted: every record of the tier (below) and, on the one tier with two
+            // exact_request cells, the request's own record alone (the second arm) — a per-cell
+            // structural exclusion must not be laundered by a surviving sibling.
+            let mutate_compositions = |record: &mut Value| {
+                record["measuredCompositions"]["tiledVae"] = json!(["resident", "bounded_decode"]);
+                record["measuredCompositions"]["chunkedAttention"] =
+                    json!(["resident", "bounded_decode", "bounded_attention"]);
+                record["measuredCompositions"]["streamedBlocks"] = json!([
+                    "resident",
+                    "bounded_decode",
+                    "bounded_attention",
+                    "bounded_transformer_residency"
+                ]);
+            };
             let mut no_compatible_deeper_row = manifest.clone();
-            let record = no_compatible_deeper_row["candle"]["turboFit"]["evidenceRecords"]
+            for record in no_compatible_deeper_row["candle"]["turboFit"]["evidenceRecords"]
                 .as_array_mut()
                 .expect("evidence records")
                 .iter_mut()
-                .find(|record| {
-                    record["tier"].as_str() == Some(tier) && record["width"].as_u64() == Some(1024)
-                })
-                .expect("1024 evidence record");
-            record["measuredCompositions"]["tiledVae"] = json!(["resident", "bounded_decode"]);
-            record["measuredCompositions"]["chunkedAttention"] =
-                json!(["resident", "bounded_decode", "bounded_attention"]);
-            record["measuredCompositions"]["streamedBlocks"] = json!([
-                "resident",
-                "bounded_decode",
-                "bounded_attention",
-                "bounded_transformer_residency"
-            ]);
+                .filter(|record| record["tier"].as_str() == Some(tier))
+            {
+                mutate_compositions(record);
+            }
             assert_eq!(
                 krea_turbo_fit(
                     &no_compatible_deeper_row,
@@ -2623,6 +3136,47 @@ mod tests {
                 }),
                 "{tier} mismatched rows must fail closed when no exact deeper composition can fit"
             );
+
+            // The laundering arm, on the one tier with a second `exact_request` cell (q4 ships
+            // 768² as well as 1024²): corrupting ONLY the request's own record must NOT be
+            // rescued by the surviving 768² sibling. The tier's curve at 1024² reproduces the
+            // corrupted record's peak to within the measured path's own 0.01 GiB agreement
+            // conjunct, so a best-anchor synthesis would re-admit the excluded cell at its own
+            // number behind nothing but the estimate margin. Whole-tier fail-closed is what stops
+            // that, and this arm is its mutation check: switching the synthesis back to
+            // "any eligible anchor wins" turns this green-to-red.
+            if tier == "q4" {
+                let mut single_corrupted = manifest.clone();
+                mutate_compositions(
+                    single_corrupted["candle"]["turboFit"]["evidenceRecords"]
+                        .as_array_mut()
+                        .expect("evidence records")
+                        .iter_mut()
+                        .find(|record| {
+                            record["tier"].as_str() == Some(tier)
+                                && record["width"].as_u64() == Some(1024)
+                        })
+                        .expect("1024 evidence record"),
+                );
+                assert_eq!(
+                    krea_turbo_fit(
+                        &single_corrupted,
+                        tier,
+                        1024,
+                        1024,
+                        Some(VramBudget {
+                            free_gb: required,
+                            total_gb: required,
+                        }),
+                        true,
+                    ),
+                    Some(KreaTurboFit::Unverified {
+                        reason: gen_core::MemoryEvidenceVerdict::CompositionMismatch,
+                    }),
+                    "{tier}: a per-cell structural exclusion must not be laundered into an \
+                     estimate anchored on a surviving sibling record"
+                );
+            }
         }
     }
 
@@ -2887,28 +3441,77 @@ mod tests {
         }
     }
 
+    /// sc-18097 repin of `q8_and_bf16_768_phase_fit_records_do_not_overclaim_exact_runtime_admission`.
+    ///
+    /// The 768² cells carry `phase_fit_only` records: they characterize the fitted curves without
+    /// authorizing EXACT runtime admission, and pre-18097 the gate therefore froze to
+    /// `Unverified { OutOfEnvelope }`. The estimate ladder retires the freeze without weakening
+    /// the original claim — 768² is admitted (or refused) by a fitted-curve ESTIMATE graded behind
+    /// the candle estimate margin, never by an exact-verified claim, and the sc-18094
+    /// binding-phase constraint decides per rung whether the extrapolation is even allowed:
+    ///
+    /// * q8: every shipped rung keeps its anchor's binding phase at 768² (streamed-blocks binds on
+    ///   the area-flat text phase at both geometries), so the deep rung admits by estimate on a
+    ///   card that fits its widened floor — and refuses below it (the margin mutation arm).
+    /// * bf16: the streamed-blocks anchor binds on DENOISE at 1024² (8.420 against 8.100 text)
+    ///   while the fitted curve binds on TEXT at 768² — a binding-phase flip, so
+    ///   `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` refuses the fitted candidate and
+    ///   the 12 GiB request stays `Unverified` on the SHIPPED data: a live demonstration that the
+    ///   constraint is enforced at this synthesis seam, on real curves.
     #[test]
-    fn q8_and_bf16_768_phase_fit_records_do_not_overclaim_exact_runtime_admission() {
+    fn q8_and_bf16_768_phase_fit_cells_are_estimate_graded_never_exactly_admitted() {
         let manifest = builtin_krea_turbo_manifest_with_original_fingerprint();
-        for tier in ["q8", "bf16"] {
-            let fit = krea_turbo_fit(
+        let fit = |tier: &str, free_gb: f64| {
+            krea_turbo_fit(
                 &manifest,
                 tier,
                 768,
                 768,
                 Some(VramBudget {
-                    free_gb: 12.0,
-                    total_gb: 12.0,
+                    free_gb,
+                    total_gb: free_gb,
                 }),
                 true,
-            );
-            assert!(matches!(
-                fit,
-                Some(KreaTurboFit::Unverified {
-                    reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope,
-                })
-            ), "{tier} 768² phase-fit-only evidence must remain outside exact runtime admission; got {fit:?}");
+            )
+        };
+
+        // q8 at 12 GiB free (10 GiB effective): the streamed-blocks fitted estimate (~5.01 GiB
+        // text-bound peak, widened ~5.21) is the only rung that fits, and it must carry the
+        // measured strategy parameters.
+        match fit("q8", 12.0) {
+            Some(KreaTurboFit::Fits {
+                selection, memory, ..
+            }) => {
+                assert_eq!(
+                    selection.strategy,
+                    MemoryStrategy::BoundedTransformerResidency,
+                    "the deep rung's fitted estimate must admit the 768² q8 request"
+                );
+                assert_eq!(selection.parameters.transformer_window_size, Some(1));
+                assert!(memory.tile_vae_decode);
+                assert!(memory.chunk_attention);
+                assert!(memory.stream_transformer_blocks);
+            }
+            other => panic!("q8 768² must admit by fitted estimate, got {other:?}"),
         }
+        // Margin mutation arm (q8): at 7.15 GiB free (5.15 effective) the RAW streamed peak
+        // (~5.01) fits but the widened one (~5.21) does not — a selector whose estimate margin is
+        // zeroed admits here and flips this arm red. Every rung carries an eligible estimate, so
+        // the refusal is the honest margins-based `Reject`, not `Unverified`.
+        assert!(
+            matches!(fit("q8", 7.15), Some(KreaTurboFit::Reject { .. })),
+            "below the widened deep-rung estimate the q8 768² request must reject"
+        );
+
+        // bf16 at 12 GiB free: the binding-phase flip suppresses the streamed-blocks fitted
+        // estimate and no shallower rung fits, so the request remains a structural refusal —
+        // phase-fit-only evidence still cannot overclaim past the sc-18094 constraint.
+        let bf16 = fit("bf16", 12.0);
+        assert!(
+            matches!(bf16, Some(KreaTurboFit::Unverified { .. })),
+            "bf16 768² must stay refused: the anchor's binding phase flips at this geometry; \
+             got {bf16:?}"
+        );
     }
 
     #[test]

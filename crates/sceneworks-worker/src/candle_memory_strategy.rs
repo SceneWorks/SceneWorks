@@ -1,8 +1,17 @@
 //! Candle image-provider adoption of the shared request-scoped memory selector.
 //!
-//! Static capability declarations never authorize an optimized request. The only optimized
-//! candidates admitted here are exact authoritative records from the packaged evidence bundle;
-//! every other state falls back to the resident candidate and the established Candle gate.
+//! Static capability declarations never authorize an optimized request at a MEASURED grade. Exact
+//! authoritative records from the packaged evidence bundle are the only measured optimized
+//! candidates. Since sc-18097 (epic 18093 R1b, the candle mirror of sc-18096) every other
+//! implemented optimized rung of a CERTIFIED artifact additionally carries a synthesized
+//! ESTIMATE-floor candidate —
+//! manifest `vramGbByTier`/`sequentialPeakGb` rows plus the standard headroom, never a promised
+//! unmeasured saving — graded by the shared selector behind the candle estimate margin
+//! (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`; CUDA OOM is a recoverable `Err`, so the
+//! margin is looser than MLX's). Any eligible measured candidate at the same rung supersedes the
+//! estimate, so measured-current admission is byte-for-byte unchanged; an UNCERTIFIED artifact
+//! gets no floors at all (the manifest rows describe the certified bytes, not an imported
+//! checkpoint) and keeps its resident-estimate-only behavior.
 
 use gen_core::{
     GenerationMemory, LoadSpec, MemoryBackend, MemoryCacheState, MemoryConformanceState,
@@ -418,6 +427,157 @@ fn account_for_runtime_overlay_bytes(
     }
 }
 
+/// The smallest declared value for every numeric knob the engaged composition requires — the most
+/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
+/// far below the floor's unreduced peak as the provider allows (sc-18097, the candle mirror of the
+/// MLX gate's helper from sc-18096). `None` when a required knob has no declared range: such a
+/// selection cannot be validated, so no estimate candidate is synthesized for the rung.
+fn estimate_floor_parameters(
+    contract: &gen_core::MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+) -> Option<gen_core::MemoryStrategyParameters> {
+    let smallest = |strategy: MemoryStrategy,
+                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
+     -> Option<Option<u32>> {
+        if !engaged.contains(&strategy) {
+            return Some(None);
+        }
+        pick(&contract.capability(strategy)?.parameters)
+            .iter()
+            .copied()
+            .min()
+            .map(Some)
+    };
+    Some(gen_core::MemoryStrategyParameters {
+        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_tile_edges
+        })?,
+        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_overlaps
+        })?,
+        attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
+            &ranges.attention_chunk_sizes
+        })?,
+        transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
+            &ranges.transformer_window_sizes
+        })?,
+        transformer_window_component: None,
+    })
+}
+
+/// Synthesize an estimate-floor candidate for every implemented optimized rung (sc-18097, epic
+/// 18093 R1b — the candle mirror of `mlx_fit_gate::synthesize_estimate_ladder`'s floor arm).
+///
+/// Peak source per rung, from the manifest rows the legacy candle gate already trusts
+/// (`crate::vram_gate::predicted_peak_gb` conventions) — never a tuned coefficient and never a
+/// promised unmeasured saving:
+///
+/// * `StagedResidency` — the measured `candle.sequentialPeakGb` row (the staged working set) plus
+///   the standard headroom, exactly the number the legacy sequential-offload gate compares. Absent
+///   the row, the resident estimate itself: staging is still selectable, but no unmeasured saving
+///   is promised so it can only admit where resident does.
+/// * Rungs 2–4 bound transients/residency the manifest has NOT measured for this cell, so they
+///   take the STAGED floor unreduced — selectable without promising an unmeasured saving. (Where a
+///   measured record for a rung exists it is a `verified_candidates` candidate and supersedes the
+///   floor in the selector.)
+///
+/// The candle estimate margin is NOT applied here — the selector owns margin widening
+/// (`crate::memory_strategy::select_strategy`), exactly as it owns the sc-18095 stale widening.
+#[allow(clippy::too_many_arguments)]
+fn synthesize_estimate_floors(
+    engine_id: &str,
+    contract: &gen_core::MemoryProviderContract,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    tier: MemoryNumericTier,
+    mode: &RequestModeBinding,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    resident_peak_bytes: u64,
+    runtime_overlay_bytes: u64,
+    request_evidence_revision: &str,
+) -> Vec<(MemorySelection, MemoryEvidence)> {
+    let calibration = contract.calibration.as_ref();
+    let staged_floor_bytes = crate::vram_gate::predicted_sequential_peak_gb(manifest, tier_key)
+        .map(|gb| {
+            ((gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64)
+                .saturating_add(runtime_overlay_bytes)
+        })
+        .unwrap_or(resident_peak_bytes);
+    let mut synthesized = Vec::new();
+    for strategy in MemoryStrategy::ALL {
+        if strategy == MemoryStrategy::Resident {
+            // The resident live estimate is already submitted on every request.
+            continue;
+        }
+        if !matches!(
+            contract.capability(strategy).map(|cap| &cap.support),
+            Some(gen_core::MemoryStrategySupport::Implemented)
+        ) {
+            continue;
+        }
+        let engaged = contract.engaged_composition(strategy);
+        let Some(parameters) = estimate_floor_parameters(contract, &engaged) else {
+            continue;
+        };
+        let selection = MemorySelection {
+            strategy,
+            parameters,
+            tier,
+        };
+        if contract.validate_selection(&selection).is_err() {
+            continue;
+        }
+        let predicted_peak_bytes = staged_floor_bytes;
+        tracing::info!(
+            route = engine_id,
+            backend = "candle",
+            ?strategy,
+            raw_peak_bytes = predicted_peak_bytes,
+            "synthesized manifest-row floor estimate candidate"
+        );
+        synthesized.push((
+            selection,
+            MemoryEvidence {
+                key: MemoryEvidenceKey {
+                    resolved_route: engine_id.to_owned(),
+                    backend: MemoryBackend::Candle,
+                    tier,
+                    mode: mode.mode.clone(),
+                    load_shape: contract.load_shape,
+                    overlay: overlay.map(str::to_owned),
+                    geometry,
+                    strategy,
+                    engaged_composition: engaged,
+                    parameters,
+                },
+                conformance: MemoryConformanceState::ImplementedUnverified,
+                dimensions: MemoryEvidenceDimensions {
+                    static_implementation: MemoryEvidenceVerdict::Satisfied,
+                    declared_calibration: MemoryEvidenceVerdict::Missing,
+                    historical_verification: MemoryEvidenceVerdict::Missing,
+                    current_environment_verification: MemoryEvidenceVerdict::Missing,
+                    canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+                    exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+                },
+                calibration_abi: calibration
+                    .map_or(gen_core::MEMORY_CALIBRATION_ABI, |item| item.abi),
+                calibration_fingerprint: calibration
+                    .map_or_else(String::new, |item| item.fingerprint.clone()),
+                sceneworks_revision: request_evidence_revision.to_owned(),
+                inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION
+                    .to_owned(),
+                harness_version: String::new(),
+                predicted_peak_bytes,
+                observed_peak_bytes: None,
+                parity: MemoryParityContract::Exact,
+                parity_result: MemoryParityResult::NotRun,
+            },
+        ));
+    }
+    synthesized
+}
+
 fn memory_for_selection(
     contract: &gen_core::MemoryProviderContract,
     selection: MemorySelection,
@@ -678,8 +838,40 @@ fn evaluate_shared_image_inner(
             .inference_revision
             .clone_from(&exact.inference_revision);
     }
-    let mut selections = Vec::with_capacity(verified.len() + 1);
-    let mut evidence = Vec::with_capacity(verified.len() + 1);
+    // sc-18097: estimate-floor candidates for every implemented optimized rung, so an unmeasured
+    // cell can still engage the ladder behind the candle estimate margin instead of freezing to
+    // resident-or-legacy behavior. Where an exact measured record exists the selector's
+    // measured-supersedes-estimate rule keeps admission byte-for-byte unchanged.
+    //
+    // Gated on `artifact_is_certified`, the same conjunct that gates the packaged records above
+    // (sc-18097 review, major finding). The floors are read from the SHIPPED manifest's
+    // `sequentialPeakGb`/`vramGbByTier` rows, which describe the certified artifact. An imported
+    // or community checkpoint on a supported route is different bytes: those rows do not describe
+    // it, so extending its ladder from them would be a static capability declaration authorizing
+    // an optimized request — exactly what this module's header forbids — and CUDA OOM being
+    // recoverable does not make a wrong prediction safe. An uncertified artifact therefore keeps
+    // its resident-estimate-only behavior, byte-for-byte as before this story. The sibling control
+    // lane gates its floors the same way (`krea_control_fit.rs`, `runtime_verified`).
+    let synthesized = if artifact_is_certified {
+        synthesize_estimate_floors(
+            engine_id,
+            &contract,
+            manifest,
+            tier_key,
+            tier,
+            &mode,
+            overlay,
+            geometry,
+            resident.predicted_peak_bytes,
+            runtime_overlay_bytes,
+            request_evidence_revision,
+        )
+    } else {
+        Vec::new()
+    };
+    let capacity = verified.len() + synthesized.len() + 1;
+    let mut selections = Vec::with_capacity(capacity);
+    let mut evidence = Vec::with_capacity(capacity);
     // The resident candidate is a live estimate, not a calibrated record, so it carries the live
     // digest and is never staled by this gate.
     let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
@@ -687,10 +879,14 @@ fn evaluate_shared_image_inner(
         evidence_provider(engine_id),
     )
     .unwrap_or_default();
-    let mut candidate_digests = Vec::with_capacity(verified.len() + 1);
+    let mut candidate_digests = Vec::with_capacity(capacity);
+    // Index-aligned basis axis (sc-18097): the synthesized floors carry their estimate basis;
+    // the resident live estimate and every packaged record stay `Measured`.
+    let mut candidate_bases = Vec::with_capacity(capacity);
     selections.push(resident_selection);
     evidence.push(&resident);
     candidate_digests.push(live_closure_digest.clone());
+    candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
     for (index, item) in verified.iter().enumerate() {
         candidate_digests.push(closure_digests.get(index).cloned().unwrap_or_default());
         selections.push(MemorySelection {
@@ -699,17 +895,29 @@ fn evaluate_shared_image_inner(
             tier: item.key.tier,
         });
         evidence.push(item);
+        candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
     }
+    for (selection, item) in &synthesized {
+        selections.push(*selection);
+        evidence.push(item);
+        // A floor is a declaration of the manifest rows under the LIVE closure, not a calibrated
+        // record; there is nothing there for currency to invalidate.
+        candidate_digests.push(live_closure_digest.clone());
+        candidate_bases.push(crate::memory_strategy::CandidateBasis::EstimateFloor);
+    }
+    debug_assert_eq!(evidence.len(), candidate_bases.len());
     let candidates = selections
         .iter()
         .zip(evidence)
-        .zip(&candidate_digests)
-        .map(|((selection, evidence), closure_digest)| Candidate {
-            selection: *selection,
-            evidence,
-            closure_digest,
-            basis: crate::memory_strategy::CandidateBasis::Measured,
-        })
+        .zip(candidate_digests.iter().zip(&candidate_bases))
+        .map(
+            |((selection, evidence), (closure_digest, basis))| Candidate {
+                selection: *selection,
+                evidence,
+                closure_digest,
+                basis: *basis,
+            },
+        )
         .collect::<Vec<_>>();
     let selected = crate::memory_strategy::select_strategy(
         RequestScope {
@@ -734,21 +942,23 @@ fn evaluate_shared_image_inner(
     let Selection::Selected { selection, .. } = selected else {
         return Ok(None);
     };
-    let selected_evidence = if selection.strategy == MemoryStrategy::Resident {
-        &resident
+    let matches_selection = |item: &MemoryEvidence| {
+        item.key.strategy == selection.strategy
+            && item.key.parameters == selection.parameters
+            && item.key.tier == selection.tier
+    };
+    let (selected_evidence, estimate_scoped) = if selection.strategy == MemoryStrategy::Resident {
+        (&resident, false)
+    } else if let Some(item) = verified.iter().find(|item| matches_selection(item)) {
+        (item, false)
+    } else if let Some((_, item)) = synthesized.iter().find(|(_, item)| matches_selection(item)) {
+        // sc-18097: a synthesized floor was selected — legacy-scoped telemetry below, exactly like
+        // the resident estimate (no measured harness version to claim).
+        (item, true)
     } else {
-        verified
-            .iter()
-            .find(|item| {
-                item.key.strategy == selection.strategy
-                    && item.key.parameters == selection.parameters
-                    && item.key.tier == selection.tier
-            })
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "{engine_id} selected a memory strategy without exact packaged evidence"
-                ))
-            })?
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id} selected a memory strategy without exact packaged evidence"
+        )));
     };
     let to_bytes = |gb: f64| (gb * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64;
     Ok(Some(CandleMemoryEvaluation {
@@ -773,7 +983,8 @@ fn evaluate_shared_image_inner(
             },
             predicted_peak_bytes: selected_evidence.predicted_peak_bytes,
             cache_state,
-            evidence_revision: if selection.strategy == MemoryStrategy::Resident {
+            evidence_revision: if selection.strategy == MemoryStrategy::Resident || estimate_scoped
+            {
                 request_evidence_revision.to_owned()
             } else {
                 selected_evidence.harness_version.clone()
@@ -1308,6 +1519,125 @@ mod tests {
         assert_eq!(widened.context.predicted_peak_bytes, 25_200_000_000);
     }
 
+    /// sc-18097 headline (epic 18093 R1b): an UNMEASURED provider cell — no packaged calibration
+    /// records at all — under a small emulated VRAM budget (`SCENEWORKS_CUDA_VRAM_CAP_GB`
+    /// scenario, driven through the same pure seam the cap feeds) engages the ladder by
+    /// estimate-floor instead of freezing to resident-or-nothing, and refuses below the widened
+    /// floors.
+    ///
+    /// Floor arithmetic: resident estimate 8.0 GiB (caller-predicted, manifest row); staged floor
+    /// = `sequentialPeakGb` row 2.5 + 2.0 headroom = 4.5 GiB, widened by the 4% candle estimate
+    /// margin to 4.68. A 7 GiB budget (5 GiB effective after the selector's 2 GiB reserve) admits
+    /// exactly the staged floor.
+    #[test]
+    fn unmeasured_provider_under_a_small_budget_engages_the_estimate_floor_ladder() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
+        let evaluate_as = |free_gb: f64, artifact_is_certified: bool| {
+            evaluate_shared_image(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                artifact_is_certified,
+                &manifest,
+                "q4",
+                "text_to_image",
+                None,
+                MemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                },
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                }),
+                Some(8.0),
+                0,
+                MemoryCacheState::Cold,
+            )
+            .expect("unmeasured z-image evaluation")
+        };
+        let evaluate = |free_gb: f64| evaluate_as(free_gb, true);
+
+        let evaluation = evaluate(7.0).expect(
+            "an implemented rung's estimate floor must admit where the resident estimate cannot",
+        );
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::StagedResidency,
+            "the cheapest fitting estimate rung must win"
+        );
+        // The floor is the manifest staged row + headroom, raw (the selector owns the widening).
+        assert!((evaluation.predicted_peak_gb - 4.5).abs() < 1e-6);
+        let memory = evaluation
+            .memory
+            .expect("optimized selection carries memory");
+        assert!(memory.stage_residency);
+        assert!(!memory.tile_vae_decode);
+        // Estimate admissions are legacy-scoped in telemetry, exactly like the resident estimate.
+        assert_eq!(
+            evaluation.context.evidence_revision,
+            Z_IMAGE_REQUEST_EVIDENCE_REVISION
+        );
+
+        // Margin mutation arm: at 6.55 GiB free (4.55 effective) the RAW staged floor (4.5) fits
+        // but the widened one (4.68) does not — the selector rejects, this lane falls back to the
+        // established legacy gates (`None`), and a zeroed estimate margin would admit instead and
+        // flip this arm red.
+        assert!(
+            evaluate(6.55).is_none(),
+            "an estimate must be graded at its WIDENED peak, not its raw floor"
+        );
+
+        // Control: the resident estimate itself still admits on a roomy card without engaging any
+        // rung — the floors extend the ladder downward, they do not perturb the fast path.
+        let roomy = evaluate(64.0).expect("resident admits on a roomy card");
+        assert_eq!(roomy.context.selection.strategy, MemoryStrategy::Resident);
+        assert!(roomy.memory.is_none());
+
+        // sc-18097 review (major): the floors are gated on artifact certification, the SAME
+        // conjunct that gates the packaged records. The manifest rows describe the certified
+        // bytes; an imported/community checkpoint on this route is different bytes, so at the
+        // exact budget where the certified artifact engages a floor rung, the uncertified one
+        // gets no floors, its resident estimate does not fit, and the lane hands back to the
+        // established gates (`None`). Removing the certification conjunct flips this red.
+        assert!(
+            evaluate_as(7.0, false).is_none(),
+            "an uncertified artifact must not engage a rung off the certified manifest's rows"
+        );
+        // …and it keeps its pre-sc-18097 resident behavior where the resident estimate DOES fit,
+        // so the gate withholds the floors rather than refusing the artifact.
+        let uncertified_roomy =
+            evaluate_as(64.0, false).expect("an uncertified artifact still admits resident");
+        assert_eq!(
+            uncertified_roomy.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+    }
+
+    /// An uncertified (imported / community) FLUX identity artifact never reaches an optimized
+    /// rung — not through packaged records, and since sc-18097 not through estimate floors either.
+    ///
+    /// The budget is DELIBERATELY tight and the manifest populated (sc-18097 review): on a roomy
+    /// card with an empty manifest the resident estimate wins for everyone, so the assertion could
+    /// not tell a withheld floor from a floor that simply never competed. Here the certified
+    /// control admits a floor rung at exactly the budget where the uncertified artifact must not —
+    /// removing the certification conjunct from the floor guard turns the second arm red.
     #[test]
     fn uncertified_flux_identity_artifacts_fall_back_to_resident() {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("alternate-flux-q4")))
@@ -1319,36 +1649,52 @@ mod tests {
                 WeightsSource::Dir(PathBuf::from("alternate-image-encoder")),
             )
             .with_offload_policy(gen_core::OffloadPolicy::Sequential);
-        let evaluation = evaluate_shared_image(
-            "flux1_dev",
-            "flux_dev",
-            &spec,
-            false,
-            &JsonObject::new(),
-            "q4",
-            "character_image",
-            Some("identity"),
-            MemoryGeometry {
-                width: 1024,
-                height: 1024,
-                batch: 1,
-                frames: 1,
-                reference_count: 1,
-            },
-            true,
-            false,
-            false,
-            Some(VramBudget {
-                free_gb: 32.0,
-                total_gb: 32.0,
-            }),
-            Some(8.0),
-            0,
-            MemoryCacheState::Cold,
-        )
-        .expect("FLUX identity evaluation")
-        .expect("resident fallback");
+        // Staged floor = `sequentialPeakGb` 2.5 + 2.0 headroom = 4.5 GiB, widened by the 4% candle
+        // estimate margin to 4.68; the resident estimate is 8.0. A 7 GiB budget (5.0 effective)
+        // therefore separates "floor available" from "resident only".
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let evaluate = |artifact_is_certified: bool, free_gb: f64| {
+            evaluate_shared_image(
+                "flux1_dev",
+                "flux_dev",
+                &spec,
+                artifact_is_certified,
+                &manifest,
+                "q4",
+                "character_image",
+                Some("identity"),
+                MemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 1,
+                },
+                true,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 32.0,
+                }),
+                Some(8.0),
+                0,
+                MemoryCacheState::Cold,
+            )
+            .expect("FLUX identity evaluation")
+        };
 
+        // Roomy card: resident for both, with the typed scope preserved.
+        let evaluation = evaluate(false, 32.0).expect("resident fallback");
         assert_eq!(
             evaluation.context.selection.strategy,
             MemoryStrategy::Resident
@@ -1359,6 +1705,20 @@ mod tests {
         );
         assert_eq!(evaluation.context.overlay.as_deref(), Some("identity"));
         assert!(evaluation.memory.is_none());
+
+        // The discriminating pair at 7 GiB free: certified engages the staged floor…
+        let certified = evaluate(true, 7.0)
+            .expect("a certified artifact's estimate floor must admit at this budget");
+        assert_eq!(
+            certified.context.selection.strategy,
+            MemoryStrategy::StagedResidency,
+            "the control arm must actually reach a rung, or the assertion below proves nothing"
+        );
+        // …and uncertified gets no floors at all, so the lane hands back to the established gates.
+        assert!(
+            evaluate(false, 7.0).is_none(),
+            "an uncertified artifact must not engage a rung off the certified manifest's rows"
+        );
     }
 
     #[test]
