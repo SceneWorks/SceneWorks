@@ -174,7 +174,7 @@ test("FLUX.1 manifest has ten base bindings and zero overlay bindings", async ()
 
 test("generated matrix retains superseded runtime evidence without authorizing the new pin", async () => {
   const matrix = JSON.parse(await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url)));
-  assert.equal(matrix.schemaVersion, 6);
+  assert.equal(matrix.schemaVersion, 7);
   const runs = matrix.calibrationRuns.filter(({ record }) =>
     ["flux1_schnell", "flux1_dev"].includes(record.target.provider),
   );

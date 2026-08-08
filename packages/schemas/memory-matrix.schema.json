@@ -295,18 +295,60 @@
         "unmeasured"
       ]
     },
+    "rung4Summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rung4BlockStacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "blocks",
+          "windowable"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "blocks": {
+            "type": "string",
+            "minLength": 1
+          },
+          "windowable": {
+            "type": "boolean"
+          },
+          "entries": {
+            "description": "Present when the stack exists on only some of the family's catalog entries, so a per-entry difference stays machine-readable instead of being rounded into the family verdict. Every id is checked to belong to the owning family at generation time.",
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "rung4Findings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "rung4SurveyVerdict": {
-      "description": "SC-15969 per-family rung-4 applicability. `structuralApplicability` and `requestPeak` are two SEPARATE findings by design: a family can be structurally capable and still correctly default to not using the rung, because a strategy that bounds a phase without moving the request peak is not a saving. `partial` is the value the five-state conformance vocabulary cannot express \u2014 a trunk that is not one uniform stack. `overlayIncompatible` is deliberately NOT folded into `structuralApplicability`: it is a property of the provider's adapter mechanism, so a family whose stack is perfectly windowable would otherwise publish `none` on its overlay cells.",
+      "description": "SC-15969 per-family rung-4 applicability, as it rides ONE cell. `structuralApplicability` and `requestPeak` are two SEPARATE findings by design: a family can be structurally capable and still correctly default to not using the rung, because a strategy that bounds a phase without moving the request peak is not a saving. `partial` is the value the five-state conformance vocabulary cannot express \u2014 a trunk that is not one uniform stack. `overlayIncompatible` is deliberately NOT folded into `structuralApplicability`: it is a property of the provider's adapter mechanism, so a family whose stack is perfectly windowable would otherwise publish `none` on its overlay cells. sc-18099 moved the family-level `summary`/`blockStacks`/`findings` to `rung4SurveyRows`, where they are carried once per (family, backend) and survive the elision of every one of that family's cells.",
       "type": "object",
       "required": [
         "story",
         "structuralApplicability",
         "requestPeak",
         "implementation",
-        "overlayIncompatible",
-        "summary",
-        "blockStacks",
-        "findings"
+        "overlayIncompatible"
       ],
       "additionalProperties": false,
       "properties": {
@@ -325,50 +367,70 @@
         "overlayIncompatible": {
           "description": "True when THIS cell is exempt because the provider's adapter mechanism cannot carry an overlay onto a rebuilt block. Scoped to cells whose entry and mode actually have the streaming path: on a route with no such path the rung is Missing for the ordinary reason, so a sibling cell of the same provider can read `false` while the provider-level fact still holds.",
           "type": "boolean"
-        },
-        "summary": {
-          "type": "string",
-          "minLength": 1
-        },
-        "blockStacks": {
+        }
+      }
+    },
+    "implementedMarginal": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "resolvedAxes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tiers",
+        "modes",
+        "overlays",
+        "rungs"
+      ],
+      "properties": {
+        "tiers": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "required": [
-              "name",
-              "blocks",
-              "windowable"
-            ],
-            "additionalProperties": false,
-            "properties": {
-              "name": {
-                "type": "string",
-                "minLength": 1
-              },
-              "blocks": {
-                "type": "string",
-                "minLength": 1
-              },
-              "windowable": {
-                "type": "boolean"
-              },
-              "entries": {
-                "description": "Present when the stack exists on only some of the family's catalog entries, so a per-entry difference stays machine-readable instead of being rounded into the family verdict. Every id is checked to belong to the owning family at generation time.",
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              }
-            }
-          }
-        },
-        "findings": {
-          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
           "items": {
             "type": "string",
             "minLength": 1
+          }
+        },
+        "modes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "overlays": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "none",
+              "lora",
+              "control",
+              "identity"
+            ]
+          }
+        },
+        "rungs": {
+          "type": "array",
+          "minItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ]
           }
         }
       }
@@ -396,6 +458,8 @@
     "summary",
     "models",
     "rung4SurveyRows",
+    "coverage",
+    "manifestScopes",
     "cells",
     "calibrationRuns",
     "modelSlices",
@@ -404,8 +468,8 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts.",
-      "const": 6
+      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row.",
+      "const": 7
     },
     "generatedFrom": {
       "type": "object"
@@ -449,6 +513,10 @@
       "required": [
         "imageModels",
         "cells",
+        "publishedCells",
+        "elidedCells",
+        "elidedByState",
+        "publicationPredicate",
         "mlxStagedStaticCoverage",
         "mlxStagedStaticCoverageDenominator",
         "fullModels",
@@ -456,6 +524,32 @@
         "rung4Survey"
       ],
       "properties": {
+        "cells": {
+          "description": "sc-18099: the number of coordinates the CATALOG resolved to, which is NOT `cells.length` any more. `publishedCells` + `elidedCells` partition it.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "publishedCells": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "elidedCells": {
+          "description": "Coordinates resolved but not written, because nothing planned, measured, bound or cited them. Named rather than silently capped: their states are counted in `elidedByState` and their per-lane population in `coverage`.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "elidedByState": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "publicationPredicate": {
+          "description": "The exact rule that decided publication, so a reader can tell what an absent coordinate means. Generated from scripts/generate-memory-matrix.mjs#PUBLICATION_PREDICATE.",
+          "type": "string",
+          "minLength": 1
+        },
         "calibrationRunsByStatus": {
           "type": "object",
           "additionalProperties": false,
@@ -497,12 +591,24 @@
           "backend",
           "structuralApplicability",
           "requestPeak",
-          "implementation"
+          "implementation",
+          "summary",
+          "blockStacks",
+          "findings"
         ],
         "additionalProperties": false,
         "properties": {
           "familyStory": {
             "type": "integer"
+          },
+          "summary": {
+            "$ref": "#/$defs/rung4Summary"
+          },
+          "blockStacks": {
+            "$ref": "#/$defs/rung4BlockStacks"
+          },
+          "findings": {
+            "$ref": "#/$defs/rung4Findings"
           },
           "backend": {
             "enum": [
@@ -537,7 +643,8 @@
           "routeKind",
           "backends",
           "owningFamilyStories",
-          "owningModelStories"
+          "owningModelStories",
+          "axes"
         ],
         "properties": {
           "id": {
@@ -577,14 +684,151 @@
           },
           "owningModelStories": {
             "$ref": "#/$defs/backendScopedStories"
+          },
+          "axes": {
+            "description": "sc-18099. The coordinate axes this entry resolves on each advertised backend. These ARE the cross-product `cells` used to enumerate, published so that eliding an unmeasured coordinate can never make a lane invisible — the sc-16069 failure, where a shipping control lane with no measurement block produced zero cells and absent evidence read as absent feature. Reconciled against the resolved cross-product by validateMatrix before either artifact is written.",
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "properties": {
+              "mlx": {
+                "$ref": "#/$defs/resolvedAxes"
+              },
+              "candle": {
+                "$ref": "#/$defs/resolvedAxes"
+              }
+            }
+          }
+        }
+      }
+    },
+    "coverage": {
+      "description": "sc-18099. One row per (catalog entry, backend, rung), derived from EVERY resolved coordinate — published or elided. This is the census the cross-product used to be: a consumer that counted `cells` by state reads `states` here and gets the same numbers, including for lanes the slim published nothing from. Its totals are reconciled against the resolved coordinate count and the published cell count by assertPublishedDocumentIsClosed before either artifact is written.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "modelId",
+          "backend",
+          "rung",
+          "coordinates",
+          "published",
+          "elided",
+          "implemented",
+          "states"
+        ],
+        "properties": {
+          "modelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backend": {
+            "enum": [
+              "mlx",
+              "candle"
+            ]
+          },
+          "rung": {
+            "enum": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ]
+          },
+          "coordinates": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "published": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "elided": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "implemented": {
+            "description": "Coordinates whose state passes scripts/generate-memory-matrix.mjs#isImplemented, counted over the whole lane rather than over the published subset.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "implementedBy": {
+            "description": "Per-axis MARGINALS of `implemented`, present on exactly the rows where 0 < implemented < coordinates — the rows a bare count cannot answer. A row spans tier x mode x overlay, so without this a partially implemented lane hides WHICH coordinates: `krea_2_turbo:mlx` rung 4 reads implemented 12/18 while its control overlay is really 0/6, which is the sc-16069 confusion (unmeasured lane vs absent lane) for the exact family sc-16069 was about. Every value the lane spans appears, including the zeroes. Marginals, not a joint distribution: each axis independently sums to `implemented`, checked before the artifact is written.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tier",
+              "mode",
+              "overlay"
+            ],
+            "properties": {
+              "tier": {
+                "$ref": "#/$defs/implementedMarginal"
+              },
+              "mode": {
+                "$ref": "#/$defs/implementedMarginal"
+              },
+              "overlay": {
+                "$ref": "#/$defs/implementedMarginal"
+              }
+            }
+          },
+          "states": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "propertyNames": {
+              "enum": [
+                "Verified",
+                "Runtime verified",
+                "Implemented/unverified",
+                "Structurally N/A",
+                "Missing",
+                "Route unavailable/broken"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "manifestScopes": {
+      "description": "sc-18099. The two manifest-derived evidence dimensions, published once per (entry, backend, tier) scope instead of once per coordinate. `declaredCalibration` and `loadability` are functions of that scope alone — which is also why neither is an arm of the publication predicate — so per-coordinate copies restated 35 distinct values 182 times. Cells point here through `evidence.manifestScope`; both directions of that reference, and the scope-invariance the hoist depends on, are checked before the artifact is written.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "declaredCalibration",
+          "loadability"
+        ],
+        "properties": {
+          "declaredCalibration": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/declaredEvidence"
+            }
+          },
+          "loadability": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/loadabilityEvidence"
+            }
           }
         }
       }
     },
     "cells": {
-      "description": "The 265-item floor is deliberately only a schema-level sanity check: 53 entries in this epic times the five normative rungs. JSON Schema cannot derive the real catalog cross-product of backend, tier, mode, overlay, and rung axes. Exact completeness is enforced before artifact writes by assertCellInventoryMatchesCatalog in scripts/generate-memory-matrix.mjs; do not replace 265 with today's generated cell count, because legitimate catalog drift changes that total.",
+      "description": "sc-18099: the planned-or-evidenced SUBSET of the catalog cross-product, not the cross-product. `summary.publicationPredicate` states the rule that decided membership and `summary.elidedCells` counts what it dropped. No useful minItems exists any more — the population is a function of what has been planned and measured, so any floor here would either be vacuous or would fail the day a lane is descoped. Completeness of the underlying cross-product is still enforced before publication by assertCellInventoryMatchesCatalog, and closure of what was written by assertPublishedDocumentIsClosed, both in scripts/generate-memory-matrix.mjs.",
       "type": "array",
-      "minItems": 265,
+      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -684,10 +928,9 @@
             "additionalProperties": false,
             "required": [
               "staticImplementation",
-              "declaredCalibration",
+              "manifestScope",
               "historicalVerification",
               "currentEnvironmentVerification",
-              "loadability",
               "strategyParameterVerification",
               "structural"
             ],
@@ -698,11 +941,10 @@
                   "$ref": "#/$defs/sourceEvidence"
                 }
               },
-              "declaredCalibration": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/declaredEvidence"
-                }
+              "manifestScope": {
+                "description": "sc-18099: key into the document's `manifestScopes` map, holding this coordinate's `declaredCalibration` and `loadability`. Both are functions of (entry, backend, tier) alone, so publishing them per coordinate restated 35 distinct values across 182 cells. `evidenceDimensions` still names all six dimensions — what changed is where two of them are written. Always `<modelId>:<backend>:<tier>`, checked against the cell's own coordinate before the artifact is written.",
+                "type": "string",
+                "minLength": 1
               },
               "historicalVerification": {
                 "type": "array",
@@ -714,12 +956,6 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/historicalEvidence"
-                }
-              },
-              "loadability": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/loadabilityEvidence"
                 }
               },
               "strategyParameterVerification": {
@@ -845,16 +1081,94 @@
             ]
           },
           "record": {
-            "$ref": "memory-calibration.schema.json#/$defs/record"
+            "description": "sc-18099: a PROJECTION of the evidence-bundle row, not the row. The full record ships and is schema-validated in docs/generated/memory-calibration-evidence.json; embedding all 65 verbatim cost 436 KB of duplication. `id` is the join key and `source` spells the join out. Kept here is exactly what the matrix itself asserts about a record: which coordinate it targets, what composition it exercised, how it dates, and which fingerprint it carries.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "status",
+              "backend",
+              "target",
+              "strategy",
+              "calibrationFingerprint",
+              "capturedAt",
+              "harnessVersion",
+              "repositories",
+              "source"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "complete",
+                  "runtime_complete",
+                  "gated",
+                  "negative_complete"
+                ]
+              },
+              "backend": {
+                "enum": [
+                  "mlx",
+                  "candle"
+                ]
+              },
+              "target": {
+                "type": "object"
+              },
+              "strategy": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "rung",
+                  "engagedRungs"
+                ],
+                "properties": {
+                  "rung": {
+                    "enum": [
+                      "resident",
+                      "staged_residency",
+                      "bounded_decode",
+                      "bounded_attention",
+                      "bounded_transformer_residency"
+                    ]
+                  },
+                  "engagedRungs": {
+                    "$ref": "#/$defs/engagedRungs"
+                  }
+                }
+              },
+              "calibrationFingerprint": {
+                "type": "string",
+                "minLength": 1
+              },
+              "capturedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "harnessVersion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "repositories": {
+                "type": "object"
+              },
+              "source": {
+                "type": "string",
+                "pattern": "^docs/generated/memory-calibration-evidence\\.json#"
+              }
+            }
           }
         }
       }
     },
     "modelSlices": {
+      "description": "Published cell ids per catalog entry. sc-18099 dropped the former 5-item floor: an entry with nothing planned, measured, bound or cited publishes NO cells, and an empty slice is the honest answer. Its lane totals remain in `coverage`.",
       "type": "object",
       "additionalProperties": {
         "type": "array",
-        "minItems": 5,
         "items": {
           "type": "string"
         }
