@@ -12,7 +12,7 @@ const categoryOptions = [
   ["render", "Renders"],
 ];
 
-const sourceImageTabs = [
+const sourceMediaTabs = [
   ["assets", "Assets"],
   ["upload", "File Upload"],
   ["character", "Character"],
@@ -230,6 +230,7 @@ export function ImageEditSourcePickerField({
   assets,
   buttonLabel = "Select image",
   characters = [],
+  changeLabel = "Change",
   // clearable=true renders a "Remove" control next to "Change" that resets the
   // selection to "" (onChange("")). Opt-in because some callers (e.g. the edit
   // Source image) require a picked asset; enable it where the source is optional
@@ -237,21 +238,106 @@ export function ImageEditSourcePickerField({
   // once-picked image can actually be un-picked rather than sticking until reload.
   clearable = false,
   emptyLabel = "No source image selected",
+  eyebrow = "Image Edit",
   importAsset,
   label = "Source image",
+  multiple = false,
   onChange,
   projectId,
   value = "",
+  values = [],
+}) {
+  return (
+    <MediaSourcePickerField
+      assets={assets}
+      buttonLabel={buttonLabel}
+      characters={characters}
+      changeLabel={changeLabel}
+      clearable={clearable}
+      emptyLabel={emptyLabel}
+      eyebrow={eyebrow}
+      importAsset={importAsset}
+      label={label}
+      mediaKind="image"
+      multiple={multiple}
+      onChange={onChange}
+      projectId={projectId}
+      value={value}
+      values={values}
+    />
+  );
+}
+
+export function VideoSourcePickerField({
+  assets,
+  buttonLabel = "Select clip",
+  characters = [],
+  changeLabel = "Change",
+  clearable = false,
+  emptyLabel = "No source clip selected",
+  importAsset,
+  label = "Source clip",
+  multiple = false,
+  onChange,
+  projectId,
+  value = "",
+  values = [],
+}) {
+  return (
+    <MediaSourcePickerField
+      assets={assets}
+      buttonLabel={buttonLabel}
+      characters={characters}
+      changeLabel={changeLabel}
+      clearable={clearable}
+      emptyLabel={emptyLabel}
+      eyebrow="Video Studio"
+      importAsset={importAsset}
+      label={label}
+      mediaKind="video"
+      multiple={multiple}
+      onChange={onChange}
+      projectId={projectId}
+      value={value}
+      values={values}
+    />
+  );
+}
+
+function MediaSourcePickerField({
+  assets,
+  buttonLabel,
+  characters,
+  changeLabel,
+  clearable,
+  emptyLabel,
+  eyebrow = "Image Edit",
+  importAsset,
+  label,
+  mediaKind,
+  multiple,
+  onChange,
+  projectId,
+  value,
+  values,
 }) {
   const [open, setOpen] = useState(false);
   const selectableAssets = useMemo(
-    () => assets.filter((asset) => activeProjectImageAsset(asset, projectId)),
-    [assets, projectId],
+    () =>
+      assets.filter((asset) =>
+        mediaKind === "video"
+          ? activeProjectVideoAsset(asset, projectId)
+          : activeProjectImageAsset(asset, projectId),
+      ),
+    [assets, mediaKind, projectId],
   );
-  const selectedAsset = selectableAssets.find((asset) => asset.id === value) ?? assets.find((asset) => asset.id === value);
+  const selectedIds = multiple ? values : value ? [value] : [];
+  const selectedAssets = selectedIds
+    .map((id) => selectableAssets.find((asset) => asset.id === id) ?? assets.find((asset) => asset.id === id))
+    .filter(Boolean);
 
-  function confirm(id) {
-    onChange(id ?? "");
+  function confirm(ids) {
+    onChange(multiple ? ids : ids[0] ?? "");
     setOpen(false);
   }
 
@@ -260,45 +346,78 @@ export function ImageEditSourcePickerField({
       <div className="asset-picker-head">
         <span className="asset-picker-label">{label}</span>
         <div className="asset-picker-actions">
-          {/* Gate on `value`, not `selectedAsset`: a still-sent id that no longer
+          {/* Gate on the value, not the resolved asset: a still-sent id that no longer
               resolves (asset trashed/filtered out) must still be clearable. */}
-          {clearable && value ? (
-            <button className="asset-picker-clear" onClick={() => onChange("")} type="button">
+          {clearable && selectedIds.length ? (
+            <button className="asset-picker-clear" onClick={() => onChange(multiple ? [] : "")} type="button">
               Remove
             </button>
           ) : null}
           <button aria-haspopup="dialog" onClick={() => setOpen(true)} type="button">
-            {selectedAsset ? "Change" : buttonLabel}
+            {selectedAssets.length ? changeLabel : buttonLabel}
           </button>
         </div>
       </div>
-      <AssetPreviewChips assets={selectedAsset ? [selectedAsset] : []} emptyLabel={emptyLabel} />
+      <AssetPreviewChips assets={selectedAssets} emptyLabel={emptyLabel} />
       {open ? (
-        <ImageEditSourcePickerModal
+        <MediaSourcePickerModal
           assets={selectableAssets}
           characters={characters}
+          eyebrow={eyebrow}
           importAsset={importAsset}
-          initialSelectedId={value}
+          initialSelectedIds={selectedIds}
+          mediaKind={mediaKind}
+          multiple={multiple}
           onCancel={() => setOpen(false)}
           onConfirm={confirm}
+          title={label}
         />
       ) : null}
     </div>
   );
 }
 
-function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSelectedId, onCancel, onConfirm }) {
+function fileMatchesMediaKind(file, mediaKind) {
+  const mime = String(file?.type ?? "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/")) {
+    return mime.startsWith(`${mediaKind}/`);
+  }
+  const name = String(file?.name ?? "").toLowerCase();
+  return mediaKind === "video"
+    ? /\.(mp4|m4v|mov|webm|mkv|avi|ogv|mpeg|mpg|wmv|flv|3gp|3g2)$/i.test(name)
+    : /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|heic|heif)$/i.test(name);
+}
+
+function assetMatchesMediaKind(asset, mediaKind) {
+  return mediaKind === "video"
+    ? assetCanRenderAsVideo(asset)
+    : assetCanRenderAsImage(asset) || asset?.type === "frame";
+}
+
+function MediaSourcePickerModal({
+  assets,
+  characters,
+  eyebrow,
+  importAsset,
+  initialSelectedIds,
+  mediaKind,
+  multiple,
+  onCancel,
+  onConfirm,
+  title,
+}) {
   const [tab, setTab] = useState("assets");
   const [query, setQuery] = useState("");
-  const [selectedId, setSelectedId] = useState(() => (assets.some((asset) => asset.id === initialSelectedId) ? initialSelectedId : ""));
+  const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
   const [characterId, setCharacterId] = useState(characters[0]?.id ?? "");
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const mediaLabel = mediaKind === "video" ? "video" : "image";
 
   useEffect(() => {
-    setSelectedId((id) => (id && assets.some((asset) => asset.id === id) ? id : ""));
-  }, [assets]);
+    setSelectedIds((ids) => normalizeSelection(ids, assets, multiple));
+  }, [assets, multiple]);
 
   useEffect(() => {
     if (characterId && characters.some((character) => character.id === characterId)) {
@@ -316,7 +435,7 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
       ),
     [assets, characterId, selectedCharacter, characterReferenceIds],
   );
-  // The Assets tab shows the project library *minus* images that already belong
+  // The Assets tab shows the project library minus media that already belongs
   // to a character — those live on the Character tab. Splitting the library this
   // way is the whole point of the two tabs; without this exclusion every
   // character asset appeared on both tabs, so "Assets" looked unfiltered.
@@ -335,23 +454,46 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
   const searchIndex = useMemo(() => assetSearchIndex(tabAssets), [tabAssets]);
   const visibleAssets = useMemo(() => filterPickerAssets(tabAssets, query, searchIndex), [tabAssets, query, searchIndex]);
 
-  async function handleUpload(file) {
-    if (!file || uploading) {
+  async function handleUpload(files) {
+    const selectedFiles = Array.from(files ?? []);
+    if (!selectedFiles.length || uploading) {
       return;
     }
     if (!importAsset) {
       setUploadError("File upload is unavailable in this context.");
       return;
     }
+    if (selectedFiles.some((file) => !fileMatchesMediaKind(file, mediaKind))) {
+      setUploadError(`Choose ${mediaLabel} files only.`);
+      return;
+    }
     setUploading(true);
     setUploadError("");
     try {
-      const imported = await importAsset(file, { throwOnError: true });
-      if (imported?.id) {
-        onConfirm(imported.id);
+      const outcomes = await Promise.allSettled(
+        (multiple ? selectedFiles : selectedFiles.slice(0, 1)).map((file) =>
+          importAsset(file, { select: false, throwOnError: true }),
+        ),
+      );
+      const importedIds = outcomes
+        .filter((outcome) => outcome.status === "fulfilled" && outcome.value?.id && assetMatchesMediaKind(outcome.value, mediaKind))
+        .map((outcome) => outcome.value.id);
+      const failureCount = outcomes.length - importedIds.length;
+      const nextIds = multiple ? [...new Set([...selectedIds, ...importedIds])] : importedIds.slice(0, 1);
+      if (failureCount) {
+        setSelectedIds(nextIds);
+        setUploadError(
+          importedIds.length
+            ? `Imported ${importedIds.length} ${mediaLabel}${importedIds.length === 1 ? "" : "s"}; ${failureCount} failed.`
+            : `Could not import the selected ${mediaLabel}${outcomes.length === 1 ? "" : "s"}.`,
+        );
+        return;
+      }
+      if (importedIds.length) {
+        onConfirm(nextIds);
       }
     } catch (err) {
-      setUploadError(err.message);
+      setUploadError(err?.message ?? `Could not import the ${mediaLabel}.`);
     } finally {
       setUploading(false);
     }
@@ -360,7 +502,7 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
   function handleDrop(event) {
     event.preventDefault();
     setDragActive(false);
-    handleUpload(event.dataTransfer?.files?.[0] ?? null);
+    handleUpload(event.dataTransfer?.files);
   }
 
   function switchTab(nextTab) {
@@ -370,24 +512,33 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
   }
 
   function renderAssetGrid(emptyLabel) {
+    function toggleAsset(asset) {
+      setSelectedIds((ids) => {
+        if (multiple) {
+          return ids.includes(asset.id) ? ids.filter((id) => id !== asset.id) : [...ids, asset.id];
+        }
+        return [asset.id];
+      });
+    }
+
     return (
       <PickerCardGrid
-        ariaMultiselectable={undefined}
+        ariaMultiselectable={multiple || undefined}
         assets={visibleAssets}
         emptyLabel={emptyLabel}
-        isSelected={(asset) => selectedId === asset.id}
-        onActivate={(asset) => onConfirm(asset.id)}
-        onSelect={(asset) => setSelectedId(asset.id)}
+        isSelected={(asset) => selectedIds.includes(asset.id)}
+        onActivate={multiple ? undefined : (asset) => onConfirm([asset.id])}
+        onSelect={toggleAsset}
       />
     );
   }
 
   return (
-    <Modal className="asset-picker-modal image-edit-source-modal" labelledBy="asset-picker-title" onClose={onCancel}>
+    <Modal className="asset-picker-modal image-edit-source-modal media-source-modal" labelledBy="asset-picker-title" onClose={onCancel}>
       <header className="asset-picker-modal-head">
         <div>
-          <p className="eyebrow">Image Edit</p>
-          <h2 id="asset-picker-title">Choose source image</h2>
+          <p className="eyebrow">{eyebrow}</p>
+          <h2 id="asset-picker-title">Choose {title.toLowerCase()}</h2>
         </div>
         <button className="modal-close" onClick={onCancel} type="button">
           Close
@@ -395,8 +546,8 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
       </header>
 
       <div className="asset-picker-toolbar">
-        <div className="segmented-control compact-segment" role="tablist" aria-label="Source image source">
-          {sourceImageTabs.map(([key, label]) => (
+        <div className="segmented-control compact-segment" role="tablist" aria-label={`Source ${mediaLabel} source`}>
+          {sourceMediaTabs.map(([key, label]) => (
             <button
               aria-selected={tab === key}
               className={tab === key ? "active" : ""}
@@ -413,7 +564,7 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
         </div>
         {tab === "upload" ? null : (
           <input
-            aria-label="Search source images"
+            aria-label={`Search source ${mediaLabel}s`}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={tab === "character" ? "Search character assets" : "Search project assets"}
             value={query}
@@ -421,17 +572,18 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
         )}
       </div>
 
-      {tab === "assets" ? renderAssetGrid("No active project images match this view") : null}
+      {tab === "assets" ? renderAssetGrid(`No active project ${mediaLabel}s match this view`) : null}
 
       {tab === "upload" ? (
         <FileDropzone
-          accept="image/*"
+          accept={`${mediaKind}/*`}
           active={dragActive}
           busy={uploading}
-          hint={uploading ? "Importing image..." : "Drop an image here, or"}
+          hint={uploading ? `Importing ${mediaLabel}${multiple ? "s" : ""}...` : `Drop ${multiple ? `${mediaLabel}s` : `a ${mediaLabel}`} here, or`}
+          multiple={multiple}
           onActiveChange={setDragActive}
           onDrop={handleDrop}
-          onFiles={(files) => handleUpload(files?.[0] ?? null)}
+          onFiles={handleUpload}
         />
       ) : null}
       {tab === "upload" && uploadError ? <p className="inline-warning">{uploadError}</p> : null}
@@ -449,17 +601,23 @@ function ImageEditSourcePickerModal({ assets, characters, importAsset, initialSe
               ))}
             </select>
           </label>
-          {renderAssetGrid(characterId ? "No active images for this character" : "Select a character")}
+          {renderAssetGrid(characterId ? `No active ${mediaLabel}s for this character` : "Select a character")}
         </div>
       ) : null}
 
       <footer className="asset-picker-footer">
-        <span>{selectedId ? "1 selected" : tab === "upload" ? "Upload an image to use it" : "No selection"}</span>
+        <span>
+          {selectedIds.length
+            ? `${selectedIds.length} selected`
+            : tab === "upload"
+              ? `Upload ${multiple ? `${mediaLabel}s` : `a ${mediaLabel}`} to use ${multiple ? "them" : "it"}`
+              : "No selection"}
+        </span>
         <div className="detail-actions">
           <button onClick={onCancel} type="button">
             Cancel
           </button>
-          <button disabled={!selectedId} onClick={() => onConfirm(selectedId)} type="button">
+          <button disabled={!selectedIds.length} onClick={() => onConfirm(selectedIds)} type="button">
             Use Selection
           </button>
         </div>

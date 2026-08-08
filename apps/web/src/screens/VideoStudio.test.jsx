@@ -45,6 +45,7 @@ function baseContext(overrides = {}) {
     deleteAsset: vi.fn(),
     purgeAsset: vi.fn(),
     gpuOptions: [],
+    importAsset: vi.fn(),
     latestVideoAssets: [],
     recentVideoAssets: [],
     studioLaunch: null,
@@ -399,6 +400,56 @@ describe("VideoStudio fit mode (sc-6139)", () => {
     expect(context.createVideoJob.mock.calls[1][0].fitMode).toBe("pad");
   });
 
+  it("keeps a secondary-field upload from overwriting the primary source selection", async () => {
+    let importOptions;
+    function Host() {
+      const [assets, setAssets] = React.useState([source]);
+      const [selectedAssetId, setSelectedAssetId] = React.useState(source.id);
+      const selectedAsset = assets.find((asset) => asset.id === selectedAssetId) ?? null;
+      const importAsset = async (_file, options) => {
+        importOptions = options;
+        const imported = {
+          id: "img_last",
+          type: "image",
+          projectId: "project_1",
+          displayName: "Uploaded Last Frame",
+        };
+        setAssets((items) => [imported, ...items]);
+        if (options.select !== false) {
+          setSelectedAssetId(imported.id);
+        }
+        return imported;
+      };
+      return (
+        <AppContext.Provider
+          value={baseContext({ assets, importAsset, selectedAsset, selectedAssetId })}
+        >
+          <VideoStudio />
+        </AppContext.Provider>
+      );
+    }
+
+    await act(async () => root.render(<Host />));
+    await act(async () => {});
+    await click(modeButton("First → Last"));
+    const fieldByLabel = (label) =>
+      [...container.querySelectorAll(".asset-picker-field")].find(
+        (field) => field.querySelector(".asset-picker-label")?.textContent === label,
+      );
+    await click(buttonWithText(fieldByLabel("Last frame"), "Select image"));
+    const modal = document.querySelector(".media-source-modal");
+    await click([...modal.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent.includes("File Upload")));
+    const input = modal.querySelector('input[type="file"]');
+    const file = new File(["last"], "last.png", { type: "image/png" });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+
+    expect(importOptions).toEqual({ select: false, throwOnError: true });
+    expect(fieldByLabel("First frame").textContent).toContain("Source");
+    expect(fieldByLabel("First frame").textContent).not.toContain("Uploaded Last Frame");
+    expect(fieldByLabel("Last frame").textContent).toContain("Uploaded Last Frame");
+  });
+
   it("omits fitMode for non-image-conditioned modes", async () => {
     const context = baseContext({ assets: [source], selectedAsset: source });
     await render(context);
@@ -496,6 +547,31 @@ describe("VideoStudio Bernini task modes", () => {
     expect(pickerLabels()).toEqual(
       expect.arrayContaining(["Source clip", "Reference video", "Reference images"]),
     );
+  });
+
+  it("uses the Image Studio source flow for both clip and image pickers", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA] });
+    await render(context);
+
+    await click(modeButton("Video → Video"));
+    await click(buttonWithText(container, "Select clip"));
+    let modal = document.querySelector(".media-source-modal");
+    expect([...modal.querySelectorAll('[role="tab"]')].map((el) => el.textContent.trim())).toEqual([
+      "Assets1",
+      "File Upload",
+      "Character0",
+    ]);
+    await click([...modal.querySelectorAll('[role="tab"]')].find((el) => el.textContent.includes("File Upload")));
+    expect(modal.querySelector('input[type="file"]').accept).toBe("video/*");
+    await click(buttonWithText(modal, "Cancel"));
+
+    await click(modeButton("Reference → Video"));
+    await click(buttonWithText(container, "Select images"));
+    modal = document.querySelector(".media-source-modal");
+    await click([...modal.querySelectorAll('[role="tab"]')].find((el) => el.textContent.includes("File Upload")));
+    const imageInput = modal.querySelector('input[type="file"]');
+    expect(imageInput.accept).toBe("image/*");
+    expect(imageInput.multiple).toBe(true);
   });
 
   it("keeps Render disabled until the required reference image is selected", async () => {

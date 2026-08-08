@@ -33,7 +33,7 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
 
   // Only the props PersonTrackCorrections needs to mount and re-render; the rest
   // of ReplacePersonPanel's surface is inert with these safe defaults.
-  const renderPanel = (selectedTrack, saveTrackCorrections = vi.fn()) =>
+  const renderPanel = (selectedTrack, saveTrackCorrections = vi.fn(), overrides = {}) =>
     act(() => {
       root.render(
         <ReplacePersonPanel
@@ -54,6 +54,7 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
           trackName=""
           videoAssets={[]}
           videoModels={[]}
+          {...overrides}
         />,
       );
     });
@@ -79,6 +80,25 @@ describe("ReplacePersonPanel track corrections drafts (sc-11966)", () => {
     // First render of a track shows its saved corrections (acceptance #3).
     expect(field(container, "Box x").value).toBe("0.65");
     expect(container.textContent).toContain("1 saved");
+  });
+
+  it("uses the direct-upload video source picker for the Replace Person source clip", async () => {
+    await renderPanel(track("track-1", []), vi.fn(), {
+      importAsset: vi.fn(),
+      projectId: "project-1",
+      videoAssets: [{ id: "clip-1", type: "video", projectId: "project-1", displayName: "Source Clip" }],
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "Select clip").click();
+    });
+    const modal = document.body.querySelector(".media-source-modal");
+    expect(modal).toBeTruthy();
+    expect([...modal.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent.trim())).toEqual([
+      "Assets1",
+      "File Upload",
+      "Character0",
+    ]);
   });
 
   it("keeps dirty per-frame drafts when a same-track corrections refresh arrives", async () => {
