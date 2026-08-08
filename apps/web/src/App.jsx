@@ -2963,7 +2963,12 @@ export function App() {
           body,
         });
         setAssets((items) => [imported, ...items.filter((item) => item.id !== imported.id)]);
-        setSelectedAssetId(imported.id);
+        // Field-scoped pickers select the imported asset in their own local value. Let them opt
+        // out of changing the app-wide Library selection, which studios also observe as a request
+        // to replace their PRIMARY source (for example First frame / Left clip).
+        if (options.select !== false) {
+          setSelectedAssetId(imported.id);
+        }
         setError("");
         return imported;
       } catch (err) {

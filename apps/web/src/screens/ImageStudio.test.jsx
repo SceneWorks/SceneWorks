@@ -535,7 +535,7 @@ describe("ImageStudio edit source picker", () => {
     await act(async () => setFileInput(dialog.querySelector('input[type="file"]'), [file]));
     await act(async () => {});
 
-    expect(importAsset).toHaveBeenCalledWith(file, { throwOnError: true });
+    expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
 
     await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate"));

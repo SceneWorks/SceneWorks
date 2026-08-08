@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, withMediaTicket } from "../api.js";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 
@@ -427,9 +427,11 @@ function PersonTrackCorrections({ track, sourceClip, saveTrackCorrections }) {
 }
 
 export function ReplacePersonPanel({
+  characters = [],
   createPersonDetectionJob,
   createPersonTrackJob,
   detectionResult,
+  importAsset,
   matchingTracks,
   representativeFrame,
   selectedDetection,
@@ -449,6 +451,7 @@ export function ReplacePersonPanel({
   model,
   setModel,
   personReadiness = {},
+  projectId,
   createModelDownloadJob,
 }) {
   // The replacement backend = the replace-capable video models. The user picks one here (it drives
@@ -499,12 +502,15 @@ export function ReplacePersonPanel({
 
   return (
     <div className="replace-person-panel">
-      <AssetPickerField
+      <VideoSourcePickerField
         assets={videoAssets}
         buttonLabel="Select clip"
+        characters={characters}
         emptyLabel="No source clip selected"
+        importAsset={importAsset}
         label="Source clip"
         onChange={setSourceClipAssetId}
+        projectId={projectId}
         value={sourceClipAssetId}
       />
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
@@ -127,6 +127,7 @@ export function VideoStudio() {
     deleteAsset,
     purgeAsset,
     gpuOptions,
+    importAsset,
     latestVideoAssets,
     recentVideoAssets,
     studioLaunch,
@@ -1477,23 +1478,31 @@ export function VideoStudio() {
           {mode !== "text_to_video" ? (
           <div className="studio-source-band">
             {mode === "image_to_video" || mode === "first_last_frame" ? (
-              <AssetPickerField
+              <ImageEditSourcePickerField
                 assets={imageAssets}
                 buttonLabel="Select image"
+                characters={characters}
                 emptyLabel="No first frame selected"
+                eyebrow="Video Studio"
+                importAsset={importAsset}
                 label="First frame"
                 onChange={setSourceAssetId}
+                projectId={activeProject?.id}
                 value={sourceAssetId}
               />
             ) : null}
 
             {mode === "first_last_frame" ? (
-              <AssetPickerField
+              <ImageEditSourcePickerField
                 assets={imageAssets}
                 buttonLabel="Select image"
+                characters={characters}
                 emptyLabel="No last frame selected"
+                eyebrow="Video Studio"
+                importAsset={importAsset}
                 label="Last frame"
                 onChange={setLastFrameAssetId}
+                projectId={activeProject?.id}
                 value={lastFrameAssetId}
               />
             ) : null}
@@ -1507,104 +1516,133 @@ export function VideoStudio() {
             ) : null}
 
             {mode === "extend_clip" ? (
-              <AssetPickerField
+              <VideoSourcePickerField
                 assets={videoAssets}
                 buttonLabel="Select clip"
+                characters={characters}
                 emptyLabel="No source clip selected"
+                importAsset={importAsset}
                 label="Source clip"
                 onChange={setSourceClipAssetId}
+                projectId={activeProject?.id}
                 value={sourceClipAssetId}
               />
             ) : null}
 
             {mode === "video_bridge" ? (
               <>
-                <AssetPickerField
+                <VideoSourcePickerField
                   assets={videoAssets}
                   buttonLabel="Select clip"
+                  characters={characters}
                   emptyLabel="No left clip selected"
+                  importAsset={importAsset}
                   label="Left clip"
                   onChange={setSourceClipAssetId}
+                  projectId={activeProject?.id}
                   value={sourceClipAssetId}
                 />
-                <AssetPickerField
+                <VideoSourcePickerField
                   assets={videoAssets}
                   buttonLabel="Select clip"
+                  characters={characters}
                   emptyLabel="No right clip selected"
+                  importAsset={importAsset}
                   label="Right clip"
                   onChange={setBridgeRightClipAssetId}
+                  projectId={activeProject?.id}
                   value={bridgeRightClipAssetId}
                 />
               </>
             ) : null}
 
             {["video_to_video", "reference_video_to_video", "ads2v"].includes(mode) ? (
-              <AssetPickerField
+              <VideoSourcePickerField
                 assets={videoAssets}
                 buttonLabel="Select clip"
+                characters={characters}
                 emptyLabel="No source clip selected"
+                importAsset={importAsset}
                 label="Source clip"
                 onChange={setSourceClipAssetId}
+                projectId={activeProject?.id}
                 value={sourceClipAssetId}
               />
             ) : null}
 
             {mode === "multi_video_to_video" ? (
-              <AssetPickerField
+              <VideoSourcePickerField
                 assets={videoAssets}
                 buttonLabel="Select clips"
+                characters={characters}
                 changeLabel="Edit clips"
                 emptyLabel="No source clips selected"
+                importAsset={importAsset}
                 label="Source clips"
                 multiple
                 onChange={setSourceClipAssetIds}
+                projectId={activeProject?.id}
                 values={sourceClipAssetIds}
               />
             ) : null}
 
             {mode === "ads2v" ? (
-              <AssetPickerField
+              <VideoSourcePickerField
                 assets={videoAssets}
                 buttonLabel="Select clip"
+                characters={characters}
                 emptyLabel="No reference video selected"
+                importAsset={importAsset}
                 label="Reference video"
                 onChange={setReferenceClipAssetId}
+                projectId={activeProject?.id}
                 value={referenceClipAssetId}
               />
             ) : null}
 
             {["reference_to_video", "reference_video_to_video", "ads2v"].includes(mode) ? (
-              <AssetPickerField
+              <ImageEditSourcePickerField
                 assets={imageAssets}
                 buttonLabel="Select images"
+                characters={characters}
                 changeLabel="Edit references"
                 emptyLabel="No reference images selected"
+                eyebrow="Video Studio"
+                importAsset={importAsset}
                 label="Reference images"
                 multiple
                 onChange={setReferenceAssetIds}
+                projectId={activeProject?.id}
                 values={referenceAssetIds}
               />
             ) : null}
 
             {mode === "animate_character" ? (
               <>
-                <AssetPickerField
+                <VideoSourcePickerField
                   assets={videoAssets}
                   buttonLabel="Select clip"
+                  characters={characters}
                   emptyLabel="No driving video selected"
+                  importAsset={importAsset}
                   label="Driving video"
                   onChange={setSourceClipAssetId}
+                  projectId={activeProject?.id}
                   value={sourceClipAssetId}
                 />
                 {/* One character today; the worker reads the first reference. Multi-reference is
                     experimental and tracked separately (sc-5583), so this stays a single image. */}
-                <AssetPickerField
+                <ImageEditSourcePickerField
                   assets={imageAssets}
                   buttonLabel="Select image"
+                  characters={characters}
                   changeLabel="Change character"
                   emptyLabel="No reference character selected"
+                  eyebrow="Video Studio"
+                  importAsset={importAsset}
                   label="Reference character"
                   onChange={(id) => setReferenceAssetIds(id ? [id] : [])}
+                  projectId={activeProject?.id}
                   value={referenceAssetIds[0] ?? ""}
                 />
               </>
@@ -1612,10 +1650,13 @@ export function VideoStudio() {
 
             {mode === "replace_person" ? (
               <ReplacePersonPanel
+                characters={characters}
                 createPersonDetectionJob={createPersonDetectionJob}
                 createPersonTrackJob={createPersonTrackJob}
                 createModelDownloadJob={createModelDownloadJob}
+                importAsset={importAsset}
                 personReadiness={personReadiness}
+                projectId={activeProject?.id}
                 detectionResult={detectionResult}
                 matchingTracks={matchingTracks}
                 personTrackId={personTrackId}
@@ -2122,13 +2163,16 @@ export function VideoStudio() {
                   previously lived in the render rail this layout removes. It operates on a
                   selected existing asset, independent of the current generation payload. */}
               <VideoUpscalePanel
+                characters={characters}
                 createVideoUpscaleJob={createVideoUpscaleJob}
+                importAsset={importAsset}
                 macCapabilities={macCapabilities}
                 onSubmitted={(job) => {
                   onLocalJobCreated(job);
                   onOpenQueue();
                 }}
                 selectedAsset={selectedAsset}
+                projectId={activeProject?.id}
                 videoAssets={videoAssets}
               />
             </div>
