@@ -370,6 +370,14 @@
         }
       }
     },
+    "implementedMarginal": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
     "resolvedAxes": {
       "type": "object",
       "additionalProperties": false,
@@ -451,6 +459,7 @@
     "models",
     "rung4SurveyRows",
     "coverage",
+    "manifestScopes",
     "cells",
     "calibrationRuns",
     "modelSlices",
@@ -459,7 +468,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `calibrationRuns[].record` is a projection of the evidence-bundle row.",
+      "description": "2 (SC-15812): backend-scoped story ownership. 3 (sc-16268): removed per-cell evidenceRevision. 4 (SC-15969): added rung-4 survey rows. 5 (SC-16060): split implementation and memory-characterization claims. 6 (SC-15823): adds Runtime verified so base-only runtime activation cannot masquerade as Full Verified, and publishes complete/runtime-complete calibration counts. 7 (sc-18099): `cells` is the planned-or-evidenced SUBSET of the catalog cross-product rather than the cross-product itself; `coverage`, `models[].axes` and `manifestScopes` added and required; `summary` gained publishedCells/elidedCells/elidedByState/publicationPredicate; `modelSlices` entries may be empty; `rung4SurveyRows` absorbed the family-level summary/blockStacks/findings that `cells[].rung4Survey` no longer carries; `cells[].evidence` replaced declaredCalibration/loadability with a `manifestScope` key into `manifestScopes`; `calibrationRuns[].record` is a projection of the evidence-bundle row.",
       "const": 7
     },
     "generatedFrom": {
@@ -747,6 +756,27 @@
             "type": "integer",
             "minimum": 0
           },
+          "implementedBy": {
+            "description": "Per-axis MARGINALS of `implemented`, present on exactly the rows where 0 < implemented < coordinates — the rows a bare count cannot answer. A row spans tier x mode x overlay, so without this a partially implemented lane hides WHICH coordinates: `krea_2_turbo:mlx` rung 4 reads implemented 12/18 while its control overlay is really 0/6, which is the sc-16069 confusion (unmeasured lane vs absent lane) for the exact family sc-16069 was about. Every value the lane spans appears, including the zeroes. Marginals, not a joint distribution: each axis independently sums to `implemented`, checked before the artifact is written.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tier",
+              "mode",
+              "overlay"
+            ],
+            "properties": {
+              "tier": {
+                "$ref": "#/$defs/implementedMarginal"
+              },
+              "mode": {
+                "$ref": "#/$defs/implementedMarginal"
+              },
+              "overlay": {
+                "$ref": "#/$defs/implementedMarginal"
+              }
+            }
+          },
           "states": {
             "type": "object",
             "minProperties": 1,
@@ -763,6 +793,33 @@
                 "Missing",
                 "Route unavailable/broken"
               ]
+            }
+          }
+        }
+      }
+    },
+    "manifestScopes": {
+      "description": "sc-18099. The two manifest-derived evidence dimensions, published once per (entry, backend, tier) scope instead of once per coordinate. `declaredCalibration` and `loadability` are functions of that scope alone — which is also why neither is an arm of the publication predicate — so per-coordinate copies restated 35 distinct values 182 times. Cells point here through `evidence.manifestScope`; both directions of that reference, and the scope-invariance the hoist depends on, are checked before the artifact is written.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "declaredCalibration",
+          "loadability"
+        ],
+        "properties": {
+          "declaredCalibration": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/declaredEvidence"
+            }
+          },
+          "loadability": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/loadabilityEvidence"
             }
           }
         }
@@ -871,10 +928,9 @@
             "additionalProperties": false,
             "required": [
               "staticImplementation",
-              "declaredCalibration",
+              "manifestScope",
               "historicalVerification",
               "currentEnvironmentVerification",
-              "loadability",
               "strategyParameterVerification",
               "structural"
             ],
@@ -885,11 +941,10 @@
                   "$ref": "#/$defs/sourceEvidence"
                 }
               },
-              "declaredCalibration": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/declaredEvidence"
-                }
+              "manifestScope": {
+                "description": "sc-18099: key into the document's `manifestScopes` map, holding this coordinate's `declaredCalibration` and `loadability`. Both are functions of (entry, backend, tier) alone, so publishing them per coordinate restated 35 distinct values across 182 cells. `evidenceDimensions` still names all six dimensions — what changed is where two of them are written. Always `<modelId>:<backend>:<tier>`, checked against the cell's own coordinate before the artifact is written.",
+                "type": "string",
+                "minLength": 1
               },
               "historicalVerification": {
                 "type": "array",
@@ -901,12 +956,6 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/historicalEvidence"
-                }
-              },
-              "loadability": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/loadabilityEvidence"
                 }
               },
               "strategyParameterVerification": {

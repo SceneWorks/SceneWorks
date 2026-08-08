@@ -768,9 +768,26 @@ def test_matrix_schema_rejects_malformed_evidence_records():
             "geometry", "up to 1024"
         )
     )
-    rejected(
-        lambda evidence: evidence["loadability"][0].__setitem__("unchecked", True)
+    # sc-18099 hoisted `loadability` (and `declaredCalibration`) out of the cell and into the
+    # document's `manifestScopes` map — they are functions of (entry, backend, tier) alone. The
+    # schema must still fail closed on a malformed entry there, so the mutation follows the data
+    # rather than being dropped: dropping it is how a hoist quietly retires a gate.
+    def rejected_scope(mutate):
+        candidate = copy.deepcopy(matrix)
+        scope_key = candidate["cells"][krea_index]["evidence"]["manifestScope"]
+        mutate(candidate["manifestScopes"][scope_key])
+        assert list(validator.iter_errors(candidate))
+
+    rejected_scope(
+        lambda scope: scope["loadability"][0].__setitem__("unchecked", True)
     )
+    rejected_scope(lambda scope: scope["loadability"][0].pop("repository"))
+    rejected_scope(
+        lambda scope: scope["declaredCalibration"][0].__setitem__("unchecked", True)
+    )
+    rejected_scope(lambda scope: scope["declaredCalibration"][0].pop("tier"))
+    # ...and the cell's end of the join is required, so a cell cannot silently lose its scope.
+    rejected(lambda evidence: evidence.pop("manifestScope"))
 
 
 def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():

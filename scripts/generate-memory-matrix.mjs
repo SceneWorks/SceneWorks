@@ -1594,6 +1594,7 @@ function validateMatrix(
   backendTierOverrides,
   rung4Survey,
   cellInventoryExpectations,
+  calibrationPlan,
 ) {
   const ids = matrix.models.map((model) => model.id);
   if (ids.length !== EXPECTED_IMAGE_COUNT) {
@@ -1629,6 +1630,7 @@ function validateMatrix(
     }
   }
   assertCellInventoryMatchesCatalog(matrix.cells, cellInventoryExpectations);
+  assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells);
   assertTwinCoverage(matrix.models);
   assertCellOwnershipIsBackendScoped(matrix.cells);
   assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models);
@@ -1777,11 +1779,73 @@ export function plannedCellIds(calibrationPlan, cells) {
 }
 
 /**
+ * Every shipped plan entry must address a coordinate that actually exists. FAIL CLOSED.
+ *
+ * ## The defect this exists because of
+ *
+ * Nine `config/memory-calibration-plan.json` entries (the sc-15817 candle-qwen-edit set) carried
+ * `mode: "edit"` while the catalog's mode axis — and therefore every matrix coordinate and every
+ * record that could ever bind to one — spells that capability `edit_image`. They matched ZERO
+ * coordinates. Nothing noticed: `expectedEngagedRungs` simply returned `null` for compositions it
+ * could not find, `memory-calibration.schema.json` types `mode` as a free string, and while the
+ * matrix published the whole cross-product the entries' targets were on the page regardless. sc-18099
+ * made the consequence visible — `qwen_image_edit_2511` and its lightning twin published no cells at
+ * all, so the artifact hid the exact lanes the plan was aiming at — but the mismatch was already
+ * costing something worse than visibility: a capture run against those entries would have produced
+ * records that bind to nothing.
+ *
+ * So this is not a slim guard. It is the check that should always have existed: a plan entry naming a
+ * coordinate the catalog cannot express is a typo, a stale target, or a vocabulary drift, and all
+ * three are defects. It throws rather than warns because the failure mode it replaces was silence.
+ */
+export function assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, cells) {
+  const unmatched = calibrationPlan.providers.filter(
+    (entry) => !cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
+  );
+  if (!unmatched.length) return;
+  const detail = unmatched
+    .map(
+      (entry) =>
+        `${entry.name} -> ${entry.target.modelId}:${entry.target.provider}:${entry.backend}:` +
+        `${entry.target.tier}:${entry.target.mode}:${matrixOverlayFor(entry.target.overlay)}:${entry.rung}`,
+    )
+    .sort();
+  throw new Error(
+    `config/memory-calibration-plan.json has ${unmatched.length} entr${unmatched.length === 1 ? "y" : "ies"} ` +
+      `that match no resolved matrix coordinate:\n  ${detail.join("\n  ")}\n` +
+      "Each names a (model, provider, backend, tier, mode, overlay, rung) the catalog does not resolve. " +
+      "Check the axis vocabularies first — modes are catalog CAPABILITY ids (`edit_image`, not `edit`) " +
+      "and overlays normalise through matrixOverlayFor. A plan entry that addresses nothing cannot be " +
+      "captured against: the record it would produce binds to no cell (sc-18099).",
+  );
+}
+
+/**
  * The per-(entry, backend, rung) census over the FULL resolved cross-product.
  *
  * This is the "no silent cap" half of the slim: it names how many coordinates each lane resolved to,
  * how many were published, how many were elided, and the state distribution of ALL of them. A
  * consumer that used to count `cells` by state reads this instead and gets the same numbers.
+ *
+ * ## Why a row can carry `implementedBy`
+ *
+ * A row spans tier x mode x overlay, so a bare `implemented` count is unambiguous ONLY when it is 0
+ * or `coordinates`. In between it hides WHICH coordinates — and that is not academic: 74 of 530 rows
+ * are mixed, and five of those are CONTROL lanes that publish no cell at all.
+ * `krea_2_turbo:mlx:bounded_transformer_residency` reads `implemented 12/18` while its control
+ * overlay is really 0/6, and the pre-slim artifact answered that with a `Missing` control cell. A
+ * consumer could not tell "control implemented but unmeasured" from "control not implemented" — the
+ * sc-16069 confusion, for the exact lane family sc-16069 was about.
+ *
+ * So a mixed row publishes per-axis MARGINALS of its implemented count. Marginals, not a joint
+ * distribution: `{tier: {bf16: 6}, overlay: {none: 6}}` says the implemented coordinates are all bf16
+ * and all overlay-none, which pins the joint only when the marginals are that tight. That is enough
+ * for the question the slim must keep answerable — "is this axis value implemented at all" — and it
+ * is stated as marginals so nobody reads more out of them.
+ *
+ * Conditional rather than always present, because an all-or-nothing row already answers every such
+ * question from `implemented` alone, and keying every row by overlay instead would cost ~320 KB in an
+ * artifact this story exists to shrink.
  */
 export function coverageCensus(cells, publishedIds) {
   const rows = new Map();
@@ -1798,19 +1862,48 @@ export function coverageCensus(cells, publishedIds) {
         elided: 0,
         implemented: 0,
         states: {},
+        // Accumulated for every row, published only on mixed ones.
+        axisTotals: { tier: {}, mode: {}, overlay: {} },
+        axisImplemented: { tier: {}, mode: {}, overlay: {} },
       };
       rows.set(key, row);
     }
     row.coordinates += 1;
     if (publishedIds.has(cell.id)) row.published += 1;
     else row.elided += 1;
-    if (isImplemented(cell.state)) row.implemented += 1;
     row.states[cell.state] = (row.states[cell.state] ?? 0) + 1;
+    const implemented = isImplemented(cell.state);
+    if (implemented) row.implemented += 1;
+    for (const axis of ["tier", "mode", "overlay"]) {
+      row.axisTotals[axis][cell[axis]] = (row.axisTotals[axis][cell[axis]] ?? 0) + 1;
+      row.axisImplemented[axis][cell[axis]] =
+        (row.axisImplemented[axis][cell[axis]] ?? 0) + (implemented ? 1 : 0);
+    }
   }
+  const sortedCounts = (counts) =>
+    Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+  const finished = [];
   for (const row of rows.values()) {
-    row.states = Object.fromEntries(Object.entries(row.states).sort(([left], [right]) => left.localeCompare(right)));
+    const mixed = row.implemented > 0 && row.implemented < row.coordinates;
+    const { axisTotals, axisImplemented, ...published } = row;
+    published.states = sortedCounts(row.states);
+    if (mixed) {
+      // Every value of the axis appears, including the zeroes — a value silently absent would be the
+      // same blind spot in miniature.
+      published.implementedBy = Object.fromEntries(
+        ["tier", "mode", "overlay"].map((axis) => [
+          axis,
+          sortedCounts(
+            Object.fromEntries(
+              Object.keys(axisTotals[axis]).map((value) => [value, axisImplemented[axis][value] ?? 0]),
+            ),
+          ),
+        ]),
+      );
+    }
+    finished.push(published);
   }
-  return [...rows.values()].sort((left, right) =>
+  return finished.sort((left, right) =>
     `${left.modelId}:${left.backend}:${left.rung}`.localeCompare(`${right.modelId}:${right.backend}:${right.rung}`),
   );
 }
@@ -1840,6 +1933,45 @@ export function assertPublishedDocumentIsClosed(matrix, resolvedCoordinateCount)
       if (!publishedIds.has(id)) throw new Error(`modelSlices.${modelId} names unpublished cell ${id}`);
     }
   }
+  // Both directions on the hoisted manifest evidence: no cell may point at a scope that is not
+  // published, and no scope may be published that no cell points at.
+  const referencedScopes = new Set(matrix.cells.map((cell) => cell.evidence.manifestScope));
+  for (const cell of matrix.cells) {
+    if (!Object.hasOwn(matrix.manifestScopes, cell.evidence.manifestScope)) {
+      throw new Error(`${cell.id}: evidence.manifestScope ${cell.evidence.manifestScope} is not published`);
+    }
+    if (cell.evidence.manifestScope !== manifestScopeKey(cell)) {
+      throw new Error(
+        `${cell.id}: evidence.manifestScope is ${cell.evidence.manifestScope}, not this cell's scope ${manifestScopeKey(cell)}`,
+      );
+    }
+  }
+  for (const key of Object.keys(matrix.manifestScopes)) {
+    if (!referencedScopes.has(key)) throw new Error(`manifestScopes.${key} is referenced by no published cell`);
+  }
+  for (const row of matrix.coverage) {
+    if (row.published + row.elided !== row.coordinates) {
+      throw new Error(`${row.modelId}:${row.backend}:${row.rung}: coverage published + elided != coordinates`);
+    }
+    // `implementedBy` is present on exactly the rows a bare `implemented` cannot answer, and each
+    // axis must account for the whole count. A marginal that summed to something else would be a
+    // more convincing wrong answer than no breakdown at all.
+    const mixed = row.implemented > 0 && row.implemented < row.coordinates;
+    if (mixed !== Object.hasOwn(row, "implementedBy")) {
+      throw new Error(
+        `${row.modelId}:${row.backend}:${row.rung}: implementedBy must be present on exactly the rows ` +
+          `whose implemented count is partial (implemented ${row.implemented} of ${row.coordinates})`,
+      );
+    }
+    for (const [axis, counts] of Object.entries(row.implementedBy ?? {})) {
+      const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+      if (total !== row.implemented) {
+        throw new Error(
+          `${row.modelId}:${row.backend}:${row.rung}: implementedBy.${axis} sums to ${total}, not ${row.implemented}`,
+        );
+      }
+    }
+  }
   const censusCoordinates = matrix.coverage.reduce((total, row) => total + row.coordinates, 0);
   const censusPublished = matrix.coverage.reduce((total, row) => total + row.published, 0);
   if (censusCoordinates !== resolvedCoordinateCount) {
@@ -1855,6 +1987,57 @@ export function assertPublishedDocumentIsClosed(matrix, resolvedCoordinateCount)
   if (matrix.summary.publishedCells + matrix.summary.elidedCells !== matrix.summary.cells) {
     throw new Error("summary published + elided must equal the resolved coordinate count");
   }
+}
+
+/**
+ * The manifest-derived evidence dimensions, published once per scope instead of once per coordinate.
+ *
+ * `declaredCalibration` and `loadability` are functions of (entry, backend, tier) ALONE — the same
+ * two arrays are recomputed identically for every mode x overlay x rung under that scope. They are
+ * also the two dimensions deliberately excluded from the publication predicate for exactly that
+ * reason. Among the published cells there are 35 distinct scopes carrying 182 copies, and the copies
+ * were 154 KB of a ~1 MB artifact whose whole purpose is to stop repeating itself.
+ *
+ * Cells keep an explicit `evidence.manifestScope` key rather than leaving the reader to rebuild it
+ * from the coordinate, so the join is stated and `assertPublishedDocumentIsClosed` can check it.
+ * `evidenceDimensions` still names all six dimensions: what changed is where two of them are
+ * written, not that the model has them.
+ */
+export function manifestScopeKey(cell) {
+  return `${cell.modelId}:${cell.backend}:${cell.tier}`;
+}
+
+export function hoistManifestScopes(cells) {
+  const scopes = {};
+  const hoisted = cells.map((cell) => {
+    const key = manifestScopeKey(cell);
+    const scope = {
+      declaredCalibration: cell.evidence.declaredCalibration,
+      loadability: cell.evidence.loadability,
+    };
+    const existing = scopes[key];
+    if (existing) {
+      // The hoist is only sound because the two dimensions really are scope-invariant. If a future
+      // change makes either depend on mode, overlay or rung, this catches it at generation time
+      // rather than silently publishing whichever coordinate happened to be visited first.
+      if (JSON.stringify(existing) !== JSON.stringify(scope)) {
+        throw new Error(
+          `${cell.id}: manifest-derived evidence differs between coordinates of scope ${key}, so it ` +
+            "cannot be published per scope — it is no longer a function of (entry, backend, tier)",
+        );
+      }
+    } else {
+      scopes[key] = scope;
+    }
+    const { declaredCalibration, loadability, ...rest } = cell.evidence;
+    return { ...cell, evidence: { ...rest, manifestScope: key } };
+  });
+  return {
+    cells: hoisted,
+    manifestScopes: Object.fromEntries(
+      Object.entries(scopes).sort(([left], [right]) => left.localeCompare(right)),
+    ),
+  };
 }
 
 /**
@@ -2522,6 +2705,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     models,
     rung4SurveyRows,
     coverage: [],
+    // Populated by the publication step's `hoistManifestScopes`; empty in the pre-publication view,
+    // where the two dimensions are still on the cells.
+    manifestScopes: {},
     cells,
     calibrationRuns,
     modelSlices,
@@ -2536,6 +2722,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     backendTierOverrides,
     rung4Survey,
     cellInventoryExpectations,
+    calibrationPlan,
   );
 
   const planned = plannedCellIds(calibrationPlan, cells);
@@ -2556,7 +2743,9 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     ),
   );
   if (!publish) return matrix;
-  matrix.cells = published;
+  const hoisted = hoistManifestScopes(published);
+  matrix.cells = hoisted.cells;
+  matrix.manifestScopes = hoisted.manifestScopes;
   matrix.modelSlices = Object.fromEntries(
     models.map((model) => [
       model.id,
@@ -2594,7 +2783,7 @@ function renderMarkdown(matrix) {
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unmeasured lane stays distinguishable from an absent one.`,
     "",
-    "Static capability is never promoted to dynamic verification. Generated cells contain separate declared, historical, current-environment, loadability, and strategy-parameter evidence arrays.",
+    "Static capability is never promoted to dynamic verification. The six evidence dimensions stay separate: `staticImplementation`, `historicalVerification`, `currentEnvironmentVerification`, `strategyParameterVerification` and `structural` are per-coordinate and ride the cell; `declaredCalibration` and `loadability` are functions of (entry, backend, tier) alone and are published once per scope in `manifestScopes`, which the cell names through `evidence.manifestScope` (sc-18099).",
     "`Runtime verified` means the exact base-only coordinate is production-admissible from current runtime evidence; it is deliberately not Full `Verified`, which additionally requires the catalog story's lifecycle and negative-mutation signoff.",
     "",
     "One row per (catalog entry, backend): ownership is backend-scoped, so a single row per entry could only name one backend's stories (SC-15812).",
@@ -2627,7 +2816,7 @@ function renderMarkdown(matrix) {
   }
   lines.push(
     "",
-    "Per-model consumers must use `modelSlices` in the JSON artifact. A cell is Full only when every applicable rung is Verified or Structurally N/A; this static baseline intentionally reports zero Full models.",
+    `Per-model consumers read \`modelSlices\` in the JSON artifact for an entry's PUBLISHED cells — but since sc-18099 that is a subset, and ${Object.values(matrix.modelSlices).filter((slice) => slice.length === 0).length} of ${matrix.models.length} entries publish none at all. An empty slice means nothing was planned, measured, bound or cited there; it does NOT mean the entry has no lanes. For "which lanes exist" read \`models[].axes\`, and for "how much of a lane is implemented" read \`coverage\`. A cell is Full only when every applicable rung is Verified or Structurally N/A; this static baseline intentionally reports zero Full models.`,
     "",
     "## Rung 4 — per-family applicability survey (SC-15969)",
     "",
@@ -2645,7 +2834,7 @@ function renderMarkdown(matrix) {
   }
   lines.push(
     "",
-    `Surveyed family/backend pairs: ${matrix.summary.rung4Survey.surveyedFamilyBackends}. Per-cell verdicts, block-stack inventories and findings are in \`cells[].rung4Survey\` in the JSON artifact.`,
+    `Surveyed family/backend pairs: ${matrix.summary.rung4Survey.surveyedFamilyBackends}. sc-18099 split the verdict by what it is a property OF: the family-level summary, block-stack inventory and findings are on \`rung4SurveyRows\` in the JSON artifact — carried once per (family, backend), so they survive a family whose rung-4 cells were all elided — while \`cells[].rung4Survey\` keeps the genuinely per-coordinate half, the resolved request-peak finding and the overlay-incompatibility verdict.`,
     "",
   );
   return lines.join("\n");

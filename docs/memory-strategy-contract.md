@@ -14,7 +14,12 @@ least-cost selector.
 > resolves on each backend, and the COVERAGE to `coverage`, one row per (entry, backend, rung) with
 > the state distribution of every resolved coordinate. `summary.cells` is still the resolved total and
 > `summary.elidedCells` counts what was dropped. Read those two, not `cells`, for any question of the
-> form "does this lane exist" or "how much of it is implemented".
+> form "does this lane exist" or "how much of it is implemented" — and note that a `coverage` row
+> spans tier x mode x overlay, so a partially implemented lane publishes `implementedBy` marginals
+> naming which axis values are implemented (a control overlay reading `0` there is declared-but-
+> unimplemented, not absent). Two evidence dimensions, `declaredCalibration` and `loadability`, are
+> functions of (entry, backend, tier) alone and now live once per scope in `manifestScopes`, which
+> each cell names through `evidence.manifestScope`.
 
 ## Ownership
 

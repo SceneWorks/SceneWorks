@@ -5353,7 +5353,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "none",
         "geometry": {
           "width": 1024,
@@ -5384,7 +5384,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "none",
         "geometry": {
           "width": 1024,
@@ -5416,7 +5416,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "none",
         "geometry": {
           "width": 1024,
@@ -5452,7 +5452,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "none",
         "geometry": {
           "width": 1024,
@@ -5490,7 +5490,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "none",
         "geometry": {
           "width": 1024,
@@ -5530,7 +5530,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511_lightning",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "lora",
         "geometry": {
           "width": 1024,
@@ -5561,7 +5561,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511_lightning",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "lora",
         "geometry": {
           "width": 1024,
@@ -5593,7 +5593,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511_lightning",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "lora",
         "geometry": {
           "width": 1024,
@@ -5629,7 +5629,7 @@
         "provider": "qwen_image_edit",
         "modelId": "qwen_image_edit_2511_lightning",
         "tier": "q4",
-        "mode": "edit",
+        "mode": "edit_image",
         "overlay": "lora",
         "geometry": {
           "width": 1024,
