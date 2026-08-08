@@ -108,9 +108,10 @@ grep -n '"<provider>"' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
 
 **This is the gate that stops most lanes.** `candle:z_image` is declared in the closure table and has
-five plan entries, and `grep -c z_image crates/sceneworks-memory-adapter/src/bin/candle.rs` returns
-`0` — which is exactly why the stale-lane report lists it as "declared but never captured". A lane
-with no adapter arm is an adapter-implementation task, not a measurement task. Stop here and say so.
+**90 plan entries across 18 fixtures**, and
+`grep -c z_image crates/sceneworks-memory-adapter/src/bin/candle.rs` returns `0` — which is exactly
+why the stale-lane report lists it as "declared but never captured". A lane with no adapter arm is an
+adapter-implementation task, not a measurement task. Stop here and say so.
 
 ## 3. Pick the host
 
@@ -123,19 +124,27 @@ Note the extra `weights` label on the MLX calibration dispatch: the ordinary MLX
 `nax` pool without it. A capture dispatch that cannot find a `weights`-labelled runner queues
 forever rather than failing.
 
-You can run the capture **locally on the host** or **through the guarded workflow dispatch**. §6
-gives both. The dispatch is preferable for MLX because it re-validates the identities for you; the
-local path is the only option for a lane the dispatch does not wire (the MLX dispatch wires Qwen and
-the Z-Image five-rung reference; the Windows dispatch wires only the Krea five-rung reference).
+You can run the capture **locally on the host** or **through a guarded workflow dispatch**. §6 gives
+both. The dispatch is preferable because it re-validates the identities for you, but only three lanes
+are wired: `mlx:qwen_image` and `mlx:z_image_turbo` (two separate inputs on `macos-mlx.yml`) and
+`candle:krea_2_turbo` (`windows-candle.yml`). Any other lane must go the local route.
 
 ## 4. Weights must really be present for the target tier
 
-**`.sceneworks-model-revision` is the only sound POSITIVE signal.** It is written inside
-`snapshots/<revision>/` by the inference repo's release tooling
-(`scripts/release/verify_model_snapshot.py`, `MARKER`) and never by the app. Its **presence** proves a
-snapshot was CI-provisioned. Its **absence proves nothing** — an app-installed or hand-fetched
-snapshot is complete and unmarked. Do not treat a missing marker as a missing snapshot, and do not
-treat a present tier directory as a complete one.
+**`.sceneworks-model-revision` is the only sound POSITIVE signal.** It lives inside
+`snapshots/<revision>/`, not in the repo directory — looking in the repo dir reads as a false
+negative. SceneWorks never writes it. Its **presence** means the snapshot was provisioned by tooling
+that stamps it, and it authoritatively names the revision when the directory itself is not named by
+one. Its **absence proves nothing** — an app-installed or hand-fetched snapshot is complete and
+unmarked. Do not treat a missing marker as a missing snapshot, and do not treat a present tier
+directory as a complete one.
+
+> Authorship, stated precisely because it is easy to get wrong: at pin `40fa7583` every reference to
+> the marker in the inference tree **reads** it — `scripts/release/verify_model_snapshot.py:77-80`,
+> `scripts/release/provision_mage_oracles.py:155-168`, `.github/workflows/real-weights.yml:1318-1325`
+> — and `git grep` finds no writer at that revision. SceneWorks only reads it too
+> (`scripts/audit-hf-cache-liveness.mjs:408`). So do not attribute the write to `verify_model_snapshot.py`;
+> the load-bearing claims above hold regardless of which provisioning path stamped it.
 
 The authoritative completeness test is the pinned verifier, run from a checkout of inference **at the
 exact pinned SHA** (§5):
@@ -165,32 +174,68 @@ Two caveats, both measured:
   binding to run — fall back to the workflow's own resolver contract below and say plainly in the PR
   that no manifest-bound verification exists for the lane.
 
-### Where the adapters look
+### Where the adapters look — one resolver block PER LANE
 
-The MLX adapter canonicalizes its root and requires a fixed
-`/models--SceneWorks--<repo>/snapshots/<exact-revision>/<tier>` suffix before loading, so a stale
-override for another tier is rejected rather than silently used. Without an override the macOS
-workflow checks exactly two locations, in order (macos-mlx.yml:742-747):
+Every adapter arm canonicalizes its root and requires a fixed
+`/models--<Org>--<Repo>/snapshots/<exact-revision>/<tier>` suffix before loading, so a stale override
+for another tier is rejected rather than silently used. But **each lane has its own resolver block
+with its own hardcoded tier** — take the one for your lane, not the first one in the file:
 
-```
-$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<rev>/<tier>
-$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<rev>/<tier>
-```
+| lane | workflow resolver | canonical locations |
+| --- | --- | --- |
+| `mlx:qwen_image` | macos-mlx.yml:726-762 (tier from the `qwen_tier` input) | `$HOME/.cache/huggingface/hub/models--SceneWorks--qwen-image-mlx/snapshots/<rev>/<tier>`, then `$HOME/Library/Application Support/SceneWorks/data/cache/huggingface/hub/…/<rev>/<tier>` (macos-mlx.yml:742-747) |
+| `mlx:z_image_turbo` | macos-mlx.yml:763-789 (**tier hardcoded `q4`**) | the same two roots under `models--SceneWorks--z-image-turbo-mlx/snapshots/<rev>/q4` (macos-mlx.yml:772-773) |
+| `candle:krea_2_turbo` | windows-candle.yml:430-450 (**tier hardcoded `q4`**) | a **single** root, no app-data fallback: `%USERPROFILE%\.cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\<rev>\q4` (windows-candle.yml:440) |
 
-Adapter environment (from [memory-calibration-harness.md](memory-calibration-harness.md)):
+Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE_ROOT`,
+`SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
+suffix.
+
+### Adapter environment — five families, one per provider arm
+
+The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
+where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
+(`z_image_turbo` → `Z_IMAGE`, `krea_2_turbo_control` → `KREA_CONTROL`). Confirm yours rather than
+inferring it:
 
 ```bash
-# MLX
-SCENEWORKS_QWEN_IMAGE_ROOT=/abs/path/to/<tier>
-SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx
-SCENEWORKS_QWEN_IMAGE_REVISION=<exact artifact revision>
-SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<optional explicit override>
+grep -oE 'SCENEWORKS_[A-Z_]+' crates/sceneworks-memory-adapter/src/bin/<backend>.rs | sort -u
+```
 
-# Candle
-SCENEWORKS_KREA_ROOT=/abs/path/to/q4
+Verified complete set today:
+
+```bash
+# memory-mlx-adapter — qwen_image
+SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx   # fixed; validated against QWEN_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
+
+# memory-mlx-adapter — z_image_turbo   (mlx.rs:1013-1031)
+SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
+SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
+SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/q4     # tier hardcoded q4
+
+# memory-mlx-adapter — krea_2_turbo_control   (mlx.rs:1645-1667)
+SCENEWORKS_KREA_CONTROL_REPOSITORY=SceneWorks/krea-2-turbo-mlx  # validated against KREA_REPOSITORY
+SCENEWORKS_KREA_CONTROL_REVISION=<exact base artifact revision>
+SCENEWORKS_KREA_CONTROL_ROOT=/abs/path/.../snapshots/<rev>/q4   # tier hardcoded q4
+SCENEWORKS_KREA_CONTROL_OVERLAY=/abs/path/to/control_step5000.safetensors
+SCENEWORKS_KREA_CONTROL_OVERLAY_REVISION=<exact overlay revision>
+# overlay artifact: SceneWorks/krea2-pose-controlnet-beta / control_step5000.safetensors
+# (mlx.rs:47-48); the overlay path is validated against that repo + revision before load
+
+# memory-mlx-adapter — any lane, optional
+SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
+
+# memory-candle-adapter — krea_2_turbo
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<exact artifact revision>
+SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/q4
 ```
+
+All three of each family are **required** (`protocol::required_env`) — a missing one fails before
+model load, not after. Note that `memory-calibration-harness.md` documents only the Qwen and Krea
+families; the Z-Image and Krea-control blocks above exist only here.
 
 ### If the snapshot is absent
 
@@ -241,6 +286,11 @@ ignore rule changes is a multi-hour sweep discarded at the end, and the CI lanes
 
 ### 6a. Locally on the host
 
+> Provenance: the adapter builds and `harness run` were **not** executed while writing this runbook —
+> a real capture is a multi-hour GPU sweep on dedicated hardware. Every flag below is transcribed
+> from `memory-calibration-harness.mjs:1186-1233` and from the two checked-in capture workflows,
+> which run exactly these commands. `harness check` WAS executed (on the committed bundle).
+
 ```bash
 # Apple silicon
 cargo build --release --locked -p sceneworks-memory-adapter \
@@ -285,7 +335,15 @@ Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
   repeated *attempt* only when its logical case, harness version, repository receipts and hardware
   probe all match.
 
-### 6b. Through the guarded dispatch (MLX)
+### 6b. Through the guarded dispatch
+
+> Provenance: transcribed from the workflow files and **not** dispatched while writing this runbook —
+> either dispatch starts a real capture on a self-hosted runner.
+
+Three dispatches exist, one per wired lane. `run_memory_calibration` and `run_five_rung_reference`
+are **separate inputs on the same MLX workflow**; the latter is not "the Windows one".
+
+**`mlx:qwen_image`** — `run_memory_calibration` (macos-mlx.yml:113-149, 799-831):
 
 ```bash
 gh workflow run macos-mlx.yml --ref main \
@@ -297,14 +355,44 @@ gh workflow run macos-mlx.yml --ref main \
   -f qwen_revision=<exact 40-hex artifact revision>
 ```
 
-The job validates the identities, resolves (without printing) the snapshot root, checks out inference
-at the exact revision into `.calibration/inference`, builds the release adapter, runs the harness with
-`--fresh-per-case`, schema-checks the bundle, and uploads it as
-`memory-mlx-evidence-<tier>-<run_id>` (macos-mlx.yml:799-831). Retrieve it with `gh run download`.
+Validates the identities, resolves (without printing) the snapshot root, checks out inference at the
+exact revision into `.calibration/inference`, builds the release adapter, runs the harness with
+`--fresh-per-case` on fixture `qwen-image-<tier>-seed<15511|16353>-step2` (seed 15511 for `bf16`,
+16353 for the packed tiers — macos-mlx.yml:809-813), schema-checks the bundle and uploads it as
+`memory-mlx-evidence-<tier>-<run_id>`.
 
-The Windows equivalent is `run_five_rung_reference=true` on `windows-candle.yml`
-(`provision_krea_snapshot`, `inference_revision`, `krea_repository`, `krea_revision`); it captures
-fresh **and** batched bundles and runs `compare-reuse` between them (windows-candle.yml:460-475).
+**`mlx:z_image_turbo`** — `run_five_rung_reference` on the **same** workflow (macos-mlx.yml:150-163,
+832-868):
+
+```bash
+gh workflow run macos-mlx.yml --ref main \
+  -f run_five_rung_reference=true \
+  -f provision_z_image_snapshot=false \
+  -f inference_revision=<exact adapter INFERENCE_PIN> \
+  -f z_image_repository=SceneWorks/z-image-turbo-mlx \
+  -f z_image_revision=<exact 40-hex artifact revision>
+```
+
+No tier input — the fixture is fixed at `fresh-five-rung-z-image-q4-768-seed16402-step2`. It first
+runs `assess-reuse` and **asserts the verdict is `unable_to_amortize`** before capturing
+(macos-mlx.yml:841-848), then runs `--fresh-per-case` and uploads
+`sc-16059-mlx-reuse-{run_id}` containing the bundle and the assessment.
+
+**`candle:krea_2_turbo`** — `run_five_rung_reference` on `windows-candle.yml` (:134-163, 460-476):
+
+```bash
+gh workflow run windows-candle.yml --ref main \
+  -f run_five_rung_reference=true \
+  -f provision_krea_snapshot=false \
+  -f inference_revision=<exact adapter INFERENCE_PIN> \
+  -f krea_repository=SceneWorks/krea-2-turbo-mlx \
+  -f krea_revision=<exact 40-hex artifact revision>
+```
+
+Captures fixture `fresh-five-rung-krea-q4-1024-seed16402-step2` **twice** — once `--fresh-per-case`,
+once `--batch-rungs` — schema-checks both and runs `compare-reuse` between them.
+
+Retrieve any of them with `gh run download <run-id>`.
 
 ### 6c. What it costs
 
@@ -334,7 +422,15 @@ re-derived from a real capture rather than trusted forward.
 
 ## 7. Ingest, stamping, and a new lane
 
+A capture has **two halves**, and both must land or the lane does not move. §7a-7b update the
+**evidence corpus**; §7d updates the **shipped calibration bindings** in
+`config/manifests/builtin.models.jsonc`. Doing only the first is the single most likely way to finish
+this runbook and change nothing the runtime reads — §7d quantifies exactly what that costs.
+
 ### 7a. Merge into the committed bundle
+
+> Provenance: written from `memory-calibration-harness.mjs:1197-1201`, not re-executed while writing
+> this runbook — `ingest` needs a real captured bundle as input.
 
 ```bash
 node scripts/memory-calibration-harness.mjs ingest \
@@ -346,6 +442,11 @@ node scripts/memory-calibration-harness.mjs ingest \
 Merge is commutative and stable-sorted; **different content under the same resolved identity is
 rejected** rather than resolved by arrival order. Copy `merged.json` over
 `docs/generated/memory-calibration-evidence.json` once it validates.
+
+Record ids are content-derived and re-validated on read, so a capture at a new revision necessarily
+produces **new record ids**; a bundle whose ids do not re-derive fails with
+`<id>: deterministic identity mismatch` (`memory-calibration-harness.mjs:503`). Never hand-edit a
+record field and keep its id.
 
 ### 7b. Confirm the closure digest is on every record
 
@@ -368,7 +469,14 @@ node scripts/backfill-closure-digests.mjs --revisions            # which revisio
 node scripts/backfill-closure-digests.mjs --repo <inference> --write
 ```
 
-A dry run (no `--write`, no `--verify`) prints what it would change and exits 0. `--verify` is the CI
+> Provenance: `--revisions` and `--verify` were executed against a real inference clone; `--write`
+> was **not** re-executed while writing this runbook — it mutates checked-in state, and `--verify`
+> exercises the identical derivation.
+
+A dry run (no `--write`, no `--verify`) prints what it would change and exits 0 — note its own
+closing line, `(dry run — pass --write to update the bundle and manifest)`: `--write` updates
+**both** `docs/generated/memory-calibration-evidence.json` and `config/manifests/builtin.models.jsonc`
+(`backfill-closure-digests.mjs:541-547`). That is the mechanism §7d relies on. `--verify` is the CI
 spelling and fails on any drift. Verified locally against `/Users/michael/Repos/inference`:
 
 ```
@@ -385,6 +493,10 @@ genuine conflict.
 
 ### 7c. If the lane is NEW
 
+> Provenance: `--check` was executed against a real inference clone; `--write` was **not**
+> re-executed while writing this runbook — it rewrites checked-in state, and `--check` runs the
+> identical derivation.
+
 Every authoritative lane in the plan must have an entry in
 `config/inference-provider-closures.json`, and `memory-calibration-harness.test.mjs` asserts it. Add
 the lane's inference crate directory and regenerate the whole table from a real clone — never by
@@ -399,6 +511,53 @@ node scripts/inference-closure-digest.mjs --repo <inference clone> --check   # v
 The key is `<backend>:<provider>`; a bare provider id is ambiguous (`krea_2_turbo_control` exists on
 both backends with different crates). `buildClosureConfig` also asserts the provider is really
 declared in the crate you named, so a wrong crate fails rather than digesting the wrong tree.
+
+### 7d. 🔴 Move the lane's SHIPPED bindings — the half that actually changes the runtime
+
+**Do not skip this. Without it your capture promotes nothing.**
+
+§1 called `BINDINGS` the shipped admission surface — the calibration objects under each model's
+`mlx`/`candle` block in `config/manifests/builtin.models.jsonc`, which are what the worker's fit
+gates read. They carry their **own** `inferenceRevision` / `inferenceClosureDigest` pair, independent
+of the evidence corpus. Ingesting evidence does not touch them.
+
+Point them at the revision you captured at, then let the backfill derive the digest:
+
+```bash
+# 1. In config/manifests/builtin.models.jsonc, for every binding whose "provider" is <provider>
+#    under the <backend> block, set "inferenceRevision" to the revision you captured at.
+#    Leave "inferenceClosureDigest" alone — step 2 derives it. Do NOT hand-write a digest.
+#
+#    Find them:
+grep -n '"provider": "<provider>"' config/manifests/builtin.models.jsonc
+
+# 2. Re-derive and stamp both halves from a real clone (§7b): this rewrites the bundle AND the
+#    manifest, using the CI gate's own brace-depth-accurate, orphan-checked locator.
+node scripts/backfill-closure-digests.mjs --repo <inference clone> --write
+
+# 3. Prove it took.
+node scripts/backfill-closure-digests.mjs --repo <inference clone> --verify
+```
+
+A hand-written digest is not an option: `--verify` re-derives every manifest digest at its own
+revision and exits 1 on any disagreement, and that check is a required CI step (`check.yml:105-123`).
+
+**Measured proof that this step is load-bearing.** Both paths were simulated on `origin/main` for
+`mlx:z_image_turbo` — restamp the 5 evidence records to the live pin and digest, regenerate, and
+compare:
+
+| | evidence half only (§7a-7c) | both halves (§7a-7d) |
+| --- | --- | --- |
+| `report:stale-lanes` totals | `8 stale, 0 current` — **unchanged** | `7 stale, 1 current` |
+| the lane on the stale list | still ranked **#2**, `5/5` bindings `0/5` records, `status=partially-stale` | **gone** — listed under `CURRENT (no widening applied)` |
+| shipped stale bindings | 33 | 28 |
+| `summary.currentCalibrationRuns` | 5 | 5 |
+| `z_image_turbo` mlx cell states | `Implemented/unverified: 90`, **`Verified: 0`** | `Implemented/unverified: 85`, **`Verified: 5`** |
+
+The evidence-only path produces `current` records that promote **nothing**. The report does not clear
+the lane; it reports `status=partially-stale` with `captured=066ff9c6a26e,5b9092c67e0f` — the two
+digests being the record half you moved and the binding half you did not. §10 step 1's success
+criterion is unreachable without §7d.
 
 ## 8. Regenerate the derived docs
 
@@ -429,14 +588,29 @@ candle:flux2_dev historical 5  mlx:z_image_turbo historical 5
 `matrix.summary.currentCalibrationRuns` is `0`. Several tests **pin that as an exact set**, not as an
 upper bound, so a capture that lands a `current` lane turns them red. This is the tests being right
 about yesterday, not your measurement being wrong — but it means **a measurement PR is never
-docs-only**, and you must plan to update these in the same commit:
+docs-only**, and you must plan to update the affected ones in the same commit.
 
-| test | assertion | notes |
-| --- | --- | --- |
-| `scripts/generate-memory-matrix.test.mjs:2439` | `"current evidence cannot promote through a historical exact manifest binding"` | |
-| `scripts/generate-memory-matrix.test.mjs:653` | `"historical bindings must not mask the pinned MLX provider contract"` (Z-Image MLX static contracts) | reds on an `mlx:z_image_turbo` capture in particular |
-| `scripts/sc-15823-flux1-evidence.test.mjs:189` | `runs.every(({ semantics }) => semantics === "historical")` | flux1 lanes |
-| `tests/test_memory_matrix.py:147-148` | `{run["semantics"] for run in full_runs} == {"historical"}` and `… == "current") == 0` | **Python — see below** |
+**Which tests red is lane-dependent and step-dependent.** The table below is the measured result of
+simulating an `mlx:z_image_turbo` capture on `origin/main`, both ways (§7d):
+
+| test | assertion | evidence half only | + §7d bindings |
+| --- | --- | --- | --- |
+| `scripts/generate-memory-matrix.test.mjs:700` | `"no historical Z-Image capture may be promoted across an exact inference-pin change"` | 🔴 reds | (superseded by :653 below) |
+| `scripts/generate-memory-matrix.test.mjs:653` | `"historical bindings must not mask the pinned MLX provider contract"` | green | 🔴 reds |
+| `scripts/generate-memory-matrix.test.mjs:2439` | `"current evidence cannot promote through a historical exact manifest binding"` | **green** — it cannot red until a binding moves | 🔴 reds |
+| `tests/test_memory_matrix.py:147-148` | `{… for run in full_runs} == {"historical"}` and current count `== 0` | 🔴 reds | 🔴 reds |
+| `tests/test_memory_matrix.py:514/530` | `test_historical_records_remain_unverified_after_the_z_image_pin_advance` | 🔴 reds | 🔴 reds |
+| `scripts/sc-15823-flux1-evidence.test.mjs:189` | `runs.every(({ semantics }) => semantics === "historical")` | green | green — **flux1-only**; reds on a `candle:flux1_*` capture |
+
+Two lessons in that table. First, `:2439` is the reviewer's canary for §7d: if you finish a capture
+and it is still green, **you skipped the binding half**. Second, the set is per-lane — enumerate
+yours by running the suites rather than trusting this list:
+
+```bash
+node --test scripts/generate-memory-matrix.test.mjs \
+             scripts/sc-15823-flux1-evidence.test.mjs \
+             scripts/sc-15833-flux2-evidence.test.mjs
+```
 
 🔴 **The Python one runs ONLY in the required `parity` CI lane. A local green does NOT clear it.**
 `npm run check` never invokes pytest; `check.yml` line 81 runs
@@ -477,15 +651,37 @@ node -e 'const m=require("./docs/generated/memory-matrix.json");
 ```
 
 Your lane must now appear as `current`, and `currentCalibrationRuns` must have risen by the number of
-records you landed. Then confirm the signal agrees:
+records you landed. But **that alone is not success** — it is true on the evidence-only path too
+(§7d). All three of these must hold:
 
 ```bash
-npm run report:stale-lanes    # your lane should have left the stale list
+npm run report:stale-lanes    # your lane must have LEFT the stale list, and the header's
+                              # "N stale, M current" must show one lane moved across
 ```
 
-A record that stays `historical` means its captured digest does not match the live one for its lane —
-usually the inference checkout was not at the pin (§5), or the closure table was regenerated after the
-capture.
+```bash
+node -e 'const m=require("./docs/generated/memory-matrix.json");
+  const z=m.cells.filter(c=>c.modelId==="<modelId>"&&c.backend==="<backend>");
+  const s={}; for(const c of z) s[c.state]=(s[c.state]||0)+1; console.log(s)'
+# the measured rungs must now be Verified, not Implemented/unverified
+```
+
+Measured on the `mlx:z_image_turbo` simulation: the corrected procedure gives
+`7 stale, 1 current`, the lane absent from the table, `28` (not 33) stale bindings, and
+`{ 'Implemented/unverified': 85, Verified: 5 }`. The evidence-only path gives `8 stale, 0 current`,
+the lane still ranked #2 as `5/5` bindings `0/5` records, and `Verified: 0`.
+
+Failure modes:
+
+- **Records stay `historical`** — the captured digest does not match the live one for the lane:
+  usually the inference checkout was not at the pin (§5), or the closure table was regenerated after
+  the capture.
+- **Records are `current` but the lane is still listed, as `partially-stale`** — you did §7a-7c and
+  skipped §7d. Go back and move the manifest bindings.
+- **Records are `current`, the lane is clear, but no cell is `Verified`** — the binding moved but does
+  not match the record on fingerprint, geometry, parameters, artifact revision or `engagedRungs`;
+  `calibrationBinding` requires an exact ordered match. Compare the binding object against the record
+  field by field.
 
 **2. `verify_model_snapshot` binds the fixture to real weights** — §4. Re-run it after the capture,
 with `--inventory-output`, and cite the `inventory_sha256` in the PR. Where the lane's artifact has no
@@ -527,9 +723,18 @@ concluding anything from a stuck job.
 
 ## 11. Land it
 
-One commit, referencing the story. The evidence bundle, the regenerated derived docs, any closure-table
-change and any relaxed test pin **go together** — a bundle without its regenerated matrix, or a
-regenerated matrix without the relaxed pins, is a red CI and a misleading intermediate state.
+One commit, referencing the story. Every one of these goes in it — a bundle without its moved
+bindings promotes nothing (§7d), a moved binding without its regenerated matrix is a red CI, and a
+regenerated matrix without the relaxed pins is another:
+
+| file | why it is in this commit | step |
+| --- | --- | --- |
+| `docs/generated/memory-calibration-evidence.json` | the measurement itself | §7a-7b |
+| `config/manifests/builtin.models.jsonc` | 🔴 the **shipped bindings** — without this the capture changes nothing the runtime reads | §7d |
+| `config/inference-provider-closures.json` | only if the lane is new, or the pin moved | §7c |
+| `docs/generated/memory-matrix.json` + `.md` | derived | §8 |
+| `docs/generated/calibration-cost-model.json` + `.md` | derived, while the generator still exists | §8 |
+| `scripts/generate-memory-matrix.test.mjs`, `tests/test_memory_matrix.py`, and any other pin your lane reds | the corpus is no longer uniformly historical | §9 |
 
 Before pushing:
 
