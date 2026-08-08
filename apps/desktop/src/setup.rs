@@ -100,6 +100,15 @@ pub struct Managed {
     pids: Mutex<SidecarPids>,
     running: AtomicBool,
     pub shutting_down: AtomicBool,
+    /// Latched by `restart_gpu_worker` so the supervisor knows the child's death was
+    /// DELIBERATE (sc-18182). A restart kills the worker with SIGKILL, which is
+    /// indistinguishable from a jetsam/OOM kill at the `CommandEvent::Terminated`
+    /// arm — without this the supervisor would report signal 9 and the API would
+    /// tell a user who just pressed "Restart worker" that their job ran out of
+    /// memory. Consumed (swapped back to false) at the report gate, so it suppresses
+    /// exactly one termination. Unlike `shutting_down` this cannot be inferred: a
+    /// restart leaves the app running.
+    expected_worker_restart: AtomicBool,
     /// Single-live-supervisor guard for the GPU-worker respawn loop (sc-13605).
     /// An API crash clears the `api` slot so a Retry re-runs `spawn_api` +
     /// `gate_window`; without this guard `gate_window` would stack a second
@@ -1615,6 +1624,20 @@ pub fn restart_gpu_worker(app: &AppHandle) {
         .take();
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     if let Some(child) = child {
+        // Mark the coming death as deliberate BEFORE the kill, so the supervisor's
+        // `CommandEvent::Terminated` arm cannot race us and report signal 9 as a
+        // crash (sc-18182). Latched only when a child is actually killed — an
+        // empty slot must not leave a latch armed for a later, genuine crash.
+        //
+        // Residual: if the kill below FAILS (taskkill refused, the tree teardown
+        // could not signal), the child lives on, no `Terminated` arrives, and this
+        // latch stays armed until some later termination consumes it — costing that
+        // one crash its attribution. Accepted: the job is still reclaimed as
+        // `interrupted` AND now announced over SSE, so nothing hangs; carrying the
+        // child's pid here to scope the latch would buy only the error text.
+        app.state::<Managed>()
+            .expected_worker_restart
+            .store(true, Ordering::SeqCst);
         // macOS runs a single MLX worker process — CommandChild::kill() (TerminateProcess
         // on Windows / a plain kill here) reaps it fully. Off-Mac runs the candle `auto`
         // supervisor, which spawns one child per GPU plus a CPU child, each inheriting
@@ -1647,6 +1670,243 @@ struct WorkerSpawnCtx<'a> {
     api_url: &'a str,
     worker_id: &'a str,
     hf_home: &'a str,
+}
+
+/// How a supervised worker child died, when it died *abnormally* (sc-18182).
+///
+/// The two cases are kept distinct because the API contract
+/// ([`WorkerTerminationRequest`]) sets exactly one of `signal` / `exitCode`, and the
+/// failure text it derives differs: a signal yields a named-signal message (with a
+/// job-type-tailored OOM hint for SIGKILL), a code yields an exit-code message.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbnormalExit {
+    /// Killed by an uncatchable signal — SIGKILL (9, jetsam/OOM on macOS), SIGABRT,
+    /// SIGSEGV. The child cannot observe or report this itself.
+    Signal(i32),
+    /// Exited on its own with a non-zero status (e.g. 101, a Rust panic that unwound
+    /// to a process exit).
+    ExitCode(i32),
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+impl AbnormalExit {
+    /// Classify a `CommandEvent::Terminated` payload, or `None` when the exit was
+    /// clean and no job should be failed.
+    ///
+    /// `None` covers exit code 0 and the "neither reported" case. Reporting the
+    /// latter as a failure would fabricate a cause the OS never gave us; such a job
+    /// is still reclaimed (as `interrupted`) by the worker-restart heartbeat path,
+    /// which now publishes its own `job.updated`.
+    fn classify(code: Option<i32>, signal: Option<i32>) -> Option<Self> {
+        // A signal death wins when both are somehow present: on Unix they are
+        // mutually exclusive, but a payload carrying both must not be misread as a
+        // plain exit and lose the signal attribution.
+        if let Some(signal) = signal {
+            return Some(Self::Signal(signal));
+        }
+        match code {
+            Some(0) | None => None,
+            Some(code) => Some(Self::ExitCode(code)),
+        }
+    }
+
+    /// `(signal, exitCode)` for the request body — exactly one is set.
+    fn request_fields(self) -> (Option<i32>, Option<i32>) {
+        match self {
+            Self::Signal(signal) => (Some(signal), None),
+            Self::ExitCode(code) => (None, Some(code)),
+        }
+    }
+}
+
+/// Whether a terminated child's death should be reported to the API as a failure.
+///
+/// Split out as a pure predicate so the three suppression rules are unit-testable
+/// without a supervisor thread, a child process, or an API (sc-18182):
+/// * a clean exit is not a failure (`exit` is `None`);
+/// * an app quit must never fail a job — the worker is *supposed* to die;
+/// * a user-initiated "Restart worker" must never fail a job either, and its
+///   SIGKILL is byte-identical to an OOM kill, so it can only be told apart by the
+///   latch `restart_gpu_worker` arms.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn should_report_termination(
+    exit: Option<AbnormalExit>,
+    shutting_down: bool,
+    expected_restart: bool,
+) -> bool {
+    exit.is_some() && !shutting_down && !expected_restart
+}
+
+/// The termination-report request path and JSON body for a worker child (sc-18182).
+/// Pure, so the route and the "exactly one of signal/exitCode" contract are testable
+/// without issuing a request.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn termination_report_request(worker_id: &str, exit: AbnormalExit) -> (String, String) {
+    let (signal, exit_code) = exit.request_fields();
+    // `worker_id` is supervisor-generated (`<prefix>-<pid>-<millis>`), so it is
+    // already path-safe; no percent-encoding needed.
+    let path = format!("/api/v1/workers/{worker_id}/terminated");
+    let body = serde_json::json!({ "signal": signal, "exitCode": exit_code }).to_string();
+    (path, body)
+}
+
+/// `http://host:port` → `host:port` for the local API (sc-18182). Split out as a
+/// pure function so the `http://`-only rule and the trailing-slash trim are
+/// testable directly — asserting them through `post_loopback_json`'s error string
+/// cannot discriminate, because a malformed authority fails inside
+/// `to_socket_addrs` with its own message.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn loopback_authority(api_url: &str) -> Result<&str, String> {
+    api_url
+        .trim_end_matches('/')
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("unsupported api url {api_url}"))
+}
+
+/// Minimal blocking HTTP/1.1 POST of a JSON body to the LOCAL API, returning
+/// `Ok(true)` when the response body is anything other than JSON `null`.
+///
+/// Hand-rolled over `TcpStream` rather than through an HTTP client crate, on purpose
+/// (sc-18182). `current_api_url` is always `http://127.0.0.1:<port>` — plain HTTP on
+/// loopback, never TLS or a proxy — so a full client buys nothing and costs a lot
+/// here: adding `reqwest` to this crate collided with the `reqwest 0.12` already
+/// declared for the Windows/Linux CUDA provisioner (two direct deps of the same name
+/// → E0464, breaking the Windows desktop build), and on macOS
+/// `reqwest::Client::builder().build()` PANICS with "No provider set" — reqwest 0.13
+/// resolves `__rustls` through feature unification with tauri-plugin-updater but no
+/// crypto provider, and that panic would kill this supervisor thread outright,
+/// leaving the worker permanently unsupervised. This is 40 lines with none of that.
+///
+/// All timeouts are bounded so a wedged API cannot stall the worker restart.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn post_loopback_json(
+    api_url: &str,
+    path: &str,
+    body: &str,
+    access_token: Option<String>,
+) -> Result<bool, String> {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    let authority = loopback_authority(api_url)?;
+    let address = authority
+        .to_socket_addrs()
+        .map_err(|error| error.to_string())?
+        .next()
+        .ok_or_else(|| format!("no address for {authority}"))?;
+    let mut stream = TcpStream::connect_timeout(&address, TIMEOUT).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(TIMEOUT)))
+        .map_err(|error| error.to_string())?;
+
+    // The route is not in the API's PUBLIC_PATHS, so LAN mode requires the same token
+    // the worker children are handed.
+    //
+    // The token is interpolated into a header line we write ourselves, so nothing
+    // else will validate it (sc-18182): `set_remote_password` only trims and rejects
+    // empty, so a password containing CR/LF would inject arbitrary headers or smuggle
+    // a second request. Drop the header rather than emit a malformed one — the report
+    // then fails a 401 and is logged, the correct best-effort outcome.
+    //
+    // This is deliberately STRICTER than `HeaderValue`, which also admits HTAB and
+    // the C1 range: a password is a single line of text, so rejecting every control
+    // character costs nothing real and needs no per-codepoint reasoning.
+    let auth_header = access_token
+        .filter(|token| !token.chars().any(|c| c.is_control()))
+        .map(|token| format!("X-SceneWorks-Token: {token}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\n\
+         Content-Length: {len}\r\n{auth_header}Connection: close\r\n\r\n{body}",
+        len = body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|error| error.to_string())?;
+
+    let mut response = String::new();
+    // `Connection: close` means the server ends the body by closing, so read to EOF.
+    // A non-UTF8 body would error here; the API only ever answers JSON.
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| error.to_string())?;
+
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| "malformed status line".to_owned())?;
+    if !(200..300).contains(&status) {
+        return Err(format!("api responded {status}"));
+    }
+    // The endpoint returns the failed job, or `null` when this worker id owned no
+    // active job. Distinguishing them keeps the log honest — see the no-op note in
+    // `report_worker_terminated`'s doc comment.
+    let payload = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.trim())
+        .unwrap_or_default();
+    Ok(!payload.is_empty() && payload != "null")
+}
+
+/// Best-effort: tell the API that a supervised worker child died abnormally, so its
+/// still-active job is failed with an attributed cause instead of sitting until the
+/// heartbeat/stale path reclaims it as the generic `interrupted` (sc-18182).
+///
+/// This mirrors `sceneworks_worker::supervisor::report_worker_terminated`, which
+/// covers the workers *that* supervisor owns. On macOS the GPU worker is owned by
+/// this Tauri supervisor instead, so without this call the whole attributed-failure
+/// path (sc-4881 signals, sc-6320 non-zero exits) was unreachable on Mac.
+///
+/// **Off-Mac this is expected to be a no-op, by design.** The Windows/Linux child is
+/// launched with `SCENEWORKS_GPU_ID=auto`, so it returns at `supervise_auto_workers`
+/// and never runs `run_worker_loop` — the process this supervisor spawned therefore
+/// never registers under `worker_id`, and the API finds no active job for it. That is
+/// correct: the workers that DO register there are its per-GPU children, whose deaths
+/// are already reported by `sceneworks_worker::supervisor`. Only a death of the whole
+/// candle tree goes unattributed, and that case is still reclaimed (as `interrupted`,
+/// with a `job.updated` broadcast) by the API's stale sweep, so no UI freezes. The
+/// call is kept cross-platform rather than `cfg`-gated to macOS so a non-`auto`
+/// off-Mac worker would be covered automatically; the log line distinguishes the
+/// two outcomes so the no-op is visible rather than misreported as a failure.
+///
+/// Failures here are logged, never raised: a dead or restarting API must not disrupt
+/// the restart loop, and the heartbeat path remains the backstop. The timeout keeps a
+/// wedged API from stalling the worker restart.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn report_worker_terminated(
+    api_url: &str,
+    worker_id: &str,
+    exit: AbnormalExit,
+    log_path: &Path,
+    log_file: Option<&mut std::fs::File>,
+    label: &str,
+    // Injected rather than read here (sc-18182) so exercising this function in a test
+    // does not touch the developer's real remote-access settings or the keychain.
+    access_token: Option<String>,
+) {
+    let (signal, exit_code) = exit.request_fields();
+    let (path, body) = termination_report_request(worker_id, exit);
+    let outcome = post_loopback_json(api_url, &path, &body, access_token);
+    let line = match outcome {
+        Ok(true) => format!(
+            "[desktop] reported {label} worker termination to the API; its active job was \
+             failed: signal={signal:?} exitCode={exit_code:?}\n"
+        ),
+        Ok(false) => format!(
+            "[desktop] reported {label} worker termination to the API; no active job was \
+             attributed to this worker id: signal={signal:?} exitCode={exit_code:?}\n"
+        ),
+        Err(error) => format!(
+            "[desktop] failed to report {label} worker termination \
+             (signal={signal:?} exitCode={exit_code:?}): {error}\n"
+        ),
+    };
+    append_log_with_handle(log_path, &line, log_file);
 }
 
 /// Shared spawn-and-supervise skeleton for the native GPU worker (F-053,
@@ -1798,6 +2058,15 @@ fn supervise_worker(
                     kill_stale(child);
                 }
                 record_pid(&app, None);
+                // This path also ends a child's life and `continue`s past the report
+                // gate below, so consume the deliberate-restart latch here too
+                // (sc-18182). Otherwise a `restart_gpu_worker` landing in the window
+                // between the spawn and this recheck would arm a latch nothing clears,
+                // and it would silence the NEXT child's genuine crash. We kill the
+                // child ourselves here, so there is nothing to attribute either way.
+                app.state::<Managed>()
+                    .expected_worker_restart
+                    .store(false, Ordering::SeqCst);
                 if matches!(verdict, SpawnVerdict::KillAndExit) {
                     return;
                 }
@@ -1823,6 +2092,10 @@ fn supervise_worker(
                 .append(true)
                 .open(&log_path)
                 .ok();
+            // How the child died, when it died abnormally (sc-18182). Reported to the
+            // API below, after the shutdown check, so an app quit never attributes a
+            // failure to a job.
+            let mut abnormal_exit: Option<AbnormalExit> = None;
             loop {
                 match tauri::async_runtime::block_on(events.recv()) {
                     Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
@@ -1841,6 +2114,7 @@ fn supervise_worker(
                             ),
                             log_file.as_mut(),
                         );
+                        abnormal_exit = AbnormalExit::classify(payload.code, payload.signal);
                         break;
                     }
                     Some(CommandEvent::Error(error)) => {
@@ -1849,6 +2123,11 @@ fn supervise_worker(
                             &format!("[desktop] {label} worker error: {error}\n"),
                             log_file.as_mut(),
                         );
+                        // Deliberately leaves `abnormal_exit` as `None` (sc-18182): a
+                        // pipe/IO error carries neither a signal nor an exit code, so
+                        // there is no cause to attribute and reporting one would
+                        // fabricate it. The job is still reclaimed — and now
+                        // announced — by the restart-heartbeat path.
                         break;
                     }
                     None => break,
@@ -1860,10 +2139,70 @@ fn supervise_worker(
                 .expect("worker lock")
                 .take();
             record_pid(&app, None);
-            if app.state::<Managed>().shutting_down.load(Ordering::SeqCst) {
+            // How long the child actually lived, sampled BEFORE the termination report
+            // below (sc-18182). The report can block for up to its timeouts against a
+            // listening-but-wedged API, and folding that latency into the child's
+            // apparent lifetime would reset the exponential backoff for a child that
+            // really only survived seconds.
+            let child_lifetime = started.elapsed();
+            // Consume the deliberate-restart latch unconditionally — including on the
+            // shutdown path below — so it can never survive into a later iteration and
+            // silence a genuine crash (sc-18182).
+            let expected_restart = app
+                .state::<Managed>()
+                .expected_worker_restart
+                .swap(false, Ordering::SeqCst);
+            let shutting_down = app.state::<Managed>().shutting_down.load(Ordering::SeqCst);
+            // The dying child cannot report its own uncatchable death, and on macOS
+            // THIS supervisor — not `sceneworks_worker::supervisor` — owns the GPU
+            // worker, so without this call the API's attributed-failure path
+            // (sc-4881 signals, sc-6320 non-zero exits) is unreachable on Mac and the
+            // job is only ever swept to the generic `interrupted` (sc-18182).
+            // `shutting_down` is passed to the predicate rather than only
+            // short-circuited by the early return below, so the rule the unit tests
+            // pin is the rule that actually runs.
+            if should_report_termination(abnormal_exit, shutting_down, expected_restart) {
+                let exit = abnormal_exit.expect("should_report_termination implies Some");
+                // Re-read the CURRENT api url rather than reusing the one captured at
+                // the top of this iteration: after an API crash → Retry the port has
+                // already changed (the sc-13605 invariant).
+                match resolve_supervisor_action(&app.state::<Managed>()) {
+                    SupervisorAction::Spawn(url) => report_worker_terminated(
+                        &url,
+                        &worker_id,
+                        exit,
+                        &log_path,
+                        log_file.as_mut(),
+                        label,
+                        lan_access_token(),
+                    ),
+                    // `WaitForPort`: the API is itself down or restarting — exactly
+                    // when a correlated worker death is likely. `Exit`: a quit landed
+                    // between the `shutting_down` read above and this re-resolve. Both
+                    // mean there is no API to report to; log the drop rather than
+                    // swallowing it. The stale sweep remains the backstop.
+                    SupervisorAction::WaitForPort => append_log_with_handle(
+                        &log_path,
+                        &format!(
+                            "[desktop] could not report {label} worker termination: \
+                             no API port published\n"
+                        ),
+                        log_file.as_mut(),
+                    ),
+                    SupervisorAction::Exit => append_log_with_handle(
+                        &log_path,
+                        &format!(
+                            "[desktop] skipped reporting {label} worker termination: \
+                             the app is shutting down\n"
+                        ),
+                        log_file.as_mut(),
+                    ),
+                }
+            }
+            if shutting_down {
                 return;
             }
-            if started.elapsed() > Duration::from_secs(20) {
+            if child_lifetime > Duration::from_secs(20) {
                 backoff = 1;
             }
             append_log(
@@ -3912,6 +4251,396 @@ mod health_gate_tests {
         assert_eq!(
             readiness_message(Duration::from_secs(90)),
             "Preparing your library… (90s)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod abnormal_exit_tests {
+    use super::{
+        loopback_authority, post_loopback_json, report_worker_terminated,
+        should_report_termination, termination_report_request, AbnormalExit,
+    };
+    use std::time::Duration;
+
+    /// sc-18182: the macOS OOM case. Jetsam kills the MLX worker with SIGKILL, which
+    /// Tauri reports as `code=None signal=Some(9)`. That must classify as a signal
+    /// death so the API derives the named-signal + OOM-remediation failure text
+    /// rather than leaving the job to the generic `interrupted` sweep.
+    #[test]
+    fn sigkill_classifies_as_a_signal_death() {
+        assert_eq!(
+            AbnormalExit::classify(None, Some(9)),
+            Some(AbnormalExit::Signal(9))
+        );
+        assert_eq!(
+            AbnormalExit::classify(None, Some(9))
+                .expect("classified")
+                .request_fields(),
+            (Some(9), None),
+            "the API contract sets exactly one of signal / exitCode"
+        );
+    }
+
+    /// A Rust panic that unwinds to a process exit reports code 101, no signal.
+    #[test]
+    fn nonzero_exit_code_classifies_as_an_exit() {
+        assert_eq!(
+            AbnormalExit::classify(Some(101), None),
+            Some(AbnormalExit::ExitCode(101))
+        );
+        assert_eq!(
+            AbnormalExit::classify(Some(101), None)
+                .expect("classified")
+                .request_fields(),
+            (None, Some(101)),
+        );
+    }
+
+    /// A clean exit must never be reported: doing so would fail the worker's active
+    /// job on an ordinary wind-down.
+    #[test]
+    fn clean_exit_is_not_reported() {
+        assert_eq!(AbnormalExit::classify(Some(0), None), None);
+    }
+
+    /// Neither code nor signal reported: we refuse to invent a cause. The job is
+    /// still reclaimed by the restart-heartbeat path, which now publishes its own
+    /// `job.updated`.
+    #[test]
+    fn unknown_exit_is_not_reported() {
+        assert_eq!(AbnormalExit::classify(None, None), None);
+    }
+
+    /// Defensive: a payload carrying both must keep the signal attribution rather
+    /// than degrade to a plain exit code.
+    #[test]
+    fn signal_wins_when_both_are_present() {
+        assert_eq!(
+            AbnormalExit::classify(Some(0), Some(15)),
+            Some(AbnormalExit::Signal(15))
+        );
+    }
+
+    /// The reporting gate. A crash reports; a clean exit, an app quit, and a
+    /// user-initiated "Restart worker" all stay silent.
+    #[test]
+    fn only_an_unexpected_abnormal_exit_is_reported() {
+        let oom = Some(AbnormalExit::Signal(9));
+        assert!(
+            should_report_termination(oom, false, false),
+            "an unexpected SIGKILL is exactly the case this exists for"
+        );
+        assert!(
+            !should_report_termination(None, false, false),
+            "a clean exit is not a failure"
+        );
+        assert!(
+            !should_report_termination(oom, true, false),
+            "quitting the app must never fail the job the worker was running"
+        );
+        assert!(
+            !should_report_termination(oom, false, true),
+            "Restart worker SIGKILLs the child exactly like jetsam does; without the \
+             latch the user would be told their job ran out of memory"
+        );
+    }
+
+    /// One-shot loopback HTTP server for the tests below: accepts a single
+    /// connection, reads the FULL request (headers plus a `Content-Length` body),
+    /// answers `reply`, and returns the raw request.
+    ///
+    /// Every blocking step is deadline-bounded (sc-18182). An unbounded `accept()`
+    /// would HANG the whole test binary on exactly the regression these tests exist
+    /// to catch — a reporter that never connects — instead of failing it.
+    fn serve_one_request(listener: std::net::TcpListener, reply: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        listener
+            .set_nonblocking(true)
+            .expect("listener goes non-blocking so accept can time out");
+        let mut accepted = None;
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    accepted = Some(stream);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        }
+        let mut stream = accepted.expect("the reporter must connect within the deadline");
+        stream
+            .set_nonblocking(false)
+            .expect("the accepted stream goes back to blocking");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout applies");
+
+        // Read until the headers are complete AND the whole Content-Length body has
+        // arrived: a single `read` can return a short segment, which would make the
+        // negative assertions below pass vacuously.
+        let mut raw: Vec<u8> = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let text = String::from_utf8_lossy(&raw).to_string();
+            if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                let expected = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Content-Length: ")
+                            .or_else(|| line.strip_prefix("content-length: "))
+                    })
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if body.len() >= expected {
+                    break;
+                }
+            }
+            let read = stream.read(&mut chunk).expect("request is readable");
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..read]);
+        }
+        stream.write_all(reply).expect("response writes");
+        let _ = stream.flush();
+        String::from_utf8_lossy(&raw).to_string()
+    }
+
+    /// Executes `report_worker_terminated` for real against a loopback listener
+    /// (sc-18182). The predicates and the source scan above never run the function
+    /// that hand-rolls the reqwest client, so without this the request line, path,
+    /// content type and body were never exercised even once.
+    #[test]
+    fn report_worker_terminated_posts_the_signal_to_the_worker_route() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let port = listener
+            .local_addr()
+            .expect("listener has an address")
+            .port();
+        // Answer with the endpoint's "no job was failed" shape so the reporter takes
+        // its Ok(false) branch.
+        let server = std::thread::spawn(move || {
+            serve_one_request(
+                listener,
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                  Content-Length: 4\r\nConnection: close\r\n\r\nnull",
+            )
+        });
+
+        // Passing `None` for the file handle means `append_log_with_handle` writes
+        // NOTHING to disk — it only mirrors into the in-app session buffer — so this
+        // path is never created and there is no temp file to leak on the failure
+        // path (the sc-17791 class). It only supplies the log's `file_stem` tag.
+        let log_path = std::path::Path::new("mlx-worker.log");
+        report_worker_terminated(
+            &format!("http://127.0.0.1:{port}"),
+            "mlx-worker-local-1-2",
+            AbnormalExit::Signal(9),
+            log_path,
+            None,
+            "mlx",
+            None,
+        );
+        let request = server.join().expect("server thread joins");
+
+        assert!(
+            request.starts_with("POST /api/v1/workers/mlx-worker-local-1-2/terminated HTTP/1.1"),
+            "must POST the worker's termination route, got request:\n{request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "the API decodes the body as JSON, got request:\n{request}"
+        );
+        let body = request
+            .split("\r\n\r\n")
+            .nth(1)
+            .expect("request has a body separated from its headers");
+        let parsed: serde_json::Value = serde_json::from_str(body).expect("body is json");
+        assert_eq!(parsed["signal"], 9);
+        assert_eq!(parsed["exitCode"], serde_json::Value::Null);
+    }
+
+    /// The pure predicates above survive deleting the code that CALLS them, so they
+    /// cannot prove the mechanism is wired. This scans this file's own source for the
+    /// four load-bearing statements, mirroring
+    /// `linux_candle_tree_teardown_is_wired_to_every_lifecycle_path` (sc-18182).
+    ///
+    /// Each needle is assembled from fragments so this test's own source does not
+    /// satisfy it, and matching runs against a whitespace-stripped copy so a
+    /// reformat or a change of nesting depth cannot break it while the wiring is
+    /// intact (rustfmt pins the current indentation only at the current depth).
+    #[test]
+    fn termination_reporting_is_wired_into_the_supervisor_lifecycle() {
+        let raw = include_str!("setup.rs");
+        let source: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let arm_latch = ["expected_worker_restart", ".store(true,"].concat();
+        assert!(
+            source.contains(&arm_latch),
+            "restart_gpu_worker must arm the deliberate-restart latch before killing \
+             the child, or a user-initiated restart is reported to the API as a crash \
+             and the job is failed with an OOM hint"
+        );
+
+        let consume_latch = ["expected_worker_restart", ".swap(false,"].concat();
+        assert!(
+            source.contains(&consume_latch),
+            "the supervisor must CONSUME the latch (swap, not load) so it suppresses \
+             exactly one termination and cannot silence a later genuine crash"
+        );
+
+        let classify = ["abnormal_exit=AbnormalExit::", "classify(payload.code,"].concat();
+        assert!(
+            source.contains(&classify),
+            "the CommandEvent::Terminated arm must classify the exit, or nothing is \
+             ever reported"
+        );
+
+        let gated_report = ["ifshould_report_", "termination(abnormal_exit,"].concat();
+        assert!(
+            source.contains(&gated_report),
+            "the report must run through the suppression predicate, not unconditionally"
+        );
+        // Anchored on the match arm, NOT on `report_worker_terminated(` alone — that
+        // bare needle is satisfied by the function's own DEFINITION, so it stays green
+        // when the call site is deleted (caught by mutation-testing this test).
+        let report_call = ["Spawn(url)=>report_worker_", "terminated("].concat();
+        assert!(
+            source.contains(&report_call),
+            "the supervisor must actually call the reporter — the whole point of \
+             sc-18182 is that this call site did not exist on macOS"
+        );
+    }
+
+    /// Pin the route and the "exactly one of signal / exitCode" wire contract.
+    #[test]
+    fn termination_report_targets_the_worker_route_with_one_cause() {
+        let (path, body) = termination_report_request(
+            "mlx-worker-local-90372-1786194969865",
+            AbnormalExit::Signal(9),
+        );
+        assert_eq!(
+            path,
+            "/api/v1/workers/mlx-worker-local-90372-1786194969865/terminated"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("body is json");
+        assert_eq!(parsed["signal"], 9);
+        assert_eq!(parsed["exitCode"], serde_json::Value::Null);
+
+        let (panic_path, panic_body) =
+            termination_report_request("w1", AbnormalExit::ExitCode(101));
+        assert_eq!(panic_path, "/api/v1/workers/w1/terminated");
+        let parsed: serde_json::Value = serde_json::from_str(&panic_body).expect("body is json");
+        assert_eq!(parsed["exitCode"], 101);
+        assert_eq!(parsed["signal"], serde_json::Value::Null);
+    }
+
+    /// The `http://`-only rule and the trailing-slash trim, asserted on the pure
+    /// parser. Going through `post_loopback_json` cannot discriminate here: with the
+    /// trim removed, `"127.0.0.1:0/"` fails inside `to_socket_addrs` with ITS message,
+    /// which matches neither error branch — so the assertion passes and the test is a
+    /// false green (this is exactly how the first version of it was wrong).
+    #[test]
+    fn loopback_authority_strips_the_scheme_and_trailing_slash() {
+        assert_eq!(
+            loopback_authority("http://127.0.0.1:53250"),
+            Ok("127.0.0.1:53250")
+        );
+        assert_eq!(
+            loopback_authority("http://127.0.0.1:53250/"),
+            Ok("127.0.0.1:53250"),
+            "a trailing slash must not survive into the authority"
+        );
+        let error = loopback_authority("https://example.test")
+            .expect_err("only the loopback http API is addressable");
+        assert!(
+            error.contains("unsupported api url"),
+            "expected an unsupported-url error, got {error}"
+        );
+    }
+
+    /// A LAN password containing CR/LF must never reach the wire: we hand-write the
+    /// header, so nothing else would reject it, and it would let the password inject
+    /// arbitrary headers or smuggle a second request.
+    #[test]
+    fn loopback_post_drops_a_control_character_token() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener binds");
+        let port = listener
+            .local_addr()
+            .expect("listener has an address")
+            .port();
+        let server = std::thread::spawn(move || {
+            serve_one_request(
+                listener,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnull",
+            )
+        });
+
+        // A well-formed token MUST reach the wire — without this positive case,
+        // deleting the whole header mechanism is indistinguishable from correctly
+        // rejecting a poisoned one, and in LAN mode a missing header means a 401,
+        // no attribution, and the generic `interrupted` this hotfix exists to kill.
+        {
+            let good_listener = TcpListener::bind("127.0.0.1:0").expect("listener binds");
+            let good_port = good_listener
+                .local_addr()
+                .expect("listener has an address")
+                .port();
+            let good_server = std::thread::spawn(move || {
+                serve_one_request(
+                    good_listener,
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnull",
+                )
+            });
+            let _ = post_loopback_json(
+                &format!("http://127.0.0.1:{good_port}"),
+                "/api/v1/workers/w1/terminated",
+                "{}",
+                Some("hunter2".to_owned()),
+            );
+            let good_request = good_server.join().expect("server thread joins");
+            assert!(
+                good_request.contains("X-SceneWorks-Token: hunter2\r\n"),
+                "a valid token must be sent, or LAN mode 401s and loses the \
+                 attribution: got request:\n{good_request}"
+            );
+        }
+
+        let smuggled = "hunter2\r\nX-Injected: yes".to_owned();
+        let _ = post_loopback_json(
+            &format!("http://127.0.0.1:{port}"),
+            "/api/v1/workers/w1/terminated",
+            "{}",
+            Some(smuggled),
+        );
+        let request = server.join().expect("server thread joins");
+
+        // Guard against a vacuous pass: the negative assertions below only mean
+        // something if we actually captured the whole request.
+        assert!(
+            request.starts_with("POST /api/v1/workers/w1/terminated HTTP/1.1")
+                && request.ends_with("{}"),
+            "the full request must be captured before asserting on it, got:\n{request}"
+        );
+        assert!(
+            !request.contains("X-Injected"),
+            "a CR/LF token must not inject a header, got request:\n{request}"
+        );
+        assert!(
+            !request.contains("X-SceneWorks-Token"),
+            "the malformed token must be dropped entirely, got request:\n{request}"
         );
     }
 }

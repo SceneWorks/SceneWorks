@@ -162,7 +162,7 @@ pub(crate) async fn heartbeat_worker(
     Path(worker_id): Path<String>,
     ApiJson(payload): ApiJson<WorkerHeartbeatRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
-    let worker = store_call(state.clone(), move |store, _timeout| {
+    let outcome = store_call(state.clone(), move |store, _timeout| {
         store.heartbeat_worker(WorkerHeartbeat {
             worker_id,
             status: payload.status,
@@ -172,8 +172,30 @@ pub(crate) async fn heartbeat_worker(
         })
     })
     .await?;
-    publish(&state, "worker.updated", &worker);
-    Ok(Json(worker))
+    // An idle heartbeat from a restarted worker terminates the job its previous
+    // incarnation was running. Announce that job, exactly as `handle_stale_sweep`
+    // does for the time-based sweep (sc-18182): the web client is SSE-driven and does
+    // not poll jobs, so an unpublished terminal transition leaves the studio showing
+    // "generating" forever even though the job is already terminal in the database.
+    if let Some(job) = &outcome.interrupted_job {
+        invalidate_model_catalog_for_terminal_jobs(&state, std::slice::from_ref(job));
+        publish(&state, "job.updated", job);
+        // Not `?`: the interrupt is already committed and `job.updated` already sent,
+        // so a queue-snapshot failure must not turn this into a 500 that denies the
+        // worker its snapshot and makes it retry a heartbeat it already delivered.
+        // (`handle_stale_sweep` avoids the question entirely — it publishes only
+        // `job.updated` and never refreshes the queue.)
+        if let Err(error) = publish_queue(&state).await {
+            tracing::warn!(
+                event = "queue_publish_failed_after_heartbeat_interrupt",
+                job_id = %job.id,
+                error = ?error,
+                "job.updated was published but the queue snapshot failed"
+            );
+        }
+    }
+    publish(&state, "worker.updated", &outcome.worker);
+    Ok(Json(outcome.worker))
 }
 
 /// The supervisor reports a worker child that terminated abnormally — killed by an
@@ -195,7 +217,20 @@ pub(crate) async fn worker_terminated(
     if let Some(job) = &failed {
         invalidate_model_catalog_for_terminal_jobs(&state, std::slice::from_ref(job));
         publish(&state, "job.updated", job);
-        publish_queue(&state).await?;
+        // Not `?` (sc-18182): the job is already committed as failed and `job.updated`
+        // is already out, so a queue-snapshot error must not turn a SUCCESSFUL
+        // attribution into a 500 — the desktop supervisor would then log "failed to
+        // report worker termination" for a report that actually landed. This endpoint
+        // only became reachable on macOS with sc-18182, which is what makes the
+        // mislabelling reachable too.
+        if let Err(error) = publish_queue(&state).await {
+            tracing::warn!(
+                event = "queue_publish_failed_after_worker_termination",
+                job_id = %job.id,
+                error = ?error,
+                "job.updated was published but the queue snapshot failed"
+            );
+        }
     }
     Ok(Json(failed))
 }

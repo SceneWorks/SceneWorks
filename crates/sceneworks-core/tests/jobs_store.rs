@@ -1936,7 +1936,7 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
         })
         .expect("busy heartbeat succeeds");
 
-    let worker = store
+    let outcome = store
         .heartbeat_worker(WorkerHeartbeat {
             worker_id: "worker-1".to_owned(),
             status: WorkerStatus::Idle,
@@ -1945,12 +1945,26 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
             utilization: None,
         })
         .expect("heartbeat succeeds");
+    let interrupted_job = outcome.interrupted_job;
+    let worker = outcome.worker;
     let job = store.get_job(&created.id).expect("job loads");
 
     assert_eq!(worker.status, WorkerStatus::Idle);
     assert_eq!(worker.current_job_id, None);
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(job.worker_id, None);
+    // sc-18182: the store must hand the interrupted job back, or the API has nothing
+    // to broadcast `job.updated` for and an SSE-only client never leaves "generating".
+    assert_eq!(
+        interrupted_job.as_ref().map(|job| job.id.as_str()),
+        Some(created.id.as_str()),
+        "the heartbeat must report the job it interrupted"
+    );
+    assert_eq!(
+        interrupted_job.map(|job| job.status),
+        Some(JobStatus::Interrupted),
+        "the reported snapshot must be the post-update one, not the pre-update row"
+    );
 }
 
 #[test]
@@ -2201,7 +2215,7 @@ fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
 
     assert_eq!(claimed.id, created.id);
 
-    let worker = store
+    let outcome = store
         .heartbeat_worker(WorkerHeartbeat {
             worker_id: "worker-1".to_owned(),
             status: WorkerStatus::Idle,
@@ -2210,6 +2224,14 @@ fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
             utilization: None,
         })
         .expect("heartbeat succeeds");
+    // sc-18182: nothing was interrupted, so nothing must be reported — otherwise the
+    // API would broadcast a terminal `job.updated` for a job that is still running.
+    assert!(
+        outcome.interrupted_job.is_none(),
+        "a heartbeat that interrupts nothing must report no job, got {:?}",
+        outcome.interrupted_job
+    );
+    let worker = outcome.worker;
     let job = store.get_job(&created.id).expect("job loads");
 
     assert_eq!(worker.status, WorkerStatus::Idle);
