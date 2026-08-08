@@ -25,6 +25,7 @@ const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-r
 const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
 const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
 const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
+const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -555,6 +556,12 @@ fn evaluate_shared_image_inner(
             | "flux1_dev"
             | "flux2_dev"
             | "flux2_klein_9b"
+            | "mage_flow_base"
+            | "mage_flow"
+            | "mage_flow_turbo"
+            | "mage_flow_edit_base"
+            | "mage_flow_edit"
+            | "mage_flow_edit_turbo"
     ) && contract_override.is_none()
     {
         return Ok(None);
@@ -564,6 +571,12 @@ fn evaluate_shared_image_inner(
         "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
         "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
         "flux2_klein_9b" => FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION,
+        "mage_flow_base"
+        | "mage_flow"
+        | "mage_flow_turbo"
+        | "mage_flow_edit_base"
+        | "mage_flow_edit"
+        | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
         _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
@@ -876,6 +889,91 @@ mod tests {
         assert_eq!(generic.mode, MemoryMode::ImageToImage);
         assert_eq!(generic.calibration_key, "image_to_image");
         assert_eq!(generic.scope_key, "image_to_image");
+    }
+
+    #[test]
+    fn mage_routes_preserve_text_to_image_and_edit_scope_keys() {
+        for engine_id in ["mage_flow_base", "mage_flow", "mage_flow_turbo"] {
+            let binding = request_mode(engine_id, "image_generation");
+            assert_eq!(binding.mode, MemoryMode::TextToImage, "engine={engine_id}");
+            assert_eq!(binding.calibration_key, "text_to_image");
+            assert_eq!(binding.scope_key, "text_to_image");
+        }
+
+        for engine_id in [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ] {
+            let binding = request_mode(engine_id, "edit_image");
+            assert_eq!(binding.mode, MemoryMode::Edit, "engine={engine_id}");
+            assert_eq!(binding.calibration_key, "edit_image");
+            assert_eq!(binding.scope_key, "edit");
+        }
+    }
+
+    #[test]
+    fn mage_manifests_declare_unverified_capabilities_without_calibrations() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .expect("embedded model manifest");
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
+        let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+        let models = root["models"].as_array().expect("models array");
+
+        for model_id in [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo",
+        ] {
+            let candle = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .unwrap_or_else(|| panic!("missing Mage model {model_id}"))["candle"]
+                .as_object()
+                .expect("Candle manifest block");
+            assert_eq!(candle["supportsSequentialOffload"], true);
+            assert_eq!(candle["measured"], false);
+            assert!(candle.get("calibrations").is_none());
+
+            let capabilities = candle["memoryStrategyCapabilities"]
+                .as_object()
+                .expect("memory strategy capabilities");
+            assert_eq!(capabilities.len(), 2);
+            assert!(
+                !capabilities.contains_key("bounded_decode"),
+                "{model_id}: CoD full-field normalization makes bounded decode structurally inapplicable"
+            );
+            let bounded_decode_exemption =
+                &candle["memoryStrategyStructuralExemptions"]["bounded_decode"];
+            assert_eq!(
+                bounded_decode_exemption["overlays"],
+                json!(["none", "lora"])
+            );
+            assert_eq!(
+                bounded_decode_exemption["evidence"]
+                    .as_array()
+                    .expect("bounded decode structural evidence")
+                    .len(),
+                2
+            );
+            assert_eq!(
+                capabilities["bounded_attention"]["parameters"],
+                json!({ "attentionChunkSize": 67_108_864 })
+            );
+            assert_eq!(
+                capabilities["bounded_transformer_residency"]["parameters"],
+                json!({ "transformerWindowSize": 1, "transformerWindowComponent": "Dit" })
+            );
+            assert!(capabilities
+                .values()
+                .all(|capability| capability["overlays"] == json!(["none"])));
+        }
     }
 
     #[test]

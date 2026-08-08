@@ -210,6 +210,36 @@
       // nvidia-smi high-water at q4 14.67 / q8 16.95 / bf16 20.41 GB for the registered 1024²,
       // 20-step RL path; the admission gate adds its standard transient headroom separately.
       "candle": {
+        // SC-15813 implements the provider surface; SC-15841 owns this route's exact CUDA
+        // calibration, so the selector remains resident-only until that evidence is packaged.
+        // Mage's CoD decoder normalizes over the full latent field, so bounded decode is
+        // structurally inapplicable and intentionally absent from this implemented-capability map.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
+              }
+            ]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -429,6 +459,34 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15844 owns this route's exact CUDA calibration. CoD's
+        // full-field normalization makes bounded decode structurally inapplicable.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
+              }
+            ]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -653,6 +711,34 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15847 owns this route's exact CUDA calibration. CoD's
+        // full-field normalization makes bounded decode structurally inapplicable.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
+              }
+            ]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -852,6 +938,34 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15850 owns this route's exact CUDA calibration. CoD's
+        // full-field normalization makes bounded decode structurally inapplicable.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
+              }
+            ]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -1045,6 +1159,34 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15853 owns this route's exact CUDA calibration. CoD's
+        // full-field normalization makes bounded decode structurally inapplicable.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
+              }
+            ]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
@@ -1246,6 +1388,34 @@
         "standardTierLayout": true
       },
       "candle": {
+        // SC-15813 implementation; SC-15856 owns this route's exact CUDA calibration. CoD's
+        // full-field normalization makes bounded decode structurally inapplicable.
+        "supportsSequentialOffload": true,
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none"]
+          },
+          "bounded_transformer_residency": {
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+            "overlays": ["none"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization."
+              },
+              {
+                "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field."
+              }
+            ]
+          }
+        },
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,

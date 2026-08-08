@@ -513,19 +513,10 @@ test("published cost model distinguishes complete history from runtime-current e
   assert.equal(model.completedBaseline.completeRecords, 50);
   assert.equal(model.completedBaseline.runtimeCompleteRecords, 15);
   assert.equal(model.completedBaseline.activationEligibleRecords, 65);
-  // "Runtime-current" is measured against the shipped inference pin. SC-15833's checked-in
-  // compatibility audit certifies the Candle FLUX.2 closure across an exact window — captured at
-  // 5ffd, compatible through `AUDITED_LIVE_REVISION` — so those five records are current through
-  // that binding and ONLY while that revision is still the live pin. The audit is a window, not a
-  // permanent grant: once the pin moves past it the five join every other retained record as
-  // historical, which is the fail-closed rule `sc-15833-flux2-evidence.test.mjs` asserts directly.
-  //
-  // Derived from the live pin rather than hardcoded, so a bump does not make this test wrong; it
-  // falls to zero on its own and comes back when the window is re-audited. sc-17524 did exactly
-  // that for a4f409ae — `Cargo.lock` and `candle-gen` both moved, and the compiled
-  // measurement binary was byte-identical at both ends — which is why the count is 5 again. Only a
-  // measurement re-opens this window; editing the constant below does not.
-  const AUDITED_LIVE_REVISION = "a4f409ae8ce73eda2ee8117b89b5f479666606b8";
+  // sc-17774 replaced whole-repository revision equality and the one-off FLUX.2 compatibility
+  // window with a derived compile-closure digest per backend/provider. Derive this expectation
+  // independently from the raw evidence and live closure ledger: an unrelated inference change
+  // must not demote a provider, while any change to that provider's closure still fails closed.
   const workerCargo = readFileSync(
     new URL("../crates/sceneworks-worker/Cargo.toml", import.meta.url),
     "utf8",
@@ -534,24 +525,34 @@ test("published cost model distinguishes complete history from runtime-current e
     /github\.com\/SceneWorks\/inference"[^}\n]*\brev\s*=\s*"([0-9a-f]{40})"/,
   )?.[1];
   assert.ok(livePin, "could not read the pinned inference revision from the worker manifest");
-  // sc-16915 measured eleven MLX runs (qwen_image, krea_2_turbo_control) directly AT this pin, so
-  // current runs no longer come only from the FLUX.2 compatibility window. The two sources are kept
-  // separate and both are derived from the live pin rather than hardcoded, so a bump makes each fall
-  // to zero on its own instead of making this test wrong:
-  //
-  //   - the audited FLUX.2 five are current only while their audited window IS the live pin;
-  //   - the sc-16915 eleven are current only while the pin they were measured at is the live pin.
-  //
-  // Neither is a permanent grant. Only a new measurement, or a re-audit, restores either count.
-  const SC_16915_MEASURED_REVISION = "fbb00d6b4147bd220fe324050534708c12fb022d";
-  const expectedCurrentRuns =
-    (livePin === AUDITED_LIVE_REVISION ? 5 : 0) +
-    (livePin === SC_16915_MEASURED_REVISION ? 11 : 0);
+  const closures = JSON.parse(
+    readFileSync(new URL("../config/inference-provider-closures.json", import.meta.url), "utf8"),
+  );
+  assert.equal(
+    closures.inferenceRevision,
+    livePin,
+    "the live provider-closure ledger must be derived at the shipped inference pin",
+  );
+  const evidence = JSON.parse(
+    readFileSync(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url), "utf8"),
+  );
+  const matrix = JSON.parse(
+    readFileSync(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
+  const eligibleByRecord = new Map(
+    matrix.calibrationRuns.map(({ binding, record }) => [record.id, binding.eligible]),
+  );
+  const expectedCurrentRuns = evidence.records.filter((record) => {
+    if (!["complete", "runtime_complete"].includes(record.status)) return false;
+    if (["fixture", "candidate"].includes(record.evidenceScope)) return false;
+    if (!eligibleByRecord.get(record.id)) return false;
+    const provider = `${record.backend}:${record.target.provider}`;
+    return record.repositories.inference.closureDigest === closures.providers[provider]?.digest;
+  }).length;
   assert.equal(
     model.completedBaseline.matrixSummaryCurrentCalibrationRuns,
     expectedCurrentRuns,
-    "a record may authorize the live runtime only by having been measured at it, or through an " +
-      "explicit compatibility audit while that audited window is still the live pin",
+    "a record may authorize the live runtime only while its provider compile closure is unchanged",
   );
   assert.doesNotMatch(model.completedBaseline.note, /Zero calibration records|WHOLE POPULATION/);
   assert.match(model.completedBaseline.note, /50 Full complete and 15 base-only runtime-complete/);

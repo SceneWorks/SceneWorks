@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:76a10e9b63e7eb7e33114fa6645213c2282a03009324afb38eb59cd868a1a2dc",
-    "matrixRevision": "source-tree:f2eb5f44866af12cea2540152c47a8ba21b5787f18ad0492a1b640b4a06be4e3",
-    "inferenceRevision": "574f0d99f44740622cacb51735474a210c678a96",
+    "sceneWorksRevision": "source-tree:89ee96666c9302476f3536bdec7f1e367d49524701372d78c0085b1a53e24daf",
+    "matrixRevision": "source-tree:8b43a88ddb42b016695444c334231cd73c2e79eab8cb0be334fac19bce034bf6",
+    "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
     "sources": {
       "matrix": {
         "path": "docs/generated/memory-matrix.json",
-        "sha256": "4b3261c68b379fc664ca4d51d5b24adc974492de4ed71541b8e82c4b644dff53"
+        "sha256": "fdb1b58844456c8064a5b9c62924ab8ab24a0d9e24fb043ed9802978b16d4210"
       },
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "5def84598c3f11b0f4de9bdb3dcab0b8fe00e371a75fbf16251a46d01b56b935"
+        "sha256": "6afacfcbe66598d53f7c884ac5905710fa9fb9758a620a10952a2c219203420c"
       },
       "harness": {
         "path": "scripts/memory-calibration-harness.mjs",
@@ -19,7 +19,7 @@
       },
       "matrixGenerator": {
         "path": "scripts/generate-memory-matrix.mjs",
-        "sha256": "968eb512a8861c5812475b4424ed755a270f847a7f1fa5bd3cdb6a508c2df18f"
+        "sha256": "f31e021c05a4c03f4fbb82bdcae79c34db4bf423ef71bdeb21350e68fc3f468f"
       },
       "sourceRevision": {
         "path": "scripts/lib/source-revision.mjs",
@@ -78,27 +78,27 @@
         "label": "Structurally N/A — static architecture evidence is sufficient",
         "blockedBy": "nothing; the epic exempts these",
         "citation": "docs/generated/memory-matrix.json (cell.state) and the epic's conformance states",
-        "cells": 6,
+        "cells": 33,
         "mlx": 0,
-        "candle": 6
+        "candle": 33
       },
       {
         "id": "overlay-declined",
         "label": "Non-`none` overlay without a complete truthful overlay record",
         "blockedBy": "provider-adapter code",
         "citation": "docs/generated/memory-calibration-evidence.json (complete records whose exact overlay scenario passed, normalized from control:N to the matrix control axis)",
-        "cells": 5674,
+        "cells": 5665,
         "mlx": 2860,
-        "candle": 2814
+        "candle": 2805
       },
       {
         "id": "no-provider-adapter",
         "label": "No provider adapter covers this (entry, backend) at all",
         "blockedBy": "provider-adapter code",
         "citation": "config/memory-calibration-plan.json (the shipped plan's provider targets)",
-        "cells": 3080,
+        "cells": 3062,
         "mlx": 1640,
-        "candle": 1440
+        "candle": 1422
       },
       {
         "id": "adapter-gated",
@@ -126,18 +126,18 @@
           "overlay-declined"
         ],
         "description": "no-provider-adapter + overlay-declined",
-        "cells": 5000,
+        "cells": 4991,
         "mlx": 2710,
-        "candle": 2290
+        "candle": 2281
       },
       {
         "blockers": [
           "no-provider-adapter"
         ],
         "description": "no-provider-adapter",
-        "cells": 3080,
+        "cells": 3062,
         "mlx": 1640,
-        "candle": 1440
+        "candle": 1422
       },
       {
         "blockers": [
@@ -177,31 +177,31 @@
       {
         "blockers": [],
         "description": "(exempt — no run needed)",
-        "cells": 6,
+        "cells": 33,
         "mlx": 0,
-        "candle": 6
+        "candle": 33
       }
     ],
     "independentBlocking": [
       {
         "id": "no-provider-adapter",
-        "cellsTouched": 8080,
-        "soleBlockerCells": 3080,
-        "coBlockedCells": 5000,
-        "coBlockedShare": 0.6188,
+        "cellsTouched": 8053,
+        "soleBlockerCells": 3062,
+        "coBlockedCells": 4991,
+        "coBlockedShare": 0.6198,
         "coBlockedWith": {
-          "overlay-declined": 5000
+          "overlay-declined": 4991
         }
       },
       {
         "id": "overlay-declined",
-        "cellsTouched": 5674,
+        "cellsTouched": 5665,
         "soleBlockerCells": 380,
-        "coBlockedCells": 5294,
-        "coBlockedShare": 0.933,
+        "coBlockedCells": 5285,
+        "coBlockedShare": 0.9329,
         "coBlockedWith": {
           "adapter-gated": 294,
-          "no-provider-adapter": 5000
+          "no-provider-adapter": 4991
         }
       },
       {
@@ -218,15 +218,15 @@
     "gateOrderSensitivity": {
       "shippedOrder": {
         "adapter-gated": 150,
-        "no-provider-adapter": 3080,
-        "no-run-needed": 6,
-        "overlay-declined": 5674,
+        "no-provider-adapter": 3062,
+        "no-run-needed": 33,
+        "overlay-declined": 5665,
         "producible-today": 230
       },
       "adapterCoverageFirst": {
         "adapter-gated": 150,
-        "no-provider-adapter": 8080,
-        "no-run-needed": 6,
+        "no-provider-adapter": 8053,
+        "no-run-needed": 33,
         "overlay-declined": 674,
         "producible-today": 230
       },
@@ -239,14 +239,14 @@
         "overlay-declined",
         "adapter-gated"
       ],
-      "overlayChargedByFirstMatch": 5674,
-      "overlayAlsoBlockedByAdapterCoverage": 5294,
+      "overlayChargedByFirstMatch": 5665,
+      "overlayAlsoBlockedByAdapterCoverage": 5285,
       "overlayIndependentlyBlocking": 380,
       "overlayBindingAfterAdapterCoverage": 674,
-      "finding": "`overlay-declined` is charged 5674 cells by the first-match partition, but it is the SOLE blocker on 380 of them. 5000 of them (88.1%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 294 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 674 while `no-provider-adapter` rises to 8080. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 3080 cells and it touches 8080. Closing the remaining overlay-support gaps is still necessary, but on its own it moves 674 cells, not 5674."
+      "finding": "`overlay-declined` is charged 5665 cells by the first-match partition, but it is the SOLE blocker on 380 of them. 4991 of them (88.1%) are also blocked by having NO PROVIDER ADAPTER AT ALL, and the remaining 294 by an adapter that has never emitted a `complete` record. Charge adapter coverage first and the overlay bucket falls to 674 while `no-provider-adapter` rises to 8053. PROVIDER-ADAPTER COVERAGE, not overlay support, is the largest independent blocker: it is the only thing wrong with 3062 cells and it touches 8053. Closing the remaining overlay-support gaps is still necessary, but on its own it moves 674 cells, not 5665."
     },
-    "behindProviderCode": 8904,
-    "behindProviderCodeShare": 0.9742,
+    "behindProviderCode": 8877,
+    "behindProviderCodeShare": 0.9712,
     "producibleToday": 230,
     "headline": "230 of 9140 cells could be certified by a run started right now."
   },
@@ -391,20 +391,20 @@
   "cells": {
     "total": 9140,
     "byState": {
-      "Implemented/unverified": 3240,
-      "Missing": 5894,
-      "Structurally N/A": 6
+      "Implemented/unverified": 3294,
+      "Missing": 5813,
+      "Structurally N/A": 33
     },
     "byBackend": {
       "candle": 4520,
       "mlx": 4620
     },
     "byStateAndBackend": {
-      "Implemented/unverified @ candle": 1201,
+      "Implemented/unverified @ candle": 1255,
       "Implemented/unverified @ mlx": 2039,
-      "Missing @ candle": 3313,
+      "Missing @ candle": 3232,
       "Missing @ mlx": 2581,
-      "Structurally N/A @ candle": 6
+      "Structurally N/A @ candle": 33
     },
     "byRung": {
       "bounded_attention": 1828,
@@ -538,7 +538,7 @@
       {
         "axis": "rung",
         "verdict": "fresh per rung on both measured backends",
-        "factor": "0 records in 0 explicit group(s) save 0 loads; combined 9134 -> 9134 (1x)",
+        "factor": "0 records in 0 explicit group(s) save 0 loads; combined 9107 -> 9107 (1x)",
         "rule": "A record names ONE rung (`strategy.rung` is a single enum and is part of the record identity), and the matrix binds a record to exactly one cell on the (modelId, provider, backend, tier, mode, overlay, rung) key, so records remain one-per-rung. The harness and Candle adapter can execute Krea's five-rung group as one `run_batch` provider invocation with `modelLoads: 1`, but the authoritative fresh/reused comparison exceeded the committed tolerance, so the shipped plan keeps Candle fresh-per-rung. MLX also stays fresh: its Z-Image ladder spans distinct eager and deferred calibration fingerprints, so one loaded generator cannot preserve every rung's calibrated identity. No target is priced as batched.",
         "citation": "scripts/memory-calibration-harness.mjs#runProviderPlan (canonical `run_batch`, one-load attestation, and within-invocation sweep retirement); crates/sceneworks-memory-adapter/src/bin/candle.rs#run_five_rung_batch; crates/sceneworks-memory-adapter/src/bin/mlx.rs#assess_z_image_batch; .github/workflows/windows-candle.yml (fresh/reused evidence gate) and macos-mlx.yml (fresh capture plus provider-contract inability gate)",
         "caveat": "The committed equivalence gate is the larger of 256 MiB absolute drift and 5% of the fresh metric, applied to every phase and allocator/device/wired/reclaimable metric. Candle's measured verdict and MLX's structural verdict are both `unable_to_amortize`. MLX's inability is structural, not an inferred timing result: the eager and deferred fingerprints differ before a reused process can truthfully execute all five identities, so the backend retains fresh-per-rung cost."
@@ -2265,7 +2265,7 @@
   },
   "runs": {
     "exemptions": {
-      "alreadyStructurallyNotApplicable": 6,
+      "alreadyStructurallyNotApplicable": 33,
       "projectedAdditional": 0,
       "projectedAdditionalByRung": {
         "resident": 0,
@@ -2276,9 +2276,9 @@
       }
     },
     "certifyingRecords": {
-      "total": 9134,
+      "total": 9107,
       "mlx": 4620,
-      "candle": 4514
+      "candle": 4487
     },
     "warmSessions": {
       "total": 1828,
@@ -2287,8 +2287,8 @@
     },
     "shippedModelLoads": {
       "mlx": 4620,
-      "candle": 4514,
-      "total": 9134
+      "candle": 4487,
+      "total": 9107
     },
     "shippedBatchCoverage": {
       "sessionKeys": [],
@@ -2307,7 +2307,7 @@
       },
       "collapseFactor": 2.66
     },
-    "recordsPerWarmSession": 4.997,
+    "recordsPerWarmSession": 4.982,
     "rungCollapseFactor": 5
   },
   "naSensitivity": {
@@ -2324,14 +2324,14 @@
         "kind": "fact",
         "note": "What the generated matrix classifies today.",
         "certifyingRecords": {
-          "total": 9134,
+          "total": 9107,
           "mlx": 4620,
-          "candle": 4514
+          "candle": 4487
         },
         "shippedModelLoads": {
           "mlx": 4620,
-          "candle": 4514,
-          "total": 9134
+          "candle": 4487,
+          "total": 9107
         },
         "warmSessions": {
           "total": 1828,
@@ -2353,14 +2353,14 @@
         "kind": "projection",
         "note": "Half of all bounded_transformer_residency cells turn out structurally inapplicable. SC-15969 names the two breakers: heterogeneous blocks (the floor is the largest single block, so the saving collapses) and skip connections (encoder activations must persist).",
         "certifyingRecords": {
-          "total": 8223,
+          "total": 8196,
           "mlx": 4158,
-          "candle": 4065
+          "candle": 4038
         },
         "shippedModelLoads": {
           "mlx": 4158,
-          "candle": 4065,
-          "total": 8223
+          "candle": 4038,
+          "total": 8196
         },
         "warmSessions": {
           "total": 1828,
@@ -2382,14 +2382,14 @@
         "kind": "projection",
         "note": "Upper bound on the rung-4 axis alone: every rung-4 cell is exempt. This is the most optimistic single-rung outcome and it still leaves four rungs to measure.",
         "certifyingRecords": {
-          "total": 7312,
+          "total": 7285,
           "mlx": 3696,
-          "candle": 3616
+          "candle": 3589
         },
         "shippedModelLoads": {
           "mlx": 3696,
-          "candle": 3616,
-          "total": 7312
+          "candle": 3589,
+          "total": 7285
         },
         "warmSessions": {
           "total": 1828,
@@ -2411,14 +2411,14 @@
         "kind": "projection",
         "note": "Half of bounded_decode, bounded_attention and bounded_transformer_residency exempt — i.e. a large fraction of the catalog turns out to have a non-tileable decoder AND non-chunkable attention. Aggressive; included to show the shape of the curve, not because anything supports it.",
         "certifyingRecords": {
-          "total": 6395,
-          "mlx": 3234,
-          "candle": 3161
+          "total": 6381,
+          "mlx": 3243,
+          "candle": 3138
         },
         "shippedModelLoads": {
-          "mlx": 3234,
-          "candle": 3161,
-          "total": 6395
+          "mlx": 3243,
+          "candle": 3138,
+          "total": 6381
         },
         "warmSessions": {
           "total": 1828,
@@ -2426,14 +2426,14 @@
           "candle": 904
         },
         "exemptedByBackend": {
-          "mlx": 1386,
-          "candle": 1353
+          "mlx": 1377,
+          "candle": 1349
         },
         "exemptedByBackendIfProportional": {
           "mlx": 1386,
-          "candle": 1353
+          "candle": 1340
         },
-        "backendSplitIsSelectionArtifact": false
+        "backendSplitIsSelectionArtifact": true
       },
       {
         "name": "everything-but-baseline",
@@ -2456,11 +2456,11 @@
         },
         "exemptedByBackend": {
           "mlx": 3696,
-          "candle": 3610
+          "candle": 3583
         },
         "exemptedByBackendIfProportional": {
           "mlx": 3696,
-          "candle": 3610
+          "candle": 3583
         },
         "backendSplitIsSelectionArtifact": false
       }
@@ -2493,14 +2493,14 @@
       {
         "perRunSeconds": 30,
         "recordHours": {
-          "total": 76.1,
+          "total": 75.9,
           "mlx": 38.5,
-          "candle": 37.6
+          "candle": 37.4
         },
         "shippedModelLoadHours": {
-          "total": 76.1,
+          "total": 75.9,
           "mlx": 38.5,
-          "candle": 37.6
+          "candle": 37.4
         },
         "warmSessionHours": {
           "total": 15.2,
@@ -2511,14 +2511,14 @@
       {
         "perRunSeconds": 60,
         "recordHours": {
-          "total": 152.2,
+          "total": 151.8,
           "mlx": 77,
-          "candle": 75.2
+          "candle": 74.8
         },
         "shippedModelLoadHours": {
-          "total": 152.2,
+          "total": 151.8,
           "mlx": 77,
-          "candle": 75.2
+          "candle": 74.8
         },
         "warmSessionHours": {
           "total": 30.5,
@@ -2529,14 +2529,14 @@
       {
         "perRunSeconds": 120,
         "recordHours": {
-          "total": 304.5,
+          "total": 303.6,
           "mlx": 154,
-          "candle": 150.5
+          "candle": 149.6
         },
         "shippedModelLoadHours": {
-          "total": 304.5,
+          "total": 303.6,
           "mlx": 154,
-          "candle": 150.5
+          "candle": 149.6
         },
         "warmSessionHours": {
           "total": 60.9,
@@ -2547,14 +2547,14 @@
       {
         "perRunSeconds": 300,
         "recordHours": {
-          "total": 761.2,
+          "total": 758.9,
           "mlx": 385,
-          "candle": 376.2
+          "candle": 373.9
         },
         "shippedModelLoadHours": {
-          "total": 761.2,
+          "total": 758.9,
           "mlx": 385,
-          "candle": 376.2
+          "candle": 373.9
         },
         "warmSessionHours": {
           "total": 152.3,
@@ -2565,14 +2565,14 @@
       {
         "perRunSeconds": 600,
         "recordHours": {
-          "total": 1522.3,
+          "total": 1517.8,
           "mlx": 770,
-          "candle": 752.3
+          "candle": 747.8
         },
         "shippedModelLoadHours": {
-          "total": 1522.3,
+          "total": 1517.8,
           "mlx": 770,
-          "candle": 752.3
+          "candle": 747.8
         },
         "warmSessionHours": {
           "total": 304.7,
@@ -2583,14 +2583,14 @@
       {
         "perRunSeconds": 1200,
         "recordHours": {
-          "total": 3044.7,
+          "total": 3035.7,
           "mlx": 1540,
-          "candle": 1504.7
+          "candle": 1495.7
         },
         "shippedModelLoadHours": {
-          "total": 3044.7,
+          "total": 3035.7,
           "mlx": 1540,
-          "candle": 1504.7
+          "candle": 1495.7
         },
         "warmSessionHours": {
           "total": 609.3,
@@ -2663,7 +2663,7 @@
       {
         "name": "exhaustive-per-cell",
         "sessions": 1828,
-        "providerInvocations": 9134,
+        "providerInvocations": 9107,
         "policy": "One measurement per cell at one geometry. Since SC-16060 this is the honest price of the IMPLEMENTATION claim alone — it takes every cell to `state: Verified` and leaves `memoryCharacterization` at `point`, which the artifact now says out loud instead of reading as envelope-wide certification."
       },
       {
@@ -2927,11 +2927,11 @@
     {
       "gate": "no-provider-adapter",
       "input": "how much provider-adapter work the CATALOG COVERAGE gap needs",
-      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 3080 cells and it touches 8080 — 5294 of them jointly with the overlay gap. Only 9 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 8080 cells.",
+      "why": "This is the largest INDEPENDENT blocker in the matrix: it is the only thing wrong with 3062 cells and it touches 8053 — 5285 of them jointly with the overlay gap. Only 9 of 53 catalog entries have a provider adapter at all, so most of the matrix cannot be measured by any code that exists, for any overlay. Charge this gate before overlay and it accounts for 8053 cells.",
       "howToResolve": "Scope provider-adapter coverage across the catalog — this is the work that actually moves the population, and it is a prerequisite for the overlay work rather than a parallel track. Land it against SC-15508's harness contract. Nothing else on this list can be started independently of it.",
       "story": 15508,
-      "independentlyBlockingCells": 3080,
-      "cellsTouched": 8080
+      "independentlyBlockingCells": 3062,
+      "cellsTouched": 8053
     },
     {
       "input": "perRunSeconds",
@@ -2941,11 +2941,11 @@
     {
       "gate": "overlay-declined",
       "input": "how much provider-adapter work the OVERLAY axis needs",
-      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 5674 cells (62.1% of the 9140-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 380 of them: 5294 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support where it remains absent therefore moves 674 cells, not 5674. It remains necessary work — those 5674 cells cannot be certified without it — but it is not where the schedule is decided.",
+      "why": "DEMOTED, and this is the correction that matters most in this document. The first-match partition charges this gate 5665 cells (62% of the 9140-cell matrix), which previously made it the #1 uncertainty. But it is the SOLE blocker on 380 of them: 5285 are also blocked by having no adapter or no `complete` record at all. Scoping overlay support where it remains absent therefore moves 674 cells, not 5665. It remains necessary work — those 5665 cells cannot be certified without it — but it is not where the schedule is decided.",
       "howToResolve": "Still SC-16072, but sequenced AFTER catalog adapter coverage rather than ahead of it. Note that the load-side saving SC-16072 was expected to unlock is not available in the shipped load contract at all (see the `overlay` axis above), so this work should be scoped for RECORD correctness, not for a model-load reduction. Control coverage is now declared by CONTROL_LANE_MODELS and is not part of this remediation.",
       "story": 16072,
       "independentlyBlockingCells": 380,
-      "cellsTouched": 5674
+      "cellsTouched": 5665
     },
     {
       "gate": "adapter-gated",

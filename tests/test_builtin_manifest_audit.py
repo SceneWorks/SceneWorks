@@ -238,6 +238,45 @@ def _assert_mage_tier_layout(model, model_id, repo, revision):
     assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
 
 
+def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
+    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract."""
+    assert model["candle"] == {
+        "minMemoryGb": 17,
+        "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
+        "vramMeasuredPixels": 1024 * 1024,
+        "measured": False,
+        "supportsSequentialOffload": True,
+        "memoryStrategyCapabilities": {
+            "bounded_attention": {
+                "parameters": {"attentionChunkSize": 67_108_864},
+                "overlays": ["none"],
+            },
+            "bounded_transformer_residency": {
+                "parameters": {
+                    "transformerWindowSize": 1,
+                    "transformerWindowComponent": "Dit",
+                },
+                "overlays": ["none"],
+            },
+        },
+        "memoryStrategyStructuralExemptions": {
+            "bounded_decode": {
+                "overlays": ["none", "lora"],
+                "evidence": [
+                    {
+                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+                        "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization.",
+                    },
+                    {
+                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
+                        "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field.",
+                    },
+                ],
+            },
+        },
+    }, model_id
+
+
 def test_mage_flow_generation_family_is_pinned_and_complete():
     """sc-14047 + sc-14980: the generation variants ship physical per-tier artifacts."""
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
@@ -250,12 +289,7 @@ def test_mage_flow_generation_family_is_pinned_and_complete():
         model = models[model_id]
         assert model["family"] == "mage-flow"
         assert model["macOnly"] is False
-        assert model["candle"] == {
-            "minMemoryGb": 17,
-            "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
-            "vramMeasuredPixels": 1024 * 1024,
-            "measured": False,
-        }
+        _assert_mage_candle_ladder(model, model_id)
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
         _assert_mage_tier_layout(model, model_id, repo, revision)
@@ -275,12 +309,7 @@ def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
         assert model["adapter"] == "mlx_mage"
         assert model["capabilities"] == ["edit_image"]
         assert model["macOnly"] is False
-        assert model["candle"] == {
-            "minMemoryGb": 17,
-            "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
-            "vramMeasuredPixels": 1024 * 1024,
-            "measured": False,
-        }
+        _assert_mage_candle_ladder(model, model_id)
         assert model["defaults"]["steps"] == steps
         assert model["defaults"]["guidanceScale"] == guidance
         assert model["ui"]["sourceWithMultiReference"] is True

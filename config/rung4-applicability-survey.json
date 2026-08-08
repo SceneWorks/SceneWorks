@@ -77,8 +77,21 @@
         },
         "candle": {
           "structuralApplicability": "full",
-          "implementation": "none",
-          "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. The shared Candle block-window backend exists, but Mage exposes neither a memory-strategy contract nor a family loader that can drive it.",
+          "implementation": "shared-primitive",
+          "implementedEntries": [
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo"
+          ],
+          "implementedOverlays": ["none"],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "Same uniform 12-block dual-stream trunk as the MLX twin. Mage now drives that trunk through the shared Candle block-window backend for every shipped Candle route without an overlay.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -88,12 +101,12 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-mage",
-              "reason": "The Candle port carries the same 12-block dual-stream trunk and declares no memory_strategy_contract, so it exposes no rung-4 capability."
+              "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
+              "reason": "The Candle Mage provider publishes a Dit-scoped bounded-transformer-residency contract with a one-block window."
             },
             {
-              "source": "inference:crates/media/candle-gen/candle-gen/src/block_window.rs",
-              "reason": "Candle implements the shared BlockWindowBackend adapter, but the Mage provider has no streamed-block loader wired to candle_gen::block_window::run_windowed, so this family cannot drive it."
+              "source": "inference:crates/media/candle-gen/candle-gen-mage/src/transformer.rs",
+              "reason": "The streamed Mage transformer branch materializes and releases each block window through candle_gen::block_window::run_windowed."
             }
           ],
           "requestPeak": {

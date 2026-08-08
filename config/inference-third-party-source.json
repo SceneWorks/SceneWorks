@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "574f0d99f44740622cacb51735474a210c678a96",
-  "auditDigest": "d2c645c2e7ff5408f78dcfb74a51d95b1da6efc7a979f413ebfb2a68b9c6924f",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 40fa7583 carries the reviewed Mage memory-ladder delivery, parity-safe complete-head attention chunking, and a test-only real-snapshot availability assertion on current inference main. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against the prior 574f0d99 audit, all candidate paths and source-area classifications and the entire crate-prefix population remain unchanged; 113 candidate blob ids changed, and only the normalized provenance marker in the already-classified mlx-gen-krea-realtime causal source changed. The 574f0d99..40fa7583 delta changes no NOTICE, LICENSE, or production include_str!/include_bytes! site.",
+  "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
+  "auditDigest": "960e01eebffb620a034bd32328617617332e12c169fc325f99092b9dc0976dfb",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "574f0d99f44740622cacb51735474a210c678a96",
+    "revision": "40fa7583a01974617e2a7275052d6d446688c956",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 624,
-    "populationSha256": "8fcf539166245a08058a53d353be0bb1a8cfa6ccf5b646ca9404e9eac68a7108"
+    "populationSha256": "02272aacb8186316e21864081ea0a4063c3e949c91badefd0f0ab9387d9b89f5"
   },
   "portedSourceAreas": [
     {
@@ -738,8 +738,9 @@
     {
       "source": "crates/media/candle-gen/candle-gen-seedvr2/src/pipeline.rs:60",
       "included": "data/neg_embed.safetensors",
-      "disposition": "model-data-no-separate-notice",
-      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+      "disposition": "model-asset",
+      "component": "seedvr2",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; it is part of the SeedVR2 model assembly, which sc-17632 declared as the installable `seedvr2_upscaler` catalog entry whose upstream terms are displayed."
     },
     {
       "source": "crates/media/candle-gen/candle-gen/src/quant/cublaslt.rs:185",
@@ -803,8 +804,9 @@
     {
       "source": "crates/media/mlx-gen/mlx-gen-seedvr2/src/pipeline.rs:75",
       "included": "data/neg_embed.safetensors",
-      "disposition": "model-data-no-separate-notice",
-      "evidence": "Fixed negative-conditioning numeric tensor, not source code; SeedVR2 is compiled into the catalog but is not exposed as a SceneWorks model."
+      "disposition": "model-asset",
+      "component": "seedvr2",
+      "evidence": "Fixed negative-conditioning numeric tensor, not source code; it is part of the SeedVR2 model assembly, which sc-17632 declared as the installable `seedvr2_upscaler` catalog entry whose upstream terms are displayed."
     },
     {
       "source": "crates/media/candle-gen/vendor/candle-kernels/src/ptx.rs:1-11",
@@ -816,7 +818,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "574f0d99f44740622cacb51735474a210c678a96",
+    "revision": "40fa7583a01974617e2a7275052d6d446688c956",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"
