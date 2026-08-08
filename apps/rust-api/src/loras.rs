@@ -42,7 +42,18 @@ pub(crate) async fn create_lora_download_job(
     if lora.get("installState").and_then(Value::as_str) == Some("installed")
         && lora.get("updateAvailable").and_then(Value::as_bool) != Some(true)
     {
-        return Err(ApiError::bad_request("LoRA is already installed"));
+        // `installState` is probed live from the HF cache on every catalog read, but a
+        // client's rendered badge is a snapshot from its last fetch. Anything that fills
+        // the cache out-of-band — the on-demand pull at first generation, another client,
+        // a manual `hf download` — flips the server to "installed" while an open catalog
+        // view still reads "Not Installed". Tag the rejection so the client can tell this
+        // benign disagreement apart from a real failure and resync instead of surfacing a
+        // message that contradicts the badge it is showing.
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: "LoRA is already installed".to_owned(),
+            code: Some("lora_already_installed"),
+        });
     }
     let source = lora.get("source").and_then(Value::as_object);
     let provider = source
