@@ -963,52 +963,71 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_control_closure_falls_back_instead_of_reporting_a_fit() {
-        // sc-17774. Before this, the control lane's currency check compared
-        // `KREA_CONTROL_INFERENCE_REVISION` (as `expected_inference_revision`) against evidence this
-        // module had stamped with THE SAME CONSTANT — so the shared staleness check compared a
-        // constant to itself and could never fire. The manifest's `measured`/`supersededBy` booleans
-        // were not the primary gate; they were the only one. The ladder had been measured at
-        // `1899a722` with the pin hundreds of commits past it, and nothing noticed.
-        //
-        // Both sides are now read rather than frozen: `expected` is the live digest for
-        // `candle:krea_2_turbo_control` from the packaged closure table, and the candidate carries
-        // `candle.control.inferenceClosureDigest` from the manifest. This test drives them apart.
-        //
-        // The correct outcome is BestEffort, NOT a reject: a stale row is an unverified upper bound,
-        // and refusing on it would assert a non-fit nobody measured. Staging as far as the measured
-        // rungs allow and letting the reactive OOM backstop decide is the contract the lane already
-        // applies when the Sequential row is absent.
-        let budget = Some(budget(20.0));
-        let fresh = super::fit_ladder(
-            "q4",
-            Some(10.0),
-            Some(10.0),
-            budget,
-            Some(5.0),
-            Some(2.0),
-            true,
-            &live_test_closure_digest(),
-        );
+    fn a_stale_control_closure_stays_eligible_at_the_widened_margin() {
+        // sc-17774 gave this lane a real currency comparison (before it, the check compared
+        // `KREA_CONTROL_INFERENCE_REVISION` against evidence this module had stamped with THE SAME
+        // CONSTANT and could never fire); the outcome it pinned was a BestEffort fallback.
+        // sc-18095 (epic 18093) turns that currency into a signal: a control ladder whose provider
+        // closure moved keeps serving its measured rows, graded at the candle stale-measured
+        // margin (`crate::ladder_margin_policy::CANDLE_STALE_MEASURED_MARGIN`, 2%), instead of
+        // being demoted. Both digest sides are still read rather than frozen: `expected` is the
+        // live digest for `candle:krea_2_turbo_control` from the packaged closure table, and the
+        // candidate carries `candle.control.inferenceClosureDigest` from the manifest. This test
+        // drives them apart.
+        const STALE_DIGEST: &str =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+        let fit = |free_gb: f64, digest: &str| {
+            super::fit_ladder(
+                "q4",
+                Some(10.0),
+                Some(10.0),
+                Some(budget(free_gb)),
+                Some(5.0),
+                Some(2.0),
+                true,
+                digest,
+            )
+        };
+
+        // Roomy budget: the stale ladder's widened resident peak (8.0 GiB evidence x 1.02) still
+        // fits 18 GiB effective, so the stale outcome is byte-identical to the fresh one.
+        let fresh = fit(20.0, &live_test_closure_digest());
         assert!(
             matches!(fresh, KreaControlFit::Fits { .. }),
-            "control point: an unmoved closure must still report a fit, or the assertion below \
-             proves nothing about staleness: {fresh:?}"
+            "control point: an unmoved closure must report a fit, or the assertions below prove \
+             nothing about staleness: {fresh:?}"
+        );
+        let stale = fit(20.0, STALE_DIGEST);
+        assert_eq!(
+            stale, fresh,
+            "a stale closure is a signal, not a gate (sc-18095): the roomy-budget fit must survive"
         );
 
-        let stale = super::fit_ladder(
-            "q4",
-            Some(10.0),
-            Some(10.0),
-            budget,
-            Some(5.0),
-            Some(2.0),
-            true,
-            "0000000000000000000000000000000000000000000000000000000000000000",
+        // The widening still discriminates: 10.1 GiB free (8.1 GiB effective) admits the RAW
+        // resident/staged evidence peak (8.0 GiB) but not the widened one (~8.16 GiB), so the
+        // fresh ladder stays resident while the stale ladder walks down to the measured
+        // bounded-decode row (3.0 GiB evidence, widened ~3.06 GiB). A zeroed stale margin would
+        // collapse the two outcomes — the mutation check for this lane.
+        let fresh_tight = fit(10.1, &live_test_closure_digest());
+        assert_eq!(
+            fresh_tight,
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Resident,
+                tile_vae_decode: false,
+                chunk_attention: false,
+            },
+            "current evidence at the raw peak must keep the resident fit"
         );
-        assert!(
-            matches!(stale, KreaControlFit::BestEffort { .. }),
-            "a control ladder whose provider closure moved must not report a fit: {stale:?}"
+        let stale_tight = fit(10.1, STALE_DIGEST);
+        assert_eq!(
+            stale_tight,
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: true,
+                chunk_attention: false,
+            },
+            "the stale ladder must be graded at the WIDENED peaks: resident/staged no longer fit, \
+             the measured bounded-decode row does"
         );
     }
 

@@ -1240,57 +1240,71 @@ mod tests {
         .expect("uncertified FLUX.2-dev control query")
         .is_empty());
 
-        // At 40 GiB free, the staged allocator high-water plus the selector's 2 GiB reserve
-        // would fit, but its 44.3 GB conservative device peak does not. Admission must advance
-        // to bounded decode, whose 34.7 GB device peak does fit.
-        let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("flux2-dev-q4-fixture")))
-            .with_quant(Quant::Q4);
-        spec.load_shape = gen_core::LoadShape::DeferredMaterialization;
-        let evaluation = evaluate_shared_image(
-            "flux2_dev",
-            "flux2_dev",
-            &spec,
-            true,
-            manifest,
-            "q4",
-            "text_to_image",
-            None,
-            geometry,
-            false,
-            false,
-            false,
-            Some(VramBudget {
-                free_gb: 40.0,
-                total_gb: 96.0,
-            }),
-            Some(44.0),
-            0,
-            MemoryCacheState::Cold,
-        )
-        .expect("FLUX.2-dev safe-device-peak evaluation");
-
-        // sc-17774: everything above is closure-independent — the packaged evidence is RETAINED
-        // whatever the pin is, which is why `verified_candidates` still returns all five rungs.
+        // sc-17774: everything below is closure-aware — the packaged evidence is RETAINED whatever
+        // the pin is (which is why `verified_candidates` still returns all five rungs), and
         // ADMISSION is the step that carries the currency term.
         //
         // `flux2_dev`'s packaged bindings were captured at `5ffd7612`, and its compile closure HAS
-        // moved since. That is not a defect in this branch and not a fixture problem: sc-17760
-        // reached the identical verdict by an independent method (a linked-artifact digest on the
-        // RTX box, ARTIFACTS DIFFER), and `main`'s own generated matrix already shows those five q4
-        // cells at `Implemented/unverified`. The demotion stands until sc-15922 re-captures.
+        // moved since (sc-17760 reached the identical verdict by an independent method: a
+        // linked-artifact digest on the RTX box, ARTIFACTS DIFFER). So every packaged candidate
+        // reaching the selector here is STALE-closure evidence. Pre-sc-18095 that staled the whole
+        // ladder into refusal (`evaluation.is_none()` was asserted here). sc-18095 turns currency
+        // into a signal: fully-verified measured cells keep serving, graded at the candle
+        // stale-measured margin (`ladder_margin_policy::CANDLE_STALE_MEASURED_MARGIN`, 2%).
         //
-        // So the honest assertion is that admission REFUSES, and the reason is the closure. An
-        // earlier revision of this branch asserted a fit here on the belief that the binding and the
-        // packaged closure table agreed — they do not, and the belief was never checked.
-        //
-        // This replaces a block that skipped the rest of the test whenever the pin had moved past
-        // the audited window, which meant the one lane with a hand-audited hatch was also the one
-        // whose selector test went dark after every bump. Refusal is asserted rather than skipped.
-        assert!(
-            evaluation.is_none(),
-            "flux2_dev's closure moved since 5ffd7612, so its packaged evidence must not admit an \
-             optimized strategy at the live pin"
+        // At 40 GiB free (38 GiB effective after the selector's 2 GiB reserve), the resident live
+        // estimate (44.0 GB) and the staged candidate's widened peak (44.3 GB x 1.02 ≈ 42.1 GiB)
+        // do not fit; bounded decode's widened peak (34.7 GB x 1.02 ≈ 33.0 GiB) does. Admission
+        // must advance to bounded decode via the stale-admission path instead of refusing.
+        let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("flux2-dev-q4-fixture")))
+            .with_quant(Quant::Q4);
+        spec.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        let evaluate = |free_gb: f64| {
+            evaluate_shared_image(
+                "flux2_dev",
+                "flux2_dev",
+                &spec,
+                true,
+                manifest,
+                "q4",
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                }),
+                Some(44.0),
+                0,
+                MemoryCacheState::Cold,
+            )
+            .expect("FLUX.2-dev safe-device-peak evaluation")
+        };
+        let evaluation = evaluate(40.0).expect(
+            "flux2_dev's stale-closure packaged evidence must stay eligible at the widened candle \
+             margin (sc-18095), not refuse the ladder",
         );
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedDecode
+        );
+        assert_eq!(evaluation.context.predicted_peak_bytes, 34_700_000_000);
+
+        // The stale margin still discriminates on this lane: at 34.5 GiB free (32.5 GiB effective)
+        // bounded decode's RAW peak (34.7 GB ≈ 32.3 GiB) would fit, but its widened peak (≈ 33.0
+        // GiB) does not — the selector must advance to bounded attention. A zeroed stale margin
+        // would select bounded decode here.
+        let widened = evaluate(34.5).expect(
+            "bounded attention's widened peak fits the 32.5 GiB effective budget (sc-18095)",
+        );
+        assert_eq!(
+            widened.context.selection.strategy,
+            MemoryStrategy::BoundedAttention
+        );
+        assert_eq!(widened.context.predicted_peak_bytes, 25_200_000_000);
     }
 
     #[test]
