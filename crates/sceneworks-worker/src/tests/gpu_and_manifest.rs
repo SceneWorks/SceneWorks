@@ -1366,6 +1366,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         }
     );
     // A 32 GB card misses the 35.5 GB resident admission peak but clears the measured 31.6 GB staged
@@ -1385,6 +1386,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         },
         "a 32 GB card only stages against the current 35.5/31.6 GB peaks"
     );
@@ -1404,6 +1406,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         }
     );
     // A card at the staged+tiled peak engages Sequential then VAE tiling — both speed-only.
@@ -1422,6 +1425,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: false,
+            estimate_scoped: false,
         }
     );
     // Just below the tiled peak: the deepest rung (chunking) engages, still with zero quality cost.
@@ -1440,6 +1444,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: true,
+            estimate_scoped: false,
         }
     );
     // Below the chunked peak there is nothing left to trade. Current measured evidence makes this a
@@ -1487,6 +1492,7 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: true,
+            estimate_scoped: false,
         }
     );
 
@@ -1583,6 +1589,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         },
         "uncapped 96 GB card engages nothing"
     );
@@ -1602,6 +1609,7 @@ async fn krea_control_live_ladder_on_a_real_card() {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: false,
+            estimate_scoped: false,
         },
         "cap at the tiled peak → VAE tiling, no quality cost"
     );

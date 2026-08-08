@@ -39,12 +39,16 @@
 //! fail-safe for malformed catalog entries and future tiers, so it keys on the missing row rather than a
 //! particular tier name.
 //!
-//! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ no candidate exists for that rung. The
-//! shared selector will use an earlier measured fit, but it will not turn an incomplete provider ladder
-//! into a hard reject: if nothing measured fits, the outcome is [`KreaControlFit::BestEffort`]. A reject
-//! requires current evidence through the provider's deepest implemented rung. This is also the floor
-//! while `candle.control.measured` is `false`, because a stale upper bound can refuse a job that would
-//! run (see [`fit_ladder`]).
+//! `decodeTileSaveGb` / `chunkAttnSaveGb` absent (unmeasured) ⇒ no MEASURED candidate exists for that
+//! rung. Since sc-18097 (epic 18093 R1b) a current-evidence ladder inside the measured 1024² envelope
+//! fills those gaps with estimate-FLOOR candidates (the staged row unreduced — never a promised
+//! unmeasured saving), graded by the shared selector behind the candle estimate margin — so an
+//! incomplete provider ladder yields an explicit estimate-graded verdict that can honestly REJECT
+//! when even the widened floors overflow the budget. [`KreaControlFit::BestEffort`] (admit and let the
+//! recoverable CUDA-OOM backstop decide) remains the outcome only where the floors deliberately do
+//! not apply: superseded evidence (`candle.control.measured` `false` — a stale upper bound can refuse
+//! a job that would run, see [`fit_ladder`]), an unverified runtime artifact, adapter overlays, or a
+//! request above the measured envelope.
 //!
 //! ## The branch tier is NOT a rung (sc-15799)
 //!
@@ -88,6 +92,10 @@ const HEADROOM_GB: f64 = crate::vram_gate::HEADROOM_GB;
 
 const KREA_CONTROL_ROUTE: &str = "krea_2_turbo_control";
 const KREA_CONTROL_CALIBRATION: &str = "sc-16013-krea-control-direct-1024-v1";
+/// Evidence-revision stamp for the synthesized estimate-floor candidates (sc-18097): request-scoped
+/// telemetry must be attributable to the estimate synthesis, never to the sc-16013 measured rows it
+/// floors on.
+const KREA_CONTROL_ESTIMATE_REVISION: &str = "sc-18097-krea-control-estimate-floor-v1";
 const KREA_CONTROL_ATTN_CHUNK_SIZE: u32 = 128 * 1024 * 1024;
 const KREA_CONTROL_DECODE_TILE_EDGE: u32 = 512;
 const KREA_CONTROL_DECODE_OVERLAP: u32 = 128;
@@ -118,6 +126,13 @@ pub(crate) enum KreaControlFit {
         /// Engage sc-6217-style query-row attention chunking (sc-11745) to bound the denoise activation
         /// peak. The worker threads this into `Krea2ControlPaths::chunk_attention` (a load-time toggle).
         chunk_attention: bool,
+        /// The admission was carried by a synthesized estimate-floor candidate (sc-18097) rather
+        /// than the measured 1024² cell — the request geometry is off the measured cell, or the
+        /// selected rung has no measured row. [`incurred_peak_gb`] records NOTHING for such an
+        /// admit: its true peak was not measured at this geometry, and crediting the 1024² row to
+        /// the reclaimable pool would over-count it (the same never-over-count rule `BestEffort`
+        /// already follows).
+        estimate_scoped: bool,
     },
     /// Won't fit even at the deepest rung, and the prediction rests on CURRENT evidence
     /// ([`control_evidence_is_current`]). Reject-before-OOM with an actionable message rather than a
@@ -547,7 +562,119 @@ fn fit_ladder_for_tier(
         .zip(&measured)
         .map(|(selection, (_, measured_peak_gb))| make_evidence(*selection, *measured_peak_gb))
         .collect::<Vec<_>>();
-    let candidates = selections
+    // ── sc-18097 (epic 18093 R1b): estimate-floor candidates for every implemented rung. ──
+    //
+    // The control lane's mirror of the estimate ladder: manifest-row floors, never a promised
+    // unmeasured saving. The resident floor is the measured `peakGbByTier` row (with adapters
+    // already folded into `peak`); the staged floor is the measured `sequentialPeakGbByTier` row
+    // where present, else the resident floor; every deeper rung takes the staged floor UNREDUCED —
+    // selectable without promising an unmeasured saving. Where a rung's savings ARE measured, its
+    // measured candidate exists in `measured` above and supersedes the floor in the selector, so
+    // the priced 1024² ladder is byte-for-byte unchanged.
+    //
+    // Floors are synthesized only when every conjunct holds:
+    //  * `evidence_is_current` — dimension-level staleness (`measured: false` / `supersededBy`)
+    //    means the rows were ALREADY known non-current when recorded; they still exclude and may
+    //    not seed floors either (the `BestEffort` never-reject contract stays for them).
+    //  * `runtime_verified` and no adapters — the rows price the shipped no-adapter artifact.
+    //  * the loaded contract's calibration identity matches the sc-16013 rows (the sc-18096
+    //    drifted-provider gate).
+    //  * the request geometry is inside the measured 1024² envelope. The rows are whole-render
+    //    peaks read VERBATIM: at or below the measured area every phase is at most its measured
+    //    value, so the constant extrapolation is an upper bound and no binding-phase flip can
+    //    exceed it — which is why these are `EstimateFloor` candidates outside
+    //    `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`'s fitted-curve scope (no per-phase
+    //    decomposition exists to re-check). ABOVE the measured area a verbatim row under-predicts,
+    //    so no floor is emitted and the pre-18097 best-effort contract stands there.
+    //
+    // The candle estimate margin is applied by the shared selector, not here.
+    let request_pixels = u64::from(request_geometry.width) * u64::from(request_geometry.height);
+    let measured_pixels = u64::from(measured_geometry.width) * u64::from(measured_geometry.height);
+    let contract_identity_matches = contract
+        .calibration
+        .as_ref()
+        .is_some_and(|identity| identity.fingerprint == KREA_CONTROL_CALIBRATION);
+    let resident_floor_gb = (peak - HEADROOM_GB).max(0.0);
+    let staged_floor_gb = sequential_peak_gb
+        .map(|gb| (gb - HEADROOM_GB).max(0.0))
+        .unwrap_or(resident_floor_gb);
+    let mut estimates: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
+    if evidence_is_current
+        && runtime_verified
+        && adapter_gb == 0.0
+        && contract_identity_matches
+        && request_pixels <= measured_pixels
+    {
+        for strategy in MemoryStrategy::ALL {
+            if !matches!(
+                contract.capability(strategy).map(|cap| &cap.support),
+                Some(gen_core::MemoryStrategySupport::Implemented)
+            ) {
+                continue;
+            }
+            let selection = MemorySelection {
+                strategy,
+                parameters: control_parameters(contract, strategy),
+                tier: numeric_tier,
+            };
+            if contract.validate_selection(&selection).is_err() {
+                continue;
+            }
+            let floor_gb = if strategy == MemoryStrategy::Resident {
+                resident_floor_gb
+            } else {
+                staged_floor_gb
+            };
+            let predicted_peak_bytes = bytes(floor_gb);
+            tracing::info!(
+                route = KREA_CONTROL_ROUTE,
+                backend = "candle",
+                ?strategy,
+                raw_peak_bytes = predicted_peak_bytes,
+                "synthesized manifest-row floor estimate candidate"
+            );
+            estimates.push((
+                selection,
+                MemoryEvidence {
+                    key: MemoryEvidenceKey {
+                        resolved_route: KREA_CONTROL_ROUTE.to_owned(),
+                        backend: gen_core::MemoryBackend::Candle,
+                        tier: numeric_tier,
+                        load_shape: contract.load_shape,
+                        mode: crate::memory_strategy::memory_mode_from_mode_key("pose_control"),
+                        overlay: Some(overlay.clone()),
+                        geometry: request_geometry,
+                        strategy,
+                        engaged_composition: contract.engaged_composition(strategy),
+                        parameters: selection.parameters,
+                    },
+                    conformance: MemoryConformanceState::ImplementedUnverified,
+                    dimensions: MemoryEvidenceDimensions {
+                        static_implementation: MemoryEvidenceVerdict::Satisfied,
+                        declared_calibration: MemoryEvidenceVerdict::Missing,
+                        historical_verification: MemoryEvidenceVerdict::Missing,
+                        current_environment_verification: MemoryEvidenceVerdict::Missing,
+                        canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+                        exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+                    },
+                    calibration_abi: contract
+                        .calibration
+                        .as_ref()
+                        .expect("control calibration")
+                        .abi,
+                    calibration_fingerprint: KREA_CONTROL_CALIBRATION.to_owned(),
+                    sceneworks_revision: KREA_CONTROL_ESTIMATE_REVISION.to_owned(),
+                    inference_revision: measured_closure_digest.to_owned(),
+                    harness_version: String::new(),
+                    predicted_peak_bytes,
+                    observed_peak_bytes: None,
+                    parity: MemoryParityContract::Exact,
+                    parity_result: MemoryParityResult::NotRun,
+                },
+            ));
+        }
+    }
+    let mut candidates = selections
         .iter()
         .zip(&evidence)
         .map(|(selection, evidence)| Candidate {
@@ -557,6 +684,13 @@ fn fit_ladder_for_tier(
             basis: crate::memory_strategy::CandidateBasis::Measured,
         })
         .collect::<Vec<_>>();
+    // A floor is a declaration under the LIVE closure — nothing there for currency to invalidate.
+    candidates.extend(estimates.iter().map(|(selection, evidence)| Candidate {
+        selection: *selection,
+        evidence,
+        closure_digest: &live_closure_digest,
+        basis: crate::memory_strategy::CandidateBasis::EstimateFloor,
+    }));
     match crate::memory_strategy::select_strategy(
         request,
         contract,
@@ -579,6 +713,13 @@ fn fit_ladder_for_tier(
             },
             tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
             chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
+            // sc-18097: a selection is estimate-scoped when it cannot be the measured 1024² cell —
+            // the request geometry is off the measured cell (every measured candidate was
+            // structurally excluded there), or the selected rung has no measured row at all.
+            estimate_scoped: request_geometry != measured_geometry
+                || !measured
+                    .iter()
+                    .any(|(strategy, _)| *strategy == selection.strategy),
         },
         Selection::Reject {
             needed_gb,
@@ -589,11 +730,16 @@ fn fit_ladder_for_tier(
             needed_gb: needed_gb + HEADROOM_GB,
             available_gb: available_gb + HEADROOM_GB,
         },
-        Selection::Unverified { .. } if sequential_peak_gb.is_none() => KreaControlFit::Fits {
-            offload_policy: OffloadPolicy::Sequential,
-            tile_vae_decode: false,
-            chunk_attention: false,
-        },
+        // sc-18097 retired the `sequential_peak_gb.is_none()` ⇒ `Fits` arm that used to sit here —
+        // the fail-open that silently ADMITTED sequential staging for a cell with no staged
+        // measurement. With current evidence inside the measured envelope, every implemented rung
+        // now carries an estimate-floor candidate, so that cell reaches `Selected`/`Reject` above
+        // with an explicit estimate-graded verdict that CAN refuse when the floor plus the candle
+        // estimate margin exceeds the budget. The `Unverified` arm below therefore remains only
+        // for the cases the floors deliberately do not cover (superseded evidence, unverified
+        // runtime, adapters, geometry above the measured envelope), where the pre-18097
+        // best-effort never-reject contract still stands — now uniformly as `BestEffort`, never a
+        // silent `Fits`.
         Selection::Unverified { .. } => {
             let (strategy, measured_peak_gb) = measured
                 .iter()
@@ -821,6 +967,7 @@ pub(crate) fn incurred_peak_gb_with_adapter_bytes(
         offload_policy,
         tile_vae_decode,
         chunk_attention,
+        estimate_scoped,
     } = fit
     else {
         // Unknown / TooBig — no admitted load. BestEffort — admitted, but above the budget the ladder
@@ -828,6 +975,13 @@ pub(crate) fn incurred_peak_gb_with_adapter_bytes(
         // no priced row at all, so there is no number to credit (sc-16069).
         return None;
     };
+    if *estimate_scoped {
+        // sc-18097: an estimate-floor admit's true peak was not measured at this geometry. The
+        // 1024² rows read below OVER-state a smaller render's pool, and an over-stated pool lets a
+        // later gate over-admit — the same never-over-count rule that makes `BestEffort` record
+        // nothing.
+        return None;
+    }
     // The base peak the ladder admitted at: the resident whole-model peak, or the staged working set.
     let mut peak = if *offload_policy == OffloadPolicy::Resident {
         predicted_control_peak_gb(manifest_entry, tier_key)?
@@ -1016,6 +1170,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Resident,
                 tile_vae_decode: false,
                 chunk_attention: false,
+                estimate_scoped: false,
             },
             "current evidence at the raw peak must keep the resident fit"
         );
@@ -1026,6 +1181,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: false,
+                estimate_scoped: false,
             },
             "the stale ladder must be graded at the WIDENED peaks: resident/staged no longer fit, \
              the measured bounded-decode row does"
@@ -1038,6 +1194,7 @@ mod tests {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         }
     }
 
@@ -1299,6 +1456,7 @@ mod tests {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         };
         assert_eq!(incurred_peak_gb(&resident, &krea_manifest(), "q4"), None);
         // With current evidence the row IS the load, so the credit is recordable again.
@@ -1334,7 +1492,7 @@ mod tests {
     // ── The ladder: staged residency → decode tiling → attention chunking, then reject. ─────────────
 
     #[test]
-    fn sequential_is_the_first_rung_and_missing_deeper_evidence_is_best_effort() {
+    fn sequential_is_the_first_rung_and_missing_deeper_evidence_is_estimate_graded() {
         let resident = Some(40.0);
         let sequential = Some(30.0);
 
@@ -1353,8 +1511,15 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: false,
+                estimate_scoped: false,
             }
         );
+        // sc-18097 repin. Pre-18097 this was `BestEffort { needed_gb: 30.0, available_gb: 29.0 }`:
+        // the unmeasured deeper rungs left the ladder "incomplete", which the selector refused to
+        // harden into a reject. The estimate floors complete it — bounded decode/attention carry
+        // the staged row UNREDUCED (28.0 evidence GiB, widened by the 4% candle estimate margin to
+        // 29.12) — so nothing fits the 27 GiB effective budget and the honest outcome is the
+        // reject, quoting the same measured staged requirement the old best-effort admit reported.
         assert_eq!(
             super::fit_ladder(
                 "q4",
@@ -1366,33 +1531,53 @@ mod tests {
                 true,
                 &live_test_closure_digest(),
             ),
-            KreaControlFit::BestEffort {
-                offload_policy: OffloadPolicy::Sequential,
-                tile_vae_decode: false,
-                chunk_attention: false,
+            KreaControlFit::TooBig {
                 needed_gb: 30.0,
                 available_gb: 29.0,
             }
         );
     }
 
+    /// sc-18097: the `Unverified && sequential_peak_gb.is_none() ⇒ Fits` fail-open is GONE. A cell
+    /// with no staged measurement used to silently ADMIT sequential staging; it now gets an
+    /// explicit estimate-graded verdict. With no `sequentialPeakGbByTier` row the staged floor is
+    /// the RESIDENT row unreduced (no unmeasured saving is ever promised), so on a card the
+    /// resident peak overflows, the whole widened floor ladder overflows too and the fit REFUSES —
+    /// the exact capability the old arm could not express.
     #[test]
-    fn missing_sequential_measurement_keeps_best_effort_staging() {
-        assert_eq!(
+    fn missing_sequential_measurement_no_longer_falls_open_to_a_silent_fit() {
+        let fit = |free_gb: f64| {
             super::fit_ladder(
                 "q4",
                 Some(40.0),
                 None,
-                Some(budget(20.0)),
+                Some(budget(free_gb)),
                 Some(5.0),
                 Some(2.0),
                 true,
                 &live_test_closure_digest(),
-            ),
+            )
+        };
+        // 20 GiB free (18 effective): the resident evidence peak is 38 GiB and every deeper floor
+        // equals it (no staged row), so the widened ladder (38 × 1.04 = 39.52) refuses. Before
+        // sc-18097 this returned `Fits { Sequential, .. }` with no evidence at all.
+        assert_eq!(
+            fit(20.0),
+            KreaControlFit::TooBig {
+                needed_gb: 40.0,
+                available_gb: 20.0,
+            },
+            "an unmeasured staged cell must be estimate-graded, not silently admitted"
+        );
+        // The same cell on a card the resident row fits is still admitted — the refusal above is
+        // the margin's work, not a blanket reject of unmeasured staging.
+        assert_eq!(
+            fit(41.0),
             KreaControlFit::Fits {
-                offload_policy: OffloadPolicy::Sequential,
+                offload_policy: OffloadPolicy::Resident,
                 tile_vae_decode: false,
                 chunk_attention: false,
+                estimate_scoped: false,
             }
         );
     }
@@ -1431,6 +1616,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: false,
+                estimate_scoped: false,
             },
             "the stale bf16-branch bound (32.9) still forces staging + tiling on a 26 GB card"
         );
@@ -1450,6 +1636,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: false,
+                estimate_scoped: false,
             }
         );
     }
@@ -1471,6 +1658,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: true,
                 chunk_attention: true,
+                estimate_scoped: false,
             }
         );
         // 23 GB card: nothing deeper exists ⇒ reject-before-OOM at the honest best-case peak. (The
@@ -1507,6 +1695,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: true,
+                estimate_scoped: false,
             }
         );
     }
@@ -1517,12 +1706,15 @@ mod tests {
         let staged = Some(40.0);
         let budget = Some(budget(36.0));
 
+        // sc-18097 repin: previously `BestEffort { needed_gb: 40.0 }`. The missing decode row
+        // still removes the full MEASURED attention candidate — its estimate floor carries the
+        // staged row UNREDUCED (38 evidence GiB, widened 39.52), so a mutation that let the
+        // chunk saving through without the decode row would admit 33 ≤ 34 effective and flip this
+        // to `Fits { chunk_attention: true }`. With the floors complete, the honest outcome for a
+        // ladder where nothing fits with margins is the reject.
         assert_eq!(
             super::fit_ladder("q4", resident, staged, budget, None, Some(5.0), true, &live_test_closure_digest()),
-            KreaControlFit::BestEffort {
-                offload_policy: OffloadPolicy::Sequential,
-                tile_vae_decode: false,
-                chunk_attention: false,
+            KreaControlFit::TooBig {
                 needed_gb: 40.0,
                 available_gb: 36.0,
             },
@@ -1543,6 +1735,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: true,
+                estimate_scoped: false,
             },
             "dense attention is independently measured and excludes the default decode edge"
         );
@@ -1563,22 +1756,24 @@ mod tests {
         );
     }
 
+    /// sc-18097 repin. The provider implements tiling and chunking; this synthetic cell measures
+    /// neither. Pre-18097 the selector refused to "hard-reject from an incomplete ladder" and
+    /// admitted best-effort. The estimate floors complete the ladder — every unmeasured rung
+    /// carries the staged row UNREDUCED (30.9 evidence GiB, widened by the 4% candle estimate
+    /// margin to 32.14) — so on an 18 GiB effective budget nothing fits with margins and the
+    /// honest outcome is now the reject, quoting the same measured peak. This is a refusal from
+    /// graded floors, not from absence: the widened floors are what the reject compares, and a
+    /// budget that clears them still admits (second arm).
     #[test]
-    fn unmeasured_provider_rungs_cannot_harden_into_a_reject() {
+    fn unmeasured_rungs_carry_estimate_floors_and_refuse_only_below_the_widened_margin() {
         let m = krea_manifest();
         let peak = predicted_control_peak_gb(&m, "q4");
-        // The provider implements tiling and chunking, but this synthetic cell measures neither. The
-        // shared selector must not infer that no deeper fit exists and hard-reject from an incomplete
-        // ladder; it stages best-effort and reports the raw measured peak (32.9 GiB).
+        assert_too_big(fit_ladder(peak, Some(budget(20.0)), None, None), 32.9, 20.0);
+        // Control arm: the same unmeasured ladder on a card the resident row fits still admits at
+        // the fast path — the floors grade, they do not blanket-refuse.
         assert_eq!(
-            fit_ladder(peak, Some(budget(20.0)), None, None),
-            KreaControlFit::BestEffort {
-                offload_policy: OffloadPolicy::Sequential,
-                tile_vae_decode: false,
-                chunk_attention: false,
-                needed_gb: 32.9,
-                available_gb: 20.0,
-            }
+            fit_ladder(peak, Some(budget(35.0)), None, None),
+            fits_nothing_engaged()
         );
     }
 
@@ -1599,6 +1794,7 @@ mod tests {
             offload_policy: OffloadPolicy::Resident,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         };
         assert_eq!(
             incurred_peak_gb(&resident, &m, tier),
@@ -1610,6 +1806,7 @@ mod tests {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: true,
             chunk_attention: true,
+            estimate_scoped: false,
         };
         let expected = predicted_control_sequential_peak_gb(&m, tier).unwrap()
             - decode_tile_save_gb(&m, tier).unwrap()
@@ -1641,6 +1838,7 @@ mod tests {
             offload_policy: OffloadPolicy::Sequential,
             tile_vae_decode: false,
             chunk_attention: false,
+            estimate_scoped: false,
         };
         assert_eq!(incurred_peak_gb(&staged, &no_seq, "q4"), None);
 
@@ -1809,6 +2007,104 @@ mod tests {
         }
     }
 
+    /// sc-18097: a request geometry off the measured 1024² cell — which excludes every measured
+    /// candidate structurally and used to collapse into the never-reject `BestEffort` — is now
+    /// estimate-graded inside the measured envelope: the manifest-row floors admit (or refuse)
+    /// behind the candle estimate margin, the admit is flagged `estimate_scoped`, and
+    /// [`incurred_peak_gb_with_adapter_bytes`] records NOTHING for it (the 1024² rows over-state a
+    /// smaller render's pool). Above the envelope the rows are lower bounds, so the pre-18097
+    /// best-effort contract still stands.
+    ///
+    /// Fixture rows (measured + chunking manifest, q4): resident evidence 30.9 GiB, staged 25.0 —
+    /// floors take the staged row UNREDUCED for every deeper rung; widened ×1.04: resident
+    /// 32.136, staged 26.0.
+    #[test]
+    fn an_unmeasured_geometry_is_estimate_graded_with_recoverable_oom_margins() {
+        let m = current_evidence(krea_manifest_with_chunking());
+        let tier = "q4";
+        let contract = registered_contract_for_tier(tier);
+        let geometry_768 = MemoryGeometry {
+            width: 768,
+            height: 768,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let fit = |free_gb: f64| {
+            fit_ladder_for_entry_with_runtime(
+                &m,
+                tier,
+                Some(budget(free_gb)),
+                0,
+                geometry_768,
+                contract.as_ref(),
+                true,
+            )
+        };
+
+        // Roomy card: the resident floor fits — the fast path, estimate-scoped, with NO
+        // reclaimable-peak credit (recording the 1024² row for a 768² render would over-count).
+        let roomy = fit(96.0);
+        assert_eq!(
+            roomy,
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Resident,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                estimate_scoped: true,
+            }
+        );
+        assert_eq!(
+            incurred_peak_gb_with_adapter_bytes(&roomy, &m, tier, 0),
+            None,
+            "an estimate-scoped admit must never credit the reclaimable pool"
+        );
+
+        // Constrained card: the staged floor's widened peak (26.0) fits a 28 GiB effective budget
+        // where the resident floor (32.136) does not.
+        assert_eq!(
+            fit(30.0),
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                estimate_scoped: true,
+            }
+        );
+
+        // Margin mutation arm: at 27.5 GiB free (25.5 effective) the RAW staged floor (25.0) fits
+        // but the widened one (26.0) does not — a zeroed estimate margin admits here and flips
+        // this red. The reported requirement carries the widening (26.0 + 2 headroom;
+        // float-tolerant, the widening rounds up in integer bytes).
+        assert_too_big(fit(27.5), 28.0, 27.5);
+
+        // The pre-18097 outcome for this cell was BestEffort at ANY budget — the starved card now
+        // gets the honest refusal instead of an admit that could only OOM.
+        assert!(matches!(fit(10.0), KreaControlFit::TooBig { .. }));
+
+        // ABOVE the measured envelope the rows under-predict, so no floors are emitted and the
+        // never-reject best-effort contract stands unchanged.
+        let beyond = fit_ladder_for_entry_with_runtime(
+            &m,
+            tier,
+            Some(budget(10.0)),
+            0,
+            MemoryGeometry {
+                width: 1536,
+                height: 1536,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            contract.as_ref(),
+            true,
+        );
+        assert!(
+            matches!(beyond, KreaControlFit::BestEffort { .. }),
+            "beyond the measured envelope the best-effort contract must survive: {beyond:?}"
+        );
+    }
+
     /// sc-13960: on a warm worker, crediting the cudarc pool the previous control render left behind
     /// FLIPS the ladder off its needless rungs — the repeated-control-render scenario the story names.
     /// Pins the arithmetic the two-pass evict-reclaim gate performs (`fit_ladder(raw)` vs
@@ -1844,6 +2140,7 @@ mod tests {
                 offload_policy: OffloadPolicy::Sequential,
                 tile_vae_decode: false,
                 chunk_attention: false,
+                estimate_scoped: false,
             }
         );
         // Crediting the 48.2 GB the first render left in-pool readmits it at the big-card fast path.
