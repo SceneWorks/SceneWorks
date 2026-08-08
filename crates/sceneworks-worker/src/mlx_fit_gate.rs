@@ -645,17 +645,34 @@ struct VerifiedGeometryAlternative {
 }
 
 /// One verified measured cell usable as the extrapolation basis for a fitted-curve estimate
-/// (sc-18096): same provider, tier, mode, and overlay as the request, artifact-current binding,
-/// but a DIFFERENT geometry — the cell the request itself could not be admitted on.
+/// (sc-18096): same provider, tier, mode, and overlay as the request, artifact-current AND
+/// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
+/// admitted on.
 ///
-/// Everything the extrapolation and the binding-phase constraint need is captured here, so the
-/// synthesis step never re-reads the bundle.
+/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` (0.10)
+/// was derived to cover extrapolation error on top of same-closure re-capture variance
+/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already
+/// carries its own 0.05 drift allowance on the MEASURED path; stacking that drift under an
+/// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
+/// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
+/// an extrapolated estimate.
+///
+/// Everything the extrapolation, the binding-phase constraint, and the loaded-provider identity
+/// gate need is captured here, so the synthesis step never re-reads the bundle.
 #[derive(Clone, Debug)]
 struct MeasuredRungBasis {
     rung: StrategyRung,
     parameters: gen_core::MemoryStrategyParameters,
     engaged_composition: Vec<MemoryStrategy>,
     load_shape: gen_core::LoadShape,
+    /// The calibration identity the basis binding was measured under. `synthesize_estimate_ladder`
+    /// requires it to equal the LOADED contract's identity: a provider whose estimator drifted
+    /// from the packaged records must not receive fitted candidates built from them (sc-18096
+    /// review). This gate cannot be left to the `carries_verified_claim` demotion, which only
+    /// fires when the route carries a verified claim (`Evidence` path or a named lower
+    /// alternative) — bases ride on legacy routes where neither may hold.
+    calibration_abi: u32,
+    calibration_fingerprint: String,
     geometry: CalibrationGeometry,
     /// Per-phase predicted peaks from the measured record, in canonical phase order
     /// (conditioning, denoise, decode). The binding phase is their argmax.
@@ -1154,6 +1171,7 @@ fn evidence_admission_route(
                 mode_key,
                 overlay,
                 request_cell_geometry,
+                expected_closure_digest,
             ),
             evidence_revision: None,
             process_limit_bytes: None,
@@ -1262,6 +1280,7 @@ fn evidence_admission_route(
                 mode_key,
                 overlay,
                 request_cell_geometry,
+                expected_closure_digest,
             ),
             evidence_revision: None,
             process_limit_bytes: None,
@@ -1289,9 +1308,11 @@ fn evidence_admission_route(
 }
 
 /// Collect the verified measured cells a fitted-curve estimate may extrapolate from (sc-18096):
-/// artifact-current bindings of this provider and tier whose mode and overlay match the request but
-/// whose GEOMETRY does not, resolved to their own verified records at their own geometry. The
-/// per-phase peaks ride along so the binding-phase constraint can be applied at synthesis time.
+/// artifact-current, closure-CURRENT bindings of this provider and tier whose mode and overlay
+/// match the request but whose GEOMETRY does not, resolved to their own verified records at their
+/// own geometry. The per-phase peaks ride along so the binding-phase constraint can be applied at
+/// synthesis time. See [`MeasuredRungBasis`] for why a stale-closure record is not a legitimate
+/// extrapolation basis even though it remains admissible for its own cell.
 fn collect_estimate_bases(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
@@ -1299,11 +1320,13 @@ fn collect_estimate_bases(
     mode_key: &str,
     overlay: &str,
     request_cell_geometry: CalibrationGeometry,
+    expected_closure_digest: &str,
 ) -> Vec<MeasuredRungBasis> {
     identity_matches
         .iter()
         .filter(|binding| {
-            binding.mode == mode_key
+            binding.query.inference_closure_digest == expected_closure_digest
+                && binding.mode == mode_key
                 && binding.overlay == overlay
                 && binding.geometry != request_cell_geometry
                 // A phase curve extrapolates over output AREA; a different batch or frame count is
@@ -1345,6 +1368,8 @@ fn collect_estimate_bases(
                     .map(evidence_strategy)
                     .collect(),
                 load_shape: crate::memory_strategy::load_shape_from_receipt(record.load_shape),
+                calibration_abi: binding.query.abi,
+                calibration_fingerprint: binding.query.fingerprint.clone(),
                 geometry: binding.geometry,
                 conditioning_peak_bytes: predicted.conditioning,
                 denoise_peak_bytes: predicted.denoise,
@@ -1581,12 +1606,21 @@ fn synthesize_estimate_ladder(
 
         // 1. Fitted-curve basis: the closest measured geometry below the request, else the
         //    smallest above it (whose clamp-at-1.0 scaling degenerates to the measurement itself).
+        //    The basis must have been measured under the LOADED provider's exact calibration
+        //    identity: a drifted estimator invalidates the measured numbers as an extrapolation
+        //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
+        //    demotion never fires without a verified claim on the route). A contract with no
+        //    calibration identity gets no fitted candidates at all — fail closed.
         let fitted = bases
             .iter()
             .filter(|basis| {
                 basis.rung == strategy_rung(strategy)
                     && basis.load_shape == contract.load_shape
                     && basis.engaged_composition == engaged
+                    && contract.calibration.as_ref().is_some_and(|identity| {
+                        identity.abi == basis.calibration_abi
+                            && identity.fingerprint == basis.calibration_fingerprint
+                    })
             })
             .max_by_key(|basis| {
                 let area = u64::from(basis.geometry.width) * u64::from(basis.geometry.height);
@@ -5702,10 +5736,17 @@ mod tests {
             "a packaged exact-cell refusal must retain its fitting lower record: {message}"
         );
 
-        // A loaded-provider fingerprint mutation demotes every evidence-derived claim — the named
-        // alternative AND the fitted-curve bases — leaving only the floors, none of which fit
-        // 60 GiB. The unmutated generator ADMITS at 60 (the fitted arm above), so the refusal here
-        // is exactly the mutation's doing.
+        // A loaded provider whose calibration identity DRIFTED from the packaged records must not
+        // receive fitted-curve candidates built from them (sc-18096 review, major finding). The
+        // mutated fingerprint is deliberately WELL-FORMED (`-v1` satisfies the contract's version
+        // token conformance rule), so the refusal below is the work of the basis identity gate in
+        // `synthesize_estimate_ladder`, not an accidental contract-conformance `Invalid`. And it
+        // runs at 60 GiB, a budget where NO lower alternative is named (both packaged cells need
+        // their ~47 GiB captured foreign reserve), so `carries_verified_claim` is FALSE and the
+        // fingerprint demotion at the admission seam never fires — the synthesis-side gate is the
+        // only thing standing between the drifted provider and the fitted candidate. The
+        // unmutated generator ADMITS at 60 (the fitted arm above), so the refusal is exactly the
+        // mutation's doing.
         let mut mismatched_generator = packaged_krea_generator();
         {
             let contract = mismatched_generator
@@ -5714,16 +5755,40 @@ mod tests {
                 .expect("Krea contract");
             contract.asset_facts = generator.contract.as_ref().expect("facts").asset_facts;
             contract.calibration = Some(MemoryCalibrationIdentity::new(
-                "mutated-loaded-provider",
+                "mutated-loaded-provider-v1",
                 gen_core::LoadShape::EagerMaterialization,
             ));
         }
+        assert!(
+            mismatched_generator
+                .contract
+                .as_ref()
+                .expect("Krea contract")
+                .conformance_errors()
+                .is_empty(),
+            "the mutated fingerprint must be conformance-CLEAN so this arm exercises the basis \
+             identity gate, not format validation"
+        );
         let message = evaluate(&mismatched_generator, 60.0)
-            .expect_err("a fingerprint-mutated provider loses the measured basis and refuses")
+            .expect_err("a fingerprint-drifted provider loses the measured basis and refuses")
             .to_string();
+        assert!(
+            message.contains("needs") && message.contains("safely available"),
+            "the drifted provider's refusal is the floors-only Reject — the fitted candidate was \
+             suppressed by the basis identity gate: {message}"
+        );
         assert!(
             !message.contains("current verified alternative"),
             "a loaded-provider fingerprint mutation must suppress evidence-derived naming: {message}"
+        );
+        // The gate is precisely scoped to the MEASURED basis: the floors derive from the
+        // contract's own asset facts, not from any record, so the drifted provider still admits
+        // where a floor fits.
+        let floor_admitted = evaluate(&mismatched_generator, 128.0)
+            .expect("a drifted provider keeps its no-measured-basis floor estimates");
+        assert_eq!(
+            floor_admitted.context.selection.strategy,
+            MemoryStrategy::StagedResidency
         );
 
         // Dropping the rung's Implemented support removes both the fitted candidate and its floor:
@@ -5750,10 +5815,13 @@ mod tests {
             "a loaded-provider composition mutation must suppress evidence-derived naming: {message}"
         );
 
-        // At the LIVE closure the verdict no longer forks (sc-18096): whether the pose-control
-        // pair is current or superseded, its verified records remain a legitimate fitted-curve
-        // basis — currency is a signal on measured admission, not a gate on estimates — so the
-        // 60 GiB request admits the same fitted rung either way.
+        // At the LIVE closure the verdict forks on the digest pair, derived rather than
+        // hardcoded: a fitted-curve estimate may extrapolate only from CLOSURE-CURRENT records
+        // (see `MeasuredRungBasis` — the 0.10 estimate margin was derived over same-closure
+        // re-capture variance and cannot also absorb closure drift). While the pose-control pair
+        // is current the 60 GiB request admits the fitted rung; once the closure moves, the
+        // records may keep serving their own measured cells behind the stale margin (sc-18095)
+        // but may NOT seed an extrapolation, so the request refuses on floors alone.
         let live = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
@@ -5766,12 +5834,28 @@ mod tests {
             &[],
             Some(&packaged_bundle()),
             Some(&fixture_closure_lookup),
-        )
-        .expect("the fitted estimate admits at the live closure current or superseded");
-        assert_eq!(
-            live.context.selection.strategy,
-            MemoryStrategy::BoundedDecode
         );
+        if shipped_mlx_declared_closure_digest("krea_2_turbo")
+            == live_mlx_closure_digest("krea_2_turbo_control")
+        {
+            let admitted =
+                live.expect("at a current closure the fitted estimate admits the 60 GiB request");
+            assert_eq!(
+                admitted.context.selection.strategy,
+                MemoryStrategy::BoundedDecode
+            );
+        } else {
+            let message = live
+                .expect_err(
+                    "a stale-closure record must not seed a fitted extrapolation; floors alone \
+                     cannot fit 60 GiB",
+                )
+                .to_string();
+            assert!(
+                message.contains("needs") && message.contains("safely available"),
+                "the stale-basis refusal is the floors-only Reject: {message}"
+            );
+        }
     }
 
     /// The fixture generator with the FULL ladder implemented, including rung 4 with its
@@ -5917,6 +6001,8 @@ mod tests {
             },
             engaged_composition: contract.engaged_composition(MemoryStrategy::BoundedDecode),
             load_shape: contract.load_shape,
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: "fixture-formula-v2".to_owned(),
             geometry: CalibrationGeometry {
                 width: 1024,
                 height: 1024,
@@ -7186,6 +7272,53 @@ mod tests {
         assert!(
             current.process_limit_bytes.is_some(),
             "the unmoved closure must still reach the exact verified cell"
+        );
+
+        // A stale record serves its OWN cell (the arms above) but may not SEED an extrapolation:
+        // at 768² — off the measured 1024² geometry — the moved-closure request gets no fitted
+        // basis and refuses on floors alone (staged/decode/attention floors widen to 9.9 GiB
+        // against 8 GiB), while the unmoved closure admits the fitted bounded-decode estimate
+        // (clamped scale 1.0, envelope 5 GiB widened to 5.5) at the same budget. A gate that let
+        // stale records seed extrapolations would admit BOTH and flip the first arm.
+        let off_geometry = fixture_inputs(768, 768);
+        let error = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &off_geometry,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&moved),
+        )
+        .expect_err("a stale-closure record must not seed a fitted extrapolation")
+        .to_string();
+        assert!(
+            error.contains("needs") && error.contains("safely available"),
+            "the stale-basis refusal is the floors-only Reject: {error}"
+        );
+        let fitted = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &off_geometry,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&fixture_closure_lookup),
+        )
+        .expect("the CURRENT-closure record is a legitimate fitted basis at the same budget");
+        assert_eq!(
+            fitted.context.selection.strategy,
+            MemoryStrategy::BoundedDecode,
+            "the fitted estimate from the current-closure cell must admit: {:?}",
+            fitted.context.selection
         );
     }
 
