@@ -2801,6 +2801,79 @@ mod tests {
         }
     }
 
+    /// sc-18097 review: refusal ADVICE stays measured-only. `krea_turbo_smaller_fit_with_runtime`
+    /// mirrors `mlx_fit_gate::verified_lower_alternative` and must not name a geometry whose own
+    /// admission rests on a fitted estimate — telling a user to drop to a resolution that was
+    /// itself only guessed invites a second refusal there.
+    ///
+    /// The shipped-data assertions elsewhere cannot pin this (the reviewer's finding): q8/bf16's
+    /// binding streamed floors are resolution-INDEPENDENT (`text` is `fixedGb` 5.01 / `perMpxGb`
+    /// 0), so no smaller geometry fits those budgets with or without the filter, and the fixture's
+    /// 2048²→1024² case resolves to a cell that HAS an exact record. This fixture arm is built to
+    /// discriminate:
+    ///
+    /// * 1024² carries an exact record, so its streamed rung is graded at the MEASURED 11.097 GiB
+    ///   — which does not fit a 10.9 GiB effective budget: the largest lower bucket rejects.
+    /// * 768² has no record, so its streamed rung is a fitted estimate at the curve peak 10.180
+    ///   GiB, widened to 10.587 — which DOES fit. Both facts are asserted directly below, so the
+    ///   discrimination is visible in this test rather than inferred: with the filter removed the
+    ///   helper necessarily returns `Some((768, 768))` from the very call it makes.
+    #[test]
+    fn krea_turbo_smaller_fit_never_names_an_estimate_backed_geometry() {
+        let manifest = krea_fit_manifest();
+        let budget = |free_gb: f64| {
+            Some(VramBudget {
+                free_gb,
+                total_gb: free_gb,
+            })
+        };
+
+        // The two facts that make the filter load-bearing at this budget.
+        assert!(
+            matches!(
+                krea_turbo_fit(&manifest, "q4", 1024, 1024, budget(12.9), true),
+                Some(KreaTurboFit::Reject { .. })
+            ),
+            "the largest lower bucket must reject at its MEASURED peak, or the helper would stop \
+             there and never reach the estimate-backed one"
+        );
+        match krea_turbo_fit(&manifest, "q4", 768, 768, budget(12.9), true) {
+            Some(KreaTurboFit::Fits {
+                estimate_scoped,
+                selection,
+                ..
+            }) => {
+                assert!(
+                    estimate_scoped,
+                    "768² has no exact record, so its admission must be estimate-scoped"
+                );
+                assert_eq!(
+                    selection.strategy,
+                    MemoryStrategy::BoundedTransformerResidency
+                );
+            }
+            other => panic!(
+                "768² must ADMIT by fitted estimate here — that is what the filter has to \
+                 suppress: {other:?}"
+            ),
+        }
+        // …so the advice must be silent rather than name 768².
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "q4", 1536, 1536, budget(12.9), true),
+            None,
+            "an estimate-backed geometry may not be offered as the lower-resolution escape hatch"
+        );
+
+        // Control: a MEASURED lower cell is still named, so the filter withholds estimates rather
+        // than silencing the advice outright. At 14 GiB free (12 effective) 1024²'s measured
+        // streamed rung (11.097) fits.
+        assert_eq!(
+            krea_turbo_smaller_fit(&manifest, "q4", 1536, 1536, budget(14.0), true),
+            Some((1024, 1024)),
+            "a measured lower cell must still be offered"
+        );
+    }
+
     /// sc-18094/sc-18097: `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` is honored at the
     /// candle synthesis seam. At 512² the fixture's threeStage curve moves the request peak onto
     /// DENOISE (14.524 against 12.573 decode) while its 1024² anchor record binds on DECODE
