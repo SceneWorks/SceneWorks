@@ -554,6 +554,7 @@ fn fit_ladder_for_tier(
             selection: *selection,
             evidence,
             closure_digest: measured_closure_digest,
+            basis: crate::memory_strategy::CandidateBasis::Measured,
         })
         .collect::<Vec<_>>();
     match crate::memory_strategy::select_strategy(

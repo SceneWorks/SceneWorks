@@ -210,18 +210,25 @@ impl MlxRequestPlan {
     /// fixed OS/app reserve separately, so even an anchor larger than the generic fallback (Lens
     /// dense) keeps its whole measured value in the area term.
     fn generic_total_peak_bytes(&self, geometry: MemoryGeometry) -> u64 {
+        self.asset_bytes
+            .saturating_add(self.generic_headroom_bytes(geometry))
+    }
+
+    /// The non-weights slice of [`Self::generic_total_peak_bytes`]: the fixed OS/app reserve plus
+    /// the area-scaled activation transient. Factored out (sc-18096) so the estimate-floor
+    /// candidates charge the exact same headroom convention as the resident baseline — same fixed
+    /// slice, same anchor, same area law — with only their weights term differing per rung.
+    fn generic_headroom_bytes(&self, geometry: MemoryGeometry) -> u64 {
         let megapixel_scale =
             (f64::from(geometry.width) * f64::from(geometry.height) / (1024.0 * 1024.0)).max(1.0);
         let request_scale = megapixel_scale * f64::from(geometry.batch.max(1));
         let fixed_reserve_bytes = self.fixed_reserve_bytes.min(self.activation_headroom_bytes);
         let area_bytes = self.activation_headroom_bytes - fixed_reserve_bytes;
-        self.asset_bytes
-            .saturating_add(fixed_reserve_bytes)
-            .saturating_add(
-                (area_bytes as f64 * request_scale)
-                    .round()
-                    .clamp(0.0, u64::MAX as f64) as u64,
-            )
+        fixed_reserve_bytes.saturating_add(
+            (area_bytes as f64 * request_scale)
+                .round()
+                .clamp(0.0, u64::MAX as f64) as u64,
+        )
     }
 
     /// Convert the legacy whole-spec estimate into the base-only scalar expected by the additive
@@ -637,11 +644,55 @@ struct VerifiedGeometryAlternative {
     engaged_composition: Vec<MemoryStrategy>,
 }
 
+/// One verified measured cell usable as the extrapolation basis for a fitted-curve estimate
+/// (sc-18096): same provider, tier, mode, and overlay as the request, artifact-current AND
+/// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
+/// admitted on.
+///
+/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` (0.10)
+/// was derived to cover extrapolation error on top of same-closure re-capture variance
+/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already
+/// carries its own 0.05 drift allowance on the MEASURED path; stacking that drift under an
+/// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
+/// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
+/// an extrapolated estimate.
+///
+/// Everything the extrapolation, the binding-phase constraint, and the loaded-provider identity
+/// gate need is captured here, so the synthesis step never re-reads the bundle.
+#[derive(Clone, Debug)]
+struct MeasuredRungBasis {
+    rung: StrategyRung,
+    parameters: gen_core::MemoryStrategyParameters,
+    engaged_composition: Vec<MemoryStrategy>,
+    load_shape: gen_core::LoadShape,
+    /// The calibration identity the basis binding was measured under. `synthesize_estimate_ladder`
+    /// requires it to equal the LOADED contract's identity: a provider whose estimator drifted
+    /// from the packaged records must not receive fitted candidates built from them (sc-18096
+    /// review). This gate cannot be left to the `carries_verified_claim` demotion, which only
+    /// fires when the route carries a verified claim (`Evidence` path or a named lower
+    /// alternative) — bases ride on legacy routes where neither may hold.
+    calibration_abi: u32,
+    calibration_fingerprint: String,
+    geometry: CalibrationGeometry,
+    /// Per-phase predicted peaks from the measured record, in canonical phase order
+    /// (conditioning, denoise, decode). The binding phase is their argmax.
+    conditioning_peak_bytes: u64,
+    denoise_peak_bytes: u64,
+    decode_peak_bytes: u64,
+    /// The measured admission envelope peak the extrapolated estimate scales.
+    envelope_peak_bytes: u64,
+    record_id: String,
+}
+
 #[derive(Clone, Debug)]
 struct AdmissionRoute {
     path: AdmissionPath,
     fallback_reason: Option<LegacyAdmissionReason>,
     evidence: Vec<VerifiedAdmissionCandidate>,
+    /// Measured cells available as fitted-curve estimate bases when the request itself is not
+    /// covered (sc-18096). Populated only on legacy fallbacks of a calibrated provider whose
+    /// artifact identity is current; empty on every covered (`Evidence`) route.
+    estimate_bases: Vec<MeasuredRungBasis>,
     evidence_revision: Option<String>,
     process_limit_bytes: Option<u64>,
     lower_alternative: Option<VerifiedGeometryAlternative>,
@@ -975,6 +1026,7 @@ fn packaged_admission_route(
                 path: AdmissionPath::Legacy,
                 fallback_reason: Some(LegacyAdmissionReason::StaleBundle),
                 evidence: Vec::new(),
+                estimate_bases: Vec::new(),
                 evidence_revision: None,
                 process_limit_bytes: None,
                 lower_alternative: None,
@@ -1014,6 +1066,7 @@ fn evidence_admission_route(
             path: AdmissionPath::Legacy,
             fallback_reason: Some(LegacyAdmissionReason::PackagedEmpty),
             evidence: Vec::new(),
+            estimate_bases: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
             lower_alternative: None,
@@ -1025,6 +1078,7 @@ fn evidence_admission_route(
                 path: AdmissionPath::Legacy,
                 fallback_reason: Some(LegacyAdmissionReason::NoBinding),
                 evidence: Vec::new(),
+                estimate_bases: Vec::new(),
                 evidence_revision: None,
                 process_limit_bytes: None,
                 lower_alternative: None,
@@ -1035,6 +1089,7 @@ fn evidence_admission_route(
                 path: AdmissionPath::Legacy,
                 fallback_reason: Some(LegacyAdmissionReason::NoProvenance),
                 evidence: Vec::new(),
+                estimate_bases: Vec::new(),
                 evidence_revision: None,
                 process_limit_bytes: None,
                 lower_alternative: None,
@@ -1043,25 +1098,28 @@ fn evidence_admission_route(
         MlxCalibrationConfig::Valid(calibration) => calibration,
         MlxCalibrationConfig::Invalid(_) => unreachable!("invalid opt-in rejected above"),
     };
-    // sc-17774: currency is the measured provider's own compile closure, NOT the inference pin. This
-    // conjunct read `binding.query.inference_revision == INFERENCE_RUNTIME_REVISION`, which is the
-    // repo-wide pin-keyed invalidation the epic removed everywhere else: it demoted every MLX
-    // binding on any inference commit, including one to a different model. `inference_revision`
-    // survives on the binding as capture provenance and is deliberately not compared.
+    // ARTIFACT identity only (sc-18096). Until this story the filter also required
+    // `binding.query.inference_closure_digest == expected_closure_digest` — the `StaleIdentity`
+    // pre-demotion that made the selector's stale-measured arm (sc-18095) production-unreachable
+    // on this lane: a stale binding was routed to `AdmissionPath::Legacy` before any candidate
+    // reached `select_strategy`. Currency is a signal, not a gate, so the closure conjunct is
+    // retired here: a stale binding proceeds, its candidate carries the digest it was MEASURED
+    // under (see `VerifiedAdmissionCandidate::closure_digest`), and the selector grades it behind
+    // the widened stale-measured margin. The pre-18096 fear — "a stale binding admitted here has
+    // no candidate left to fall back to and kills the request" — no longer holds: refusal now
+    // happens only when nothing fits with margins, which is the honest outcome for a stale ladder
+    // too.
     //
-    // The comparison stays HERE, at the admission seam, rather than being left to
-    // `memory_strategy::candidate_exclusion` downstream. Entering `AdmissionPath::Evidence` commits
-    // the request to its exact verified ladder with the resident baseline deliberately withheld, so
-    // a stale binding admitted here has no candidate left to fall back to and kills the request
-    // instead of demoting it. An expired calibration is epistemically the same as no calibration, so
-    // it must land on the legacy estimator — which is what the candle lane does, and what the shipped
-    // (historical) z_image_turbo opt-in relies on today.
+    // The ARTIFACT conjuncts stay: a binding for different bytes on disk (repository, revision,
+    // variant, or path fingerprint) is not a stale measurement of this install, it is a
+    // measurement of something else, and remains structurally excluded. `inference_revision`
+    // likewise survives on the binding as capture provenance and is deliberately not compared
+    // (sc-17774).
     let identity_matches = calibration
         .bindings
         .iter()
         .filter(|binding| {
-            binding.query.inference_closure_digest == expected_closure_digest
-                && binding.provider == plan.engine_id
+            binding.provider == plan.engine_id
                 && binding.tier == plan_tier_key(plan.tier)
                 && binding.query.artifact_repository == calibration.resolved.identity.repository
                 && binding.query.artifact_resolved_revision
@@ -1076,6 +1134,7 @@ fn evidence_admission_route(
             path: AdmissionPath::Legacy,
             fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
             evidence: Vec::new(),
+            estimate_bases: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
             lower_alternative: None,
@@ -1092,7 +1151,8 @@ fn evidence_admission_route(
     };
     let overlay = inputs.overlay.as_deref().unwrap_or("none");
     let matching = identity_matches
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|binding| {
             binding.mode == mode_key
                 && binding.overlay == overlay
@@ -1104,6 +1164,15 @@ fn evidence_admission_route(
             path: AdmissionPath::Legacy,
             fallback_reason: Some(LegacyAdmissionReason::OutOfEnvelope),
             evidence: Vec::new(),
+            estimate_bases: collect_estimate_bases(
+                bundle,
+                plan,
+                &identity_matches,
+                mode_key,
+                overlay,
+                request_cell_geometry,
+                expected_closure_digest,
+            ),
             evidence_revision: None,
             process_limit_bytes: None,
             lower_alternative: verified_lower_alternative(
@@ -1204,6 +1273,15 @@ fn evidence_admission_route(
             path: AdmissionPath::Legacy,
             fallback_reason: Some(fallback_reason),
             evidence,
+            estimate_bases: collect_estimate_bases(
+                bundle,
+                plan,
+                &identity_matches,
+                mode_key,
+                overlay,
+                request_cell_geometry,
+                expected_closure_digest,
+            ),
             evidence_revision: None,
             process_limit_bytes: None,
             lower_alternative: None,
@@ -1222,10 +1300,447 @@ fn evidence_admission_route(
         path: AdmissionPath::Evidence,
         fallback_reason: None,
         evidence,
+        estimate_bases: Vec::new(),
         evidence_revision: None,
         process_limit_bytes: None,
         lower_alternative,
     })
+}
+
+/// Collect the verified measured cells a fitted-curve estimate may extrapolate from (sc-18096):
+/// artifact-current, closure-CURRENT bindings of this provider and tier whose mode and overlay
+/// match the request but whose GEOMETRY does not, resolved to their own verified records at their
+/// own geometry. The per-phase peaks ride along so the binding-phase constraint can be applied at
+/// synthesis time. See [`MeasuredRungBasis`] for why a stale-closure record is not a legitimate
+/// extrapolation basis even though it remains admissible for its own cell.
+fn collect_estimate_bases(
+    bundle: &EvidenceBundle,
+    plan: &MlxRequestPlan,
+    identity_matches: &[&MlxCalibrationBinding],
+    mode_key: &str,
+    overlay: &str,
+    request_cell_geometry: CalibrationGeometry,
+    expected_closure_digest: &str,
+) -> Vec<MeasuredRungBasis> {
+    identity_matches
+        .iter()
+        .filter(|binding| {
+            binding.query.inference_closure_digest == expected_closure_digest
+                && binding.mode == mode_key
+                && binding.overlay == overlay
+                && binding.geometry != request_cell_geometry
+                // A phase curve extrapolates over output AREA; a different batch or frame count is
+                // a different workload shape, not a scalable geometry.
+                && binding.geometry.batch == request_cell_geometry.batch
+                && binding.geometry.frames == request_cell_geometry.frames
+        })
+        .filter_map(|binding| {
+            let query = EvidenceQuery {
+                backend: CalibrationBackend::Mlx,
+                model_id: plan.model_id.clone(),
+                provider: binding.provider.clone(),
+                tier: binding.tier.clone(),
+                mode: mode_key.to_owned(),
+                overlay: overlay.to_owned(),
+                geometry: binding.geometry,
+                rung: binding.rung,
+                parameters: binding.parameters.clone(),
+                calibration: binding.query.clone(),
+            };
+            let EvidenceVerdict::Verified(record) = bundle.evidence_for(&query) else {
+                return None;
+            };
+            let envelope = record.mlx_admission_envelope()?;
+            let predicted = match &record.predicted_peak_bytes {
+                sceneworks_core::memory_calibration::RequiredNullable::Value(value) => {
+                    value.full()?
+                }
+                _ => return None,
+            };
+            Some(MeasuredRungBasis {
+                rung: binding.rung,
+                parameters: binding.selection_parameters,
+                engaged_composition: record
+                    .strategy
+                    .engaged_rungs
+                    .iter()
+                    .copied()
+                    .map(evidence_strategy)
+                    .collect(),
+                load_shape: crate::memory_strategy::load_shape_from_receipt(record.load_shape),
+                calibration_abi: binding.query.abi,
+                calibration_fingerprint: binding.query.fingerprint.clone(),
+                geometry: binding.geometry,
+                conditioning_peak_bytes: predicted.conditioning,
+                denoise_peak_bytes: predicted.denoise,
+                decode_peak_bytes: predicted.decode,
+                envelope_peak_bytes: envelope.peak_bytes,
+                record_id: record.id.clone(),
+            })
+        })
+        .collect()
+}
+
+/// One estimate-backed candidate synthesized for an implemented-but-unmeasured rung (sc-18096).
+#[derive(Clone, Debug)]
+struct SynthesizedEstimate {
+    selection: MemorySelection,
+    evidence: MemoryEvidence,
+    basis: crate::memory_strategy::CandidateBasis,
+}
+
+const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
+    match strategy {
+        MemoryStrategy::Resident => StrategyRung::Resident,
+        MemoryStrategy::StagedResidency => StrategyRung::StagedResidency,
+        MemoryStrategy::BoundedDecode => StrategyRung::BoundedDecode,
+        MemoryStrategy::BoundedAttention => StrategyRung::BoundedAttention,
+        MemoryStrategy::BoundedTransformerResidency => StrategyRung::BoundedTransformerResidency,
+    }
+}
+
+/// The canonical measurement phases, in ladder order, used for the binding-phase comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EstimatePhase {
+    Conditioning,
+    Denoise,
+    Decode,
+}
+
+/// The phase carrying the peak of a `(conditioning, denoise, decode)` triple. Ties resolve to the
+/// LATER phase deterministically; the comparison below only ever contrasts two triples scaled by
+/// the same per-phase rule, so tie handling cannot manufacture a flip on its own.
+fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase {
+    let mut phase = EstimatePhase::Conditioning;
+    let mut peak = conditioning;
+    if denoise >= peak {
+        phase = EstimatePhase::Denoise;
+        peak = denoise;
+    }
+    if decode >= peak {
+        phase = EstimatePhase::Decode;
+    }
+    phase
+}
+
+/// Fabricated evidence for a synthesized estimate candidate, following the
+/// [`generic_mlx_shared_observation`] / [`resident_evidence`] pattern: `ImplementedUnverified`
+/// conformance, no observed peak, parity not run — the record claims exactly what an estimate can
+/// claim and nothing more. The selector's estimate-scoped eligibility wrap (sc-18096,
+/// `memory_strategy::candidate_exclusion`) is what admits it.
+#[allow(clippy::too_many_arguments)]
+fn estimate_evidence(
+    contract: &MemoryProviderContract,
+    tier: MemoryNumericTier,
+    mode: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    selection: MemorySelection,
+    predicted_peak_bytes: u64,
+    calibration_fingerprint: Option<&str>,
+) -> MemoryEvidence {
+    MemoryEvidence {
+        key: MemoryEvidenceKey {
+            resolved_route: contract.provider_id.clone(),
+            backend: gen_core::MemoryBackend::Mlx,
+            tier,
+            load_shape: contract.load_shape,
+            mode: memory_mode_from_mode_key(mode),
+            overlay: overlay.map(str::to_owned),
+            geometry,
+            strategy: selection.strategy,
+            engaged_composition: contract.engaged_composition(selection.strategy),
+            parameters: selection.parameters,
+        },
+        conformance: MemoryConformanceState::ImplementedUnverified,
+        dimensions: MemoryEvidenceDimensions {
+            static_implementation: MemoryEvidenceVerdict::Satisfied,
+            declared_calibration: MemoryEvidenceVerdict::Missing,
+            historical_verification: MemoryEvidenceVerdict::Missing,
+            current_environment_verification: MemoryEvidenceVerdict::Missing,
+            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+        },
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
+        sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+        inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
+        harness_version: String::new(),
+        predicted_peak_bytes,
+        observed_peak_bytes: None,
+        parity: MemoryParityContract::Exact,
+        parity_result: MemoryParityResult::NotRun,
+    }
+}
+
+/// The floor's per-rung WEIGHTS term, derived only from the provider contract's own declarations
+/// (sc-18096). Nothing here is a tuned coefficient:
+///
+/// * `StagedResidency` engaged ⇒ the co-residency drop the rung exists for: the resident working
+///   set is the larger of the conditioning stack and everything else, exactly the
+///   `staged_weights_gb` split the load-time gate has always used.
+/// * `BoundedTransformerResidency` engaged ⇒ the transformer's declared bytes leave the resident
+///   floor: the rung windows them, and the window slice plus scratch is carried by the headroom
+///   term and the estimate margin, not by a guessed window fraction.
+/// * Rungs 2 and 3 bound TRANSIENTS, not weights, so they take no weights reduction here — and
+///   deliberately no transient reduction either, because no measured basis for one exists on an
+///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
+///   promising an unmeasured saving.
+/// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
+///   itself declares them `bounded_by` a rung the composition engages.
+fn estimate_floor_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+) -> u64 {
+    let facts = contract.asset_facts;
+    let conditioning = facts.conditioning_bytes;
+    let mut heavy = facts.base_bytes.saturating_sub(conditioning);
+    if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
+        heavy = heavy.saturating_sub(facts.transformer_bytes);
+    }
+    let base = if engaged.contains(&MemoryStrategy::StagedResidency) {
+        conditioning.max(heavy)
+    } else {
+        conditioning.saturating_add(heavy)
+    };
+    let auxiliary = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.kind.is_auxiliary())
+        .filter(|component| match component.bounded_by {
+            Some(bounding) => !engaged.contains(&bounding),
+            None => true,
+        })
+        .fold(0_u64, |total, component| {
+            total.saturating_add(component.resident_bytes)
+        });
+    base.saturating_add(auxiliary)
+}
+
+/// The smallest declared value for every numeric knob the engaged composition requires — the most
+/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
+/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
+/// knob has no declared range: such a selection cannot be validated, so no candidate is
+/// synthesized for the rung.
+fn estimate_floor_parameters(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+) -> Option<gen_core::MemoryStrategyParameters> {
+    let smallest = |strategy: MemoryStrategy,
+                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
+     -> Option<Option<u32>> {
+        if !engaged.contains(&strategy) {
+            return Some(None);
+        }
+        pick(&contract.capability(strategy)?.parameters)
+            .iter()
+            .copied()
+            .min()
+            .map(Some)
+    };
+    Some(gen_core::MemoryStrategyParameters {
+        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_tile_edges
+        })?,
+        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_overlaps
+        })?,
+        attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
+            &ranges.attention_chunk_sizes
+        })?,
+        transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
+            &ranges.transformer_window_sizes
+        })?,
+        transformer_window_component: None,
+    })
+}
+
+/// Synthesize estimate-backed candidates for every optimized rung the provider contract marks
+/// `Implemented` (sc-18096, epic 18093 R1a). Called only on legacy admission routes — a covered
+/// cell is authorized by its exact measured ladder and gets no synthetic sibling.
+///
+/// Peak source per rung, in preference order:
+///
+/// 1. **Fitted curve** — a verified measured cell of the same provider/tier/mode/overlay at a
+///    different geometry ([`MeasuredRungBasis`]), extrapolated over output area: the conditioning
+///    peak is area-flat (text encoding does not grow with the render target) while denoise,
+///    decode, and the admission envelope scale by the area ratio, floored at 1.0 so a
+///    smaller-than-measured request never predicts below the measurement. Gated by
+///    [`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]: if the
+///    extrapolated triple's binding phase differs from the measured cell's, the fitted candidate
+///    is NOT emitted (no per-phase variance re-derivation exists) and the rung falls back to the
+///    floor, whose no-measured-basis path the constraint's scope sentence explicitly exempts.
+/// 2. **Weights + headroom floor** — [`estimate_floor_weights_bytes`] plus the exact same
+///    fixed-reserve + area-scaled headroom the resident baseline charges
+///    ([`MlxRequestPlan::generic_headroom_bytes`]).
+///
+/// The MLX-conservative estimate margin is NOT applied here — the selector owns margin widening
+/// (`memory_strategy::select_strategy`), exactly as it owns the sc-18095 stale widening.
+#[allow(clippy::too_many_arguments)]
+fn synthesize_estimate_ladder(
+    contract: &MemoryProviderContract,
+    plan: &MlxRequestPlan,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    calibration_fingerprint: Option<&str>,
+    bases: &[MeasuredRungBasis],
+) -> Vec<SynthesizedEstimate> {
+    use crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE;
+    use crate::memory_strategy::CandidateBasis;
+
+    let request_area = f64::from(geometry.width) * f64::from(geometry.height);
+    let mut synthesized = Vec::new();
+    for strategy in MemoryStrategy::ALL {
+        if strategy == MemoryStrategy::Resident {
+            // The resident baseline candidate already exists on every legacy route.
+            continue;
+        }
+        if !matches!(
+            contract.capability(strategy).map(|cap| &cap.support),
+            Some(gen_core::MemoryStrategySupport::Implemented)
+        ) {
+            continue;
+        }
+        let engaged = contract.engaged_composition(strategy);
+
+        // 1. Fitted-curve basis: the closest measured geometry below the request, else the
+        //    smallest above it (whose clamp-at-1.0 scaling degenerates to the measurement itself).
+        //    The basis must have been measured under the LOADED provider's exact calibration
+        //    identity: a drifted estimator invalidates the measured numbers as an extrapolation
+        //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
+        //    demotion never fires without a verified claim on the route). A contract with no
+        //    calibration identity gets no fitted candidates at all — fail closed.
+        let fitted = bases
+            .iter()
+            .filter(|basis| {
+                basis.rung == strategy_rung(strategy)
+                    && basis.load_shape == contract.load_shape
+                    && basis.engaged_composition == engaged
+                    && contract.calibration.as_ref().is_some_and(|identity| {
+                        identity.abi == basis.calibration_abi
+                            && identity.fingerprint == basis.calibration_fingerprint
+                    })
+            })
+            .max_by_key(|basis| {
+                let area = u64::from(basis.geometry.width) * u64::from(basis.geometry.height);
+                let below = area as f64 <= request_area;
+                // Rank every below-request basis above every above-request one; among "below" take
+                // the largest area, among "above" the smallest.
+                (below, if below { area as i128 } else { -(area as i128) })
+            })
+            .and_then(|basis| {
+                let selection = MemorySelection {
+                    strategy,
+                    parameters: basis.parameters,
+                    tier: plan.tier,
+                };
+                if contract.validate_selection(&selection).is_err() {
+                    return None;
+                }
+                let measured_area =
+                    f64::from(basis.geometry.width) * f64::from(basis.geometry.height);
+                let scale = (request_area / measured_area).max(1.0);
+                let scaled =
+                    |bytes: u64| (bytes as f64 * scale).ceil().clamp(0.0, u64::MAX as f64) as u64;
+                let measured_binding = binding_phase(
+                    basis.conditioning_peak_bytes,
+                    basis.denoise_peak_bytes,
+                    basis.decode_peak_bytes,
+                );
+                let extrapolated_binding = binding_phase(
+                    basis.conditioning_peak_bytes,
+                    scaled(basis.denoise_peak_bytes),
+                    scaled(basis.decode_peak_bytes),
+                );
+                if ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE
+                    && extrapolated_binding != measured_binding
+                {
+                    // The pinned sc-18094 constraint: the corpus shows a 17.14% per-phase
+                    // re-capture spread that no margin in the policy absorbs, so an extrapolation
+                    // that moves the request peak onto a different phase than the one measured is
+                    // refused rather than margined. The rung falls back to the floor path below.
+                    tracing::info!(
+                        route = contract.provider_id,
+                        backend = "mlx",
+                        ?strategy,
+                        basis_record = basis.record_id,
+                        measured_binding_phase = ?measured_binding,
+                        extrapolated_binding_phase = ?extrapolated_binding,
+                        "fitted-curve estimate rejected: extrapolation flips the binding phase \
+                         (ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE)"
+                    );
+                    return None;
+                }
+                let predicted_peak_bytes = scaled(basis.envelope_peak_bytes);
+                tracing::info!(
+                    route = contract.provider_id,
+                    backend = "mlx",
+                    ?strategy,
+                    basis_record = basis.record_id,
+                    basis_geometry = format!("{}x{}", basis.geometry.width, basis.geometry.height),
+                    raw_peak_bytes = predicted_peak_bytes,
+                    area_scale = scale,
+                    "synthesized fitted-curve estimate candidate from a measured cell"
+                );
+                Some(SynthesizedEstimate {
+                    selection,
+                    evidence: estimate_evidence(
+                        contract,
+                        plan.tier,
+                        mode_key,
+                        overlay,
+                        geometry,
+                        selection,
+                        predicted_peak_bytes,
+                        calibration_fingerprint,
+                    ),
+                    basis: CandidateBasis::EstimateFittedCurve,
+                })
+            });
+        if let Some(candidate) = fitted {
+            synthesized.push(candidate);
+            continue;
+        }
+
+        // 2. Weights + headroom floor — no measured basis, so the binding-phase constraint does
+        //    not gate it (scope sentence on the constraint's doc).
+        let Some(parameters) = estimate_floor_parameters(contract, &engaged) else {
+            continue;
+        };
+        let selection = MemorySelection {
+            strategy,
+            parameters,
+            tier: plan.tier,
+        };
+        if contract.validate_selection(&selection).is_err() {
+            continue;
+        }
+        let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
+            .saturating_add(plan.generic_headroom_bytes(geometry));
+        tracing::info!(
+            route = contract.provider_id,
+            backend = "mlx",
+            ?strategy,
+            raw_peak_bytes = predicted_peak_bytes,
+            "synthesized weights+headroom floor estimate candidate"
+        );
+        synthesized.push(SynthesizedEstimate {
+            selection,
+            evidence: estimate_evidence(
+                contract,
+                plan.tier,
+                mode_key,
+                overlay,
+                geometry,
+                selection,
+                predicted_peak_bytes,
+                calibration_fingerprint,
+            ),
+            basis: CandidateBasis::EstimateFloor,
+        });
+    }
+    synthesized
 }
 
 /// Select the largest strictly lower, same-aspect geometry backed by a current exact record that
@@ -1478,6 +1993,7 @@ fn evaluate_request_with_budget_using_bundle(
             path: AdmissionPath::Legacy,
             fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
             evidence: Vec::new(),
+            estimate_bases: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
             lower_alternative: None,
@@ -1505,6 +2021,7 @@ fn evaluate_request_with_budget_using_bundle(
             path: AdmissionPath::Legacy,
             fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
             evidence: Vec::new(),
+            estimate_bases: Vec::new(),
             evidence_revision: None,
             process_limit_bytes: None,
             lower_alternative: None,
@@ -1591,6 +2108,23 @@ fn evaluate_request_with_budget_using_bundle(
         predicted_peak_bytes,
         calibration_fingerprint,
     );
+    // sc-18096: on a legacy route — the exact request cell has no measured evidence — synthesize
+    // estimate-backed candidates for every implemented optimized rung, so the full ladder is
+    // selectable behind the estimate margin instead of freezing to the resident baseline and
+    // refusing. A covered (`Evidence`) route gets none: its measured ladder is authoritative.
+    let synthesized_estimates = if admission.path == AdmissionPath::Legacy {
+        synthesize_estimate_ladder(
+            contract,
+            plan,
+            mode_key,
+            inputs.overlay.as_deref(),
+            geometry,
+            calibration_fingerprint,
+            &admission.estimate_bases,
+        )
+    } else {
+        Vec::new()
+    };
     let mut selections = Vec::new();
     let mut evidence = Vec::new();
     // Index-aligned with `evidence`, and pushed at the same sites. Each entry is the closure the
@@ -1599,6 +2133,11 @@ fn evaluate_request_with_budget_using_bundle(
     // behind them and carry the live digest, because there is nothing there for currency to
     // invalidate.
     let mut candidate_digests: Vec<&str> = Vec::new();
+    // Index-aligned basis axis (sc-18096): synthesized candidates carry their estimate basis, the
+    // resident baseline is the rung-0 weights+headroom floor, and everything measured stays
+    // `Measured`. Pushed at the same sites as `evidence` for the same fail-open reason as the
+    // digests above.
+    let mut candidate_bases: Vec<crate::memory_strategy::CandidateBasis> = Vec::new();
     if admission.path == AdmissionPath::Evidence {
         // A covered cell is authorized only by its exact verified ladder. Letting the generic
         // resident estimate or caller-supplied evidence run first would turn Evidence telemetry
@@ -1615,9 +2154,22 @@ fn evaluate_request_with_budget_using_bundle(
                 total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
                 reserved_headroom_gb: candidate.foreign_reserve_bytes as f64 / BYTES_PER_GIB,
             };
-            if candidate_budget.effective_gb().is_some_and(|available| {
-                exact.predicted_peak_bytes as f64 / BYTES_PER_GIB <= available
-            }) {
+            // sc-18096: this pre-check runs against the candidate's CAPTURED foreign reserve,
+            // which the selector's uniform zero-reserve Evidence budget cannot carry, so a stale
+            // candidate must be graded here at the same widened ceiling the selector admits it at
+            // — via the selector's own policy function, not a re-derived margin.
+            let graded_peak_bytes = if candidate.closure_digest == live_closure_digest {
+                exact.predicted_peak_bytes
+            } else {
+                crate::memory_strategy::stale_widened_peak_bytes(
+                    gen_core::MemoryBackend::Mlx,
+                    exact.predicted_peak_bytes,
+                )
+            };
+            if candidate_budget
+                .effective_gb()
+                .is_some_and(|available| graded_peak_bytes as f64 / BYTES_PER_GIB <= available)
+            {
                 selections.push(MemorySelection {
                     strategy: exact.key.strategy,
                     parameters: exact.key.parameters,
@@ -1625,13 +2177,26 @@ fn evaluate_request_with_budget_using_bundle(
                 });
                 evidence.push(exact);
                 candidate_digests.push(candidate.closure_digest.as_str());
+                candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
             }
         }
         if evidence.is_empty() {
             let minimum_required_host = admission
                 .evidence
                 .iter()
-                .map(|candidate| candidate.required_host_bytes)
+                .map(|candidate| {
+                    // Same stale-aware grading as the pre-check above, so the refusal quotes the
+                    // requirement that was actually enforced.
+                    if candidate.closure_digest == live_closure_digest {
+                        candidate.required_host_bytes
+                    } else {
+                        crate::memory_strategy::stale_widened_peak_bytes(
+                            gen_core::MemoryBackend::Mlx,
+                            candidate.evidence.predicted_peak_bytes,
+                        )
+                        .saturating_add(candidate.foreign_reserve_bytes)
+                    }
+                })
                 .min()
                 .unwrap_or(0);
             let alternative = admission
@@ -1656,12 +2221,20 @@ fn evaluate_request_with_budget_using_bundle(
             )));
         }
     } else {
-        selections.reserve(1 + additional_evidence.len());
-        evidence.reserve(1 + additional_evidence.len());
-        candidate_digests.reserve(1 + additional_evidence.len());
+        use crate::memory_strategy::CandidateBasis;
+
+        let capacity = 1 + additional_evidence.len() + synthesized_estimates.len();
+        selections.reserve(capacity);
+        evidence.reserve(capacity);
+        candidate_digests.reserve(capacity);
+        candidate_bases.reserve(capacity);
         selections.push(resident_selection);
         evidence.push(&resident);
         candidate_digests.push(live_closure_digest.as_str());
+        // The resident baseline IS the rung-0 weights+headroom floor estimate (sc-18096): its
+        // peak source is unchanged, but it is now graded behind the estimate margin like every
+        // other unmeasured candidate instead of at its raw guess.
+        candidate_bases.push(CandidateBasis::EstimateFloor);
         selections.extend(additional_evidence.iter().map(|item| MemorySelection {
             strategy: item.key.strategy,
             parameters: item.key.parameters,
@@ -1673,6 +2246,13 @@ fn evaluate_request_with_budget_using_bundle(
                 .iter()
                 .map(|_| live_closure_digest.as_str()),
         );
+        candidate_bases.extend(additional_evidence.iter().map(|_| CandidateBasis::Measured));
+        for estimate in &synthesized_estimates {
+            selections.push(estimate.selection);
+            evidence.push(&estimate.evidence);
+            candidate_digests.push(live_closure_digest.as_str());
+            candidate_bases.push(estimate.basis);
+        }
     }
     // The digests are carried from the push sites rather than recovered by searching
     // `admission.evidence` for a matching `MemoryEvidenceKey`. That search was how this read first,
@@ -1681,15 +2261,19 @@ fn evaluate_request_with_budget_using_bundle(
     // Keys are also not unique enough to be a lookup key in principle. Pushing the digest alongside
     // the evidence removes the failure mode instead of arguing it cannot happen.
     debug_assert_eq!(evidence.len(), candidate_digests.len());
+    debug_assert_eq!(evidence.len(), candidate_bases.len());
     let candidates = selections
         .iter()
         .zip(evidence)
-        .zip(&candidate_digests)
-        .map(|((selection, evidence), closure_digest)| Candidate {
-            selection: *selection,
-            evidence,
-            closure_digest,
-        })
+        .zip(candidate_digests.iter().zip(&candidate_bases))
+        .map(
+            |((selection, evidence), (closure_digest, basis))| Candidate {
+                selection: *selection,
+                evidence,
+                closure_digest,
+                basis: *basis,
+            },
+        )
         .collect::<Vec<_>>();
     let selection = crate::memory_strategy::select_strategy(
         RequestScope {
@@ -1746,6 +2330,12 @@ fn evaluate_request_with_budget_using_bundle(
                 alternative,
             )));
         }
+        // sc-18096 retired the "no measured evidence ⇒ refuse" meaning of this arm: every
+        // implemented rung of a legacy route now carries an estimate-backed candidate, so the
+        // selector only lands here when the evidence is STRUCTURALLY invalid (contract
+        // conformance errors, composition mismatch, an unresolvable budget, or a rung whose
+        // declared parameters cannot form a valid selection). That remains a refusal — the other
+        // permitted refusal, "no rung fits with margins", is the `Reject` arm above.
         Selection::Unverified { reason } => {
             let alternative = admission
                 .lower_alternative
@@ -1758,8 +2348,9 @@ fn evaluate_request_with_budget_using_bundle(
                 })
                 .unwrap_or_default();
             let message = format!(
-                "{} request {}x{} count {} has no safely verified MLX memory strategy ({reason:?}); \
-                 refusing to enter MLX's process-terminating allocation path{alternative}",
+                "{} request {}x{} count {} has no structurally admissible MLX memory strategy \
+                 ({reason:?}); refusing to enter MLX's process-terminating allocation \
+                 path{alternative}",
                 plan.engine_id,
                 inputs.width,
                 inputs.height,
@@ -1796,12 +2387,32 @@ fn evaluate_request_with_budget_using_bundle(
             total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
             reserved_headroom_gb: reserve as f64 / BYTES_PER_GIB,
         };
-        needed_gb = evidence.predicted_peak_bytes.saturating_add(reserve) as f64 / BYTES_PER_GIB;
+        let graded_peak_bytes = if candidate.closure_digest == live_closure_digest {
+            evidence.predicted_peak_bytes
+        } else {
+            crate::memory_strategy::stale_widened_peak_bytes(
+                gen_core::MemoryBackend::Mlx,
+                evidence.predicted_peak_bytes,
+            )
+        };
+        needed_gb = graded_peak_bytes.saturating_add(reserve) as f64 / BYTES_PER_GIB;
         available_gb = selected_budget.effective_gb().unwrap_or(0.0);
         budget.reserved_headroom_bytes = reserve;
         process_limit_bytes = Some(budget.total_bytes.saturating_sub(reserve));
         selected_record_id = Some(candidate.record_id.clone());
         evidence.predicted_peak_bytes
+    } else if let Some(estimate) = synthesized_estimates.iter().find(|estimate| {
+        estimate.selection.strategy == selection.strategy
+            && estimate.selection.parameters == selection.parameters
+            && estimate.selection.tier == selection.tier
+    }) {
+        // sc-18096: a synthesized deep rung was selected. The run context's incremental demand is
+        // that rung's raw estimate, not the resident baseline's — the whole point of the rung is a
+        // smaller working set. Warm-resident credit applies the same way as the baseline arm.
+        estimate
+            .evidence
+            .predicted_peak_bytes
+            .saturating_sub(attributable_resident_bytes)
     } else {
         predicted_peak_bytes
     };
@@ -2604,7 +3215,7 @@ fn decide_residency_with_headroom(
     );
     match peak {
         ResidencyOutcome::Reject { .. } => {
-            legacy_admission_override(total_bytes, te_bytes, budget, sequential_capable)
+            weights_floor_load_admission(total_bytes, te_bytes, budget, sequential_capable)
                 .unwrap_or(peak)
         }
         admitted => admitted,
@@ -2616,7 +3227,7 @@ fn decide_residency_with_headroom(
 /// — against the budget. This is the right signal for SELECTING Resident vs Sequential and for the
 /// rejection message's `needed`/`staged` numbers, but it rejects too aggressively on small Macs
 /// because the flat headroom bundles a pageable 1024² activation transient (sc-12179); the caller
-/// folds in the Decision 2 legacy override before honoring a reject.
+/// folds in the [`weights_floor_load_admission`] floor before honoring a reject.
 #[cfg(test)]
 fn decide_residency_by_peak(
     total_bytes: u64,
@@ -2787,6 +3398,8 @@ fn generic_mlx_shared_observation(
             selection,
             evidence: &evidence,
             closure_digest: UNCALIBRATED_CLOSURE,
+            // The generic cold-load estimate is exactly a weights+headroom floor (sc-18096).
+            basis: crate::memory_strategy::CandidateBasis::EstimateFloor,
         }],
     )
 }
@@ -2800,13 +3413,21 @@ fn staged_weights_gb(total_bytes: u64, te_bytes: u64) -> f64 {
     te_bytes.max(rest_bytes) as f64 / BYTES_PER_GIB
 }
 
-/// Decision 1 / Decision 2 transition override.
+/// LOAD-time weights-floor admission (formerly `legacy_admission_override`, and before that
+/// `weights_fit_floor`).
 ///
-/// This deliberately replaces the old `weights_fit_floor` symbol while preserving its outcome for
-/// requests which have no exact verified evidence. The settled transition rule requires those cells
-/// to remain byte-for-byte legacy, including the 8 GiB q4 guard, until that cell's calibration story
-/// opts it into evidence. Verified cells never call this function and genuinely fail closed above.
-fn legacy_admission_override(
+/// sc-18096 retired this function's old "Decision 1 / Decision 2 transition freeze" meaning — the
+/// rule that unmeasured cells "remain byte-for-byte legacy … until that cell's calibration story
+/// opts it into evidence" is gone: the REQUEST-scoped gate now synthesizes estimate-backed
+/// candidates for every implemented rung, so an unmeasured cell is no longer frozen to
+/// resident/sequential behavior. What survives, byte-for-byte (including the 8 GiB q4 guard), is
+/// the load-time floor itself: a spec whose bare staged weights fit under the legacy ceiling is
+/// ADMITTED for loading even when the peak-based prediction (weights + flat headroom) rejects,
+/// because bounding the render transient is the request gate's job, not the loader's. The
+/// remaining honest reject is a spec whose staged WEIGHTS do not fit — the load materializes
+/// those bytes before any request-time rung can bound anything, so no ladder admission could
+/// rescue it.
+fn weights_floor_load_admission(
     total_bytes: u64,
     te_bytes: u64,
     budget: Option<MlxMemoryBudget>,
@@ -3334,10 +3955,10 @@ mod tests {
     /// sc-17774 split this into the two questions it had been conflating. AGREEMENT — do the two
     /// shipped artefacts describe the same measurements — is graded at the closure they were both
     /// captured under, and is therefore true regardless of where the pin has since moved. CURRENCY
-    /// is graded separately, at the live closure, and is DERIVED from the digest pair rather than
-    /// asserted: once a shared `mlx-gen` crate moves, calibrated admission must refuse, and that
-    /// refusal is asserted here rather than skipped. Both branches are live code, so a re-capture
-    /// restores the `Evidence` requirement with no edit to this test.
+    /// is graded separately, at the live closure: since sc-18096 a moved closure no longer demotes
+    /// the route — the ladder still reaches calibrated admission with each candidate carrying its
+    /// measured digest, and the selector applies the widened stale-measured margin when that
+    /// digest differs from the live one.
     #[test]
     fn shipped_qwen_manifest_and_packaged_evidence_agree_at_their_captured_closure() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
@@ -3450,9 +4071,11 @@ mod tests {
 
             // The currency claim, derived from the digest pair rather than hardcoded either way.
             // `mlx:qwen_image`'s closure covers `crates/media/mlx-gen`, which every MLX provider
-            // depends on, so an edit for another model legitimately re-dates this ladder. When that
-            // has happened the only honest outcome is a refusal — asserted, not skipped — and the
-            // `Evidence` requirement returns by itself once the ladder is re-captured.
+            // depends on, so an edit for another model legitimately re-dates this ladder.
+            // sc-18096: currency is a signal, not a gate — a superseded closure no longer demotes
+            // the route. The ladder still reaches calibrated admission, its candidates carry the
+            // digest they were MEASURED under, and the selector grades them behind the widened
+            // stale-measured margin.
             let at_live = packaged_admission_route(
                 &plan,
                 &inputs,
@@ -3460,29 +4083,22 @@ mod tests {
                 fixture_budget(128.0),
                 &live,
             )
-            .expect("a moved provider closure degrades, it never errors");
-            if declared == live {
-                assert_eq!(
-                    at_live.path,
-                    AdmissionPath::Evidence,
-                    "{tier}: an opt-in AT the live closure must still reach calibrated admission; \
-                     got fallback {:?}",
-                    at_live.fallback_reason
-                );
-            } else {
-                assert_eq!(
-                    at_live.path,
-                    AdmissionPath::Legacy,
-                    "{tier}: evidence captured under a superseded mlx:qwen_image closure may not \
-                     authorize calibrated admission"
-                );
-                assert_eq!(
-                    at_live.fallback_reason,
-                    Some(LegacyAdmissionReason::StaleIdentity),
-                    "{tier}: the demotion must be the closure comparison, not a missing record or \
-                     an unparseable opt-in"
-                );
-            }
+            .expect("a moved provider closure widens the margin, it never errors");
+            assert_eq!(
+                at_live.path,
+                AdmissionPath::Evidence,
+                "{tier}: the ladder must reach calibrated admission current OR stale; got \
+                 fallback {:?}",
+                at_live.fallback_reason
+            );
+            assert!(
+                at_live
+                    .evidence
+                    .iter()
+                    .all(|candidate| candidate.closure_digest == declared),
+                "{tier}: every candidate must carry the digest its binding was measured under, so \
+                 the selector can grade its currency against the live closure"
+            );
         }
 
         // Mutation check for the axis this story exists to restore. Asserting only the route above
@@ -3665,8 +4281,9 @@ mod tests {
             );
 
             // Currency, derived. `mlx:krea_2_turbo_control`'s closure spans `mlx-gen` and five
-            // sibling provider crates, so it moves on work that has nothing to do with Krea. When it
-            // has, refusal is the only honest answer and it is asserted here, not skipped.
+            // sibling provider crates, so it moves on work that has nothing to do with Krea.
+            // sc-18096: a superseded closure no longer demotes — the ladder stays admissible with
+            // its candidates carrying the measured digest for the selector's widened grading.
             let at_live = packaged_admission_route(
                 &plan,
                 &inputs,
@@ -3674,32 +4291,25 @@ mod tests {
                 fixture_budget(128.0),
                 &live,
             )
-            .expect("a moved provider closure degrades, it never errors");
-            if declared == live {
-                assert_eq!(
-                    at_live.path,
-                    AdmissionPath::Evidence,
-                    "{}x{}: an opt-in AT the live closure must still reach calibrated admission",
-                    dimension("width"),
-                    dimension("height"),
-                );
-            } else {
-                assert_eq!(
-                    at_live.path,
-                    AdmissionPath::Legacy,
-                    "{}x{}: evidence captured under a superseded mlx:krea_2_turbo_control closure \
-                     may not authorize calibrated admission",
-                    dimension("width"),
-                    dimension("height"),
-                );
-                assert_eq!(
-                    at_live.fallback_reason,
-                    Some(LegacyAdmissionReason::StaleIdentity),
-                    "{}x{}: the demotion must be the closure comparison, not a missing record",
-                    dimension("width"),
-                    dimension("height"),
-                );
-            }
+            .expect("a moved provider closure widens the margin, it never errors");
+            assert_eq!(
+                at_live.path,
+                AdmissionPath::Evidence,
+                "{}x{}: the krea ladder must reach calibrated admission current OR stale; got \
+                 fallback {:?}",
+                dimension("width"),
+                dimension("height"),
+                at_live.fallback_reason
+            );
+            assert!(
+                at_live
+                    .evidence
+                    .iter()
+                    .all(|candidate| candidate.closure_digest == declared),
+                "{}x{}: every candidate must carry the digest its binding was measured under",
+                dimension("width"),
+                dimension("height"),
+            );
         }
     }
 
@@ -3875,13 +4485,14 @@ mod tests {
         );
     }
 
-    /// The demotion half of sc-17774 on a REAL shipped lane. Z-Image's ladder was measured at
+    /// Stale admission (sc-18096) on a REAL shipped lane. Z-Image's ladder was measured at
     /// `d4802320`, and `mlx:z_image_turbo`'s closure has moved since, so this is the one shipped
-    /// opt-in whose calibration is genuinely expired. It must reach the legacy estimator — not be
-    /// refused — which is the behaviour the deleted pin comparison happened to produce and the
-    /// closure comparison now produces for the right reason.
+    /// opt-in whose calibration is genuinely stale. Under sc-18095/18096 that ladder stays
+    /// SELECTABLE — its candidates reach the selector carrying their measured digest and are
+    /// graded behind the widened stale margin — while a binding that LIES about its digest still
+    /// resolves to nothing.
     #[test]
-    fn shipped_z_image_manifest_rejects_historical_exact_mlx_ladder_rungs() {
+    fn shipped_z_image_manifest_admits_historical_mlx_ladder_rungs_as_stale() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3976,24 +4587,40 @@ mod tests {
             fixture_budget(128.0),
             &live_mlx_closure_digest("z_image_turbo"),
         )
-        .expect("historical Z-Image evidence must fall back without an error");
+        .expect("historical Z-Image evidence must route without an error");
 
-        assert_eq!(route.path, AdmissionPath::Legacy);
+        // sc-18096: the historical ladder is no longer pre-demoted to legacy. It reaches
+        // calibrated admission with every candidate carrying the digest it was MEASURED under, so
+        // the selector grades the whole ladder behind the widened stale-measured margin instead of
+        // refusing the render outright.
         assert_eq!(
-            route.fallback_reason,
-            Some(LegacyAdmissionReason::StaleIdentity)
+            route.path,
+            AdmissionPath::Evidence,
+            "the stale historical ladder must reach the selector; got fallback {:?}",
+            route.fallback_reason
         );
-        assert!(route.evidence.is_empty());
+        assert_eq!(
+            route.evidence.len(),
+            5,
+            "every historical rung must resolve to its promoted record"
+        );
+        assert!(
+            route
+                .evidence
+                .iter()
+                .all(|candidate| candidate.closure_digest == captured),
+            "each candidate must carry the captured digest so the selector can widen it"
+        );
 
-        // A manifest cannot LAUNDER a stale ladder current by claiming the live digest.
+        // A manifest still cannot LAUNDER a stale ladder current by claiming the live digest.
         //
-        // Every conjunct above is satisfied by the shipped data, so deleting one changes nothing —
-        // they document the state rather than grade it. This does grade it. Rewriting the opt-in's
-        // `inferenceClosureDigest` to the live value walks the binding straight past the admission
-        // filter, which compares exactly that field; what stops it is `EvidenceBundle::evidence_for`
-        // finding the RECORD still stamped with the digest it was really measured under. The two
-        // comparisons look redundant and are not: one asks "is this measurement of current code?",
-        // the other asks "is this binding telling the truth about which measurement it is?".
+        // With the admission pre-filter's closure conjunct retired (sc-18096), what stops the
+        // laundering is `EvidenceBundle::evidence_for` finding the RECORD still stamped with the
+        // digest it was really measured under: a binding claiming the live digest no longer
+        // matches its own record, so it resolves to NO candidates at all — a lie about identity
+        // is worse off than the honest stale declaration above, which is exactly the incentive
+        // the two comparisons must preserve. One asks "which measurement is this binding telling
+        // the truth about?"; the currency question is now the selector's widened-margin grading.
         let mut laundered = z_image.clone();
         for calibration in laundered
             .get_mut("mlx")
@@ -4990,17 +5617,36 @@ mod tests {
     }
 
     #[test]
-    fn packaged_krea_1024_refuses_before_render_and_names_only_a_fitting_current_cell() {
+    fn packaged_krea_1024_admits_by_estimate_and_refuses_below_the_widened_margins() {
         use gen_core::MemoryCalibrationIdentity;
 
         let plan = packaged_krea_plan();
-        let generator = packaged_krea_generator();
+        // Realistic component facts so the floor arithmetic is meaningful: conditioning 8 GiB,
+        // transformer 60 GiB, decoder 4 GiB. Floors at 1024² (headroom = 2 GiB fixture anchor):
+        //   staged (rung 1)       max(8, 64) + 2 = 66 GiB  -> widened 72.6 GiB
+        //   bounded decode floor  (8 + 64)  + 2 = 74 GiB  -> widened 81.4 GiB (never used: the
+        //                                                   measured 896² basis supplies a fitted
+        //                                                   curve instead)
+        // Fitted bounded-decode estimate from the 896² record: envelope 38.563 GiB scaled by
+        // 1024²/896² = 50.37 GiB, widened by the 0.10 MLX estimate margin to 55.41 GiB.
+        let mut generator = packaged_krea_generator();
+        {
+            let facts = &mut generator
+                .contract
+                .as_mut()
+                .expect("Krea contract")
+                .asset_facts;
+            facts.conditioning_bytes = gib_to_bytes(8.0);
+            facts.transformer_bytes = gib_to_bytes(60.0);
+            facts.decoder_bytes = gib_to_bytes(4.0);
+            facts.base_bytes = gib_to_bytes(72.0);
+        }
+        let generator = generator;
         let mut inputs = fixture_inputs(1024, 1024);
         inputs.overlay = Some("control:1".to_owned());
-
-        for (budget_gib, expected) in [(128.0, "896x896"), (83.0, "768x768")] {
-            let error = evaluate_request_with_budget_using_bundle(
-                &generator,
+        let evaluate = |generator: &RequestGenerator, budget_gib: f64| {
+            evaluate_request_with_budget_using_bundle(
+                generator,
                 &plan,
                 &inputs,
                 MemoryCacheState::Cold,
@@ -5012,13 +5658,60 @@ mod tests {
                 Some(&packaged_bundle()),
                 Some(&packaged_krea_closure_lookup),
             )
-            .expect_err("the independent legacy estimate must refuse before provider render");
-            let message = error.to_string();
-            assert!(
-                message.contains(&format!("current verified alternative: {expected}")),
-                "the largest exact current cell that fits {budget_gib} GiB must be named: {message}"
-            );
-        }
+        };
+
+        // sc-18096 headline: 1024² has no measured cell, and before this story it REFUSED here.
+        // Now the estimate ladder admits it. At 128 GiB the cheapest fitting rung is the staged
+        // floor; the run context is legacy-scoped (no record id, no request-scoped ceiling).
+        let admitted = evaluate(&generator, 128.0)
+            .expect("an unmeasured geometry must be admitted by the estimate ladder");
+        assert_eq!(
+            admitted.context.selection.strategy,
+            MemoryStrategy::StagedResidency,
+            "the cheapest fitting estimate rung must win: {:?}",
+            admitted.context.selection
+        );
+        assert_eq!(admitted.process_limit_bytes, None);
+        assert_eq!(
+            admitted.context.evidence_revision,
+            REQUEST_EVIDENCE_REVISION
+        );
+
+        // At 60 GiB the staged floor (72.6 widened) no longer fits, and the FITTED bounded-decode
+        // estimate extrapolated from the measured 896² cell (55.41 GiB widened) is selected — with
+        // the measured cell's own sweep parameters, which a floor synthesis (built from the
+        // smallest declared ranges and a 81.4 GiB widened peak) could not produce at this budget.
+        let fitted = evaluate(&generator, 60.0)
+            .expect("the fitted-curve estimate must admit where the floors cannot");
+        assert_eq!(
+            fitted.context.selection.strategy,
+            MemoryStrategy::BoundedDecode
+        );
+        assert_eq!(
+            fitted.context.selection.parameters.decode_tile_edge,
+            Some(512),
+            "the fitted estimate must carry the measured basis' parameters"
+        );
+        assert_eq!(
+            fitted.context.selection.parameters.decode_overlap,
+            Some(64),
+            "the fitted estimate must carry the measured basis' parameters"
+        );
+
+        // Below every widened estimate the request still refuses — margins are load-bearing. No
+        // verified alternative fits 40 GiB (the 768² cell needs its captured foreign reserve too),
+        // so none may be named.
+        let message = evaluate(&generator, 40.0)
+            .expect_err("below the widened estimates the refusal must remain")
+            .to_string();
+        assert!(
+            message.contains("needs") && message.contains("safely available"),
+            "the refusal keeps the actionable needs/available format: {message}"
+        );
+        assert!(
+            !message.contains("current verified alternative"),
+            "no verified cell fits 40 GiB, so none may be named: {message}"
+        );
 
         let mut exact_896 = inputs.clone();
         exact_896.width = 896;
@@ -5043,101 +5736,348 @@ mod tests {
             "a packaged exact-cell refusal must retain its fitting lower record: {message}"
         );
 
-        let mut mismatched = packaged_krea_generator();
-        mismatched
-            .contract
-            .as_mut()
-            .expect("Krea contract")
-            .calibration = Some(MemoryCalibrationIdentity::new(
-            "mutated-loaded-provider",
-            gen_core::LoadShape::EagerMaterialization,
-        ));
-        let message = evaluate_request_with_budget_using_bundle(
-            &mismatched,
-            &plan,
-            &inputs,
-            MemoryCacheState::Cold,
-            OffloadPolicy::Resident,
-            fixture_budget(128.0),
-            gib_to_bytes(130.0),
-            0,
-            &[],
-            Some(&packaged_bundle()),
-            Some(&packaged_krea_closure_lookup),
-        )
-        .expect_err("the mismatched loaded provider still refuses on the independent estimate")
-        .to_string();
+        // A loaded provider whose calibration identity DRIFTED from the packaged records must not
+        // receive fitted-curve candidates built from them (sc-18096 review, major finding). The
+        // mutated fingerprint is deliberately WELL-FORMED (`-v1` satisfies the contract's version
+        // token conformance rule), so the refusal below is the work of the basis identity gate in
+        // `synthesize_estimate_ladder`, not an accidental contract-conformance `Invalid`. And it
+        // runs at 60 GiB, a budget where NO lower alternative is named (both packaged cells need
+        // their ~47 GiB captured foreign reserve), so `carries_verified_claim` is FALSE and the
+        // fingerprint demotion at the admission seam never fires — the synthesis-side gate is the
+        // only thing standing between the drifted provider and the fitted candidate. The
+        // unmutated generator ADMITS at 60 (the fitted arm above), so the refusal is exactly the
+        // mutation's doing.
+        let mut mismatched_generator = packaged_krea_generator();
+        {
+            let contract = mismatched_generator
+                .contract
+                .as_mut()
+                .expect("Krea contract");
+            contract.asset_facts = generator.contract.as_ref().expect("facts").asset_facts;
+            contract.calibration = Some(MemoryCalibrationIdentity::new(
+                "mutated-loaded-provider-v1",
+                gen_core::LoadShape::EagerMaterialization,
+            ));
+        }
+        assert!(
+            mismatched_generator
+                .contract
+                .as_ref()
+                .expect("Krea contract")
+                .conformance_errors()
+                .is_empty(),
+            "the mutated fingerprint must be conformance-CLEAN so this arm exercises the basis \
+             identity gate, not format validation"
+        );
+        let message = evaluate(&mismatched_generator, 60.0)
+            .expect_err("a fingerprint-drifted provider loses the measured basis and refuses")
+            .to_string();
+        assert!(
+            message.contains("needs") && message.contains("safely available"),
+            "the drifted provider's refusal is the floors-only Reject — the fitted candidate was \
+             suppressed by the basis identity gate: {message}"
+        );
         assert!(
             !message.contains("current verified alternative"),
             "a loaded-provider fingerprint mutation must suppress evidence-derived naming: {message}"
         );
+        // The gate is precisely scoped to the MEASURED basis: the floors derive from the
+        // contract's own asset facts, not from any record, so the drifted provider still admits
+        // where a floor fits.
+        let floor_admitted = evaluate(&mismatched_generator, 128.0)
+            .expect("a drifted provider keeps its no-measured-basis floor estimates");
+        assert_eq!(
+            floor_admitted.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
 
-        let mut mismatched = packaged_krea_generator();
-        let bounded_decode = mismatched
-            .contract
-            .as_mut()
-            .expect("Krea contract")
-            .strategies
-            .iter_mut()
-            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
-            .expect("bounded decode capability");
-        bounded_decode.support = gen_core::MemoryStrategySupport::Missing;
-        let message = evaluate_request_with_budget_using_bundle(
-            &mismatched,
-            &plan,
-            &inputs,
-            MemoryCacheState::Cold,
-            OffloadPolicy::Resident,
-            fixture_budget(128.0),
-            gib_to_bytes(130.0),
-            0,
-            &[],
-            Some(&packaged_bundle()),
-            Some(&packaged_krea_closure_lookup),
-        )
-        .expect_err("the composition-mismatched provider still refuses on the independent estimate")
-        .to_string();
+        // Dropping the rung's Implemented support removes both the fitted candidate and its floor:
+        // an unimplemented rung is never estimate-admissible.
+        let mut unimplemented_generator = packaged_krea_generator();
+        {
+            let contract = unimplemented_generator
+                .contract
+                .as_mut()
+                .expect("Krea contract");
+            contract.asset_facts = generator.contract.as_ref().expect("facts").asset_facts;
+            contract
+                .strategies
+                .iter_mut()
+                .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+                .expect("bounded decode capability")
+                .support = gen_core::MemoryStrategySupport::Missing;
+        }
+        let message = evaluate(&unimplemented_generator, 60.0)
+            .expect_err("an unimplemented rung is never estimate-admissible")
+            .to_string();
         assert!(
             !message.contains("current verified alternative"),
             "a loaded-provider composition mutation must suppress evidence-derived naming: {message}"
         );
 
-        // The honest counterpart to the override above. Everything so far is graded at the closure
-        // the packaged Krea records were captured under, because refusal NAMING needs two exact
-        // cells to choose between. At the LIVE closure that same evidence may name nothing at all,
-        // and that verdict is DERIVED from the digest pair rather than hardcoded — so this asserts
-        // the demotion instead of quietly routing around it, and flips back on its own the moment
-        // the pose-control pair is re-captured.
-        let live_message = evaluate_request_with_budget_using_bundle(
+        // At the LIVE closure the verdict forks on the digest pair, derived rather than
+        // hardcoded: a fitted-curve estimate may extrapolate only from CLOSURE-CURRENT records
+        // (see `MeasuredRungBasis` — the 0.10 estimate margin was derived over same-closure
+        // re-capture variance and cannot also absorb closure drift). While the pose-control pair
+        // is current the 60 GiB request admits the fitted rung; once the closure moves, the
+        // records may keep serving their own measured cells behind the stale margin (sc-18095)
+        // but may NOT seed an extrapolation, so the request refuses on floors alone.
+        let live = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(128.0),
+            fixture_budget(60.0),
             gib_to_bytes(130.0),
             0,
             &[],
             Some(&packaged_bundle()),
             Some(&fixture_closure_lookup),
-        )
-        .expect_err("a superseded closure still refuses; it never admits")
-        .to_string();
+        );
         if shipped_mlx_declared_closure_digest("krea_2_turbo")
             == live_mlx_closure_digest("krea_2_turbo_control")
         {
-            assert!(
-                live_message.contains("current verified alternative: 896x896"),
-                "at the live closure the packaged pair is current and must still be named: \
-                 {live_message}"
+            let admitted =
+                live.expect("at a current closure the fitted estimate admits the 60 GiB request");
+            assert_eq!(
+                admitted.context.selection.strategy,
+                MemoryStrategy::BoundedDecode
             );
         } else {
+            let message = live
+                .expect_err(
+                    "a stale-closure record must not seed a fitted extrapolation; floors alone \
+                     cannot fit 60 GiB",
+                )
+                .to_string();
             assert!(
-                !live_message.contains("current verified alternative"),
-                "evidence captured under a superseded mlx:krea_2_turbo_control closure may not be \
-                 offered as a current verified alternative: {live_message}"
+                message.contains("needs") && message.contains("safely available"),
+                "the stale-basis refusal is the floors-only Reject: {message}"
             );
         }
+    }
+
+    /// The fixture generator with the FULL ladder implemented, including rung 4 with its
+    /// deferred-materialization prerequisite — the shape an unmeasured provider needs for the
+    /// sc-18096 estimate ladder to reach every rung.
+    fn full_ladder_generator() -> RequestGenerator {
+        use gen_core::{MemoryCalibrationIdentity, MemoryStrategySupport};
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.calibration = Some(MemoryCalibrationIdentity::new(
+            "fixture-formula-v2",
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+        contract.lifecycle.transformer_window_materialization = true;
+        let rung4 = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedTransformerResidency)
+            .expect("rung 4 capability");
+        rung4.support = MemoryStrategySupport::Implemented;
+        rung4.parameters.transformer_window_sizes = vec![2, 4];
+        generator
+    }
+
+    /// sc-18096 acceptance: an UNMEASURED provider (no calibration opt-in, no evidence bundle)
+    /// under a small emulated unified-memory budget — the `SCENEWORKS_MLX_MEMORY_CAP_GB` scenario,
+    /// driven through the same pure seam the cap feeds — selects a DEEP rung instead of refusing,
+    /// and the selection translates to the right engine knobs.
+    ///
+    /// Floor arithmetic (fixture facts: base 3 GiB all transformer, headroom 2 fixed + 4 area):
+    ///   resident        9 GiB modeled -> widened  9.9
+    ///   staged floor    3 + 6 = 9     -> widened  9.9
+    ///   decode floor    3 + 6 = 9     -> widened  9.9   (bounds transients, not weights)
+    ///   attention floor 3 + 6 = 9     -> widened  9.9
+    ///   rung 4 floor    0 + 6 = 6     -> widened  6.6   (windowed transformer leaves residency)
+    /// An 8 GiB budget therefore admits exactly one rung: BoundedTransformerResidency.
+    #[test]
+    fn unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung() {
+        let generator = full_ladder_generator();
+        let mut plan = fixture_plan();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        let inputs = fixture_inputs(1024, 1024);
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect("the estimate ladder must admit the deep rung instead of refusing");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency,
+            "only rung 4's floor fits an 8 GiB budget: {:?}",
+            evaluation.context.selection
+        );
+        // The floor synthesizes the most deeply bounding declared parameters.
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_tile_edge,
+            Some(512)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_overlap,
+            Some(128)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.attention_chunk_size,
+            Some(256)
+        );
+        assert_eq!(
+            evaluation
+                .context
+                .selection
+                .parameters
+                .transformer_window_size,
+            Some(2),
+            "the smallest declared window is the most bounding"
+        );
+        // And the selection translates to the engine knobs the engaged composition names:
+        // rung 4 engages bounded decode, bounded attention, and block streaming — but NOT staged
+        // residency, which the shared cost order keeps explicit-selection-only.
+        assert!(evaluation.memory.tile_vae_decode);
+        assert!(evaluation.memory.chunk_attention);
+        assert!(evaluation.memory.stream_transformer_blocks);
+        assert!(!evaluation.memory.stage_residency);
+        // Legacy-scoped telemetry: an estimate admission never claims a verified record or a
+        // request-scoped process ceiling.
+        assert_eq!(evaluation.process_limit_bytes, None);
+        assert_eq!(
+            evaluation.context.evidence_revision,
+            REQUEST_EVIDENCE_REVISION
+        );
+
+        // Mutation arm: at 6 GiB even the rung-4 widened floor (6.6 GiB) overflows, and the
+        // refusal is the honest Reject quoting the widened requirement — proving the estimate
+        // margin is applied on this path (a zeroed margin would admit 6.0 <= 6.0).
+        let error = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(6.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect_err("below every widened estimate the request must refuse")
+        .to_string();
+        assert!(
+            error.contains("needs 6.60 GiB"),
+            "the refusal must quote the WIDENED rung-4 floor: {error}"
+        );
+    }
+
+    /// sc-18094/sc-18096: `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` is honored at the
+    /// synthesis seam. An extrapolation that moves the request peak onto a DIFFERENT phase than
+    /// the measured cell's is rejected — the rung falls back to the no-measured-basis floor,
+    /// which the constraint's scope sentence exempts — while a same-binding-phase extrapolation
+    /// produces the fitted candidate at the area-scaled envelope.
+    #[test]
+    fn fitted_estimates_honor_the_measured_binding_phase_constraint() {
+        use crate::memory_strategy::CandidateBasis;
+
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        let plan = fixture_plan();
+        // Measured cell at 1024²: the CONDITIONING phase binds (16 GiB text-encoder peak against
+        // 12 GiB denoise and 5 GiB decode) — the exact shape of the corpus example behind the
+        // constraint.
+        let basis = MeasuredRungBasis {
+            rung: StrategyRung::BoundedDecode,
+            parameters: gen_core::MemoryStrategyParameters {
+                decode_tile_edge: Some(512),
+                decode_overlap: Some(128),
+                ..Default::default()
+            },
+            engaged_composition: contract.engaged_composition(MemoryStrategy::BoundedDecode),
+            load_shape: contract.load_shape,
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: "fixture-formula-v2".to_owned(),
+            geometry: CalibrationGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            conditioning_peak_bytes: gib_to_bytes(16.0),
+            denoise_peak_bytes: gib_to_bytes(12.0),
+            decode_peak_bytes: gib_to_bytes(5.0),
+            envelope_peak_bytes: gib_to_bytes(20.0),
+            record_id: "imc-binding-phase-fixture".to_owned(),
+        };
+
+        // 2048²: area scale 4.0 pushes denoise to 48 GiB past the flat 16 GiB conditioning peak —
+        // the binding phase flips, the fitted candidate is refused, and the rung falls back to
+        // the weights+headroom floor.
+        let flipped = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 2048,
+                height: 2048,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            None,
+            std::slice::from_ref(&basis),
+        );
+        let decode = flipped
+            .iter()
+            .find(|estimate| estimate.selection.strategy == MemoryStrategy::BoundedDecode)
+            .expect("the rung must still be estimate-admissible via the floor");
+        assert_eq!(
+            decode.basis,
+            CandidateBasis::EstimateFloor,
+            "a binding-phase flip must refuse the FITTED candidate per \
+             ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE"
+        );
+
+        // 1120² (area scale ~1.196): denoise extrapolates to ~14.4 GiB, still under the
+        // conditioning peak — no flip, so the fitted candidate is emitted at the area-scaled
+        // envelope with the measured cell's parameters.
+        let request_geometry = MemoryGeometry {
+            width: 1120,
+            height: 1120,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let fitted = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            request_geometry,
+            None,
+            std::slice::from_ref(&basis),
+        );
+        let decode = fitted
+            .iter()
+            .find(|estimate| estimate.selection.strategy == MemoryStrategy::BoundedDecode)
+            .expect("a same-binding-phase extrapolation must be admissible");
+        assert_eq!(decode.basis, CandidateBasis::EstimateFittedCurve);
+        assert_eq!(decode.selection.parameters.decode_tile_edge, Some(512));
+        assert_eq!(decode.selection.parameters.decode_overlap, Some(128));
+        let scale = (1120.0 * 1120.0) / (1024.0 * 1024.0);
+        let expected_peak = (gib_to_bytes(20.0) as f64 * scale).ceil() as u64;
+        assert_eq!(
+            decode.evidence.predicted_peak_bytes, expected_peak,
+            "the fitted estimate's raw peak is the area-scaled measured envelope (the estimate \
+             margin is applied later, by the selector)"
+        );
     }
 
     #[test]
@@ -6211,19 +7151,17 @@ mod tests {
     }
 
     #[test]
-    fn a_moved_provider_closure_demotes_the_calibrated_ladder() {
-        // sc-17774: the currency gate the MLX lane never actually had. The constant it replaced was
-        // read off the first candidate's own evidence, so the comparison was candidate-against-self
-        // and could not fail; every fit-ladder test below therefore passed under a dead gate.
+    fn a_moved_provider_closure_admits_the_stale_ladder_behind_the_widened_margin() {
+        // sc-18096 (scope addendum from sc-18095's review): the `StaleIdentity` pre-demotion in
+        // `evidence_admission_route` is retired. A binding measured under a moved closure still
+        // reaches `AdmissionPath::Evidence`; its candidate carries the digest it was MEASURED
+        // under, and `select_strategy` grades it behind `MLX_STALE_MEASURED_MARGIN`. This is the
+        // PRODUCTION-routing proof that the sc-18095 selector arm is reachable on the MLX lane —
+        // not merely a selector unit test.
         //
-        // DEMOTES, not refuses. The comparison sits in `evidence_admission_route`, ahead of the
-        // decision to enter `AdmissionPath::Evidence` — which withholds the resident baseline and so
-        // leaves a stale request with nothing to fall back to. An expired calibration is
-        // epistemically the same as no calibration and must land on the legacy estimator, which is
-        // what candle does and what the shipped historical z_image_turbo opt-in relies on. The
-        // selector's own closure exclusion (`memory_strategy::candidate_exclusion`) stays as the
-        // fail-closed backstop for anything reaching it another way, and is graded there against
-        // `STALE_CLOSURE`.
+        // Fixture arithmetic: the record's envelope peak is exactly 5 GiB with a 3 GiB captured
+        // foreign reserve, so the widened requirement is 5 * 1.05 = 5.25 GiB against
+        // `total - reserve` of effective budget.
         let bundle = fixture_bundle();
         let generator = fixture_generator();
         let plan = fixture_plan();
@@ -6231,69 +7169,156 @@ mod tests {
         let moved_digest = "a".repeat(64);
         let moved = |_backend: &str, _provider: &str| Some(moved_digest.clone());
 
-        // The seam itself: a binding measured under another closure is not an identity match, and
-        // the reason must be the staleness rather than a parse or provenance failure.
-        let demoted = evidence_admission_route(
+        // The seam: the stale binding is still an identity match (same artifact bytes), so it
+        // enters the Evidence path with its measured digest attached for the selector to grade.
+        let stale = evidence_admission_route(
             &bundle,
             &plan,
             &inputs,
             "text_to_image",
-            fixture_budget(8.0),
+            fixture_budget(9.0),
             &moved_digest,
         )
-        .expect("a moved closure demotes, it does not error");
-        assert_eq!(demoted.path, AdmissionPath::Legacy);
+        .expect("a moved closure admits behind the widened margin, it does not error");
         assert_eq!(
-            demoted.fallback_reason,
-            Some(LegacyAdmissionReason::StaleIdentity)
+            stale.path,
+            AdmissionPath::Evidence,
+            "a stale-only cell must reach the selector instead of being pre-demoted: {:?}",
+            stale.fallback_reason
         );
-        assert!(demoted.evidence.is_empty());
-        // The refusal alternative is filtered by the SAME term. It never becomes a `Candidate`, so
-        // nothing downstream grades it: leaving it unfiltered would name a smaller geometry that the
-        // very next request refuses for the identical staleness.
-        assert!(demoted.lower_alternative.is_none());
+        assert!(!stale.evidence.is_empty());
+        assert!(
+            stale
+                .evidence
+                .iter()
+                .all(
+                    |candidate| candidate.closure_digest == FIXTURE_CLOSURE_DIGEST
+                        && candidate.closure_digest != moved_digest
+                ),
+            "each candidate must carry the digest it was MEASURED under, not the live one"
+        );
+        // Refusal advice stays current-only: a stale cell may serve widened numbers, but it is not
+        // offered as a named "current verified alternative".
+        assert!(stale.lower_alternative.is_none());
 
-        // End to end. `process_limit_bytes` is derived only from an exact verified cell, so it
-        // distinguishes "admitted" — which the legacy estimator also does — from "an exact verified
-        // rung was selected", which is what a moved closure must cost.
-        let evaluated = evaluate_request_with_budget_using_bundle(
+        // End to end at 9 GiB: effective budget is 9 - 3 (captured foreign reserve) = 6 GiB, the
+        // widened 5.25 GiB fits, and the request keeps the exact verified rung INCLUDING its
+        // request-scoped process ceiling.
+        let admitted = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.0),
+            fixture_budget(9.0),
             gib_to_bytes(4.0),
             0,
             &[],
             Some(&bundle),
             Some(&moved),
         )
-        .expect("a demoted request still evaluates against the generic estimator");
+        .expect("a stale ladder that fits with the widened margin must admit");
         assert_eq!(
-            evaluated.process_limit_bytes, None,
-            "a moved closure must not keep the calibrated request-scoped ceiling"
+            admitted.context.selection.strategy,
+            MemoryStrategy::BoundedDecode,
+            "the stale measured rung itself must be selected"
+        );
+        assert!(
+            admitted.process_limit_bytes.is_some(),
+            "a stale exact cell still derives the request-scoped ceiling"
         );
 
-        // The control: the SAME request with the closure unmoved keeps the verified rung, so the
-        // assertions above are discriminating rather than a request that never fit.
+        // The margin is APPLIED, not just plumbed (production-path mutation check): at 8.1 GiB the
+        // effective budget is 5.1 GiB — the RAW 5 GiB peak fits, the widened 5.25 GiB does not. A
+        // gate that stopped widening stale admission would admit here and flip this arm. The
+        // refusal quotes the graded host requirement: widened 5.25 GiB + the 3 GiB captured
+        // foreign reserve = 8.25 GiB.
+        let error = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.1),
+            gib_to_bytes(4.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&moved),
+        )
+        .expect_err("the raw peak fits 5.1 GiB but the WIDENED stale peak must not")
+        .to_string();
+        assert!(
+            error.contains("needs at least 8.25 GiB"),
+            "the refusal must quote the widened stale host requirement: {error}"
+        );
+
+        // The control: the SAME request with the closure unmoved is graded at the raw peak, so the
+        // 8.1 GiB budget that refused above admits — proving the refusal was the stale widening.
         let current = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.0),
+            fixture_budget(8.1),
             gib_to_bytes(4.0),
             0,
             &[],
             Some(&bundle),
             Some(&fixture_closure_lookup),
         )
-        .expect("the unmoved closure must still admit the verified rung");
+        .expect("the unmoved closure must still admit the verified rung at the raw peak");
         assert!(
             current.process_limit_bytes.is_some(),
             "the unmoved closure must still reach the exact verified cell"
+        );
+
+        // A stale record serves its OWN cell (the arms above) but may not SEED an extrapolation:
+        // at 768² — off the measured 1024² geometry — the moved-closure request gets no fitted
+        // basis and refuses on floors alone (staged/decode/attention floors widen to 9.9 GiB
+        // against 8 GiB), while the unmoved closure admits the fitted bounded-decode estimate
+        // (clamped scale 1.0, envelope 5 GiB widened to 5.5) at the same budget. A gate that let
+        // stale records seed extrapolations would admit BOTH and flip the first arm.
+        let off_geometry = fixture_inputs(768, 768);
+        let error = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &off_geometry,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&moved),
+        )
+        .expect_err("a stale-closure record must not seed a fitted extrapolation")
+        .to_string();
+        assert!(
+            error.contains("needs") && error.contains("safely available"),
+            "the stale-basis refusal is the floors-only Reject: {error}"
+        );
+        let fitted = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &off_geometry,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(8.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&fixture_closure_lookup),
+        )
+        .expect("the CURRENT-closure record is a legitimate fitted basis at the same budget");
+        assert_eq!(
+            fitted.context.selection.strategy,
+            MemoryStrategy::BoundedDecode,
+            "the fitted estimate from the current-closure cell must admit: {:?}",
+            fitted.context.selection
         );
     }
 
@@ -7568,9 +8593,16 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
+        // sc-18096 repin. The mismatched record's 5 GiB raw peak fits the 10 GiB budget easily, so
+        // ANY error here proves the record was excluded rather than authorizing the fit — the
+        // fail-closed property this test owns. What changed: the bounded-decode rung now also
+        // carries a synthesized floor estimate (weights 6 GiB + headroom 6 GiB, widened to 13.2),
+        // so the refusal is the honest "no rung fits with margins" `Reject` quoting the floor's
+        // widened requirement instead of an `Unverified`/`FingerprintMismatch` refusal.
         assert!(
-            error.contains("FingerprintMismatch"),
-            "mismatch must remain an unverified fail-closed result: {error}"
+            error.contains("needs 13.20 GiB"),
+            "the mismatched record must not authorize the fit; the refusal must quote the \
+             estimate floor instead: {error}"
         );
     }
 
@@ -8419,10 +9451,13 @@ mod tests {
         ));
     }
 
-    /// Decision 1: replacing `weights_fit_floor` must preserve the settled Decision 2 legacy result.
-    /// The renamed transition override uses the typed 2 GiB legacy reserve only for unverified cells.
+    /// The load-time weights floor (`weights_floor_load_admission`, formerly
+    /// `legacy_admission_override`) must preserve its settled small-Mac outcomes byte-for-byte
+    /// through sc-18096's retirement of the request-path freeze: a spec whose bare staged weights
+    /// fit still loads, and one whose weights cannot be held resident under any policy still
+    /// rejects at load.
     #[test]
-    fn legacy_admission_override_preserves_small_mac_behavior() {
+    fn weights_floor_load_admission_preserves_small_mac_behavior() {
         let gib = 1024 * 1024 * 1024_u64;
 
         // SANA-class small model on an 8 GB Mac: total 2 GiB (TE 1, rest 1). Peak = 2+18 = 20 ≫ 8 and
@@ -8460,9 +9495,10 @@ mod tests {
         );
     }
 
-    /// Decision 1's existing 8 GiB policy guard: until an exact cell opts into evidence, the settled
-    /// transition keeps this real on-disk q4 footprint on legacy. This is a policy outcome only, not
-    /// a model calibration or implementation claim. Measured
+    /// Decision 1's existing 8 GiB policy guard, preserved byte-for-byte through sc-18096: the
+    /// LOAD-time weights floor still admits this real on-disk q4 footprint (the request-scoped
+    /// estimate ladder owns transient bounding, not the loader). This is a policy outcome only,
+    /// not a model calibration or implementation claim. Measured
     /// tier layout: total 5.49 GiB (text_encoder 2.11, transformer 3.23, vae 0.15), so the largest
     /// single component the Sequential schedule ever holds wired is ~3.38 GiB. Against an 8 GB budget
     /// (legacy reserve 2 ⇒ 6 GiB weight budget) that admits with ~2.6 GiB of margin.
