@@ -524,8 +524,17 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
     "the static production contract must never assert verification by itself",
   );
 
+  // The manifest binding must be re-stamped alongside the records: sc-17774 made currency the
+  // provider's compile closure, and a record carrying a LIVE digest cannot match a binding still
+  // carrying a superseded one. Overriding only the evidence leaves the pair mismatched, so nothing
+  // promotes and this test reads as a scope regression when it is really a stale fixture.
   const onCurrentPin = await buildMatrix({
-    sourceOverrides: { calibrationEvidence: await qwenRung4OnCurrentPin() },
+    sourceOverrides: {
+      calibrationEvidence: await qwenRung4OnCurrentPin(),
+      manifest: await currentManifestCalibrationFixture({
+        select: (binding) => binding.provider === "qwen_image",
+      }),
+    },
   });
   const verified = onCurrentPin.cells.filter(
     (cell) =>
@@ -1045,15 +1054,28 @@ test("a shipping control lane is declared, not inferred from having been measure
   // fingerprint the cell now claims. A record measured against a different provider identity is not
   // this cell's history — attaching it would be the same category error as re-dating it onto the
   // new pin.
+  // Current has gone 2 -> 0 again, and correctly. sc-17774 made currency the provider's compile
+  // closure rather than the pin, and `mlx:krea_2_turbo_control` moved in this pin's window because
+  // two commits touched the shared `crates/media/mlx-gen` crate, which is a first-party dependency of
+  // every MLX provider's closure. The two runs are unchanged and still in the bundle; they were
+  // measured against a closure that is no longer live. Re-capturing them is the Krea calibration
+  // story's work. What this test still pins is the ROUTE binding above — that the cell resolves to
+  // the distinct `krea_2_turbo_control` provider at all — which is what sc-16069 is actually about.
   assert.equal(
     kreaBounded?.evidence.currentEnvironmentVerification.length,
-    2,
-    "both exact Krea control geometries are verified on the current runtime",
+    0,
+    "the Krea control runs were measured against a superseded provider closure",
   );
+  // History is the mirror of the line above: the two sc-16915 runs carry this cell's own calibration
+  // fingerprint, so when their closure went superseded they moved from `current` into `historical`
+  // rather than detaching. The pre-full-ladder runs
+  // (`krea-control-mlx-v4-q4-pose-bounded-decode-512-64`) still do not appear here — they were
+  // measured against a different provider identity, which is a category apart from a live identity
+  // whose closure has merely moved on.
   assert.equal(
     kreaBounded?.evidence.historicalVerification.length,
-    0,
-    "runs measured against the superseded provider fingerprint are not this cell's history",
+    2,
+    "this cell's own runs become its history once their closure is superseded",
   );
 
   for (const [modelId, provider] of [
@@ -1096,14 +1118,23 @@ test("a shipping control lane is declared, not inferred from having been measure
   // verbatim. It now asserts something: a declared lane with no measurement stays unverified while a
   // measured one is promoted, and the sc-16060 tests below prove the promotion path is live. What
   // this test forbids is DECLARATION alone producing verification.
-  // sc-16915 gave the MLX Krea control lane a current capture, so it is now the one verified control
-  // cell. Pinned by IDENTITY rather than as a count of zero: the claim being defended is that
-  // DECLARATION alone never verifies, which is stated more precisely by naming the single lane that
-  // earned it and requiring every other declared control lane to stay unverified.
+  // sc-16915 gave the MLX Krea control lane a current capture and this read `[KREA_CONTROL_CELL]`.
+  // It is back to empty because sc-17774 made currency the provider's compile closure and
+  // `mlx:krea_2_turbo_control` moved in this pin's window (the shared `crates/media/mlx-gen` crate is
+  // a first-party dependency of every MLX provider).
+  //
+  // On its own that is the vacuous shape the paragraph above warns about — with no cell able to hold
+  // `Verified`, "declaration alone never verifies" asserts nothing. It is NOT vacuous overall,
+  // because the promotion path is asserted against a promoted FIXTURE in
+  // "current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)",
+  // which was deliberately rebased off the shipped bundle for exactly this reason: shipped currency
+  // is not a stable thing to assert on, and that mutation has already gone inert twice by depending
+  // on it. What remains pinned here is the scope claim — that no UNDECLARED lane produces a control
+  // cell, checked above — which is what sc-16069 is actually about.
   assert.deepEqual(
     control.filter((cell) => cell.state === "Verified").map((cell) => cell.id),
-    [KREA_CONTROL_CELL],
-    "only a lane with a current control capture may be Verified",
+    [],
+    "no declared control lane holds a current capture at this closure",
   );
   const attachedZImageControl = control.filter(
     (cell) =>
@@ -1183,8 +1214,13 @@ test("the two rung-4 findings stay separate: structural applicability never impl
   assert.deepEqual(
     moves.map((row) => `${row.familyStory}:${row.backend}`).sort(),
     [
+      // SC-15524 (Anima), SC-15525 (SDXL + derivatives) and SC-15521 (Kolors) join the measured set
+      // with their MLX ladders: Anima moves the request peak 5.229 -> 4.151 GiB at window 1; the SDXL
+      // family moves it -6.97% (q4) to -21.40% (bf16) per entry per tier; Kolors moves it -7.21% /
+      // -12.72% / -21.37% by tier, and its `TextEncoder`/`Both` scopes move it a further -22.22% /
+      // -60.02% at bf16/512 where conditioning carries the peak.
       "15510:candle", "15510:mlx", "15511:mlx", "15512:candle", "15512:mlx", "15517:candle", "15517:mlx",
-      "15519:candle",
+      "15519:candle", "15521:mlx", "15524:mlx", "15525:mlx",
     ],
   );
   assert.equal(
@@ -2260,18 +2296,28 @@ async function historicalEvidenceFixture({
 async function currentManifestCalibrationFixture({
   select = (binding) => binding.provider === "krea_2_turbo_control",
 } = {}) {
-  const [manifest, cargo] = await Promise.all([
+  const [manifest, cargo, closureBody] = await Promise.all([
     readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
     readFile(new URL(`../${SOURCE_PATHS.cargo}`, import.meta.url), "utf8"),
+    readFile(new URL(`../${SOURCE_PATHS.inferenceClosures}`, import.meta.url), "utf8"),
   ]);
   const pin = cargo.match(
     /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/,
   )[1];
+  // sc-17774 moved currency off the pin and onto the provider's compile closure. The evidence
+  // fixture was migrated with it; this one was not, so it kept stamping only the revision. A record
+  // carrying a LIVE closure digest can never match a binding still carrying a stale one, which made
+  // every fixture built here un-promotable the moment any provider's closure moved — regardless of
+  // whether the provider under test was the one that moved.
+  const liveClosures = JSON.parse(closureBody).providers;
   const parsed = JSON.parse(stripJsoncComments(manifest));
   for (const model of parsed.models) {
     for (const backend of ["candle", "mlx"]) {
       for (const binding of model[backend]?.calibrations ?? []) {
-        if (select(binding)) binding.inferenceRevision = pin;
+        if (!select(binding)) continue;
+        binding.inferenceRevision = pin;
+        binding.inferenceClosureDigest =
+          liveClosures[`${backend}:${binding.provider}`]?.digest ?? binding.inferenceClosureDigest;
       }
     }
   }
@@ -2296,19 +2342,25 @@ const qwenRung4OnCurrentPin = () =>
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
   const shipped = await buildMatrix();
   const shippedCell = shipped.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
-  // sc-16915 re-collected both families at the current pin, so the POSITIVE half of this test is now
-  // observable on the shipped matrix. It previously read `Implemented/unverified`, on the grounds
-  // that every shipped record predated the pin. The negative half is preserved below as an explicit
-  // mutation rather than as a property of the shipped bundle happening to be stale — which is the
-  // stronger arrangement, because it stays meaningful once the evidence is current.
+  // sc-16915 re-collected both families at the then-current pin, so the POSITIVE half of this test
+  // was briefly observable on the shipped matrix. It has gone back to `Implemented/unverified`, and
+  // correctly: under sc-17774 currency is the provider's compile closure, and `mlx:krea_2_turbo_control`
+  // moved (records carry d355971e/3064f675, live is cbb83ed8) because two commits in this pin's
+  // window touched the shared `crates/media/mlx-gen` crate, which is a first-party dependency of
+  // every MLX provider's closure. Re-capturing is the Krea calibration story's work, not this PR's.
+  //
+  // The POSITIVE half is not lost — it is asserted below against `promotedQwen`, built from a fixture
+  // stamped with live closure digests. That is the stronger arrangement anyway: it stays meaningful
+  // whether or not the shipped bundle happens to be current.
   assert.equal(
     shippedCell.state,
-    "Verified",
-    "the shipped Krea records are current on the pinned inference revision",
+    "Implemented/unverified",
+    "the shipped Krea records were captured against a superseded provider closure",
   );
-  assert.ok(
-    shippedCell.evidence.currentEnvironmentVerification.length > 0,
-    "a Verified cell must carry the dynamic evidence its guard requires",
+  assert.equal(
+    shippedCell.evidence.currentEnvironmentVerification.length,
+    0,
+    "a cell with no current evidence must carry no current-environment verification",
   );
   const verifiedQwen = (matrix) =>
     matrix.cells.filter(
@@ -2332,8 +2384,8 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   );
   assert.equal(
     verifiedQwen(shipped),
-    9,
-    "the shipped Qwen opt-in is verified at the current pin",
+    0,
+    "the shipped Qwen opt-in was captured against a superseded provider closure",
   );
 
   const evidenceOnlyZ = await buildMatrix({
@@ -2419,14 +2471,34 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     "Qwen's OWN compile closure moving must fail closed instead of carrying verification forward",
   );
 
-  // MUTATION, and the negative half of this test's title. Re-stamping the SAME Krea records onto a
-  // superseded pin must demote the cell. Asserting only the positive direction would pass on a
-  // generator that promoted unconditionally — which is precisely the failure the `Verified` state
-  // exists to rule out.
+  // MUTATION, and the negative half of this test's title. The SAME Krea records must verify their
+  // cell when their closure is live and stop verifying it when it is superseded. Asserting only one
+  // direction would pass on a generator that promoted unconditionally — precisely the failure the
+  // `Verified` state exists to rule out.
   //
-  // This replaces the previous mutation, which re-stamped the records onto the CURRENT pin. That
-  // direction became a no-op once the shipped evidence was re-collected: the fixture and the shipped
-  // bundle now agree, so it asserted nothing and `movedIds` would have been empty.
+  // Both halves now run against FIXTURES rather than against the shipped bundle, because the shipped
+  // bundle's currency is not a stable thing to assert on. The mutation has already gone inert twice
+  // for that reason: once when the evidence was re-collected at the pin (the promote-direction became
+  // a no-op), and again once `mlx:krea_2_turbo_control`'s closure moved (the demote-direction became
+  // a no-op, since the shipped cell was already `Implemented/unverified`). Anchoring the baseline to
+  // a promoted fixture makes the pair meaningful regardless of what the shipped bundle happens to be.
+  const promotedKrea = await buildMatrix({
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture(),
+      manifest: await currentManifestCalibrationFixture(),
+    },
+  });
+  const promotedKreaCell = promotedKrea.cells.find((cell) => cell.id === KREA_CONTROL_CELL);
+  assert.equal(
+    promotedKreaCell.state,
+    "Verified",
+    "records carrying the live provider closure must verify their cell",
+  );
+  assert.ok(
+    promotedKreaCell.evidence.currentEnvironmentVerification.length > 0,
+    "a Verified cell must carry the dynamic evidence its guard requires",
+  );
+
   const demoted = await buildMatrix({
     sourceOverrides: { calibrationEvidence: await historicalEvidenceFixture() },
   });
@@ -2445,7 +2517,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   // Demotion is scoped to the cells those records bind. Nothing else may move.
   const movedIds = demoted.cells
     .filter(
-      (cell) => cell.state !== shipped.cells.find((other) => other.id === cell.id).state,
+      (cell) => cell.state !== promotedKrea.cells.find((other) => other.id === cell.id).state,
     )
     .map((cell) => cell.id);
   assert.deepEqual(movedIds, [KREA_CONTROL_CELL]);

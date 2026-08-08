@@ -288,8 +288,16 @@
             "qwen_image_edit_2511",
             "qwen_image_edit_2511_lightning"
           ],
-          "implementedTiers": ["bf16", "q4", "q8"],
-          "implementedOverlays": ["none", "lora", "identity"],
+          "implementedTiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "implementedOverlays": [
+            "none",
+            "lora",
+            "identity"
+          ],
           "strategyParameters": {
             "transformerWindowSize": 1,
             "transformerWindowComponent": "Dit"
@@ -332,10 +340,20 @@
             "finding": "moves",
             "scopes": [
               {
-                "entries": ["qwen_image"],
-                "tiers": ["bf16", "q4", "q8"],
-                "modes": ["text_to_image"],
-                "overlays": ["none"],
+                "entries": [
+                  "qwen_image"
+                ],
+                "tiers": [
+                  "bf16",
+                  "q4",
+                  "q8"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
                 "finding": "moves"
               }
             ],
@@ -360,10 +378,23 @@
             "qwen_image",
             "qwen_image_edit_2511"
           ],
-          "implementedTiers": ["bf16", "q4", "q8"],
-          "implementedOverlays": ["none"],
+          "implementedTiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "implementedOverlays": [
+            "none"
+          ],
           "strategyParameters": {
-            "transformerWindowSizes": [1, 2, 4, 8, 15, 30],
+            "transformerWindowSizes": [
+              1,
+              2,
+              4,
+              8,
+              15,
+              30
+            ],
             "transformerWindowComponent": "Dit"
           },
           "summary": "The Candle/CUDA provider reopens the uniform 60-block base/edit DiT from dense mmap tensors or content-addressed packed sidecars and materializes exact shared block windows. The head and tail remain resident. Adapter-bearing requests, including Lightning's built-in LoRA, retain the established additive/folded path and report rung 4 Missing.",
@@ -392,25 +423,33 @@
               "reason": "Dense and packed loaders retain a static source and replay one exact `candle_gen::block_window::BlockPlan` window at a time, with cancellation checks, synchronization before release, and ragged-final-window parity coverage."
             }
           ],
-            "requestPeak": {
-              "finding": "unmeasured",
-              "scopes": [
-                {
-                  "entries": ["qwen_image"],
-                  "tiers": ["q4"],
-                  "modes": ["text_to_image"],
-                  "overlays": ["none"],
-                  "finding": "does-not-move"
-                }
-              ],
-              "reason": "SC-15817's representative base-Q4 CUDA capture loaded the exact current artifact and measured the bounded-attention and window-1 transformer compositions at the same 29,700,915,200-byte request peak because conditioning remained dominant. The capture is candidate/gated conformance rather than promotion evidence; unmeasured sibling tiers, modes, and overlays still require their own calibration stories.",
-              "evidence": [
-                {
-                  "source": "docs/generated/qwen-candle-five-rung-sc-15817.json",
-                  "reason": "Schema-valid real-weight records bind all five rungs to the exact artifact, CUDA device, load shape, paired repository revisions, phase peaks, and passed loadability without promoting a fit."
-                }
-              ]
-            },
+          "requestPeak": {
+            "finding": "unmeasured",
+            "scopes": [
+              {
+                "entries": [
+                  "qwen_image"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "does-not-move"
+              }
+            ],
+            "reason": "SC-15817's representative base-Q4 CUDA capture loaded the exact current artifact and measured the bounded-attention and window-1 transformer compositions at the same 29,700,915,200-byte request peak because conditioning remained dominant. The capture is candidate/gated conformance rather than promotion evidence; unmeasured sibling tiers, modes, and overlays still require their own calibration stories.",
+            "evidence": [
+              {
+                "source": "docs/generated/qwen-candle-five-rung-sc-15817.json",
+                "reason": "Schema-valid real-weight records bind all five rungs to the exact artifact, CUDA device, load shape, paired repository revisions, phase peaks, and passed loadability without promoting a fit."
+              }
+            ]
+          },
           "findings": [
             "Head-once/tail-tiled VAE decode exposes 768, 640, 512, 448, 384, 320, and 256 output-pixel tile edges at overlap 64. Overlap 96 remains only the rejected sub-512 experiment arm.",
             "Lightning and all user-adapter requests preserve their pre-story semantics through the existing additive/folded path and do not inherit the no-overlay rung-4 claim.",
@@ -574,7 +613,14 @@
                 "none"
               ],
               "strategyParameters": {
-                "transformerWindowSizes": [1, 2, 4, 8, 12, 24],
+                "transformerWindowSizes": [
+                  1,
+                  2,
+                  4,
+                  8,
+                  12,
+                  24
+                ],
                 "transformerWindowComponent": "Dit"
               }
             }
@@ -601,10 +647,18 @@
             "finding": "unmeasured",
             "scopes": [
               {
-                "entries": ["lens_turbo"],
-                "tiers": ["q4"],
-                "modes": ["text_to_image"],
-                "overlays": ["none"],
+                "entries": [
+                  "lens_turbo"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
                 "finding": "moves"
               }
             ],
@@ -1322,10 +1376,18 @@
             "finding": "unmeasured",
             "scopes": [
               {
-                "entries": ["flux2_dev"],
-                "tiers": ["q4"],
-                "modes": ["text_to_image"],
-                "overlays": ["none"],
+                "entries": [
+                  "flux2_dev"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
                 "finding": "moves"
               }
             ],
@@ -1433,8 +1495,8 @@
       "backends": {
         "mlx": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "The SDXL U-Net reused verbatim, so the same 2- and 10-deep spatial-transformer sub-stacks inside a conv trunk, plus a ChatGLM3 encoder that is a uniform stack of its own.",
+          "implementation": "shared-primitive",
+          "summary": "The SDXL U-Net reused verbatim — eleven Transformer2D at depths [2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2], six at depth 10 and five at depth 2, 70 windowable blocks inside a non-windowable conv trunk — PLUS a ChatGLM3-6B encoder that is a uniform 28-block stack of its own. Kolors is therefore the ladder's first family to publish more than one rung-4 SCOPE: `Dit`, `TextEncoder` and `Both`.",
           "blockStacks": [
             {
               "name": "attentions[*].transformer_blocks (level 1)",
@@ -1476,14 +1538,71 @@
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/controlnet.rs",
               "reason": "The control route adds the SDXL `ControlNet`, a second down-path whose `UNetBlock2D`s carry the same `attentions: Option<Vec<Transformer2D>>` the base UNet does. It has no up path, so at the [1, 2, 10] depths it is 34 TransformerBlocks across 5 Transformer2D modules — 4 at level 1, 20 at level 2, 10 in the mid block — every one running each step."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1, 2, 5, 10]`, `TRANSFORMER_WINDOW_SIZE = 1` and `TRANSFORMER_WINDOW_COMPONENTS = [Dit, TextEncoder, Both]` under fingerprint `kolors-mlx-chatglm3-sdxl-unet-ladder-v1` — deliberately NOT shared with SDXL's, because the numbers do not transfer even though the U-Net module does. `streamable` requires BOTH `load_leaves_blocks_lazy` (unet) and `text_encoder_leaves_blocks_lazy` (ChatGLM3), plus `adapters_are_replayable`, which refuses a LoRA load at the dense bf16 tier."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/tests/memory_ladder_real_weights.rs",
+              "reason": "`the_text_encoder_window_bounds_the_conditioning_bearing_cell` measures all three scopes at bf16/512² against the 11.3644 GiB staged control, and `the_rung_four_stream_replays_an_installed_ip_adapter` proves an IP-armed rung-4 render is reachable in production."
             }
           ],
           "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Kolors."
+            "finding": "moves",
+            "reason": "Measured on Kolors' own weights (Apple/Metal, byte-identical output), never inherited from SC-15525. Per tier at 1024²/4 steps, rung 4 `Dit` against that tier's own staged control: q4 −7.21% (16.0411 → 14.8840 GiB), q8 −12.72%, bf16 −21.37% — the saving is the whole `transformer_blocks` weight set (1.1468 / 2.1638 / 4.0706 GiB by tier), and the measured saving exceeds the most a windowed-forward peak could give (1.1572 vs a 1.1285 GiB ceiling on q4), which is what proves the phase-separation mechanism. The SCOPE axis is the family's own finding: at bf16/512² against the 11.3644 GiB staged control the three scopes read `Dit` 11.3644 (+0.00%), `TextEncoder` 8.8396 (−22.22%) and `Both` 4.5436 (−60.02%) — because ChatGLM3-6B is larger than the U-Net at every tier (3.98 / 6.64 / 11.63 GiB against 1.80 / 2.84 / 4.80), so at the geometry where conditioning carries the peak the Dit scope alone moves nothing at all. The peak is flat across the whole cadence domain [1,2,5,10]; cadence buys wall clock only (3745 → 1507 ms/step at 1024² q4).",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/tests/memory_ladder_real_weights.rs",
+                "reason": "The full-ladder real-weight harness records each tier's staged control and rung-4 request peak with a warm-up row before every published peak, and asserts byte-identical pixels."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
+                "reason": "The per-tier arithmetic reconciles each measured saving against the summed `transformer_blocks` safetensors bytes, and the three-scope table is measured at bf16/512²."
+              }
+            ]
           },
           "findings": [
-            "See the SDXL family entry (SC-15525) for why a U-Net is not Structurally N/A here. Kolors inherits that verdict exactly, because it inherits the module."
+            "See the SDXL family entry (SC-15525) for why a U-Net is not Structurally N/A here. Kolors inherits that verdict exactly, because it inherits the module — but it inherits NONE of the numbers, because it conditions on ChatGLM3-6B rather than SDXL's CLIP-L + OpenCLIP-bigG pair, and that inverts which phase carries the request peak at several advertised geometries.",
+            "Kolors is the first family in the ladder to publish a rung-4 SCOPE domain of more than one value: `transformer_window_components = [Dit, TextEncoder, Both]`. The matrix already carries the scope axis as `transformerWindowComponent` inside `strategyParameters` (and `transformerWindowComponents` inside `publishedRanges`), so no schema change was needed to express it — but this is the first time the domain is genuinely three-valued and the choice is load-bearing rather than degenerate.",
+            "The production default stays the TIGHT cadence 1, unlike SDXL's 10, and the `Dit` scope, unlike the `Both` that wins at 512². Both are the provider's declarations; the selector may name any point in the published domains.",
+            "Rungs 2 and 3 are `Missing` WITH measurements. Rung 2 is by a wide margin the biggest lever on this family's ladder — at 1024² q4 it takes the whole staged request from 16.0412 → 9.9981 GiB (−37.67%) for +10% wall clock (925 → 1018 ms/step), against rung 4's −7.21% for +4.2× — and it CLEARS the 48/255 inherited drift bar at 1024² (38) and 1280² (26), but FAILS it at 1536² (69) and 2048² (53). `MemoryParameterRanges::decode_tile_edges` is an absolute pixel domain with no geometry axis, so no fixed edge holds a constant tile fraction across a 2× output range; the unlock is tracked as sc-17678. Rung 3 moves the peak 0.00% at both measured scopes — the request (16.0412 → 16.0410 GiB) and the U-Net seam (5.3652 → 5.3652 GiB, reproduced across three runs) — and is not bit-exact (max|Δeps| 3.929e-3, 16/255 of image movement at one step, 212/255 by four). An earlier revision published the seam as +12.54% from an un-warmed control: MLX's first `run` in a process reads ~4.6-4.8 GiB whichever plan it executes."
+          ],
+          "implementationScopes": [
+            {
+              "entries": [
+                "kolors"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none",
+                "identity"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "kolors"
+              ],
+              "tiers": [
+                "q4",
+                "q8"
+              ],
+              "overlays": [
+                "none",
+                "lora",
+                "identity"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "Dit"
+              }
+            }
           ]
         },
         "candle": {
@@ -1700,8 +1819,8 @@
       "backends": {
         "mlx": {
           "structuralApplicability": "full",
-          "implementation": "none",
-          "summary": "One uniform 28-block DiT stack over the original Cosmos key naming.",
+          "implementation": "shared-primitive",
+          "summary": "One uniform 28-block DiT stack over the original Cosmos key naming, windowed through `mlx_gen::block_residency::run_windowed`. The window is declared per LOAD, not per tier: it needs `LoadShape::DeferredMaterialization` (`streamable`) so the stack was never bulk-committed, and rung 1 engaged in the same request so the released phases are what the bound competes against.",
           "blockStacks": [
             {
               "name": "blocks",
@@ -1717,14 +1836,43 @@
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/config.rs",
               "reason": "`num_layers: 28` for the DiT; the separate 6-layer figure in the same file is the text conditioner, not the trunk."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1]`, `TRANSFORMER_WINDOW_SIZE = 1` and `TRANSFORMER_WINDOW_COMPONENTS = [Dit]`, under fingerprint `anima-mlx-cosmos-shared-ladder-v1`. The TextEncoder scope is deliberately NOT published: rung 1 already sheds the Qwen3-0.6B tower, and the 6-block conditioner is ~1% of the DiT checkpoint, so the only honest measured value for that scope is 0.0%."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/tests/shared_memory_ladder_real_weights.rs",
+              "reason": "Real-weight window sweep on anima_base bf16 at 1024²: the denoise phase falls 5.229 → 1.110 GiB at window 1 and the request peak falls 5.229 → 4.151 GiB, byte-identical output. Windows 2/4/14/28 are refused (1.497 GiB), so 1 is the whole admitted domain."
             }
           ],
           "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Anima."
+            "finding": "moves",
+            "reason": "Measured on anima_base bf16 at 1024² (Apple/Metal). Rung 4 at the published window 1 takes the DENOISE phase 5.229 → 1.110 GiB and the REQUEST peak 5.229 → 4.151 GiB (−20.6%), byte-identical output; the published window measures 1.304 GiB of denoise inside a 4.151 GiB request. Windows 2/4/14/28 are refused, so the domain is [1]. Reproducibility across runs: 1.110 / 1.497 / 1.497 / 1.497 / 1.497 / 5.229 and 1.304 / 4.151 — window 1 differs from the next admitted plan by a real 26% (1.110 vs 1.497). Only anima_base bf16 has been measured; q4/q8 carry the capability claim, not a measured peak.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-anima/tests/shared_memory_ladder_real_weights.rs",
+                "reason": "Serial real-weight request comparison records the rung-4 denoise and request peaks against the exact unwindowed reference and asserts byte-identical pixels."
+              }
+            ]
           },
           "findings": [
-            "Anima's Qwen3-0.6B encoder reuses Z-Image's decoder block, which is the same module Z-Image's shipped TE streaming windows. A TextEncoder-scoped rung 4 here is therefore the smallest port in the catalog — the block constructor already exists in a streamed form."
+            "Anima's Qwen3-0.6B encoder reuses Z-Image's decoder block, which is the same module Z-Image's shipped TE streaming windows. A TextEncoder-scoped rung 4 here is therefore the smallest port in the catalog — the block constructor already exists in a streamed form.",
+            "The scope is published as `Dit` only, and that is a measured decision rather than an omission: rung 1 already sheds the Qwen3-0.6B tower before denoise, and the 6-block `llm_adapter` conditioner is ~1% of the DiT checkpoint, so a TextEncoder scope's only honest measured value on this family is 0.0%.",
+            "Rung 4 is declared per LOAD (`streamable` = `LoadShape::DeferredMaterialization`), not per tier. Anima's only matrix tier today is q4 because the catalog entry has no hosted per-tier download variant — the q4/q8/bf16 matrix is packed on-device by the `anima_quant` converter — so the tier axis of this claim is narrower than the family's real tier surface."
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "implementedEntries": [
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo"
+          ],
+          "implementedOverlays": [
+            "none",
+            "lora"
           ]
         },
         "candle": {
@@ -1763,17 +1911,17 @@
       "backends": {
         "mlx": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "NOT Structurally N/A. The conv/resnet trunk and its skip connections are not windowable, but each Transformer2D holds a genuine uniform stack of TransformerBlock — depth 10 at the lowest resolution and in the mid block, depth 2 at the middle level.",
+          "implementation": "shared-primitive",
+          "summary": "NOT Structurally N/A. The conv/resnet trunk and its skip connections are not windowable, but each Transformer2D holds a genuine uniform stack of TransformerBlock. SDXL-base has ELEVEN Transformer2D in forward order at depths [2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2] — six at depth 10 and FIVE at depth 2 — for 70 windowable blocks in total. `mlx_gen::block_residency::run_windowed` is driven once per Transformer2D at a shared cadence.",
           "blockStacks": [
             {
               "name": "down/up level 1 attentions[*].transformer_blocks",
-              "blocks": "2 per Transformer2D",
+              "blocks": "2 per Transformer2D × 5 stacks (down_blocks.1 ×2, up_blocks.1 ×3) = 10 blocks",
               "windowable": true
             },
             {
               "name": "down/up level 2 + mid attentions[*].transformer_blocks",
-              "blocks": "10 per Transformer2D",
+              "blocks": "10 per Transformer2D × 6 stacks (down_blocks.2 ×2, mid_block ×1, up_blocks.0 ×3) = 60 blocks",
               "windowable": true
             },
             {
@@ -1794,16 +1942,115 @@
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/mod.rs",
               "reason": "The forward collects down-path skip residuals and pops them on the up path, so those activations are alive across the whole pass."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/unet/mod.rs",
+              "reason": "`windowable_depths` records every windowable sub-stack's depth in forward order — for SDXL-base `[2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2]`: eleven Transformer2D, six at depth 10 and FIVE at depth 2, 70 windowable blocks in total. SC-16355's survey text said four 2-deep sub-stacks; the up path carries `layers_per_block + 1 = 3` attentions, so it is five."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1, 2, 5, 10]` and `TRANSFORMER_WINDOW_SIZE = 10` (SC-17679 moved the default 1 → 10), scope `[Dit]`, under fingerprint `sdxl-mlx-unet-shared-ladder-v3`. `streamable` additionally requires `adapters_are_replayable`, which is true only on an already-packed snapshot — so a LoRA load arms rung 4 at q4/q8 and is refused at dense bf16."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/tests/memory_ladder_real_weights.rs",
+              "reason": "`EXPECTED_RUNG_FOUR` pins per-entry-per-tier coverage: sdxl/bf16, realvisxl/{bf16,q4,q8} and realvisxl_lightning/q4 publish the rung; illustrious_xl_v1/q8 and illustrious_xl_v2/q8 do not."
             }
           ],
           "requestPeak": {
-            "finding": "unmeasured",
-            "reason": "No rung-4 run exists for the SDXL family."
+            "finding": "moves",
+            "scopes": [
+              {
+                "entries": [
+                  "illustrious_xl_v1",
+                  "illustrious_xl_v2"
+                ],
+                "finding": "unmeasured"
+              }
+            ],
+            "reason": "Measured per entry per tier at 1024²/4 steps against that same entry's own staged control, at the shipped cadence (Apple/Metal, byte-identical output): sdxl bf16 19.005 → 14.938 GiB (−21.40%); realvisxl bf16 19.003 → 14.936 (−21.40%); realvisxl q8 17.693 → 15.516 (−12.31%); realvisxl q4 16.654 → 15.493 (−6.97%); realvisxl_lightning q4 16.654 → 15.493 (−6.97%). The saving is the whole `transformer_blocks` weight set (4.071 / 2.166 / 1.149 GiB by tier), so what rung 4 is worth is a function of the tier — a selector sizing it off the q8 row under-buys at bf16 by a factor of three. The peak column is FLAT across the whole cadence domain [1,2,5,10] at every geometry the instrument can resolve, because the peak is taken in the decode rather than in the windowed forward; cadence buys wall clock only (1262 vs 3524 ms/step at 1024²), which is why SC-17679 moved the default to the widest cadence 10. illustrious_xl_v1/v2 are `unmeasured`: their staged peak is realvisxl q8's 17.693 GiB to the millibyte, but rung 4 never ran on them because `streamable` refuses their snapshot (sc-17522).",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/tests/memory_ladder_real_weights.rs",
+                "reason": "`every_catalog_entry_loads_and_publishes_the_ladder` takes each entry's staged control and rung-4 request peak on that entry's own weights and checks which ladder each entry publishes."
+              },
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+                "reason": "The cadence sweep records the flat peak column across [1,2,5,10] at bf16/q8/q4 × 1024²/768²/512², and the two once-non-flat 512² cells are withdrawn as positional allocator noise (SC-17679)."
+              }
+            ]
           },
           "findings": [
             "The story's first trap is confirmed against the code and the classification is `partial`, not N/A. Its `[0, 2, 10]` shorthand is right about the SHAPE: the config array is [1, 2, 10], but level 0 is a DownBlock2D/UpBlock2D with no attention, so its entry is never read and the effective depths are 2 and 10.",
-            "The skip connections bound the SIZE of the win, not its validity. They keep down-path ACTIVATIONS alive across the forward, and rung 4 bounds WEIGHT residency — so the weight bound over each 10-deep sub-stack still holds; what does not shrink is the activation term it is competing against. That is why this family needs a measurement before selection, not a structural exemption.",
-            "The rung would need a plan PER Transformer2D, not one per model: there are six 10-deep sub-stacks (two on the down path, one in the mid block, three on the up path) and the residency floor is one block of the widest level. `BlockPlan` expresses each of them unchanged; what is missing is a family loader that can re-read a single `down_blocks.N.attentions.M.transformer_blocks.K` from the snapshot."
+            "SC-15525's survey text said SDXL has FOUR 2-deep `Transformer2D` sub-stacks. It is FIVE: the down path contributes two (down_blocks.1) and the up path three, because an up block carries `layers_per_block + 1 = 3` attentions. The full forward-order depth array is [2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2] — eleven Transformer2D, 70 windowable blocks.",
+            "The skip connections bound the SIZE of the win, not its validity. They keep down-path ACTIVATIONS alive across the forward, and rung 4 bounds WEIGHT residency — so the weight bound over each 10-deep sub-stack still holds; what does not shrink is the activation term it is competing against. The measured wins (−6.97% to −21.40% by tier) are that competition priced.",
+            "The rung needs a plan PER Transformer2D, not one per model, and that is what shipped: eleven `BlockPlan`s at a shared cadence. `BlockPlan::new` clamps a window to its stack's depth, so a cadence wider than 2 degrades the five 2-deep sub-stacks to fully resident rather than erroring — which is why the domain is stated once and not per depth, and why 10 is the widest cadence that means anything here.",
+            "Rungs 2 and 3 are `Missing` WITH measurements rather than unattempted. Rung 2's tiled decode works and is the family's biggest lever — 19.0032 → 15.8660 GiB (−16.51%) of request peak for ~7% wall clock, isolated decode 14.360 → 11.237 GiB (−21.7%) at edge 896 — but it is withheld on QUALITY: the inherited sibling drift bar is 48/255, and on the production latent the same 1024²/edge-896/overlap-192 geometry drifts 84/255 (the synthetic-latent sweep read 38, which is why the withholding argument had to be measured on production latents). It fails the bar outright at 1280²/1536²/2048², and `decode_tile_edges` has no geometry axis to vary the edge with output size. Rung 3's `sdpa_budgeted_bhsd` reaches every attention site including the IP-Adapter branch, but moves the peak 0.00% at BOTH measured scopes — the request (19.0032 → 19.0032 GiB) and the U-Net seam (6.5868 → 6.5868 GiB) — and is not bit-exact on its query-row axis (max|Δeps| 5.25e-3 at one step; 57/255 of image movement at one step, a different image by six). An earlier revision published the seam as +5.1% from an un-warmed control; warmed, both U-Nets read +0.00%.",
+            "illustrious_xl_v1 and illustrious_xl_v2 are `Missing` at rung 4 outright, because q8 is their only advertised tier. The cause is the SNAPSHOT, not the architecture: their `unet/` weights are genuinely packed (u32 codes with .scales/.biases, 3.46 GiB, byte-for-byte realvisxl q8's shape) but their `unet/config.json` ships without the `quantization` marker, so `packed_quant_bits` reads nothing, `needs_load_time_quant` returns true, `load_leaves_blocks_lazy` is false and `streamable` refuses. The rung fails closed, which is correct; the repair is a republished snapshot, tracked as sc-17522."
+          ],
+          "implementationScopes": [
+            {
+              "entries": [
+                "sdxl"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "realvisxl"
+              ],
+              "tiers": [
+                "bf16"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "realvisxl"
+              ],
+              "tiers": [
+                "q4",
+                "q8"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            },
+            {
+              "entries": [
+                "realvisxl_lightning"
+              ],
+              "tiers": [
+                "q4"
+              ],
+              "overlays": [
+                "none",
+                "lora"
+              ],
+              "strategyParameters": {
+                "transformerWindowSize": 10,
+                "transformerWindowComponent": "Dit"
+              }
+            }
           ]
         },
         "candle": {

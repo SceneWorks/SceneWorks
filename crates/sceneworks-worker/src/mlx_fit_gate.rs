@@ -3224,8 +3224,14 @@ mod tests {
     /// The rest of the assertion is unweakened. It still requires the full five-rung bf16 ladder —
     /// checked as a rung SET on the bf16 subset rather than as a total count, so adding the q8/q4
     /// tiers cannot mask a dropped bf16 rung the way a bare `bindings.len()` would.
+    ///
+    /// What this test grades is the SHAPE of the shipped opt-in — one captured closure, the full
+    /// per-tier ladder — not its currency. Currency is a comparison against the live table and it
+    /// belongs where the consequence is observable, which is the two admission-route tests below.
+    /// Grading it here as well made this red whenever a shared `mlx-gen` crate moved, which says
+    /// nothing about whether the ladder is complete.
     #[test]
-    fn shipped_qwen_manifest_carries_every_tier_ladder_at_the_current_closure() {
+    fn shipped_qwen_manifest_carries_every_tier_ladder_at_one_captured_closure() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3244,13 +3250,16 @@ mod tests {
             9,
             "bf16 five-rung ladder plus q8 and q4 pairs"
         );
-        let live = live_mlx_closure_digest("qwen_image");
         assert!(
-            !live.is_empty(),
+            !live_mlx_closure_digest("qwen_image").is_empty(),
             "qwen_image must be declared in config/inference-provider-closures.json; an undeclared \
-             lane resolves to the fail-closed empty expectation and would make the comparison below \
-             vacuously discriminating for the wrong reason"
+             lane resolves to the fail-closed empty expectation, which would make every currency \
+             comparison in this module discriminating for the wrong reason"
         );
+        // Read from the manifest, so this is "every binding agrees with every other" rather than a
+        // hex literal that has to be re-typed on each re-capture. `shipped_mlx_declared_closure_digest`
+        // already refuses a split opt-in, so a single stale row cannot hide inside a current ladder.
+        let declared = shipped_mlx_declared_closure_digest("qwen_image");
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
                 && binding.provider == "qwen_image"
@@ -3263,7 +3272,7 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                && binding.query.inference_closure_digest == live
+                && binding.query.inference_closure_digest == declared
         }));
         // The load shape is a receipt axis, not a naming convention: rung 4 goes deferred and every
         // other rung is eager, on every tier. A bundle where one shape covers all rows is the tell
@@ -3321,8 +3330,16 @@ mod tests {
     ///
     /// The count assertion is what makes a dropped record fail: `path == Evidence` only needs the
     /// candidate list to be non-empty, so one surviving rung would mask the loss of every other.
+    ///
+    /// sc-17774 split this into the two questions it had been conflating. AGREEMENT — do the two
+    /// shipped artefacts describe the same measurements — is graded at the closure they were both
+    /// captured under, and is therefore true regardless of where the pin has since moved. CURRENCY
+    /// is graded separately, at the live closure, and is DERIVED from the digest pair rather than
+    /// asserted: once a shared `mlx-gen` crate moves, calibrated admission must refuse, and that
+    /// refusal is asserted here rather than skipped. Both branches are live code, so a re-capture
+    /// restores the `Evidence` requirement with no edit to this test.
     #[test]
-    fn shipped_qwen_manifest_and_packaged_evidence_select_the_calibrated_path() {
+    fn shipped_qwen_manifest_and_packaged_evidence_agree_at_their_captured_closure() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3340,6 +3357,8 @@ mod tests {
             .and_then(|mlx| mlx.get("calibrations"))
             .and_then(Value::as_array)
             .expect("qwen_image declares mlx.calibrations");
+        let declared = shipped_mlx_declared_closure_digest("qwen_image");
+        let live = live_mlx_closure_digest("qwen_image");
 
         for (tier, quant, expected_rungs) in [
             ("bf16", None, 5_usize),
@@ -3398,19 +3417,22 @@ mod tests {
 
             let mut inputs = fixture_inputs(dimension("width"), dimension("height"));
             inputs.overlay = None;
+            // Graded at the closure both artefacts were captured under. This is the agreement claim
+            // and it does not expire: whether the manifest opt-in and the bundle describe the same
+            // measurements is a fact about the two files, not about the pin.
             let route = packaged_admission_route(
                 &plan,
                 &inputs,
                 &text("mode"),
                 fixture_budget(128.0),
-                &live_mlx_closure_digest("qwen_image"),
+                &declared,
             )
             .expect("a covered cell must not error");
             assert_eq!(
                 route.path,
                 AdmissionPath::Evidence,
-                "{tier}: shipped manifest + shipped evidence must reach calibrated admission; \
-                 got fallback {:?}",
+                "{tier}: shipped manifest + shipped evidence must reach calibrated admission at \
+                 the closure they were captured under; got fallback {:?}",
                 route.fallback_reason
             );
             assert_eq!(
@@ -3425,6 +3447,42 @@ mod tests {
                     .all(|candidate| !candidate.record_id.is_empty()),
                 "{tier}: each candidate names the exact record backing it"
             );
+
+            // The currency claim, derived from the digest pair rather than hardcoded either way.
+            // `mlx:qwen_image`'s closure covers `crates/media/mlx-gen`, which every MLX provider
+            // depends on, so an edit for another model legitimately re-dates this ladder. When that
+            // has happened the only honest outcome is a refusal — asserted, not skipped — and the
+            // `Evidence` requirement returns by itself once the ladder is re-captured.
+            let at_live = packaged_admission_route(
+                &plan,
+                &inputs,
+                &text("mode"),
+                fixture_budget(128.0),
+                &live,
+            )
+            .expect("a moved provider closure degrades, it never errors");
+            if declared == live {
+                assert_eq!(
+                    at_live.path,
+                    AdmissionPath::Evidence,
+                    "{tier}: an opt-in AT the live closure must still reach calibrated admission; \
+                     got fallback {:?}",
+                    at_live.fallback_reason
+                );
+            } else {
+                assert_eq!(
+                    at_live.path,
+                    AdmissionPath::Legacy,
+                    "{tier}: evidence captured under a superseded mlx:qwen_image closure may not \
+                     authorize calibrated admission"
+                );
+                assert_eq!(
+                    at_live.fallback_reason,
+                    Some(LegacyAdmissionReason::StaleIdentity),
+                    "{tier}: the demotion must be the closure comparison, not a missing record or \
+                     an unparseable opt-in"
+                );
+            }
         }
 
         // Mutation check for the axis this story exists to restore. Asserting only the route above
@@ -3432,6 +3490,10 @@ mod tests {
         // so corrupting one cell's shape just selects a different cell and still reaches Evidence.
         // Flip EVERY declared shape and the whole opt-in must stop matching — the receipts say
         // which cells were measured eager and which deferred, and the two are not interchangeable.
+        //
+        // Driven at `declared`, not at the live closure. Once the two diverge the live route is
+        // ALREADY `Legacy`/`StaleIdentity` for currency reasons, so a mutation graded there proves
+        // nothing about the load-shape axis — the assertion would pass with the mutation reverted.
         let bf16 = calibrations
             .iter()
             .find(|item| item.get("tier").and_then(Value::as_str) == Some("bf16"))
@@ -3482,7 +3544,7 @@ mod tests {
             &inputs,
             "text_to_image",
             fixture_budget(128.0),
-            &live_mlx_closure_digest("qwen_image"),
+            &declared,
         )
         .expect("a load-shape mismatch degrades, never errors");
         assert_eq!(
@@ -3503,9 +3565,11 @@ mod tests {
     /// The krea half of the same guarantee. `packaged_krea_plan` synthesizes its bindings FROM the
     /// evidence records, so it is current-by-construction and structurally cannot notice the
     /// shipped krea manifest disagreeing with the shipped bundle. krea_2_turbo_control is a covered
-    /// provider of sc-16915, so it gets the same real-manifest × real-evidence route check qwen has.
+    /// provider of sc-16915, so it gets the same real-manifest × real-evidence route check qwen has
+    /// — including the same sc-17774 split between agreement (at the captured closure, permanent)
+    /// and currency (at the live closure, derived).
     #[test]
-    fn shipped_krea_manifest_and_packaged_evidence_select_the_calibrated_path() {
+    fn shipped_krea_manifest_and_packaged_evidence_agree_at_their_captured_closure() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3528,6 +3592,8 @@ mod tests {
             2,
             "the shipped krea opt-in is the 768² and 896² pose-control pair"
         );
+        let declared = shipped_mlx_declared_closure_digest("krea_2_turbo");
+        let live = live_mlx_closure_digest("krea_2_turbo_control");
 
         for binding in calibrations {
             let text = |key: &str| {
@@ -3585,18 +3651,55 @@ mod tests {
                 &inputs,
                 &text("mode"),
                 fixture_budget(128.0),
-                &live_mlx_closure_digest("krea_2_turbo_control"),
+                &declared,
             )
             .expect("a covered krea cell must not error");
             assert_eq!(
                 route.path,
                 AdmissionPath::Evidence,
-                "{}x{}: shipped krea manifest + evidence must reach calibrated admission; \
-                 got fallback {:?}",
+                "{}x{}: shipped krea manifest + evidence must reach calibrated admission at the \
+                 closure they were captured under; got fallback {:?}",
                 dimension("width"),
                 dimension("height"),
                 route.fallback_reason
             );
+
+            // Currency, derived. `mlx:krea_2_turbo_control`'s closure spans `mlx-gen` and five
+            // sibling provider crates, so it moves on work that has nothing to do with Krea. When it
+            // has, refusal is the only honest answer and it is asserted here, not skipped.
+            let at_live = packaged_admission_route(
+                &plan,
+                &inputs,
+                &text("mode"),
+                fixture_budget(128.0),
+                &live,
+            )
+            .expect("a moved provider closure degrades, it never errors");
+            if declared == live {
+                assert_eq!(
+                    at_live.path,
+                    AdmissionPath::Evidence,
+                    "{}x{}: an opt-in AT the live closure must still reach calibrated admission",
+                    dimension("width"),
+                    dimension("height"),
+                );
+            } else {
+                assert_eq!(
+                    at_live.path,
+                    AdmissionPath::Legacy,
+                    "{}x{}: evidence captured under a superseded mlx:krea_2_turbo_control closure \
+                     may not authorize calibrated admission",
+                    dimension("width"),
+                    dimension("height"),
+                );
+                assert_eq!(
+                    at_live.fallback_reason,
+                    Some(LegacyAdmissionReason::StaleIdentity),
+                    "{}x{}: the demotion must be the closure comparison, not a missing record",
+                    dimension("width"),
+                    dimension("height"),
+                );
+            }
         }
     }
 
@@ -4206,6 +4309,67 @@ mod tests {
         sceneworks_core::memory_calibration::packaged_closure_digest(backend, provider)
     }
 
+    /// The compile-closure digest the SHIPPED `mlx.calibrations` opt-in for `model_id` declares —
+    /// the closure its bindings, and the packaged records behind them, were measured under.
+    ///
+    /// Deliberately NOT [`live_mlx_closure_digest`]. That one answers "what does the pinned
+    /// inference tree compile to now"; this one answers "what did these measurements describe". The
+    /// two are equal exactly while the opt-in is current, and the tests below DERIVE that verdict
+    /// from the pair rather than assuming either side of it. They have to: the MLX providers share
+    /// first-party crates (`crates/media/mlx-gen` is in every one of their closures), so an edit
+    /// aimed at one model legitimately re-dates the others. That is the closure mechanism being
+    /// conservative, not an opt-in that broke, and a test that hardcodes "current" turns it into a
+    /// red build instead of a re-capture signal.
+    ///
+    /// Uniformity across the model's bindings is asserted rather than assumed: a split opt-in would
+    /// let one stale row hide behind a current one and make every comparison below ambiguous.
+    fn shipped_mlx_declared_closure_digest(model_id: &str) -> String {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin model manifest parses");
+        let mut declared = manifest["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|model| model["id"] == model_id))
+            .and_then(|model| model["mlx"]["calibrations"].as_array())
+            .unwrap_or_else(|| panic!("{model_id} declares mlx.calibrations"))
+            .iter()
+            .map(|binding| {
+                binding["inferenceClosureDigest"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        panic!("{model_id} calibration binding declares inferenceClosureDigest")
+                    })
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        declared.sort();
+        declared.dedup();
+        assert_eq!(
+            declared.len(),
+            1,
+            "{model_id}'s shipped bindings must all name ONE captured closure"
+        );
+        declared.remove(0)
+    }
+
+    /// [`fixture_closure_lookup`] with the Krea control lane pinned to the closure its PACKAGED
+    /// records were captured under.
+    ///
+    /// `packaged_krea_1024_refuses_before_render_and_names_only_a_fitting_current_cell` is about how
+    /// a refusal names the largest fitting exact cell — not about whether the shipped bundle is
+    /// still current, which `a_moved_provider_closure_demotes_the_calibrated_ladder` owns. Reading
+    /// currency from the live table made the two inseparable: a shared `mlx-gen` edit emptied the
+    /// fixture and the naming behaviour silently went untested. The digest is read from the shipped
+    /// opt-in, never restated as a literal, so this cannot drift into exercising a closure nothing
+    /// was ever measured under.
+    fn packaged_krea_closure_lookup(backend: &str, provider: &str) -> Option<String> {
+        if backend == "mlx" && provider == "krea_2_turbo_control" {
+            return Some(shipped_mlx_declared_closure_digest("krea_2_turbo"));
+        }
+        fixture_closure_lookup(backend, provider)
+    }
+
     fn fixture_calibration_json(tier: &str, variant: &str) -> Value {
         serde_json::json!({
             "abi": sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI,
@@ -4310,7 +4474,13 @@ mod tests {
         // sc-17774: the predicate is the provider's own closure digest, not the inference pin. The
         // pin form separated the same two records only by coincidence — it also expired them on any
         // unrelated inference commit, so this fixture went unbuildable on every bump.
-        let live = live_mlx_closure_digest("krea_2_turbo_control");
+        //
+        // The digest is the one the shipped opt-in DECLARES, not the live one. Selecting on live
+        // made the fixture empty the moment a shared `mlx-gen` crate moved — a legitimate closure
+        // move — and this fixture exists to exercise refusal NAMING, which needs two exact cells to
+        // choose between. `packaged_krea_closure_lookup` feeds the same digest to the gate, and the
+        // test asserts the live-closure refusal separately so the demotion is not merely bypassed.
+        let captured = shipped_mlx_declared_closure_digest("krea_2_turbo");
         let records = bundle
             .records
             .iter()
@@ -4322,14 +4492,14 @@ mod tests {
                     && record.target.mode == "text_to_image"
                     && record.target.overlay == "control:1"
                     && record.repositories.inference.closure_digest.as_deref()
-                        == Some(live.as_str())
+                        == Some(captured.as_str())
             })
             .collect::<Vec<_>>();
         assert_eq!(
             records.len(),
             2,
-            "the packaged Krea contract has two exact cells at the current mlx:krea_2_turbo_control \
-             closure"
+            "the packaged Krea contract has two exact cells at the closure the shipped \
+             mlx:krea_2_turbo_control opt-in declares"
         );
         let first = records[0];
         let resolved_path_fingerprint =
@@ -4424,6 +4594,7 @@ mod tests {
         // The previous literal `krea-control-mlx-v4-q4-pose-bounded-decode-512-64` outlived the
         // provider's move to the full-ladder identity, and a stale copy here fails the handshake
         // and reports the cell as `Missing` — which is how it presented before this was fixed.
+        let captured = shipped_mlx_declared_closure_digest("krea_2_turbo");
         let record = packaged_bundle()
             .records
             .into_iter()
@@ -4431,9 +4602,9 @@ mod tests {
                 matches!(record.backend, CalibrationBackend::Mlx)
                     && record.target.provider == "krea_2_turbo_control"
                     && record.repositories.inference.closure_digest.as_deref()
-                        == Some(live_mlx_closure_digest("krea_2_turbo_control").as_str())
+                        == Some(captured.as_str())
             })
-            .expect("the packaged bundle carries a current Krea control record");
+            .expect("the packaged bundle carries a Krea control record at the declared closure");
         contract.calibration = Some(MemoryCalibrationIdentity::new(
             record.calibration_fingerprint,
             match record.load_shape {
@@ -4839,7 +5010,7 @@ mod tests {
                 0,
                 &[],
                 Some(&packaged_bundle()),
-                Some(&fixture_closure_lookup),
+                Some(&packaged_krea_closure_lookup),
             )
             .expect_err("the independent legacy estimate must refuse before provider render");
             let message = error.to_string();
@@ -4863,7 +5034,7 @@ mod tests {
             0,
             &[],
             Some(&packaged_bundle()),
-            Some(&fixture_closure_lookup),
+            Some(&packaged_krea_closure_lookup),
         )
         .expect_err("the exact 896 cell exceeds 83 GiB including its captured foreign reserve")
         .to_string();
@@ -4892,7 +5063,7 @@ mod tests {
             0,
             &[],
             Some(&packaged_bundle()),
-            Some(&fixture_closure_lookup),
+            Some(&packaged_krea_closure_lookup),
         )
         .expect_err("the mismatched loaded provider still refuses on the independent estimate")
         .to_string();
@@ -4922,7 +5093,7 @@ mod tests {
             0,
             &[],
             Some(&packaged_bundle()),
-            Some(&fixture_closure_lookup),
+            Some(&packaged_krea_closure_lookup),
         )
         .expect_err("the composition-mismatched provider still refuses on the independent estimate")
         .to_string();
@@ -4930,6 +5101,43 @@ mod tests {
             !message.contains("current verified alternative"),
             "a loaded-provider composition mutation must suppress evidence-derived naming: {message}"
         );
+
+        // The honest counterpart to the override above. Everything so far is graded at the closure
+        // the packaged Krea records were captured under, because refusal NAMING needs two exact
+        // cells to choose between. At the LIVE closure that same evidence may name nothing at all,
+        // and that verdict is DERIVED from the digest pair rather than hardcoded — so this asserts
+        // the demotion instead of quietly routing around it, and flips back on its own the moment
+        // the pose-control pair is re-captured.
+        let live_message = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(128.0),
+            gib_to_bytes(130.0),
+            0,
+            &[],
+            Some(&packaged_bundle()),
+            Some(&fixture_closure_lookup),
+        )
+        .expect_err("a superseded closure still refuses; it never admits")
+        .to_string();
+        if shipped_mlx_declared_closure_digest("krea_2_turbo")
+            == live_mlx_closure_digest("krea_2_turbo_control")
+        {
+            assert!(
+                live_message.contains("current verified alternative: 896x896"),
+                "at the live closure the packaged pair is current and must still be named: \
+                 {live_message}"
+            );
+        } else {
+            assert!(
+                !live_message.contains("current verified alternative"),
+                "evidence captured under a superseded mlx:krea_2_turbo_control closure may not be \
+                 offered as a current verified alternative: {live_message}"
+            );
+        }
     }
 
     #[test]
