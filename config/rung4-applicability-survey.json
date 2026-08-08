@@ -1421,8 +1421,8 @@
       "backends": {
         "mlx": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "The FLUX MMDiT skeleton with pruned adaLN — 19 double + 38 single uniform sub-stacks, plus a small distribution approximator that feeds every block's modulation.",
+          "implementation": "shared-primitive",
+          "summary": "The FLUX MMDiT skeleton with pruned adaLN — 19 double + 38 single uniform sub-stacks windowed through `mlx_gen::block_residency::run_windowed`, plus a small distribution approximator that feeds every block's modulation and stays resident. All three catalog entries are the same provider route (one architecture, one loader, one contract shape), differing only in checkpoint, sampler default and schedule; every measured number is Chroma1-Base's own, never inherited from FLUX.1 or a sibling.",
           "blockStacks": [
             {
               "name": "transformer_blocks",
@@ -1443,7 +1443,7 @@
           "evidence": [
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/transformer.rs",
-              "reason": "ChromaTransformer holds `double_blocks: Vec<DoubleBlock>` and `single_blocks: Vec<SingleBlock>` over `num_layers` (19) and `num_single_layers` (38), and asserts the checkpoint's block counts match."
+              "reason": "ChromaTransformer holds `double_blocks: Vec<DoubleBlock>` and `single_blocks: Vec<SingleBlock>` over `num_layers` (19) and `num_single_layers` (38), and drives `mlx_gen::block_residency::run_windowed` over both sub-stacks when a window is selected."
             },
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/config.rs",
@@ -1452,14 +1452,70 @@
             {
               "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/transformer.rs#ChromaApproximator",
               "reason": "`layers: Vec<(Lin, Lin)>` with a parallel `norms: Vec<Array>`, both `approximator_layers` = 5, run as a true residual loop. It is the ENTIRE modulation source for the pruned-adaLN blocks, runs every step, and stays dense while the block stacks quantize — resident weight the window never bounds."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
+              "reason": "Declares rung 4 Implemented for streamable loads with `TRANSFORMER_WINDOW_SIZES = [1, 2, 5, 10]`, `TRANSFORMER_WINDOW_SIZE = 1` and `TRANSFORMER_WINDOW_COMPONENTS = [Dit, TextEncoder, Both]` under fingerprint `chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1`. `structurally_streamable` requires Sequential + DeferredMaterialization, `quantize == None` at load (true of all three shipped tiers: q4/q8 are pre-packed and bf16 loads dense; only a re-quantizing dense-source window is refused) and the CLEAN route — any adapter/control/ip-adapter/identity/external-TE/PiD axis fails the window closed. Rungs 2 and 3 are Missing WITH measurements (see `findings`), and the production calibration key names chroma1_base's packed-4-bit tier exactly, failing closed on every other axis (sc-17695)."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/block_stream.rs",
+              "reason": "The rebuildable-block seam `run_windowed` consumes: each DiT block is re-materialized from the snapshot per window and released after use, with a fresh view per window."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/tests/memory_ladder_real_weights.rs",
+              "reason": "The real-weight ladder harness on Chroma1-Base q4 at 1024² records resident 28.0779 GiB, staged 19.2065 GiB (−31.60%) and rung-4 windowed 14.6932 GiB (−23.50% on rung 1) with byte-identical output at every cadence, measures all three window scopes end to end, and re-asserts the withheld rungs' rejections against the production admission path."
             }
           ],
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Chroma1."
+            "scopes": [
+              {
+                "entries": [
+                  "chroma1_base"
+                ],
+                "tiers": [
+                  "q4"
+                ],
+                "modes": [
+                  "text_to_image"
+                ],
+                "overlays": [
+                  "none"
+                ],
+                "finding": "moves"
+              }
+            ],
+            "reason": "Measured on Chroma1-Base q4 at 1024², 4 steps, true CFG 4.0 (Apple/Metal), fresh generator per row with a discarded warm-up row and `reset_peak_memory` after the load: rung 4 takes the staged request peak 19.2065 → 14.6932 GiB (−23.50%), byte-identical output at every cadence in [1, 2, 5, 10]. The saving is attributed, not assumed — the 4.5133 GiB drop matches the 4.5125 GiB windowable block weight set read from the snapshot's own safetensors `data_offsets`, the whole set to within 0.8 MiB. The scope axis is measured on the same control: `TextEncoder` −0.00% (rung 1 already shed the dense 10.15 GiB T5-XXL before the heavy phase), `Dit` −23.50%, `Both` identical to `Dit` at +22% wall clock (dominated, not wrong). The four cadences are equal-peak alternatives whose ms/step ordering is unresolvable on this instrument (sc-17679). The sibling entries, q8/bf16 tiers, style_variations mode and every overlay carry the capability claim, not a measured peak.",
+            "evidence": [
+              {
+                "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/tests/memory_ladder_real_weights.rs",
+                "reason": "Serial real-weight rows record each rung's request peak against the exact staged control and assert byte-identical pixels; `the_window_component_scopes_are_measured_not_inherited` measures all three scopes end to end."
+              }
+            ]
           },
           "findings": [
-            "Pruned adaLN makes this family MORE window-friendly than stock FLUX, not less: the blocks carry no `.norm*.linear` weights and take their modulation as a slice of one approximator output computed once per step. That output is a small resident tensor, and the per-block weight bytes a window must materialize are correspondingly smaller."
+            "Pruned adaLN makes this family MORE window-friendly than stock FLUX, not less: the blocks carry no `.norm*.linear` weights and take their modulation as a slice of one approximator output computed once per step. That output is a small resident tensor, and the per-block weight bytes a window must materialize are correspondingly smaller.",
+            "Rung 2 is `Missing` on an UNRESOLVED margin, not a clean failure. Tiling the FLUX.1 16-ch VAE decode works and the saving is large (−11.4% to −72.4% of the decode phase across 28 swept geometries at the variant's real 28-step schedule), but the best cell (edge 832 / overlap 256) drifts 53/255 against the 48/255 bar the closest sibling admits — and resampling that one geometry across five production latents gives max-drift 28..82, a 2.9× spread that straddles the bar. Nothing in that supports admission, and calling it a clean rejection would overstate the evidence; resolving it needs a quality methodology (perceptual metric or a family-derived bar) the epic has not agreed on.",
+            "Rung 3 is `Missing` on a measured verdict: `sdpa_budgeted_bhsd` reaches both block stacks and both attention sites and saves −2.27% at the DiT seam (7.1679 → 7.0053 GiB, bit-exact), but the seam sits ~12 GiB inside the staged request peak so the REQUEST moves −0.001% — which per the epic is not a saving. MLX's fused SDPA streams its scores (no materialized [B,H,Sq,Sk] to bound), and Chroma's MMDiT mask is a per-query [B,1,S,S] tensor (85 MiB per CFG branch at 1024²) the bounded kernel must narrow per chunk.",
+            "The rung-4 scope default is `Dit`, and it is measured rather than inherited — the naive phase probe predicts the opposite. T5-XXL is the largest single component (dense bf16 at 10.15 GiB against a 7.14 GiB packed DiT), which makes `TextEncoder` look obviously right; but rung 1 has already shed it before the heavy phase loads, so a `TextEncoder` window moves the request peak −0.00%. The verdict is coupled to rung 2's: a bounded decode would drop the heavy phase below conditioning and flip the binding scope (Kolors/SC-15521 is the same arithmetic with a different decode).",
+            "The cadence domain [1, 2, 5, 10] is published as equal-peak alternatives, not a latency frontier: all four bound the request to 14.6932 GiB, and the ms/step ordering moves with execution-order slots and is unresolvable on this instrument (sc-17679). The default 1 rests on being the tightest weight bound."
+          ],
+          "strategyParameters": {
+            "transformerWindowSize": 1,
+            "transformerWindowComponent": "Dit"
+          },
+          "implementedEntries": [
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd"
+          ],
+          "implementedTiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "implementedOverlays": [
+            "none"
           ]
         },
         "candle": {
