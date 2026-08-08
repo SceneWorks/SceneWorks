@@ -1,5 +1,10 @@
 # Cross-backend memory-strategy calibration harness
 
+> **Measuring a lane? Start with [calibration-runbook.md](calibration-runbook.md)** (sc-18103) — the
+> parameterized, copy-paste procedure from "I want `<backend>:<provider>` measured" to "PR open with
+> the record ingested". This page is the *reference* it draws on: identities, schema semantics,
+> resume, provider protocol, truth status.
+
 `scripts/memory-calibration-harness.mjs` is the executable, versioned evidence runner for
 MLX/Metal and Candle/CUDA. It owns plan expansion, repository resolution, provider execution,
 validation, resume, atomic writes, and generated-matrix ingestion. It does not change runtime memory
