@@ -3,12 +3,15 @@
 //! Static capability declarations never authorize an optimized request at a MEASURED grade. Exact
 //! authoritative records from the packaged evidence bundle are the only measured optimized
 //! candidates. Since sc-18097 (epic 18093 R1b, the candle mirror of sc-18096) every other
-//! implemented optimized rung additionally carries a synthesized ESTIMATE-floor candidate —
+//! implemented optimized rung of a CERTIFIED artifact additionally carries a synthesized
+//! ESTIMATE-floor candidate —
 //! manifest `vramGbByTier`/`sequentialPeakGb` rows plus the standard headroom, never a promised
 //! unmeasured saving — graded by the shared selector behind the candle estimate margin
 //! (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`; CUDA OOM is a recoverable `Err`, so the
 //! margin is looser than MLX's). Any eligible measured candidate at the same rung supersedes the
-//! estimate, so measured-current admission is byte-for-byte unchanged.
+//! estimate, so measured-current admission is byte-for-byte unchanged; an UNCERTIFIED artifact
+//! gets no floors at all (the manifest rows describe the certified bytes, not an imported
+//! checkpoint) and keeps its resident-estimate-only behavior.
 
 use gen_core::{
     GenerationMemory, LoadSpec, MemoryBackend, MemoryCacheState, MemoryConformanceState,
@@ -839,19 +842,33 @@ fn evaluate_shared_image_inner(
     // cell can still engage the ladder behind the candle estimate margin instead of freezing to
     // resident-or-legacy behavior. Where an exact measured record exists the selector's
     // measured-supersedes-estimate rule keeps admission byte-for-byte unchanged.
-    let synthesized = synthesize_estimate_floors(
-        engine_id,
-        &contract,
-        manifest,
-        tier_key,
-        tier,
-        &mode,
-        overlay,
-        geometry,
-        resident.predicted_peak_bytes,
-        runtime_overlay_bytes,
-        request_evidence_revision,
-    );
+    //
+    // Gated on `artifact_is_certified`, the same conjunct that gates the packaged records above
+    // (sc-18097 review, major finding). The floors are read from the SHIPPED manifest's
+    // `sequentialPeakGb`/`vramGbByTier` rows, which describe the certified artifact. An imported
+    // or community checkpoint on a supported route is different bytes: those rows do not describe
+    // it, so extending its ladder from them would be a static capability declaration authorizing
+    // an optimized request — exactly what this module's header forbids — and CUDA OOM being
+    // recoverable does not make a wrong prediction safe. An uncertified artifact therefore keeps
+    // its resident-estimate-only behavior, byte-for-byte as before this story. The sibling control
+    // lane gates its floors the same way (`krea_control_fit.rs`, `runtime_verified`).
+    let synthesized = if artifact_is_certified {
+        synthesize_estimate_floors(
+            engine_id,
+            &contract,
+            manifest,
+            tier_key,
+            tier,
+            &mode,
+            overlay,
+            geometry,
+            resident.predicted_peak_bytes,
+            runtime_overlay_bytes,
+            request_evidence_revision,
+        )
+    } else {
+        Vec::new()
+    };
     let capacity = verified.len() + synthesized.len() + 1;
     let mut selections = Vec::with_capacity(capacity);
     let mut evidence = Vec::with_capacity(capacity);
@@ -1525,12 +1542,12 @@ mod tests {
         .unwrap()
         .clone();
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
-        let evaluate = |free_gb: f64| {
+        let evaluate_as = |free_gb: f64, artifact_is_certified: bool| {
             evaluate_shared_image(
                 "z_image_turbo",
                 "z_image_turbo",
                 &spec,
-                true,
+                artifact_is_certified,
                 &manifest,
                 "q4",
                 "text_to_image",
@@ -1555,6 +1572,7 @@ mod tests {
             )
             .expect("unmeasured z-image evaluation")
         };
+        let evaluate = |free_gb: f64| evaluate_as(free_gb, true);
 
         let evaluation = evaluate(7.0).expect(
             "an implemented rung's estimate floor must admit where the resident estimate cannot",
@@ -1591,8 +1609,35 @@ mod tests {
         let roomy = evaluate(64.0).expect("resident admits on a roomy card");
         assert_eq!(roomy.context.selection.strategy, MemoryStrategy::Resident);
         assert!(roomy.memory.is_none());
+
+        // sc-18097 review (major): the floors are gated on artifact certification, the SAME
+        // conjunct that gates the packaged records. The manifest rows describe the certified
+        // bytes; an imported/community checkpoint on this route is different bytes, so at the
+        // exact budget where the certified artifact engages a floor rung, the uncertified one
+        // gets no floors, its resident estimate does not fit, and the lane hands back to the
+        // established gates (`None`). Removing the certification conjunct flips this red.
+        assert!(
+            evaluate_as(7.0, false).is_none(),
+            "an uncertified artifact must not engage a rung off the certified manifest's rows"
+        );
+        // …and it keeps its pre-sc-18097 resident behavior where the resident estimate DOES fit,
+        // so the gate withholds the floors rather than refusing the artifact.
+        let uncertified_roomy =
+            evaluate_as(64.0, false).expect("an uncertified artifact still admits resident");
+        assert_eq!(
+            uncertified_roomy.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
     }
 
+    /// An uncertified (imported / community) FLUX identity artifact never reaches an optimized
+    /// rung — not through packaged records, and since sc-18097 not through estimate floors either.
+    ///
+    /// The budget is DELIBERATELY tight and the manifest populated (sc-18097 review): on a roomy
+    /// card with an empty manifest the resident estimate wins for everyone, so the assertion could
+    /// not tell a withheld floor from a floor that simply never competed. Here the certified
+    /// control admits a floor rung at exactly the budget where the uncertified artifact must not —
+    /// removing the certification conjunct from the floor guard turns the second arm red.
     #[test]
     fn uncertified_flux_identity_artifacts_fall_back_to_resident() {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("alternate-flux-q4")))
@@ -1604,36 +1649,52 @@ mod tests {
                 WeightsSource::Dir(PathBuf::from("alternate-image-encoder")),
             )
             .with_offload_policy(gen_core::OffloadPolicy::Sequential);
-        let evaluation = evaluate_shared_image(
-            "flux1_dev",
-            "flux_dev",
-            &spec,
-            false,
-            &JsonObject::new(),
-            "q4",
-            "character_image",
-            Some("identity"),
-            MemoryGeometry {
-                width: 1024,
-                height: 1024,
-                batch: 1,
-                frames: 1,
-                reference_count: 1,
-            },
-            true,
-            false,
-            false,
-            Some(VramBudget {
-                free_gb: 32.0,
-                total_gb: 32.0,
-            }),
-            Some(8.0),
-            0,
-            MemoryCacheState::Cold,
-        )
-        .expect("FLUX identity evaluation")
-        .expect("resident fallback");
+        // Staged floor = `sequentialPeakGb` 2.5 + 2.0 headroom = 4.5 GiB, widened by the 4% candle
+        // estimate margin to 4.68; the resident estimate is 8.0. A 7 GiB budget (5.0 effective)
+        // therefore separates "floor available" from "resident only".
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let evaluate = |artifact_is_certified: bool, free_gb: f64| {
+            evaluate_shared_image(
+                "flux1_dev",
+                "flux_dev",
+                &spec,
+                artifact_is_certified,
+                &manifest,
+                "q4",
+                "character_image",
+                Some("identity"),
+                MemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 1,
+                },
+                true,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 32.0,
+                }),
+                Some(8.0),
+                0,
+                MemoryCacheState::Cold,
+            )
+            .expect("FLUX identity evaluation")
+        };
 
+        // Roomy card: resident for both, with the typed scope preserved.
+        let evaluation = evaluate(false, 32.0).expect("resident fallback");
         assert_eq!(
             evaluation.context.selection.strategy,
             MemoryStrategy::Resident
@@ -1644,6 +1705,20 @@ mod tests {
         );
         assert_eq!(evaluation.context.overlay.as_deref(), Some("identity"));
         assert!(evaluation.memory.is_none());
+
+        // The discriminating pair at 7 GiB free: certified engages the staged floor…
+        let certified = evaluate(true, 7.0)
+            .expect("a certified artifact's estimate floor must admit at this budget");
+        assert_eq!(
+            certified.context.selection.strategy,
+            MemoryStrategy::StagedResidency,
+            "the control arm must actually reach a rung, or the assertion below proves nothing"
+        );
+        // …and uncertified gets no floors at all, so the lane hands back to the established gates.
+        assert!(
+            evaluate(false, 7.0).is_none(),
+            "an uncertified artifact must not engage a rung off the certified manifest's rows"
+        );
     }
 
     #[test]

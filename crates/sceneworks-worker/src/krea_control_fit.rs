@@ -68,8 +68,12 @@
 //! tier's shipping branch on RTX PRO 6000 Blackwell at 1024² / 8 steps / control scale 0.6. They include
 //! q4, q8, bf16, and INT8-ConvRot, so every reachable tier has a priced fast path and staged path. The
 //! worker reads those rows verbatim and adds only the shared admission headroom; there is no branch
-//! packing correction. The generic `BestEffort` path remains for any future superseded entry, while the
-//! current Krea evidence is eligible for a hard reject after the deepest measured rung.
+//! packing correction. Since sc-18097 a hard reject on CURRENT evidence no longer waits for the
+//! deepest MEASURED rung: every implemented rung inside the measured envelope carries at least an
+//! estimate-floor candidate, so the reject fires once no rung fits at its graded (measured or
+//! widened-floor) peak. `BestEffort` remains the outcome only where floors deliberately do not
+//! apply — superseded entries, an unverified runtime artifact, adapter overlays, or a request
+//! above the measured envelope.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and the
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
@@ -145,9 +149,12 @@ pub(crate) enum KreaControlFit {
     /// CUDA-OOM backstop takes it from there; `needed_gb`/`available_gb` are for the log line only and
     /// must never be recorded as an incurred peak (see [`incurred_peak_gb`]).
     ///
-    /// This is the same best-effort contract the lane already applies when the Sequential row is absent:
-    /// stage as far as the measured rungs allow and let the runtime decide, rather than asserting a
-    /// non-fit nobody measured.
+    /// Until sc-18097 this was also the outcome whenever the Sequential row was absent. It no longer
+    /// is: a current-evidence cell inside the measured envelope now grades its unmeasured rungs at
+    /// estimate floors and can reject honestly. `BestEffort` is reserved for the states where those
+    /// floors are withheld — superseded evidence (here), an unverified runtime artifact, adapter
+    /// overlays, or a request above the measured envelope — where asserting a non-fit nobody
+    /// measured, from numbers nobody can stand behind, remains the wrong call.
     BestEffort {
         offload_policy: OffloadPolicy,
         tile_vae_decode: bool,
@@ -177,8 +184,10 @@ pub(crate) enum KreaControlFit {
     /// lane's own `note_loaded_peak`; see `ConditioningAdmission::GatedInPreamble`). So an unpriced tier is
     /// not unguarded — it is guarded by the floor alone, with no measured peak on top.
     ///
-    /// Staging is the SAME contract this ladder already applies when the Sequential row alone is missing:
-    /// stage anyway and let the runtime decide. The knobs coincide with `Fits { Sequential, false, false }`
+    /// Staging without rejecting is the same posture [`KreaControlFit::BestEffort`] takes, and for the
+    /// same reason: with no peak row for this tier there is nothing for sc-18097's estimate floors to
+    /// floor ON, so no graded candidate exists to reject from. The knobs coincide with
+    /// `Fits { Sequential, false, false }`
     /// on purpose; only the verdict and its log line differ, exactly as `BestEffort` does — and, like
     /// `BestEffort`, it records no reclaimable peak ([`incurred_peak_gb`]). Note this DOES change behavior
     /// for an unpriced tier that previously took the resident fast path: it now stages, a speed-only cost
@@ -1049,8 +1058,10 @@ mod tests {
     }
 
     /// [`krea_manifest`] with the control block declaring CURRENT evidence — what sc-16013's re-measure
-    /// will ship. A hard reject becomes available only when the fixture also carries evidence through
-    /// the deepest implemented rung; current evidence also makes [`incurred_peak_gb`] recordable.
+    /// will ship. Since sc-18097 current evidence is itself what makes a hard reject available: the
+    /// unmeasured deeper rungs are covered by estimate floors, so the reject fires once nothing fits
+    /// at its graded peak rather than waiting for measurements through the deepest implemented rung.
+    /// Current evidence also makes [`incurred_peak_gb`] recordable.
     fn krea_manifest_measured() -> JsonObject {
         current_evidence(krea_manifest())
     }
@@ -1097,8 +1108,10 @@ mod tests {
     }
 
     /// Keep the rung tests focused on tiling/chunking by modeling a staged peak equal to the resident
-    /// peak, against CURRENT evidence. Fully measured fixtures can hard-reject; incomplete provider
-    /// ladders remain best-effort. Dedicated tests below cover both floors.
+    /// peak, against CURRENT evidence. Since sc-18097 a current-evidence fixture can hard-reject
+    /// whether or not its deeper rungs are measured — the unmeasured ones are graded at estimate
+    /// floors. Best-effort now belongs to superseded evidence, an unverified runtime, adapters, or a
+    /// request above the measured envelope; dedicated tests below cover each floor.
     fn fit_ladder(
         peak: Option<f64>,
         budget: Option<VramBudget>,
@@ -1381,6 +1394,10 @@ mod tests {
     /// MUTATION PROOF for the review's `measured: false` finding: superseded evidence may not produce a
     /// hard reject, because the peaks it rests on are upper bounds and a reject from an upper bound can
     /// refuse a job that would run. Same numbers, same budget — only the evidence flag differs.
+    ///
+    /// sc-18097 sharpens the contrast rather than blunting it: the current-evidence side now rejects
+    /// from graded floors even where the deeper rungs are unmeasured, while the superseded side is
+    /// exactly where the estimate floors are withheld, so its never-reject contract is untouched.
     #[test]
     fn superseded_evidence_never_rejects_and_current_evidence_does() {
         let peak = Some(40.0);
@@ -2102,6 +2119,80 @@ mod tests {
         assert!(
             matches!(beyond, KreaControlFit::BestEffort { .. }),
             "beyond the measured envelope the best-effort contract must survive: {beyond:?}"
+        );
+    }
+
+    /// sc-18097 review: the floor-synthesis conjuncts this lane owns, each mutation-checked on the
+    /// SAME cell and budget where the unmutated ladder rejects from graded floors.
+    ///
+    /// * **Loaded calibration identity** — a provider whose fingerprint drifted from the sc-16013
+    ///   rows must not receive floors built from them (the candle mirror of the mlx gate's basis
+    ///   identity gate). The mutated fingerprint is deliberately WELL-FORMED — it keeps the shipped
+    ///   `…-v1` version-token grammar — and the mutated contract is asserted conformance-CLEAN, so
+    ///   the outcome below is the identity conjunct's work and not a format rejection that would
+    ///   have passed by grammar accident (the sc-18096 finding).
+    /// * **Evidence currency** — a superseded block (`measured: false`) keeps its never-reject
+    ///   `BestEffort` contract; floors may not resurrect a reject from rows already known
+    ///   non-current when recorded.
+    ///
+    /// Both mutations must land on `BestEffort`, never on the `TooBig` the unmutated control arm
+    /// produces: withholding the floors must return the cell to the pre-sc-18097 posture, not
+    /// harden it.
+    #[test]
+    fn control_estimate_floors_require_current_evidence_and_the_loaded_identity() {
+        use gen_core::MemoryCalibrationIdentity;
+
+        let tier = "q4";
+        let geometry_768 = MemoryGeometry {
+            width: 768,
+            height: 768,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let contract = registered_contract_for_tier(tier).expect("control contract");
+        let fit = |manifest: &JsonObject, contract: &MemoryProviderContract| {
+            fit_ladder_for_entry_with_runtime(
+                manifest,
+                tier,
+                // 27.5 GiB free (25.5 effective): the raw staged floor (25.0) fits, the widened one
+                // (26.0) does not — so the unmutated ladder rejects from its graded floors.
+                Some(budget(27.5)),
+                0,
+                geometry_768,
+                Some(contract),
+                true,
+            )
+        };
+
+        let current = current_evidence(krea_manifest_with_chunking());
+        assert!(
+            matches!(fit(&current, &contract), KreaControlFit::TooBig { .. }),
+            "control point: the unmutated cell must reject from its floors, or the arms below \
+             prove nothing"
+        );
+
+        let mut drifted = contract.clone();
+        drifted.calibration = Some(MemoryCalibrationIdentity::new(
+            "sc-16013-krea-control-direct-1024-v2",
+            contract.load_shape,
+        ));
+        assert!(
+            drifted.conformance_errors().is_empty(),
+            "the mutated fingerprint must be conformance-CLEAN so this arm exercises the identity \
+             conjunct, not format validation"
+        );
+        assert!(
+            matches!(fit(&current, &drifted), KreaControlFit::BestEffort { .. }),
+            "a fingerprint drifted from the loaded provider must lose its estimate floors"
+        );
+
+        assert!(
+            matches!(
+                fit(&krea_manifest_with_chunking(), &contract),
+                KreaControlFit::BestEffort { .. }
+            ),
+            "superseded evidence must not gain a reject through the estimate floors"
         );
     }
 

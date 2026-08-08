@@ -6895,6 +6895,7 @@ mod candle_request_residency_tests {
                 },
             },
             memory: gen_core::GenerationMemory::default(),
+            estimate_scoped: false,
         };
         let streamed = fit(gen_core::MemoryStrategy::BoundedTransformerResidency);
         let cheaper = fit(gen_core::MemoryStrategy::BoundedAttention);
@@ -8219,6 +8220,11 @@ async fn generate_candle_stream(
                             needed_gb,
                             selection,
                             memory,
+                            // Measured or estimate-scoped (sc-18097): the selected rung and its
+                            // knobs are what this lane acts on, and both are already graded. The
+                            // flag exists for refusal ADVICE (`krea_turbo_smaller_fit_*`), which
+                            // must not name an estimate-backed geometry.
+                            estimate_scoped: _,
                         }) => {
                             memory_strategy_selection = Some(selection);
                             generation_memory = Some(memory);

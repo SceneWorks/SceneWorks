@@ -342,6 +342,15 @@ pub(crate) enum KreaTurboFit {
         needed_gb: f64,
         selection: gen_core::MemorySelection,
         memory: gen_core::GenerationMemory,
+        /// The rung was carried by a synthesized fitted-curve ESTIMATE, not by an exact measured
+        /// record of this cell (sc-18097). True exactly when the request geometry has no
+        /// `exact_request` record: a rung's measured candidates come only from that record, and a
+        /// rung whose record exists but is structurally excluded emits no estimate either (the
+        /// whole-tier fail-closed rule in `krea_turbo_fit_with_runtime`), so those are the only
+        /// two states. Consumed by [`krea_turbo_smaller_fit_with_runtime`], which — mirroring
+        /// `mlx_fit_gate::verified_lower_alternative` — must not offer an estimate-backed
+        /// geometry as refusal advice.
+        estimate_scoped: bool,
     },
     Reject {
         phases: KreaTurboPhasePeaks,
@@ -1060,11 +1069,12 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     // verified record, the selector's measured-supersedes-estimate rule keeps admission
     // byte-for-byte unchanged.
     //
-    // A rung's fitted estimate is emitted only when the curve is anchored to a VERIFIED measured
-    // record: some `exact_request` record of this tier which, graded at ITS OWN geometry through
-    // the same `make_evidence` conjuncts as the request path, passes the full measured
-    // eligibility predicate (`optimized_eligibility`). That single check carries every
-    // restriction sc-18096 established for extrapolation bases —
+    // A rung's fitted estimate is emitted only when EVERY `exact_request` record of this tier —
+    // graded at ITS OWN geometry through the same `make_evidence` conjuncts as the request path —
+    // passes the full measured eligibility predicate (`optimized_eligibility`). Whole-tier rather
+    // than best-anchor, because the curve is fitted across every cell (see the fail-closed note at
+    // the loop head). That check carries every restriction sc-18096 established for extrapolation
+    // bases —
     // closure-CURRENT capture (a stale record may serve its own cell behind the stale margin but
     // may not seed an extrapolation; the estimate margin was derived over same-closure re-capture
     // variance and cannot also absorb closure drift), the loaded contract's calibration identity
@@ -1082,43 +1092,62 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     let mut estimates: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
     for (strategy, phases, _, selection) in &measured {
         let manifest_rung = krea_turbo_manifest_key(*strategy);
+        let record_is_eligible = |record: &Value, record_width: u32, record_height: u32| {
+            let Some(anchor_phases) =
+                krea_rung_phase_peaks(manifest_entry, tier, *strategy, record_width, record_height)
+            else {
+                return false;
+            };
+            let anchor_geometry = MemoryGeometry {
+                width: record_width,
+                height: record_height,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
+            // The FULL measured-eligibility predicate, not just `Verified` conformance: it
+            // additionally requires the record's measured composition to agree with the loaded
+            // contract's and the calibration identity to match (the mirror of
+            // `mlx_fit_gate::collect_estimate_bases`' engaged-composition filter).
+            make_evidence(
+                *selection,
+                Some(manifest_rung),
+                anchor_phases.peak_gb(),
+                Some(anchor_phases),
+                Some(record),
+                anchor_geometry,
+            )
+            .optimized_eligibility(&provider_contract)
+            .is_ok()
+        };
+        // FAIL CLOSED ON THE WHOLE TIER (sc-18097 review, major finding). The tier's phase curves
+        // are fitted across EVERY measured cell, and the measured path's own
+        // `exact_strategy_parameters` conjunct requires the record peak and the curve to agree
+        // within 0.01 GiB — so the curve evaluated at an excluded cell's geometry reproduces that
+        // cell's number. Anchoring on a surviving SIBLING record would therefore let a
+        // structurally excluded cell (composition mismatch, drifted identity, stale capture) be
+        // re-admitted at its own numbers behind nothing but the 4% estimate margin, laundering
+        // the per-cell structural exclusion the epic requires to keep excluding. So a rung emits
+        // fitted candidates only when EVERY `exact_request` record of the tier is eligible for it:
+        // one bad row disqualifies the tier's curve for that rung, not merely that row.
+        if let Some((_, bad_width, bad_height)) = tier_records
+            .iter()
+            .find(|(record, width, height)| !record_is_eligible(record, *width, *height))
+        {
+            tracing::info!(
+                route = "krea_2_turbo",
+                backend = "candle",
+                ?strategy,
+                ineligible_record_geometry = format!("{bad_width}x{bad_height}"),
+                "fitted-curve estimates suppressed for this rung: a measured record of this tier \
+                 is structurally excluded, and the tier's curve is fitted across it"
+            );
+            continue;
+        }
         let anchor = tier_records
             .iter()
             .copied()
-            .filter(|(record, record_width, record_height)| {
-                let Some(anchor_phases) = krea_rung_phase_peaks(
-                    manifest_entry,
-                    tier,
-                    *strategy,
-                    *record_width,
-                    *record_height,
-                ) else {
-                    return false;
-                };
-                let anchor_geometry = MemoryGeometry {
-                    width: *record_width,
-                    height: *record_height,
-                    batch: 1,
-                    frames: 1,
-                    reference_count: 0,
-                };
-                // The FULL measured-eligibility predicate, not just `Verified` conformance: it
-                // additionally requires the record's measured composition to agree with the
-                // loaded contract's and the calibration identity to match — a record that cannot
-                // authorize its own cell must not seed an extrapolation either (the mirror of
-                // `mlx_fit_gate::collect_estimate_bases`' engaged-composition filter).
-                make_evidence(
-                    *selection,
-                    Some(manifest_rung),
-                    anchor_phases.peak_gb(),
-                    Some(anchor_phases),
-                    Some(*record),
-                    anchor_geometry,
-                )
-                .optimized_eligibility(&provider_contract)
-                .is_ok()
-            })
-            // Prefer the largest verified cell: the curve is fitted within `maxMeasuredPixels`,
+            // Prefer the largest measured cell: the curve is fitted within `maxMeasuredPixels`,
             // and the top sample is the anchor closest to that envelope.
             .max_by_key(|(_, record_width, record_height)| {
                 u64::from(*record_width) * u64::from(*record_height)
@@ -1260,6 +1289,10 @@ pub(crate) fn krea_turbo_fit_with_runtime(
                 needed_gb: needed_gb + HEADROOM_GB,
                 selection: selected,
                 memory,
+                // See the field doc: with no `exact_request` record at this geometry the rung's
+                // measured candidates are structurally excluded, so only a synthesized estimate
+                // can have carried it.
+                estimate_scoped: evidence_record.is_none(),
             })
         }
         Selection::Reject { needed_gb, .. } => {
@@ -1303,6 +1336,14 @@ fn krea_turbo_fit(
 /// Highest lower-pixel manifest bucket that the deepest available Krea Turbo rung can actually fit.
 /// Used only to make rejection copy truthful: if this returns `None`, lowering resolution is not
 /// presented as an escape hatch.
+///
+/// The advice is restricted to MEASURED admissions (sc-18097): an estimate-scoped `Fits` — the
+/// fitted-curve admission of a geometry nobody measured — is not offered here, mirroring
+/// `mlx_fit_gate::verified_lower_alternative` ("no formula, interpolation, tier heuristic, or
+/// aspect-ratio rewrite is admitted"). Naming a fallback that itself rests on an estimate invites
+/// a second refusal at the geometry the user was just told to switch to. `Resident` keeps its
+/// pre-sc-18097 acceptance: that verdict is the manifest's geometry-independent `vramGbByTier`
+/// row, which this helper has always been allowed to quote.
 pub(crate) fn krea_turbo_smaller_fit_with_runtime(
     manifest_entry: &JsonObject,
     tier: &str,
@@ -1336,7 +1377,13 @@ pub(crate) fn krea_turbo_smaller_fit_with_runtime(
                 allow_streamed_blocks,
                 runtime,
             ),
-            Some(KreaTurboFit::Resident { .. } | KreaTurboFit::Fits { .. })
+            Some(
+                KreaTurboFit::Resident { .. }
+                    | KreaTurboFit::Fits {
+                        estimate_scoped: false,
+                        ..
+                    }
+            )
         )
     })
 }
@@ -2971,12 +3018,14 @@ mod tests {
                 other => panic!("{tier} expected {probe_rung:?}, got {other:?}"),
             }
 
-            // sc-18097: the mutation must now corrupt EVERY exact_request record of the tier, not
-            // only the 1024² cell. A record that cannot authorize its own cell also may not seed a
-            // fitted-curve estimate — but any OTHER still-verified record of the tier remains a
-            // legitimate anchor (q4 ships a second exact_request cell at 768²), so a single-record
-            // corruption degrades to estimate-graded admission instead of tier-wide refusal. The
-            // whole-tier corruption below is the honest fail-closed claim this assertion pins.
+            // sc-18097: the fail-closed claim survives estimate admission because the synthesis
+            // fails closed on the WHOLE TIER — the tier's phase curves are fitted across every
+            // measured cell, and the measured path requires each record's peak to agree with the
+            // curve within 0.01 GiB, so a sibling-anchored estimate would reproduce the excluded
+            // cell's own number behind nothing but the 4% margin. Both corruption shapes are
+            // therefore asserted: every record of the tier (below) and, on the one tier with two
+            // exact_request cells, the request's own record alone (the second arm) — a per-cell
+            // structural exclusion must not be laundered by a surviving sibling.
             let mutate_compositions = |record: &mut Value| {
                 record["measuredCompositions"]["tiledVae"] = json!(["resident", "bounded_decode"]);
                 record["measuredCompositions"]["chunkedAttention"] =
@@ -3015,11 +3064,14 @@ mod tests {
                 "{tier} mismatched rows must fail closed when no exact deeper composition can fit"
             );
 
-            // The sc-18097 degradation semantics, pinned on the one tier with a second verified
-            // anchor: corrupting ONLY the 1024² record excludes its measured candidates, and the
-            // untouched 768² record anchors fitted estimates instead — so admission survives, but
-            // at the curve peak WIDENED by the estimate margin, never at the corrupted record's
-            // measured numbers or grade.
+            // The laundering arm, on the one tier with a second `exact_request` cell (q4 ships
+            // 768² as well as 1024²): corrupting ONLY the request's own record must NOT be
+            // rescued by the surviving 768² sibling. The tier's curve at 1024² reproduces the
+            // corrupted record's peak to within the measured path's own 0.01 GiB agreement
+            // conjunct, so a best-anchor synthesis would re-admit the excluded cell at its own
+            // number behind nothing but the estimate margin. Whole-tier fail-closed is what stops
+            // that, and this arm is its mutation check: switching the synthesis back to
+            // "any eligible anchor wins" turns this green-to-red.
             if tier == "q4" {
                 let mut single_corrupted = manifest.clone();
                 mutate_compositions(
@@ -3033,50 +3085,24 @@ mod tests {
                         })
                         .expect("1024 evidence record"),
                 );
-                match krea_turbo_fit(
-                    &single_corrupted,
-                    tier,
-                    1024,
-                    1024,
-                    Some(VramBudget {
-                        free_gb: required,
-                        total_gb: required,
-                    }),
-                    true,
-                ) {
-                    Some(KreaTurboFit::Fits {
-                        selection,
-                        needed_gb,
-                        ..
-                    }) => {
-                        assert_eq!(
-                            selection.strategy,
-                            MemoryStrategy::BoundedAttention,
-                            "the 768²-anchored estimate ladder must carry the cell"
-                        );
-                        let curve_peak = krea_rung_phase_peaks(
-                            &manifest,
-                            tier,
-                            MemoryStrategy::BoundedAttention,
-                            1024,
-                            1024,
-                        )
-                        .expect("chunked-attention curve")
-                        .peak_gb();
-                        let expected = curve_peak
-                            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
-                            + HEADROOM_GB;
-                        assert!(
-                            (needed_gb - expected).abs() < 1e-3,
-                            "the admit must be graded at the WIDENED curve peak, not the \
-                             corrupted record's numbers: needed {needed_gb}, expected {expected}"
-                        );
-                    }
-                    other => panic!(
-                        "{tier}: a single corrupted record must degrade to estimate admission, \
-                         got {other:?}"
+                assert_eq!(
+                    krea_turbo_fit(
+                        &single_corrupted,
+                        tier,
+                        1024,
+                        1024,
+                        Some(VramBudget {
+                            free_gb: required,
+                            total_gb: required,
+                        }),
+                        true,
                     ),
-                }
+                    Some(KreaTurboFit::Unverified {
+                        reason: gen_core::MemoryEvidenceVerdict::CompositionMismatch,
+                    }),
+                    "{tier}: a per-cell structural exclusion must not be laundered into an \
+                     estimate anchored on a surviving sibling record"
+                );
             }
         }
     }
