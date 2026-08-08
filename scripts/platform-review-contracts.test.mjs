@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
+import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
+
 async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
 }
@@ -530,6 +532,29 @@ test("the Rust gate verifies the generated docs derived from Rust sources", asyn
   assert.match(scripts.check, /\bcheck:rust-derived-docs\b/);
   // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
   assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
+});
+
+test("the pre-push derived-docs trigger covers every non-Rust source the matrix is hashed from", async () => {
+  // sc-18098. `check:rust-derived-docs` catches a stale matrix in under a second; the pre-push hook
+  // only runs it when the pushed diff LOOKS like it touched an input. Its Rust/Cargo arm covers the
+  // `.rs` and `Cargo.toml` entries of `generate-memory-matrix.mjs#SOURCE_PATHS`; this arm has to
+  // cover the rest, and two of them — the closure table and the rung-4 survey — were missing, so a
+  // pin bump that re-derived one lane's closure digest pushed clean and heard about the stale matrix
+  // from `parity` fifteen minutes later.
+  //
+  // Derived from SOURCE_PATHS rather than restated, so a NEW hashed source is covered or this reds
+  // (the epic-18093 slices are actively adding and removing them).
+  const hook = await source("scripts/git-hooks/pre-push");
+  const pattern = hook.match(/'(\^\(config\/manifests[^']+)'/)?.[1];
+  assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
+  const trigger = new RegExp(pattern);
+  const rustArm = /(^|\/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$/;
+  for (const relative of Object.values(SOURCE_PATHS)) {
+    if (rustArm.test(relative)) continue;
+    assert.ok(trigger.test(relative), `${relative} must trigger the pre-push derived-docs check`);
+  }
+  // The pattern is anchored, not a substring sweep: a same-named file elsewhere must not fire it.
+  assert.equal(trigger.test("vendor/config/inference-provider-closures.json"), false);
 });
 
 test("macOS lanes lint every crate they ship, in the configuration they ship it", async () => {
