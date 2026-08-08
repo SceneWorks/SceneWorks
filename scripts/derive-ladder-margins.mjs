@@ -19,10 +19,20 @@
  *                      the "same cell, different day" situation the margin must absorb.
  *   BINDING spread   — a pairwise relative spread on a phase peak that is at least
  *                      BINDING_PHASE_ENVELOPE_SHARE of the record's overall allocator envelope.
- *                      Only these can move an admission decision: the gate compares peaks against
- *                      a budget, and a phase far below the envelope cannot become the envelope
- *                      within the spread bounds admitted here (a <50%-of-envelope phase with a
- *                      <=50% spread stays <=75% of the envelope).
+ *                      Only these can move a SAME-CELL admission decision (stale-measured,
+ *                      sc-18095): the gate compares peaks against a budget, and — when admitting
+ *                      the very cell that was measured — a phase far below the envelope cannot
+ *                      become the envelope within the spread bounds admitted here (a
+ *                      <50%-of-envelope phase with a <=50% spread stays <=75% of the envelope).
+ *                      That argument does NOT extend to estimate-backed extrapolation: at a
+ *                      different rung (e.g. bounded conditioning) or larger geometry (MLX
+ *                      activation transients scale linearly in area) a phase that was minor in
+ *                      the measured cell can carry the request peak. See CAN-BIND below.
+ *   CAN-BIND spread  — any pairwise per-phase spread that is NOT an accounting flip, regardless
+ *                      of the phase's share of the envelope. Under estimate-backed extrapolation
+ *                      (sc-18096/18097) any phase can become the binding one, so per-phase
+ *                      re-capture variance is tracked separately from the same-cell binding set
+ *                      and reported as `maxCanBindPhaseSpread`.
  *   ACCOUNTING FLIP  — a pairwise spread above ACCOUNTING_DISCONTINUITY_THRESHOLD. The corpus
  *                      contains conditioning-phase peaks of ~44 KB in one harness variant and
  *                      ~16 GB in another for the same key (the eager variant reports conditioning
@@ -37,6 +47,17 @@
  *
  * The hard floor applies when variance data is thin — few or no repeat pairs — and, as of the
  * 65-record corpus, it binds for BOTH backends (see the floor rationale on each constant below).
+ *
+ * The estimate margin does NOT fold in the max CAN-BIND phase spread. The corpus demonstrates a
+ * 17.1369% cross-fingerprint same-key denoise re-capture spread; folding it through the rule
+ * shape above (x2 safety, floor, x2 widening) would yield a 68.5% MLX estimate margin —
+ * unusable (and even the un-widened variance term alone is 34.3%). Instead
+ * ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE records the constraint that carries that
+ * risk: estimate-backed admission (sc-18096/18097) must not admit a candidate whose predicted
+ * binding phase differs from the measured cell's without re-deriving per-phase variance for
+ * that phase. The derivation prints the can-bind number so the tradeoff stays visible as the
+ * corpus grows.
+ *
  * The constants this script derives are landed in
  * `crates/sceneworks-worker/src/ladder_margin_policy.rs`;
  * `scripts/derive-ladder-margins.test.mjs` pins the two against each other, so re-running this
@@ -101,6 +122,16 @@ export const VARIANCE_SAFETY_MULTIPLIER = 2;
  */
 export const ESTIMATE_WIDENING_MULTIPLIER = 2;
 
+/**
+ * Constraint inherited by sc-18096/18097, mirrored by the Rust constant of the same name (the
+ * test pins the two against each other): estimate-backed admission must not admit a candidate
+ * whose predicted binding phase differs from the measured cell's binding phase without
+ * re-deriving per-phase variance for that phase. This is the load-bearing replacement for
+ * folding `maxCanBindPhaseSpread` (17.1369% as of this corpus — larger than every margin below)
+ * into the estimate margin; see the header for the arithmetic that rules the fold-in out.
+ */
+export const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE = true;
+
 /** Pairwise spreads above this are accounting flips (see header), excluded and counted. */
 export const ACCOUNTING_DISCONTINUITY_THRESHOLD = 0.5;
 
@@ -135,6 +166,25 @@ export function evidenceKey(record) {
 function envelopeBytes(record) {
   const overall = record.observedMemory?.overall ?? {};
   return overall.allocatorBytes ?? overall.activeBytes ?? null;
+}
+
+/**
+ * Range of the shipped predictor's envelope gap `(predicted - observed) / predicted` across the
+ * given records. This is the citable anchor behind the 5% MLX hard floor (rationale 2 on
+ * MLX_HARD_FLOOR): the headroom the calibrated pipeline already demonstrates on every measured
+ * cell. Computed here — not asserted from prose — and pinned in the test alongside the other
+ * doc-fact guards.
+ */
+export function predictorEnvelopeGapRange(records) {
+  const gaps = records
+    .map((record) => {
+      const predicted = record.predictedPeakBytes?.overall ?? null;
+      const observed = envelopeBytes(record);
+      return predicted && observed ? (predicted - observed) / predicted : null;
+    })
+    .filter((gap) => gap !== null);
+  if (gaps.length === 0) return null;
+  return { count: gaps.length, min: Math.min(...gaps), max: Math.max(...gaps) };
 }
 
 function phasePeaks(record, phase) {
@@ -174,6 +224,8 @@ export function analyzeBackend(records) {
     intraRecordRepeatMeasurements: 0,
     bindingSpreads: [],
     maxNonBindingSpread: null,
+    maxCanBindPhaseSpread: null,
+    envelopeGap: predictorEnvelopeGapRange(records),
   };
 
   for (const record of records) {
@@ -198,6 +250,12 @@ export function analyzeBackend(records) {
             if (spread > ACCOUNTING_DISCONTINUITY_THRESHOLD) {
               analysis.accountingFlipsExcluded += 1;
               continue;
+            }
+            if (
+              analysis.maxCanBindPhaseSpread === null ||
+              spread > analysis.maxCanBindPhaseSpread.spread
+            ) {
+              analysis.maxCanBindPhaseSpread = { spread, phase, metric, recordIds: [first.id, second.id] };
             }
             const binding =
               phase === "overall" ||
@@ -291,7 +349,21 @@ async function main() {
     if (analysis.maxNonBindingSpread) {
       const nb = analysis.maxNonBindingSpread;
       process.stdout.write(
-        `  max NON-binding spread (excluded): ${formatPercent(nb.spread)} (${nb.phase}/${nb.metric}, ${nb.recordIds.join(" vs ")})\n`,
+        `  max NON-binding spread (excluded from SAME-CELL margins): ${formatPercent(nb.spread)} (${nb.phase}/${nb.metric}, ${nb.recordIds.join(" vs ")})\n`,
+      );
+    }
+    if (analysis.maxCanBindPhaseSpread) {
+      const cb = analysis.maxCanBindPhaseSpread;
+      const foldedIn = ESTIMATE_WIDENING_MULTIPLIER * Math.max(margins.hardFloor, VARIANCE_SAFETY_MULTIPLIER * cb.spread);
+      process.stdout.write(
+        `  max CAN-BIND phase spread (any phase, flips excluded): ${formatPercent(cb.spread)} (${cb.phase}/${cb.metric}, ${cb.recordIds.join(" vs ")})\n` +
+          `    folding it into the estimate margin would yield ${formatPercent(foldedIn)} — carried by the phase-extrapolation constraint instead (see header)\n`,
+      );
+    }
+    if (analysis.envelopeGap) {
+      const gap = analysis.envelopeGap;
+      process.stdout.write(
+        `  predictor envelope gap (predicted - observed)/predicted: ${formatPercent(gap.min)}..${formatPercent(gap.max)} across ${gap.count} records\n`,
       );
     }
     process.stdout.write(

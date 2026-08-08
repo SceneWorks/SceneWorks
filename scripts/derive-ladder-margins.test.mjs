@@ -8,6 +8,7 @@ import {
   ACCOUNTING_DISCONTINUITY_THRESHOLD,
   BINDING_PHASE_ENVELOPE_SHARE,
   CANDLE_HARD_FLOOR,
+  ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE,
   ESTIMATE_WIDENING_MULTIPLIER,
   MLX_HARD_FLOOR,
   VARIANCE_SAFETY_MULTIPLIER,
@@ -86,6 +87,59 @@ test("derivation corpus facts backing the doc comments still hold", async () => 
   assert.equal(derived.candle.analysis.repeatPairs, 0, "candle has zero repeat pairs (floor is the whole margin)");
   assert.equal(derived.mlx.analysis.intraRecordRepeatMeasurements, 0);
   assert.equal(derived.candle.analysis.intraRecordRepeatMeasurements, 0);
+
+  // The 5% MLX floor's citable anchor (MLX_HARD_FLOOR rationale 2): the shipped predictor's
+  // envelope gap really does span 4.76%..5.21% across all mlx records, and the floor never
+  // exceeds the demonstrated headroom. Computed by the script, pinned here — not prose.
+  const gap = derived.mlx.analysis.envelopeGap;
+  assert.equal(gap.count, derived.mlx.analysis.recordCount, "every mlx record has a predicted overall peak");
+  assert.equal((gap.min * 100).toFixed(2), "4.76", "envelope gap lower bound matches the doc comments");
+  assert.equal((gap.max * 100).toFixed(2), "5.21", "envelope gap upper bound matches the doc comments");
+  assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
+});
+
+// The issue-1 resolution (adversarial review of sc-18094): the non-binding exclusion is sound
+// only for SAME-CELL admission, and the estimate margins do NOT absorb per-phase re-capture
+// variance (max can-bind phase spread 17.1369% > 10% MLX estimate margin). That risk is carried
+// by a pinned constraint instead: sc-18096/18097 must not admit estimate candidates whose
+// predicted binding phase differs from the measured cell's without per-phase re-derivation.
+// This test asserts the constraint constant exists on BOTH sides (script + Rust), that the Rust
+// doc actually states the rule, and that the constraint is still load-bearing on the current
+// corpus — if it ever stops being (spread drops under the margin), revisit whether the fold-in
+// route has become viable.
+test("the estimate-admission binding-phase constraint is pinned on both sides and load-bearing", async () => {
+  assert.equal(ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE, true);
+
+  const source = await readFile(RUST_POLICY_PATH, "utf8");
+  const match = source.match(
+    /pub const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE: bool = (true|false);/,
+  );
+  assert.ok(match, "rust constraint constant exists");
+  assert.equal(match[1] === "true", ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE);
+
+  // The doc block immediately above the constant must state the rule, not just name it.
+  const docBlock = source
+    .slice(0, match.index)
+    .split("\n")
+    .reverse();
+  const docLines = [];
+  for (const line of docBlock) {
+    if (line.trim() === "") continue;
+    if (!line.trim().startsWith("///")) break;
+    docLines.push(line);
+  }
+  const doc = docLines.join("\n");
+  assert.ok(/MUST NOT/.test(doc), "doc states the prohibition");
+  assert.ok(/binding phase/i.test(doc), "doc names the binding phase condition");
+  assert.ok(/per-phase variance re-derivation/i.test(doc), "doc names the escape hatch");
+
+  // Load-bearing on the committed corpus: the demonstrated per-phase re-capture spread exceeds
+  // the widest MLX margin, so the constraint (not the margin) is what stands between an
+  // estimate-backed phase extrapolation and a fatal MLX OOM.
+  const derived = deriveMargins(await loadEvidenceRecords(ROOT));
+  const canBind = derived.mlx.analysis.maxCanBindPhaseSpread;
+  assert.equal((canBind.spread * 100).toFixed(4), "17.1369", "spread matches the number cited in both doc comments");
+  assert.ok(canBind.spread > derived.mlx.margins.estimateMargin, "constraint is load-bearing");
 });
 
 // Mutation-proofs the VARIANCE path: with a synthetic repeat pair whose doubled spread exceeds
@@ -126,10 +180,12 @@ test("a backend with no repeat pairs falls back to the hard floor as the whole m
   assert.equal(margins.estimateMargin, ESTIMATE_WIDENING_MULTIPLIER * CANDLE_HARD_FLOOR);
 });
 
-// The two exclusion rules that keep the corpus's known artifacts out of the variance estimate:
-// harness accounting flips (~44 KB vs ~16 GB conditioning) and spreads on phases too far below
-// the envelope to ever bind admission (the 17% rung-4 denoise swing on a 2 GB phase under a
-// 16 GB envelope).
+// The two exclusion rules that keep the corpus's known artifacts out of the SAME-CELL variance
+// estimate: harness accounting flips (~44 KB vs ~16 GB conditioning) and spreads on phases too
+// far below the envelope to bind a same-cell admission (the 17% rung-4 denoise swing on a 2 GB
+// phase under a 16 GB envelope). The non-binding exclusion is scoped: the excluded swing must
+// still surface as maxCanBindPhaseSpread, because under estimate-backed extrapolation that
+// phase CAN bind — that is what the binding-phase constraint above exists for.
 test("accounting flips and non-binding phase spreads are excluded from the variance estimate", () => {
   const belowBinding = 0.4 * 10_500_000_000; // < BINDING_PHASE_ENVELOPE_SHARE of the envelope
   const analysis = analyzeBackend([
@@ -149,5 +205,10 @@ test("accounting flips and non-binding phase spreads are excluded from the varia
   assert.ok(
     analysis.bindingSpreads.every((entry) => entry.phase === "overall" || entry.phase === "conditioning"),
     "neither excluded spread reached the binding set",
+  );
+  assert.equal(analysis.maxCanBindPhaseSpread.phase, "denoise");
+  assert.ok(
+    Math.abs(analysis.maxCanBindPhaseSpread.spread - 0.2) < 0.01,
+    "the same-cell-excluded denoise swing still surfaces as the max can-bind phase spread",
   );
 });
