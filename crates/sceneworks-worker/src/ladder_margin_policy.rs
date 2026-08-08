@@ -1,10 +1,10 @@
 //! Ladder margin policy derived from repeat-capture variance (sc-18094, epic 18093).
 //!
 //! Epic 18093 retires "measurement currency as a gate". Instead of invalidating evidence whose
-//! closure digest went stale, the selector will keep it eligible behind a widened margin
-//! (sc-18095), and will admit estimate-backed rungs nobody has measured behind a wider one still
-//! (sc-18096/18097). This module owns ONLY the margin constants those follow-ups consume; it
-//! changes no selector behavior by itself.
+//! closure digest went stale, the selector keeps it eligible behind a widened margin (sc-18095,
+//! applied in `crate::memory_strategy::select_strategy`), and will admit estimate-backed rungs
+//! nobody has measured behind a wider one still (sc-18096/18097). This module owns ONLY the margin
+//! constants those consumers read; it changes no selector behavior by itself.
 //!
 //! Every value here is pinned to a committed derivation —
 //! `scripts/derive-ladder-margins.mjs`, run against
