@@ -1096,6 +1096,17 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
                   "family": "z-image",
                   "compatibility": { "families": ["z-image"] },
                   "source": { "provider": "local", "path": "loras/local.safetensors" }
+                },
+                {
+                  "id": "already_cached",
+                  "name": "Already Cached",
+                  "family": "ltx-video",
+                  "compatibility": { "families": ["ltx-video"] },
+                  "source": {
+                    "provider": "huggingface",
+                    "repo": "Test/lora-install-probe",
+                    "file": "cached.safetensors"
+                  }
                 }
               ]
             }
@@ -1129,6 +1140,30 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A LoRA already present in the HF cache is rejected with a machine-readable code. The
+    // web client keys the "my badge is stale, resync" path off `code` rather than the prose
+    // detail, so the code is load-bearing contract, not decoration: a client rendering a
+    // pre-download catalog snapshot would otherwise show "Not Installed" next to an error
+    // saying it IS installed. Guarded here so the code can't be dropped or renamed silently.
+    let repo_dir =
+        huggingface_repo_cache_path(&temp_dir.path().join("data"), "Test/lora-install-probe")
+            .expect("repo cache path");
+    std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
+    std::fs::write(repo_dir.join("refs").join("main"), "rev1").expect("write refs/main");
+    let snapshot = repo_dir.join("snapshots").join("rev1");
+    std::fs::create_dir_all(&snapshot).expect("create snapshot");
+    std::fs::write(snapshot.join("cached.safetensors"), b"").expect("write adapter");
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/loras/already_cached/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "lora_already_installed");
 
     // An unknown LoRA id is a 404.
     let (status, _) = request(app, "POST", "/api/v1/loras/missing/download", json!({})).await;

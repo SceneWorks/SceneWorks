@@ -364,11 +364,22 @@ export function useModelsAndLoras({
         setLoraError("");
         return job;
       } catch (err) {
+        // The server probes installState live from the HF cache; our badge is a snapshot
+        // from the last catalog fetch. When the cache is filled out-of-band (the on-demand
+        // pull at first generation, another client) the row is already "installed" server-
+        // side while we still render "Not Installed", so the click lands on a Download
+        // button that cannot succeed. That disagreement is benign and self-correcting:
+        // resync the catalog so the badge flips, rather than showing an error that
+        // contradicts what the user is looking at.
+        if (err?.code === "lora_already_installed") {
+          await refreshLoras();
+          return null;
+        }
         setLoraError(err.message);
         return null;
       }
     },
-    [token, setJobs, setLoraError],
+    [token, setJobs, setLoraError, refreshLoras],
   );
 
   return {
