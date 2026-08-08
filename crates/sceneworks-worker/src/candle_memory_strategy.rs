@@ -708,6 +708,7 @@ fn evaluate_shared_image_inner(
             selection: *selection,
             evidence,
             closure_digest,
+            basis: crate::memory_strategy::CandidateBasis::Measured,
         })
         .collect::<Vec<_>>();
     let selected = crate::memory_strategy::select_strategy(

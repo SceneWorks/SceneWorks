@@ -9,6 +9,13 @@
 //! backend's stale-measured margin from [`crate::ladder_margin_policy`], and current evidence is
 //! strictly preferred over stale for the same key. Structural verdicts (`Invalid`,
 //! `OutOfEnvelope`, `CompositionMismatch`, unverified conformance) still exclude.
+//!
+//! Estimate-backed candidates admit the full ladder (sc-18096, epic 18093 R1): a caller may
+//! submit synthesized candidates ([`CandidateBasis::EstimateFittedCurve`] /
+//! [`CandidateBasis::EstimateFloor`]) for implemented-but-unmeasured rungs. They are graded at
+//! their peak widened by the backend's ESTIMATE margin, every structural exclusion still applies,
+//! and any eligible measured candidate at the same rung supersedes them — the normative
+//! precedence is measured-current > stale-measured > estimate.
 
 use std::collections::BTreeSet;
 
@@ -19,7 +26,10 @@ use gen_core::{
 };
 use sceneworks_core::memory_calibration::StrategyRung;
 
-use crate::ladder_margin_policy::{CANDLE_STALE_MEASURED_MARGIN, MLX_STALE_MEASURED_MARGIN};
+use crate::ladder_margin_policy::{
+    CANDLE_ESTIMATE_MARGIN, CANDLE_STALE_MEASURED_MARGIN, MLX_ESTIMATE_MARGIN,
+    MLX_STALE_MEASURED_MARGIN,
+};
 
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
@@ -217,6 +227,43 @@ pub struct RequestScope<'a> {
     pub expected_closure_digest: &'a str,
 }
 
+/// What produced a candidate's peak number (sc-18096, epic 18093 R1).
+///
+/// A measured candidate is backed by a calibration record (its currency — current vs stale
+/// closure — is decided separately, from the digest pair). An estimate candidate was synthesized
+/// by the caller for an implemented-but-unmeasured rung; the two estimate variants exist because
+/// the binding-phase constraint
+/// ([`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]) governs
+/// only candidates extrapolated from a measured cell, and because admission telemetry must name
+/// which basis carried a selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateBasis {
+    /// Backed by a measured calibration record.
+    Measured,
+    /// Synthesized estimate extrapolated from a measured cell's per-phase peaks (sc-18096). The
+    /// caller must have already honored the binding-phase constraint before submitting it.
+    EstimateFittedCurve,
+    /// Synthesized estimate from the weights + headroom floor — no measured cell in its
+    /// extrapolation basis, so the binding-phase constraint does not apply (see the scope
+    /// sentence on the constraint's doc).
+    EstimateFloor,
+}
+
+impl CandidateBasis {
+    pub const fn is_estimate(self) -> bool {
+        matches!(self, Self::EstimateFittedCurve | Self::EstimateFloor)
+    }
+
+    /// Stable label for tracing/telemetry.
+    pub const fn as_key(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::EstimateFittedCurve => "fitted_curve",
+            Self::EstimateFloor => "floor",
+        }
+    }
+}
+
 /// A provider estimate submitted to the selector. Cost is intentionally absent: strategy order is
 /// worker-owned and follows [`MemoryStrategy::ALL`].
 #[derive(Clone, Copy, Debug)]
@@ -230,6 +277,9 @@ pub struct Candidate<'a> {
     /// there without an inference change and a pin bump. The comparison itself is unaffected and is
     /// applied to every lane identically.
     pub closure_digest: &'a str,
+    /// Whether the peak is a measurement or a synthesized estimate (sc-18096). Like
+    /// `closure_digest`, this lives on `Candidate` because `MemoryEvidence` is pinned gen-core.
+    pub basis: CandidateBasis,
 }
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -241,13 +291,26 @@ fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
     peak_bytes as f64 / BYTES_PER_GIB
 }
 
-/// How a non-excluded candidate passed [`candidate_exclusion`] (sc-18095): with evidence measured
-/// under the request's live compile closure, or with stale-closure evidence that stays eligible
-/// behind the widened stale-measured margin.
+/// How a non-excluded candidate passed [`candidate_exclusion`] (sc-18095/sc-18096): with evidence
+/// measured under the request's live compile closure, with stale-closure measured evidence that
+/// stays eligible behind the widened stale-measured margin, or as a synthesized estimate behind
+/// the wider estimate margin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandidateCurrency {
     Current,
     StaleClosure,
+    Estimate,
+}
+
+impl CandidateCurrency {
+    /// Normative precedence (sc-18096): measured-current > stale-measured > estimate.
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Current => 2,
+            Self::StaleClosure => 1,
+            Self::Estimate => 0,
+        }
+    }
 }
 
 /// The stale-measured margin for one backend (sc-18094 derivation, consumed here by sc-18095).
@@ -261,14 +324,32 @@ const fn stale_measured_margin(backend: MemoryBackend) -> f64 {
     }
 }
 
-/// Widen a stale-closure candidate's canonical byte ceiling by the backend's stale-measured margin
-/// (sc-18095). The widening happens in integer bytes with a ceil, so the admitted ceiling is never
-/// under the exact `peak * (1 + margin)` product and the GiB conversion stays a single downstream
-/// step.
-fn widened_stale_peak_bytes(peak_bytes: u64, stale_margin: f64) -> u64 {
-    (peak_bytes as f64 * (1.0 + stale_margin))
+/// The estimate margin for one backend (sc-18094 derivation, consumed here by sc-18096). Same
+/// exhaustive-match rationale as [`stale_measured_margin`].
+const fn estimate_margin(backend: MemoryBackend) -> f64 {
+    match backend {
+        MemoryBackend::Candle => CANDLE_ESTIMATE_MARGIN,
+        MemoryBackend::Mlx => MLX_ESTIMATE_MARGIN,
+    }
+}
+
+/// Widen a stale-closure or estimate candidate's canonical byte ceiling by its policy margin
+/// (sc-18095/sc-18096). The widening happens in integer bytes with a ceil, so the admitted ceiling
+/// is never under the exact `peak * (1 + margin)` product and the GiB conversion stays a single
+/// downstream step.
+fn widened_peak_bytes(peak_bytes: u64, margin: f64) -> u64 {
+    (peak_bytes as f64 * (1.0 + margin))
         .ceil()
         .clamp(0.0, u64::MAX as f64) as u64
+}
+
+/// The selector's own stale-measured widening (sc-18095), exported so the MLX gate's
+/// evidence-path budget pre-check grades a stale candidate at the SAME admitted ceiling
+/// `select_strategy` will (sc-18096). The pre-check runs against each candidate's captured
+/// foreign reserve, which the selector's uniform budget cannot carry, so the two must share this
+/// one policy function rather than each deriving a margin.
+pub(crate) fn stale_widened_peak_bytes(backend: MemoryBackend, peak_bytes: u64) -> u64 {
+    widened_peak_bytes(peak_bytes, stale_measured_margin(backend))
 }
 
 /// Worker-owned live budget. Headroom is removed once from the live/reclaimable pool and once from
@@ -385,6 +466,23 @@ fn candidate_exclusion(
     if contract.validate_selection(&candidate.selection).is_err() {
         return Err(MemoryEvidenceVerdict::Invalid);
     }
+    if candidate.basis.is_estimate() {
+        // sc-18096: worker-side eligibility wrap for estimate-scoped candidates. gen-core's
+        // `optimized_eligibility` (pinned inference revision) hard-requires `Verified` conformance
+        // and a `Passed` parity result for every optimized rung, which no synthesized estimate can
+        // carry — and bumping the pin for this was explicitly ruled out. The predicate is still
+        // consulted rather than re-implemented: its STRUCTURAL prefix (canonical engaged
+        // composition ⇒ `Invalid`, contract composition agreement ⇒ `CompositionMismatch`) runs
+        // before the conformance gate, so those verdicts exclude an estimate exactly as they
+        // exclude a measured cell. The only accepted failure is the `Unverified` verdict the
+        // conformance gate necessarily yields for a synthesized record; the calibration-identity
+        // checks it short-circuits do not apply to a candidate with no calibration record behind
+        // it.
+        return match candidate.evidence.optimized_eligibility(contract) {
+            Ok(()) | Err(MemoryEvidenceVerdict::Unverified) => Ok(CandidateCurrency::Estimate),
+            Err(reason) => Err(reason),
+        };
+    }
     if let Some(reason) = candidate
         .evidence
         .optimized_eligibility(contract)
@@ -447,6 +545,7 @@ pub fn select_strategy(
         .ceil()
         .clamp(0.0, u64::MAX as f64) as u64;
     let stale_margin = stale_measured_margin(contract.backend.backend_kind());
+    let estimate_margin = estimate_margin(contract.backend.backend_kind());
     let mut deepest = None;
     let mut first_unknown = None;
     for strategy in MemoryStrategy::ALL {
@@ -487,9 +586,13 @@ pub fn select_strategy(
                 Ok(currency) => {
                     let admitted_peak_bytes = match currency {
                         CandidateCurrency::Current => candidate.evidence.predicted_peak_bytes,
-                        CandidateCurrency::StaleClosure => widened_stale_peak_bytes(
+                        CandidateCurrency::StaleClosure => widened_peak_bytes(
                             candidate.evidence.predicted_peak_bytes,
                             stale_margin,
+                        ),
+                        CandidateCurrency::Estimate => widened_peak_bytes(
+                            candidate.evidence.predicted_peak_bytes,
+                            estimate_margin,
                         ),
                     };
                     if currency == CandidateCurrency::StaleClosure {
@@ -507,6 +610,21 @@ pub fn select_strategy(
                             "stale-closure memory-strategy candidate admitted with widened margin"
                         );
                     }
+                    if currency == CandidateCurrency::Estimate {
+                        // sc-18096: record the estimate admission, which basis produced it, and
+                        // both the raw and widened peaks, so a later OOM under this selection is
+                        // attributable to a synthesized estimate rather than a measurement.
+                        tracing::info!(
+                            route = request.resolved_route,
+                            backend = request.backend,
+                            ?strategy,
+                            basis = candidate.basis.as_key(),
+                            raw_peak_bytes = candidate.evidence.predicted_peak_bytes,
+                            widened_peak_bytes = admitted_peak_bytes,
+                            estimate_margin,
+                            "estimate-backed memory-strategy candidate admitted with widened margin"
+                        );
+                    }
                     eligible.push((candidate, currency, admitted_peak_bytes));
                 }
             }
@@ -514,6 +632,12 @@ pub fn select_strategy(
         // sc-18095: current evidence is strictly preferred over stale for the same key — a stale
         // cell whose exact key was re-measured under the live closure never competes with the
         // re-measurement.
+        //
+        // sc-18096: any eligible MEASURED candidate at this rung — current or stale — supersedes
+        // every estimate at the rung. An estimate exists to cover a rung nobody measured; where a
+        // measurement exists it is authoritative in both directions, including "this rung's
+        // measured peak does not fit", which a synthesized guess must not overrule on a
+        // fatal-OOM lane.
         let eligible = {
             let superseded_by_current = |candidate: &Candidate<'_>| {
                 eligible.iter().any(|(current, currency, _)| {
@@ -521,10 +645,15 @@ pub fn select_strategy(
                         && current.evidence.key == candidate.evidence.key
                 })
             };
+            let rung_has_measured = eligible
+                .iter()
+                .any(|(_, currency, _)| *currency != CandidateCurrency::Estimate);
             eligible
                 .iter()
-                .filter(|(candidate, currency, _)| {
-                    *currency == CandidateCurrency::Current || !superseded_by_current(candidate)
+                .filter(|(candidate, currency, _)| match currency {
+                    CandidateCurrency::Current => true,
+                    CandidateCurrency::StaleClosure => !superseded_by_current(candidate),
+                    CandidateCurrency::Estimate => !rung_has_measured,
                 })
                 .copied()
                 .collect::<Vec<_>>()
@@ -552,12 +681,10 @@ pub fn select_strategy(
                 |(left, left_currency, left_peak), (right, right_currency, right_peak)| {
                     left_peak
                         .cmp(right_peak)
-                        // Current outranks stale between distinct keys too; on an all-current set this
-                        // arm is always `Equal`, so pre-sc-18095 selection is byte-for-byte unchanged.
-                        .then_with(|| {
-                            (*left_currency == CandidateCurrency::Current)
-                                .cmp(&(*right_currency == CandidateCurrency::Current))
-                        })
+                        // The normative precedence breaks peak ties between distinct keys too
+                        // (current > stale > estimate); on an all-current set this arm is always
+                        // `Equal`, so pre-sc-18095 selection is byte-for-byte unchanged.
+                        .then_with(|| left_currency.precedence().cmp(&right_currency.precedence()))
                         .then_with(|| parameter_preference(left).cmp(&parameter_preference(right)))
                 },
             )
@@ -572,6 +699,18 @@ pub fn select_strategy(
                     widened_peak_bytes = *admitted_peak_bytes,
                     stale_margin,
                     "memory-strategy selection uses stale-closure evidence at the widened peak"
+                );
+            }
+            if *currency == CandidateCurrency::Estimate {
+                tracing::warn!(
+                    route = request.resolved_route,
+                    backend = request.backend,
+                    ?strategy,
+                    basis = candidate.basis.as_key(),
+                    raw_peak_bytes = candidate.evidence.predicted_peak_bytes,
+                    widened_peak_bytes = *admitted_peak_bytes,
+                    estimate_margin,
+                    "memory-strategy selection uses an estimate-backed candidate at the widened peak"
                 );
             }
             return Selection::Selected {
@@ -793,6 +932,7 @@ mod tests {
             },
             evidence: &source_only_change,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
 
         assert!(matches!(
@@ -829,6 +969,7 @@ mod tests {
             },
             evidence: &exact,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
 
         assert!(matches!(
@@ -868,6 +1009,7 @@ mod tests {
                 },
                 evidence: &staged,
                 closure_digest: INF,
+                basis: CandidateBasis::Measured,
             },
             Candidate {
                 selection: MemorySelection {
@@ -877,6 +1019,7 @@ mod tests {
                 },
                 evidence: &resident,
                 closure_digest: INF,
+                basis: CandidateBasis::Measured,
             },
         ];
         let mut provider = contract();
@@ -937,6 +1080,7 @@ mod tests {
             },
             evidence: &staged,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         assert_eq!(
             select_strategy(
@@ -973,6 +1117,7 @@ mod tests {
             },
             evidence: &staged,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         assert_eq!(
             select_strategy(
@@ -1011,6 +1156,7 @@ mod tests {
             },
             evidence: &staged,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         assert_eq!(
             select_strategy(
@@ -1041,6 +1187,7 @@ mod tests {
             },
             evidence: &captured,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         let mut changed_contract = contract();
         changed_contract.additional_prerequisites.push((
@@ -1126,6 +1273,7 @@ mod tests {
                 },
                 evidence: &excluded_staged,
                 closure_digest: INF,
+                basis: CandidateBasis::Measured,
             },
             Candidate {
                 selection: MemorySelection {
@@ -1135,6 +1283,7 @@ mod tests {
                 },
                 evidence: &bounded_decode,
                 closure_digest: INF,
+                basis: CandidateBasis::Measured,
             },
         ];
         assert!(matches!(
@@ -1176,6 +1325,7 @@ mod tests {
                 },
                 evidence: &resident,
                 closure_digest: INF,
+                basis: CandidateBasis::Measured,
             },
             Candidate {
                 selection: MemorySelection {
@@ -1185,6 +1335,7 @@ mod tests {
                 },
                 evidence: &staged,
                 closure_digest: INF,
+                basis: CandidateBasis::Measured,
             },
         ];
         let mut provider = contract();
@@ -1247,6 +1398,7 @@ mod tests {
             },
             evidence: &staged,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         let mut scope = request();
         scope.mode = "character_image";
@@ -1312,6 +1464,7 @@ mod tests {
             selection,
             evidence: &staged,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1334,6 +1487,7 @@ mod tests {
                     selection,
                     evidence: &staged,
                     closure_digest: INF,
+                    basis: CandidateBasis::Measured,
                 }],
             ),
             Selection::Selected {
@@ -1357,6 +1511,7 @@ mod tests {
             },
             evidence: &staged,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1384,6 +1539,7 @@ mod tests {
                     selection: candidate.selection,
                     evidence: &wrong_backend,
                     closure_digest: INF,
+                    basis: CandidateBasis::Measured,
                 }],
             ),
             Selection::Unverified {
@@ -1430,6 +1586,7 @@ mod tests {
             },
             evidence: &high,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         let low_candidate = Candidate {
             evidence: &low,
@@ -1441,6 +1598,7 @@ mod tests {
             selection: high_selection,
             evidence: &high,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         let budget = Some(Budget {
             available_gb: 8.0,
@@ -1478,6 +1636,7 @@ mod tests {
                     selection: high_selection,
                     evidence: &tied_high,
                     closure_digest: INF,
+                    basis: CandidateBasis::Measured,
                 },
             ],
         );
@@ -1802,6 +1961,7 @@ mod tests {
                 },
                 evidence: record,
                 closure_digest: INF,
+                basis: CandidateBasis::Measured,
             })
             .collect::<Vec<_>>();
         let provider = contract();
@@ -1938,6 +2098,7 @@ mod tests {
             },
             evidence: &record,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         }];
         let select = |provider: &MemoryProviderContract| {
             select_strategy(
@@ -2048,6 +2209,7 @@ mod tests {
                     },
                     evidence: record,
                     closure_digest: INF,
+                    basis: CandidateBasis::Measured,
                 })
                 .collect::<Vec<_>>();
 
@@ -2126,6 +2288,7 @@ mod tests {
                     selection,
                     evidence: &staged,
                     closure_digest: INF,
+                    basis: CandidateBasis::Measured,
                 }],
             ),
             Selection::Selected {
@@ -2163,6 +2326,7 @@ mod tests {
                 },
                 evidence: &staged,
                 closure_digest: STALE_CLOSURE,
+                basis: CandidateBasis::Measured,
             }],
         );
         let Selection::Selected { needed_gb, .. } = result else {
@@ -2205,6 +2369,7 @@ mod tests {
                 },
                 evidence: record,
                 closure_digest: STALE_CLOSURE,
+                basis: CandidateBasis::Measured,
             })
             .collect::<Vec<_>>();
         let selection = select_strategy(
@@ -2264,6 +2429,7 @@ mod tests {
                 },
                 evidence: &staged,
                 closure_digest: STALE_CLOSURE,
+                basis: CandidateBasis::Measured,
             }],
         );
         let Selection::Reject { needed_gb, .. } = result else {
@@ -2300,11 +2466,13 @@ mod tests {
             selection,
             evidence: &current,
             closure_digest: INF,
+            basis: CandidateBasis::Measured,
         };
         let stale_candidate = Candidate {
             selection,
             evidence: &stale,
             closure_digest: STALE_CLOSURE,
+            basis: CandidateBasis::Measured,
         };
         let budget = Some(Budget {
             available_gb: 10.0,
@@ -2365,6 +2533,7 @@ mod tests {
                     },
                     evidence: &captured,
                     closure_digest: STALE_CLOSURE,
+                    basis: CandidateBasis::Measured,
                 }],
             ),
             Selection::Unverified {
@@ -2390,6 +2559,7 @@ mod tests {
                     },
                     evidence: &wrong_backend,
                     closure_digest: STALE_CLOSURE,
+                    basis: CandidateBasis::Measured,
                 }],
             ),
             Selection::Unverified {
@@ -2425,6 +2595,7 @@ mod tests {
             },
             evidence: &staged,
             closure_digest: STALE_CLOSURE,
+            basis: CandidateBasis::Measured,
         };
         let budget = |available_gb| {
             Some(Budget {
@@ -2502,6 +2673,7 @@ mod tests {
                     },
                     evidence: &staged,
                     closure_digest: STALE_CLOSURE,
+                    basis: CandidateBasis::Measured,
                 }],
             )
         });
@@ -2520,6 +2692,343 @@ mod tests {
         assert!(
             output.contains("memory-strategy selection uses stale-closure evidence"),
             "stale-selection event missing from trace output: {output}"
+        );
+    }
+
+    // ── sc-18096: estimate-backed candidates admit the full ladder behind the estimate margin ──
+
+    /// An estimate-basis candidate for one strategy: synthesized evidence, `ImplementedUnverified`
+    /// conformance, no observed peak, parity not run — the shape the MLX gate fabricates.
+    fn estimate_evidence(
+        strategy: MemoryStrategy,
+        contract: &MemoryProviderContract,
+    ) -> MemoryEvidence {
+        let mut record = evidence(strategy);
+        record.conformance = MemoryConformanceState::ImplementedUnverified;
+        record.observed_peak_bytes = None;
+        record.parity_result = MemoryParityResult::NotRun;
+        rekey_composition(&mut record, contract);
+        record
+    }
+
+    /// sc-18096: an estimate-only cell is admitted at exactly the policy-widened peak. The
+    /// expected value is recomputed from the POLICY constant, so a selector that stops widening
+    /// estimates (or grades them with the narrower stale margin) turns this red.
+    #[test]
+    fn estimate_candidates_are_admitted_at_exactly_the_policy_widened_peak() {
+        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
+        let provider = staged_only_provider();
+        let mut staged = estimate_evidence(MemoryStrategy::StagedResidency, &provider);
+        staged.predicted_peak_bytes = raw_peak_bytes;
+        let result = select_strategy(
+            request(),
+            &provider,
+            Some(Budget {
+                available_gb: 11.0,
+                reclaimable_gb: 0.0,
+                total_gb: 11.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &[Candidate {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    parameters: Default::default(),
+                    tier: tier(),
+                },
+                evidence: &staged,
+                closure_digest: INF,
+                basis: CandidateBasis::EstimateFloor,
+            }],
+        );
+        let Selection::Selected { needed_gb, .. } = result else {
+            panic!("an implemented rung's estimate candidate must be selectable: {result:?}");
+        };
+        let expected_widened_bytes =
+            (raw_peak_bytes as f64 * (1.0 + CANDLE_ESTIMATE_MARGIN)).ceil();
+        assert_eq!(needed_gb, expected_widened_bytes / BYTES_PER_GIB);
+        // The candle estimate margin is strictly wider than the candle stale margin — pinned at
+        // COMPILE TIME by `ladder_margin_policy`'s invariant block — so grading an estimate with
+        // the stale margin would have produced a smaller needed_gb: this equality pins the
+        // ESTIMATE margin specifically.
+    }
+
+    /// Mutation check demanded by the story: prove the estimate widening is APPLIED. This
+    /// estimate's raw peak fits the budget exactly — a selector whose estimate margin is zeroed
+    /// selects it, flipping this red. The real selector grades it at the widened peak, which
+    /// overflows into `Reject`.
+    #[test]
+    fn zeroing_the_estimate_margin_would_flip_this_rejection_into_a_selection() {
+        let raw_peak_bytes: u64 = 8 * 1024 * 1024 * 1024;
+        let provider = staged_only_provider();
+        let mut staged = estimate_evidence(MemoryStrategy::StagedResidency, &provider);
+        staged.predicted_peak_bytes = raw_peak_bytes;
+        let result = select_strategy(
+            request(),
+            &provider,
+            Some(Budget {
+                available_gb: 8.0,
+                reclaimable_gb: 0.0,
+                total_gb: 8.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &[Candidate {
+                selection: MemorySelection {
+                    strategy: MemoryStrategy::StagedResidency,
+                    parameters: Default::default(),
+                    tier: tier(),
+                },
+                evidence: &staged,
+                closure_digest: INF,
+                basis: CandidateBasis::EstimateFloor,
+            }],
+        );
+        let Selection::Reject { needed_gb, .. } = result else {
+            panic!(
+                "an estimate must be graded at its WIDENED peak; selecting at the raw peak means \
+                 the estimate margin was not applied: {result:?}"
+            );
+        };
+        assert!(
+            needed_gb > 8.0,
+            "the reported requirement must carry the widening: {needed_gb}"
+        );
+    }
+
+    /// sc-18096 precedence: ANY eligible measured candidate at a rung — current or stale —
+    /// supersedes every estimate at that rung, in either declaration order, and a current
+    /// measured selection stays byte-for-byte unwidened while the estimate coexists.
+    #[test]
+    fn measured_candidates_supersede_estimates_at_the_same_rung() {
+        let provider = staged_only_provider();
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
+            parameters: Default::default(),
+            tier: tier(),
+        };
+        let mut measured = evidence(MemoryStrategy::StagedResidency);
+        rekey_composition(&mut measured, &provider);
+        measured.predicted_peak_bytes = 8 * 1024 * 1024 * 1024;
+        // The estimate claims a SMALLER peak than the measurement — the dangerous direction on a
+        // fatal-OOM lane. It must not win merely by fitting more comfortably.
+        let mut estimate = estimate_evidence(MemoryStrategy::StagedResidency, &provider);
+        estimate.predicted_peak_bytes = 4 * 1024 * 1024 * 1024;
+        let measured_candidate = Candidate {
+            selection,
+            evidence: &measured,
+            closure_digest: INF,
+            basis: CandidateBasis::Measured,
+        };
+        let estimate_candidate = Candidate {
+            selection,
+            evidence: &estimate,
+            closure_digest: INF,
+            basis: CandidateBasis::EstimateFloor,
+        };
+        let budget = Some(Budget {
+            available_gb: 10.0,
+            reclaimable_gb: 0.0,
+            total_gb: 10.0,
+            reserved_headroom_gb: 0.0,
+        });
+        let forward = select_strategy(
+            request(),
+            &provider,
+            budget,
+            &[measured_candidate, estimate_candidate],
+        );
+        let reverse = select_strategy(
+            request(),
+            &provider,
+            budget,
+            &[estimate_candidate, measured_candidate],
+        );
+        assert_eq!(forward, reverse);
+        assert!(
+            matches!(forward, Selection::Selected { needed_gb: 8.0, .. }),
+            "the CURRENT measurement must win at its raw, unwidened peak: {forward:?}"
+        );
+
+        // A STALE measurement also supersedes the estimate: the widened measured 8.4 GiB peak is
+        // the admitted requirement, not the estimate's 4.4.
+        let stale_candidate = Candidate {
+            selection,
+            evidence: &measured,
+            closure_digest: STALE_CLOSURE,
+            basis: CandidateBasis::Measured,
+        };
+        let result = select_strategy(
+            request(),
+            &provider,
+            budget,
+            &[estimate_candidate, stale_candidate],
+        );
+        let Selection::Selected { needed_gb, .. } = result else {
+            panic!("the stale measurement must stay selectable: {result:?}");
+        };
+        let expected_widened_bytes =
+            (8.0 * BYTES_PER_GIB * (1.0 + CANDLE_STALE_MEASURED_MARGIN)).ceil();
+        assert_eq!(
+            needed_gb,
+            expected_widened_bytes / BYTES_PER_GIB,
+            "the stale MEASUREMENT outranks the smaller estimate at the same rung"
+        );
+
+        // And where the measurement — even widened — does not fit, the estimate must NOT rescue
+        // the rung: a guess never overrules a measurement's refusal.
+        let tight = Some(Budget {
+            available_gb: 5.0,
+            reclaimable_gb: 0.0,
+            total_gb: 5.0,
+            reserved_headroom_gb: 0.0,
+        });
+        assert!(
+            matches!(
+                select_strategy(
+                    request(),
+                    &provider,
+                    tight,
+                    &[estimate_candidate, measured_candidate],
+                ),
+                Selection::Reject { .. }
+            ),
+            "an estimate must not overrule the measured refusal at its own rung"
+        );
+    }
+
+    /// sc-18096: a fully estimate-backed ladder walks down to rung 4 under pressure, exactly like
+    /// the measured and stale ladders — the epic's capability claim at the selector seam.
+    #[test]
+    fn a_fully_estimate_backed_ladder_can_select_a_deep_rung() {
+        let provider = contract();
+        let peaks = [40.0, 30.0, 20.0, 10.0, 2.0];
+        let evidences = MemoryStrategy::ALL
+            .into_iter()
+            .zip(peaks)
+            .map(|(strategy, gb)| {
+                let mut record = estimate_evidence(strategy, &provider);
+                record.key.parameters = cumulative_params(strategy);
+                record.predicted_peak_bytes = (gb * BYTES_PER_GIB) as u64;
+                record
+            })
+            .collect::<Vec<_>>();
+        let candidates = MemoryStrategy::ALL
+            .into_iter()
+            .zip(&evidences)
+            .map(|(strategy, record)| Candidate {
+                selection: MemorySelection {
+                    strategy,
+                    parameters: cumulative_params(strategy),
+                    tier: tier(),
+                },
+                evidence: record,
+                closure_digest: INF,
+                basis: CandidateBasis::EstimateFloor,
+            })
+            .collect::<Vec<_>>();
+        let selection = select_strategy(
+            request(),
+            &provider,
+            Some(Budget {
+                available_gb: 3.0,
+                reclaimable_gb: 0.0,
+                total_gb: 48.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &candidates,
+        );
+        assert!(
+            matches!(
+                selection,
+                Selection::Selected {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::BoundedTransformerResidency,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "an estimate ladder must stay walkable down to rung 4: {selection:?}"
+        );
+    }
+
+    /// sc-18096: the selector's tracing records the estimate admission, which BASIS produced it,
+    /// and both the raw and widened peaks, so a later OOM under this selection is attributable to
+    /// a synthesized estimate rather than a measurement.
+    #[test]
+    fn tracing_records_estimate_admission_with_its_basis_and_the_widened_peak() {
+        use std::io::Write;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        let raw_peak_bytes: u64 = 10 * 1024 * 1024 * 1024;
+        let provider = staged_only_provider();
+        let mut staged = estimate_evidence(MemoryStrategy::StagedResidency, &provider);
+        staged.predicted_peak_bytes = raw_peak_bytes;
+        let result = tracing::subscriber::with_default(subscriber, || {
+            select_strategy(
+                request(),
+                &provider,
+                Some(Budget {
+                    available_gb: 11.0,
+                    reclaimable_gb: 0.0,
+                    total_gb: 11.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &[Candidate {
+                    selection: MemorySelection {
+                        strategy: MemoryStrategy::StagedResidency,
+                        parameters: Default::default(),
+                        tier: tier(),
+                    },
+                    evidence: &staged,
+                    closure_digest: INF,
+                    basis: CandidateBasis::EstimateFittedCurve,
+                }],
+            )
+        });
+        assert!(matches!(result, Selection::Selected { .. }), "{result:?}");
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        let widened_peak_bytes =
+            (raw_peak_bytes as f64 * (1.0 + CANDLE_ESTIMATE_MARGIN)).ceil() as u64;
+        assert!(
+            output
+                .contains("estimate-backed memory-strategy candidate admitted with widened margin"),
+            "estimate admission event missing from trace output: {output}"
+        );
+        assert!(
+            output.contains("basis=\"fitted_curve\"") || output.contains("basis=fitted_curve"),
+            "the admission event must name which basis produced the estimate: {output}"
+        );
+        assert!(
+            output.contains(&format!("raw_peak_bytes={raw_peak_bytes}")),
+            "raw peak missing from trace output: {output}"
+        );
+        assert!(
+            output.contains(&format!("widened_peak_bytes={widened_peak_bytes}")),
+            "widened peak missing from trace output: {output}"
+        );
+        assert!(
+            output.contains("memory-strategy selection uses an estimate-backed candidate"),
+            "estimate-selection event missing from trace output: {output}"
         );
     }
 }

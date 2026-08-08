@@ -1004,6 +1004,7 @@ pub(crate) fn krea_turbo_fit_with_runtime(
             selection: *selection,
             evidence,
             closure_digest: &measured_closure_digest,
+            basis: memory_strategy::CandidateBasis::Measured,
         })
         .collect::<Vec<_>>();
     let selection = memory_strategy::select_strategy(

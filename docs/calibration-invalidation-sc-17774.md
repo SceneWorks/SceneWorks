@@ -106,15 +106,23 @@ changed are demoted, and the regenerated files show which.
 
 ## What a demotion costs at runtime
 
-> **Superseded in part by sc-18095 (epic 18093)** for the selector path: in
+> **Superseded by sc-18095/sc-18096 (epic 18093)**: in
 > `memory_strategy::candidate_exclusion` a moved closure no longer excludes a candidate at all.
 > Fully-verified measured evidence whose closure went stale stays **eligible**, graded at its peak
 > widened by the backend's stale-measured margin
 > (`crates/sceneworks-worker/src/ladder_margin_policy.rs`), with current evidence strictly
 > preferred over stale for the same key. The structural verdicts (`Invalid`, `OutOfEnvelope`,
-> `CompositionMismatch`, unverified conformance) still exclude. The paragraphs below describe the
-> pre-sc-18095 demote-to-legacy behavior, which still governs the MLX
-> `evidence_admission_route` currency application and `verified_lower_alternative`.
+> `CompositionMismatch`, unverified conformance) still exclude. sc-18096 retired the MLX
+> `evidence_admission_route` pre-demotion too — a stale binding of the installed artifact now
+> reaches the selector and is graded there — leaving `verified_lower_alternative` (refusal
+> advice) as the only surface still filtered to the current closure.
+>
+> **Do not conflate the two staleness axes.** CLOSURE-DIGEST staleness — the capture's provider
+> compile closure no longer matching the live one — is the widened-margin *signal* described
+> above. Dimension-level `Stale` **verdicts** from capture-time manifest flags
+> (`vram_gate.rs` `historical_verification` / `krea_control_fit.rs` `historical_verification`)
+> are claims that the evidence was ALREADY known non-current when recorded, and they still
+> exclude via `optimized_eligibility`.
 
 A lane whose closure moved **degrades to the legacy estimator. It is not refused.** An expired
 calibration is epistemically the same as no calibration, and every uncalibrated model already renders
@@ -127,11 +135,9 @@ structural reasons:
 | | where currency is applied | why there |
 | --- | --- | --- |
 | candle | `memory_strategy::candidate_exclusion` — since sc-18095 a signal (widened margin), not an exclusion | the resident baseline is always in the candidate pool, so grading the calibrated cells conservatively still leaves something to select |
-| mlx | `mlx_fit_gate::evidence_admission_route`, before entering `AdmissionPath::Evidence` | that path withholds the resident baseline on purpose, so a stale binding admitted into it has nothing to fall back to and kills the request |
+| mlx | since sc-18096, the same `candidate_exclusion` grading: `evidence_admission_route` no longer pre-demotes a stale binding | the pre-18096 fear — the Evidence path withholds the resident baseline, so a stale binding had nothing to fall back to — is retired: refusal now happens only when nothing fits with margins, and the estimate ladder covers the unmeasured rungs |
 
-`candidate_exclusion` still applies the same comparison on the MLX lane (as the sc-18095 widened
-grading, with the MLX stale margin) and remains the backstop for a candidate reaching the selector
-another way. Pre-sc-18095, "the gate refuses a moved closure" meant it refused to admit that
+Pre-sc-18095, "the gate refuses a moved closure" meant it refused to admit that
 **candidate** — not that the request dies.
 
 `verified_lower_alternative` is the exception that has to carry its own copy: the geometry it names
