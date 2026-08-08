@@ -779,6 +779,12 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         (15517, "candle"),
         (15517, "mlx"),
         (15519, "candle"),
+        # SC-15520 Chroma1 lands its MLX ladder: rung 4 at `Dit` scope moves the staged request
+        # peak 19.2065 -> 14.6932 GiB (-23.50%) on Chroma1-Base q4 at 1024^2, byte-identical
+        # output at every cadence in [1, 2, 5, 10]. The measured scope is exactly one cell
+        # (chroma1_base/q4/text_to_image/none); every sibling entry, tier, mode and overlay
+        # stays `unmeasured`.
+        (15520, "mlx"),
         # SC-15521 Kolors, SC-15524 Anima and SC-15525 SDXL + derivatives land their MLX ladders
         # with measured request peaks: Anima 5.229 -> 4.151 GiB at window 1; SDXL -6.97% (q4) to
         # -21.40% (bf16) per entry per tier; Kolors -7.21% / -12.72% / -21.37% by tier, plus the

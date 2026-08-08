@@ -7706,9 +7706,11 @@
         // The rung-4 SCOPE domain is [Dit, TextEncoder, Both], default `Dit`, and the default is
         // MEASURED rather than inherited (`the_window_component_scopes_are_measured_not_inherited`):
         // against the 19.2065 GiB rung-1 control, `TextEncoder` moves the request peak -0.00%,
-        // `Dit` -23.50% (14.6932 GiB) and `Both` matches `Dit` to the fourth decimal at +22% wall
-        // clock (dominated, not wrong). T5-XXL IS the largest single component (dense bf16 at 10.15
-        // GiB against a 7.14 GiB packed DiT) -- but rung 1 has already shed it before the heavy
+        // `Dit` -23.50% (14.6932 GiB) and `Both` matches `Dit` to the fourth decimal -- equal peak
+        // for a wider scope, so the narrower `Dit` wins (no wall-clock claim is made here: ms/step
+        // ordering is unresolvable on this instrument, inference sc-17679). T5-XXL IS the largest
+        // single component (dense bf16 at 10.15 GiB against a 7.14 GiB packed DiT) -- but rung 1
+        // has already shed it before the heavy
         // phase loads, so bounding it moves nothing. This verdict is coupled to rung 2's: a bounded
         // decode would drop the heavy phase below conditioning and flip the binding scope
         // (Kolors/SC-15521 is the same arithmetic with a different decode).
