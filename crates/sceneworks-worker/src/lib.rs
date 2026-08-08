@@ -144,6 +144,11 @@ use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
 mod fit_gate;
+// Margin constants derived from repeat-capture variance in the calibration evidence (sc-18094,
+// epic 18093). Consumed by the stale-closure widening (sc-18095) and estimate-backed admission
+// (sc-18096/18097) follow-ups; pinned to `scripts/derive-ladder-margins.mjs` by
+// `scripts/derive-ladder-margins.test.mjs`.
+pub mod ladder_margin_policy;
 pub mod memory_strategy;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
