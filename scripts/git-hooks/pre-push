@@ -47,8 +47,16 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
 
   # The non-Rust inputs to the same generated docs: the catalog and plan they read, the generators
   # themselves, and the artifacts one generator consumes from another.
+  #
+  # sc-18098: `inference-provider-closures.json` and `rung4-applicability-survey.json` are both
+  # hashed sources of the matrix (`generate-memory-matrix.mjs#SOURCE_PATHS`) and were missing here,
+  # so the exact PR shape epic 18093 cares about — a pin bump that re-derives one lane's closure
+  # digest — pushed clean and learned about the stale matrix from `parity` a quarter of an hour
+  # later. This is the SAME sub-second regeneration check fired on a source that already required
+  # it; it adds no gate and demands no measurement. `platform-review-contracts.test.mjs` derives the
+  # coverage from SOURCE_PATHS so the next added source cannot go missing the same way.
   if printf '%s\n' "$changed" | grep -Eq \
-    '^(config/manifests/builtin\.models\.jsonc|config/(memory-calibration-plan|tier-integrity)\.jsonc?|scripts/(generate-memory-matrix|calibration-cost-model|check-tier-integrity|memory-calibration-harness)\.mjs|scripts/lib/(source-revision|jsonc)\.mjs|docs/generated/(memory-matrix\.json|memory-calibration-evidence\.json))$'; then
+    '^(config/manifests/builtin\.models\.jsonc|config/(memory-calibration-plan|tier-integrity)\.jsonc?|config/(inference-provider-closures|rung4-applicability-survey)\.json|scripts/(generate-memory-matrix|calibration-cost-model|check-tier-integrity|memory-calibration-harness)\.mjs|scripts/lib/(source-revision|jsonc)\.mjs|docs/generated/(memory-matrix\.json|memory-calibration-evidence\.json))$'; then
     derived_docs_changed=1
   fi
 done

@@ -545,6 +545,23 @@ export function digestsAtRevision({ repo, revision, providers, readBodies, runGi
   return out;
 }
 
+/**
+ * The pinned `SceneWorks/inference` revision, read from a `Cargo.toml` body.
+ *
+ * Exported because the stale-lane report (sc-18098) needs the same pin this module derives against,
+ * and a second private copy of the pattern is how the two would silently disagree. It deliberately
+ * lives here rather than in `generate-memory-matrix.mjs`, which holds the third copy: that file is a
+ * hashed source of `docs/generated/calibration-cost-model.json`, so exporting its private helper
+ * would rotate a 1 MB generated artifact for a keyword.
+ */
+export function inferencePinFromCargo(cargo) {
+  const pinned = cargo.match(
+    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/,
+  )?.[1];
+  if (!pinned) throw new Error("could not resolve the pinned SceneWorks/inference revision");
+  return pinned;
+}
+
 export function resolveRevision(repo, revision, { runGit = git } = {}) {
   const resolved = runGit(repo, ["rev-parse", `${revision}^{commit}`]).trim();
   if (!/^[0-9a-f]{40}$/.test(resolved)) {
@@ -650,11 +667,7 @@ export async function main(argv = process.argv.slice(2)) {
     Object.entries(existing.providers).map(([provider, entry]) => [provider, entry.crate]),
   );
 
-  const cargo = await readFile(path.join(root, "Cargo.toml"), "utf8");
-  const pinned = cargo.match(
-    /candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/,
-  )?.[1];
-  if (!pinned) throw new Error("could not resolve the pinned SceneWorks/inference revision");
+  const pinned = inferencePinFromCargo(await readFile(path.join(root, "Cargo.toml"), "utf8"));
 
   const revision = resolveRevision(path.resolve(repo), value("--revision") ?? pinned);
 
