@@ -5,7 +5,7 @@
 // clip, NOT a generation mode, so it lives in its own card rather than the mode picker.
 import React, { useMemo, useState } from "react";
 
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 
 // SeedVR2 is the only Mac engine (no torch path). 7B (sc-5197) / int8 (sc-5198) are
@@ -13,11 +13,14 @@ import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 const VIDEO_UPSCALE_ENGINES = [{ id: "seedvr2", label: "SeedVR2", model: "seedvr2_3b", factors: [2, 4] }];
 
 export function VideoUpscalePanel({
+  characters = [],
   videoAssets = [],
   selectedAsset = null,
   createVideoUpscaleJob,
+  importAsset,
   macCapabilities = DEFAULT_MAC_CAPABILITIES,
   onSubmitted,
+  projectId,
 }) {
   const engine = VIDEO_UPSCALE_ENGINES[0];
   const [sourceAssetId, setSourceAssetId] = useState(
@@ -62,12 +65,15 @@ export function VideoUpscalePanel({
       <h3>Upscale video</h3>
       <p className="upscale-card-sub">{engine.label} · one-step super-resolution (Mac / MLX)</p>
       {block ? <p className="mac-feature-block">{block.text}</p> : null}
-      <AssetPickerField
+      <VideoSourcePickerField
         assets={videoAssets}
         buttonLabel="Select clip"
+        characters={characters}
         emptyLabel="No source clip selected"
+        importAsset={importAsset}
         label="Source clip"
         onChange={setSourceAssetId}
+        projectId={projectId}
         value={sourceAssetId}
       />
       <div className="upscale-field">

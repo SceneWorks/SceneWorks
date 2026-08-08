@@ -8,6 +8,7 @@ import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
 const VIDEO = {
   id: "vid_1",
   type: "video",
+  projectId: "project_1",
   displayName: "Clip A",
   file: { width: 512, height: 384 },
 };
@@ -79,5 +80,24 @@ describe("VideoUpscalePanel", () => {
     expect(button.disabled).toBe(true);
     await click(button);
     expect(createVideoUpscaleJob).not.toHaveBeenCalled();
+  });
+
+  it("uses the direct-upload video source picker", async () => {
+    await renderPanel(
+      <VideoUpscalePanel
+        importAsset={vi.fn()}
+        projectId="project_1"
+        videoAssets={[VIDEO]}
+      />,
+    );
+
+    await click(findButton("Select clip"));
+    const modal = document.body.querySelector(".media-source-modal");
+    expect(modal).toBeTruthy();
+    expect([...modal.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent.trim())).toEqual([
+      "Assets1",
+      "File Upload",
+      "Character0",
+    ]);
   });
 });
