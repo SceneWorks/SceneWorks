@@ -5,11 +5,15 @@
 - SceneWorks revision: `source-tree:5686ee289805aa27535010ebab4d572485bde824a4976a95b3355d1144d974d4`
 - Inference revision: `40fa7583a01974617e2a7275052d6d446688c956`
 - Catalog entries: 53
-- Cells: 9140
+- Resolved coordinates: 9140
+- Published cells: 173
+- Elided coordinates: 8967 (Implemented/unverified 3172, Missing 5795)
 - MLX staged-residency static coverage: 39/53
 - Full models: 0
 - Full complete calibration records: 50
 - Base-only runtime-complete calibration records: 15
+
+sc-18099: `cells` is a SUBSET. A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped. The counts on this page, `summary`, and the per-(entry, backend, rung) `coverage` census in the JSON artifact are all derived from every resolved coordinate, published or not, and `models[].axes` publishes the axes those coordinates span so an unmeasured lane stays distinguishable from an absent one.
 
 Static capability is never promoted to dynamic verification. Generated cells contain separate declared, historical, current-environment, loadability, and strategy-parameter evidence arrays.
 `Runtime verified` means the exact base-only coordinate is production-admissible from current runtime evidence; it is deliberately not Full `Verified`, which additionally requires the catalog story's lifecycle and negative-mutation signoff.

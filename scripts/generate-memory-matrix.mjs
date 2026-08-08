@@ -508,6 +508,30 @@ export function memoryCharacterization(geometries) {
   };
 }
 
+/**
+ * Does one `config/memory-calibration-plan.json` entry target exactly this matrix coordinate?
+ *
+ * ONE matcher, consumed by both the engaged-composition lookup below and sc-18099's publication
+ * predicate. The predicate publishes a cell BECAUSE it is planned, so "planned" has to mean the set
+ * the plan actually addresses. A second filter that merely resembled this one would publish — or
+ * silently elide — a different population with every test still green, which is the derived-constant
+ * failure class this subsystem has already been bitten by.
+ *
+ * `coordinate` is deliberately the shape a generated cell already has (`modelId`, `provider`,
+ * `backend`, `tier`, `mode`, `overlay`, `rung`), so a cell can be passed straight in.
+ */
+export function planEntryTargetsCoordinate(entry, coordinate) {
+  return (
+    entry.target.modelId === coordinate.modelId &&
+    entry.target.provider === coordinate.provider &&
+    entry.backend === coordinate.backend &&
+    entry.target.tier === coordinate.tier &&
+    entry.target.mode === coordinate.mode &&
+    matrixOverlayFor(entry.target.overlay) === coordinate.overlay &&
+    entry.rung === coordinate.rung
+  );
+}
+
 function expectedEngagedRungs({
   model,
   provider,
@@ -522,15 +546,16 @@ function expectedEngagedRungs({
   if (Array.isArray(status.engagedRungs)) return status.engagedRungs;
   if (rung === "resident") return ["resident"];
   const matches = calibrationPlan.providers
-    .filter(
-      (candidate) =>
-        candidate.target.modelId === model.id &&
-        candidate.target.provider === provider &&
-        candidate.backend === backend &&
-        candidate.target.tier === tier &&
-        candidate.target.mode === mode &&
-        matrixOverlayFor(candidate.target.overlay) === overlay &&
-        candidate.rung === rung,
+    .filter((candidate) =>
+      planEntryTargetsCoordinate(candidate, {
+        modelId: model.id,
+        provider,
+        backend,
+        tier,
+        mode,
+        overlay,
+        rung,
+      }),
     )
     .map((candidate) => candidate.engagedRungs);
   if (matches.length === 0) return null;
@@ -1093,9 +1118,11 @@ function rung4SurveyCell(survey, modelId, backend, tier, mode, overlay, overlayI
       scopedRequestPeak?.finding ?? verdict.requestPeak.byTier?.[tier] ?? verdict.requestPeak.finding,
     implementation: verdict.implementation,
     overlayIncompatible,
-    summary: verdict.summary,
-    blockStacks: verdict.blockStacks ?? [],
-    findings: verdict.findings ?? [],
+    // sc-18099: `summary`, `blockStacks` and `findings` moved to `rung4SurveyRows`. They are
+    // constants of the (family, backend) pair, so restating them per cell was 2.72 MB of pure
+    // duplication AND left them unreachable for any family the slim publishes no cell from. What
+    // stays here is what genuinely varies per coordinate: the request-peak scope resolution and the
+    // overlay-incompatibility verdict.
   };
 }
 
@@ -1606,11 +1633,23 @@ function validateMatrix(
   assertCellOwnershipIsBackendScoped(matrix.cells);
   assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models);
   for (const model of matrix.models) {
-    for (const map of ["owningFamilyStories", "owningModelStories"]) {
+    for (const map of ["owningFamilyStories", "owningModelStories", "axes"]) {
       const owned = Object.keys(model[map]).sort();
       if (JSON.stringify(owned) !== JSON.stringify([...model.backends].sort())) {
         throw new Error(
           `${model.id}: ${map} covers ${owned.join(",") || "nothing"} but the entry advertises ${model.backends.join(",")}`,
+        );
+      }
+    }
+    // sc-18099: the published axes must BE the cross-product the inventory guard resolved, not a
+    // parallel description of it. Elided coordinates are reconstructable only from these lists, so a
+    // list that disagreed with the resolved scope would publish a lane inventory nothing generated.
+    for (const [backend, axes] of Object.entries(model.axes)) {
+      const expected = cellInventoryExpectations.get(`${model.id}:${backend}`);
+      const resolved = axes.tiers.length * axes.modes.length * axes.overlays.length * axes.rungs.length;
+      if (!expected || resolved !== expected.cells) {
+        throw new Error(
+          `${model.id}:${backend}: published axes resolve to ${resolved} coordinates but the catalog cross-product is ${expected?.cells ?? "unresolved"}`,
         );
       }
     }
@@ -1668,6 +1707,180 @@ function validateMatrix(
   }
 }
 
+// ── sc-18099: publication ──────────────────────────────────────────────────────────────────────
+//
+// The generator still RESOLVES the whole catalog cross-product and still validates it — every guard
+// above keeps its full reach, `assertCellInventoryMatchesCatalog` included. What changed is what gets
+// WRITTEN. 9,140 coordinates at ~2.5 KB apiece produced a 22 MB committed artifact that no two PRs
+// could merge without regenerating, and ~98% of it said nothing: `Missing`, `unmeasured`, unplanned,
+// no evidence of any kind. The runtime never reads this file; it is a report, and a report that
+// restates the same absence 8,967 times is not more honest than one that counts it.
+//
+// So the elision is COUNTED, not hidden. `summary.elidedCells` and the per-(entry, backend, rung)
+// `coverage` census below are derived from the FULL resolved set, so every coverage claim the old
+// artifact could support is still answerable — including `mlxStagedStaticCoverage`, which is still
+// computed over all 9,140 coordinates with `isImplemented()`. What a coordinate's mere EXISTENCE
+// claimed is preserved separately, in `models[].axes`.
+
+/**
+ * Why a cell earns a published row. Stated here, published in `summary.publicationPredicate`, and
+ * implemented by `isPublishableCell` — one wording, so a reader of the artifact can tell exactly what
+ * an absent coordinate means.
+ */
+export const PUBLICATION_PREDICATE =
+  "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json " +
+  "targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record " +
+  "in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, " +
+  "current-environment, strategy-parameter, or structural). Every elided coordinate is therefore " +
+  "unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted " +
+  "in `summary.elidedByState` and `coverage`, never dropped.";
+
+/**
+ * The publication predicate.
+ *
+ * Each arm is an EVIDENCE arm — something a human wrote down or a machine measured about this exact
+ * coordinate. Two manifest-derived evidence dimensions are deliberately NOT arms:
+ * `evidence.declaredCalibration` and `evidence.loadability` are functions of (entry, backend, tier)
+ * alone, present on essentially every coordinate, so admitting them would publish the cross-product
+ * again under a different name.
+ *
+ * `evidence.structural` rather than `state === "Structurally N/A"`: `validateMatrix` already proves
+ * the two agree, and the cited evidence is the reason the row is worth keeping. Eliding a
+ * Structurally N/A verdict would be the one genuinely lossy elision, because an absent coordinate
+ * reads as "nothing has been done here" and that verdict says the opposite.
+ *
+ * A bare `isImplemented()` state is NOT an arm on its own. `state` is counted for every coordinate in
+ * `coverage[].implemented`, which is what the coverage claim actually needs; a per-coordinate row
+ * adds nothing when the claim is "this route exists", replicated across every tier x mode x overlay.
+ */
+export function isPublishableCell(cell, { plannedCellIds, calibrationRunCellIds }) {
+  if (plannedCellIds.has(cell.id)) return true;
+  if (calibrationRunCellIds.has(cell.id)) return true;
+  if (cell.memoryCharacterization.status !== "unmeasured") return true;
+  return [
+    cell.evidence.historicalVerification,
+    cell.evidence.currentEnvironmentVerification,
+    cell.evidence.strategyParameterVerification,
+    cell.evidence.structural,
+  ].some((dimension) => dimension.length > 0);
+}
+
+/** Every resolved coordinate the shipped calibration plan targets, matched by the plan's own matcher. */
+export function plannedCellIds(calibrationPlan, cells) {
+  const planned = new Set();
+  for (const cell of cells) {
+    if (calibrationPlan.providers.some((entry) => planEntryTargetsCoordinate(entry, cell))) {
+      planned.add(cell.id);
+    }
+  }
+  return planned;
+}
+
+/**
+ * The per-(entry, backend, rung) census over the FULL resolved cross-product.
+ *
+ * This is the "no silent cap" half of the slim: it names how many coordinates each lane resolved to,
+ * how many were published, how many were elided, and the state distribution of ALL of them. A
+ * consumer that used to count `cells` by state reads this instead and gets the same numbers.
+ */
+export function coverageCensus(cells, publishedIds) {
+  const rows = new Map();
+  for (const cell of cells) {
+    const key = `${cell.modelId}:${cell.backend}:${cell.rung}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        modelId: cell.modelId,
+        backend: cell.backend,
+        rung: cell.rung,
+        coordinates: 0,
+        published: 0,
+        elided: 0,
+        implemented: 0,
+        states: {},
+      };
+      rows.set(key, row);
+    }
+    row.coordinates += 1;
+    if (publishedIds.has(cell.id)) row.published += 1;
+    else row.elided += 1;
+    if (isImplemented(cell.state)) row.implemented += 1;
+    row.states[cell.state] = (row.states[cell.state] ?? 0) + 1;
+  }
+  for (const row of rows.values()) {
+    row.states = Object.fromEntries(Object.entries(row.states).sort(([left], [right]) => left.localeCompare(right)));
+  }
+  return [...rows.values()].sort((left, right) =>
+    `${left.modelId}:${left.backend}:${left.rung}`.localeCompare(`${right.modelId}:${right.backend}:${right.rung}`),
+  );
+}
+
+/**
+ * Prove the published document is internally closed before it is written.
+ *
+ * The slim introduces exactly one new way to ship a broken artifact: a reference that survives while
+ * the row it names does not. Both directions are checked, because a dangling `cellId` and a census
+ * that disagrees with the published set are the same defect seen from two sides.
+ */
+export function assertPublishedDocumentIsClosed(matrix, resolvedCoordinateCount) {
+  const publishedIds = new Set(matrix.cells.map((cell) => cell.id));
+  if (publishedIds.size !== matrix.cells.length) {
+    throw new Error("published memory-matrix cells contain a duplicate id");
+  }
+  for (const run of matrix.calibrationRuns) {
+    if (!publishedIds.has(run.cellId)) {
+      throw new Error(
+        `${run.record.id}: calibration run names cell ${run.cellId}, which the slim did not publish — ` +
+          "a bound record must always keep its cell (sc-18099)",
+      );
+    }
+  }
+  for (const [modelId, slice] of Object.entries(matrix.modelSlices)) {
+    for (const id of slice) {
+      if (!publishedIds.has(id)) throw new Error(`modelSlices.${modelId} names unpublished cell ${id}`);
+    }
+  }
+  const censusCoordinates = matrix.coverage.reduce((total, row) => total + row.coordinates, 0);
+  const censusPublished = matrix.coverage.reduce((total, row) => total + row.published, 0);
+  if (censusCoordinates !== resolvedCoordinateCount) {
+    throw new Error(
+      `coverage census covers ${censusCoordinates} coordinates but the catalog resolved ${resolvedCoordinateCount}`,
+    );
+  }
+  if (censusPublished !== matrix.cells.length) {
+    throw new Error(
+      `coverage census reports ${censusPublished} published cells but ${matrix.cells.length} were written`,
+    );
+  }
+  if (matrix.summary.publishedCells + matrix.summary.elidedCells !== matrix.summary.cells) {
+    throw new Error("summary published + elided must equal the resolved coordinate count");
+  }
+}
+
+/**
+ * The calibration record as the matrix publishes it (sc-18099).
+ *
+ * The matrix used to embed each record VERBATIM — 65 copies of rows that already ship, fully
+ * schema-validated, in `docs/generated/memory-calibration-evidence.json`. That duplication was 436 KB
+ * of the artifact. What the matrix actually needs to say about a record is which coordinate it
+ * targets, whether it bound, and how it dates; `id` is the join key back to the full row, and every
+ * consumer of the dropped fields already loads that bundle.
+ */
+function publishedCalibrationRecord(record) {
+  return {
+    id: record.id,
+    status: record.status,
+    backend: record.backend,
+    target: record.target,
+    strategy: { rung: record.strategy.rung, engagedRungs: record.strategy.engagedRungs },
+    calibrationFingerprint: record.calibrationFingerprint,
+    capturedAt: record.capturedAt,
+    harnessVersion: record.harnessVersion,
+    repositories: record.repositories,
+    source: `docs/generated/memory-calibration-evidence.json#${record.id}`,
+  };
+}
+
 // Every source this document is DERIVED from. Exported (sc-16268) so the tests that prove the
 // staleness tripwire covers all of them derive the list from here instead of mirroring it: a
 // hand-copied mirror lets a source be dropped from the fingerprint with every test still green,
@@ -1711,7 +1924,21 @@ function manifestRevisionBody(body) {
   return JSON.stringify(visit(parsed));
 }
 
-export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = {}) {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.publish] When false, return the document BEFORE sc-18099's publication
+ *   step: `cells` is the full resolved cross-product, `modelSlices` covers all of it, and
+ *   `calibrationRuns[].record` is the unprojected evidence row. `coverage` and the
+ *   `summary.publishedCells`/`elidedCells`/`elidedByState` counts are still computed, because they
+ *   describe what publication WOULD do and are derived from the full set either way.
+ *
+ *   This exists for the generator's own tests, which assert which STATE the generator assigns to a
+ *   coordinate. That is a claim about generation, not about publication, and most of those
+ *   coordinates are elided — asserting them against the published subset would silently reduce
+ *   thirteen behavioural tests to vacuous ones. The CLI never passes it: `main()` writes the
+ *   published document, and the publication path has its own tests.
+ */
+export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, publish = true } = {}) {
   const sourcePaths = SOURCE_PATHS;
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
@@ -1809,10 +2036,21 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
   const cellInventoryExpectations = new Map();
   for (const modelSummary of models) {
     const model = manifestById.get(modelSummary.id);
+    // sc-18099: the resolved AXES are published on the entry, not just counted here.
+    //
+    // Elision is safe for a coordinate's evidence, which is absent by definition. It is NOT safe for
+    // a lane's EXISTENCE: sc-16069 exists because keying the control overlay off a measurement block
+    // gave the shipping MLX Krea control lane zero cells, and absent evidence read as absent feature.
+    // Publishing only planned-or-evidenced cells would recreate that blind spot for every unmeasured
+    // axis value — no `control` cell, no `bf16` cell, no way to tell an unmeasured lane from one that
+    // does not exist. These four lists ARE the cross-product (tiers x modes x overlays x rungs), so a
+    // reader can see every coordinate the catalog resolves whether or not one was published.
+    modelSummary.axes = {};
     for (const backend of modelSummary.backends) {
       const tiers = tiersFor(model, backend, backendTierOverrides);
       const modes = modesFor(model);
       const overlays = overlaysFor(model, backend);
+      modelSummary.axes[backend] = { tiers, modes, overlays, rungs: [...RUNGS] };
       cellInventoryExpectations.set(`${model.id}:${backend}`, {
         tiers: tiers.length,
         modes: modes.length,
@@ -2062,6 +2300,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     };
   });
 
+  // Replaced after validation with the PUBLISHED cells only (sc-18099). Built over the full set here
+  // so the document shape below is unchanged and `validateMatrix` still sees the full inventory.
   const modelSlices = Object.fromEntries(
     models.map((model) => [
       model.id,
@@ -2094,6 +2334,18 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
       structuralApplicability: cell.rung4Survey.structuralApplicability,
       requestPeak,
       implementation: cell.rung4Survey.implementation,
+      // sc-18099: the family-level half of the verdict lives HERE now instead of on the cells.
+      // `summary`, `blockStacks` and `findings` are constants of the (family, backend) pair that
+      // used to be restated on all ~1,828 rung-4 cells — 2.72 MB of the old artifact. Most rung-4
+      // coordinates are elided, so leaving them on cells would drop the verdict's evidence entirely
+      // for every family that publishes none, which is what the survey exists to prevent.
+      //
+      // Read from the survey map, but only for a family the loop above proved REACHED a cell: the
+      // reach proof is this loop, not the field's provenance, so a verdict that generated nothing
+      // still cannot appear here as though it had.
+      ...(({ summary, blockStacks = [], findings = [] }) => ({ summary, blockStacks, findings }))(
+        rung4Survey.get(key),
+      ),
     });
   }
   const rung4SurveyRows = [...rung4SurveyRowsByFamily.values()].sort((left, right) =>
@@ -2142,7 +2394,17 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     // (`sceneWorksRevision` / `inferenceRevision`), which is the copy the only real consumer
     // (`scripts/memory-calibration-harness.mjs`) has always read. A reader written against 2 that
     // dereferences `cell.evidenceRevision.sceneWorks` now throws, so this takes a new version.
-    schemaVersion: 6,
+    // 7 (sc-18099): the document no longer publishes the catalog cross-product. `cells` is now the
+    // planned-or-evidenced SUBSET (`PUBLICATION_PREDICATE`), `modelSlices` lists only published ids
+    // and may be EMPTY for an entry, `coverage` and `models[].axes` were ADDED and are REQUIRED,
+    // `summary` gained `publishedCells`/`elidedCells`/`elidedByState`/`publicationPredicate`,
+    // `rung4SurveyRows` absorbed the family-level `summary`/`blockStacks`/`findings` that
+    // `cells[].rung4Survey` no longer carries, and `calibrationRuns[].record` is a PROJECTION of the
+    // evidence-bundle row rather than the row itself. `summary.cells` keeps its meaning — the number
+    // of coordinates the catalog resolved to, which is no longer `cells.length`. A version-6 reader
+    // that counts `cells` by state now reads a sample and calls it a census, which is precisely why
+    // this is a new version rather than an additive one.
+    schemaVersion: 7,
     generatedFrom: {
       sceneWorksRevision,
       inferenceRevision: pin,
@@ -2228,7 +2490,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     ],
     summary: {
       imageModels: models.length,
+      // The number of coordinates the CATALOG resolved to, unchanged in meaning by sc-18099 and no
+      // longer equal to `cells.length`. `publishedCells` and `elidedCells` partition it.
       cells: cells.length,
+      publishedCells: cells.length,
+      elidedCells: 0,
+      elidedByState: {},
+      publicationPredicate: PUBLICATION_PREDICATE,
       mlxStagedStaticCoverage: mlxStagedModels.size,
       mlxStagedStaticCoverageDenominator: EXPECTED_IMAGE_COUNT,
       fullModels: 0,
@@ -2253,10 +2521,15 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     },
     models,
     rung4SurveyRows,
+    coverage: [],
     cells,
     calibrationRuns,
     modelSlices,
   };
+  // Validation runs against the FULL resolved cross-product, before anything is elided. Every guard
+  // above — inventory, ownership scope, twin coverage, rung-4 survey reach, the two-claims
+  // invariants — therefore keeps exactly the reach it had when the artifact was the cross-product.
+  // The slim is a publication step, not a generation step (sc-18099).
   validateMatrix(
     matrix,
     expectedIds,
@@ -2264,6 +2537,37 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null } = 
     rung4Survey,
     cellInventoryExpectations,
   );
+
+  const planned = plannedCellIds(calibrationPlan, cells);
+  const calibrationRunCellIds = new Set(calibrationRuns.map((run) => run.cellId));
+  const published = cells.filter((cell) =>
+    isPublishableCell(cell, { plannedCellIds: planned, calibrationRunCellIds }),
+  );
+  const publishedIds = new Set(published.map((cell) => cell.id));
+  matrix.coverage = coverageCensus(cells, publishedIds);
+  matrix.summary.publishedCells = published.length;
+  matrix.summary.elidedCells = cells.length - published.length;
+  matrix.summary.elidedByState = Object.fromEntries(
+    sortedUnique(cells.filter((cell) => !publishedIds.has(cell.id)).map((cell) => cell.state)).map(
+      (state) => [
+        state,
+        cells.filter((cell) => !publishedIds.has(cell.id) && cell.state === state).length,
+      ],
+    ),
+  );
+  if (!publish) return matrix;
+  matrix.cells = published;
+  matrix.modelSlices = Object.fromEntries(
+    models.map((model) => [
+      model.id,
+      published.filter((cell) => cell.modelId === model.id).map((cell) => cell.id),
+    ]),
+  );
+  matrix.calibrationRuns = calibrationRuns.map((run) => ({
+    ...run,
+    record: publishedCalibrationRecord(run.record),
+  }));
+  assertPublishedDocumentIsClosed(matrix, cells.length);
   return matrix;
 }
 
@@ -2276,11 +2580,19 @@ function renderMarkdown(matrix) {
     `- SceneWorks revision: \`${matrix.generatedFrom.sceneWorksRevision}\``,
     `- Inference revision: \`${matrix.generatedFrom.inferenceRevision}\``,
     `- Catalog entries: ${matrix.summary.imageModels}`,
-    `- Cells: ${matrix.summary.cells}`,
+    `- Resolved coordinates: ${matrix.summary.cells}`,
+    `- Published cells: ${matrix.summary.publishedCells}`,
+    `- Elided coordinates: ${matrix.summary.elidedCells} (${
+      Object.entries(matrix.summary.elidedByState)
+        .map(([state, count]) => `${state} ${count}`)
+        .join(", ") || "none"
+    })`,
     `- MLX staged-residency static coverage: ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}`,
     `- Full models: ${matrix.summary.fullModels}`,
     `- Full complete calibration records: ${matrix.summary.calibrationRunsByStatus.complete}`,
     `- Base-only runtime-complete calibration records: ${matrix.summary.calibrationRunsByStatus.runtimeComplete}`,
+    "",
+    `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unmeasured lane stays distinguishable from an absent one.`,
     "",
     "Static capability is never promoted to dynamic verification. Generated cells contain separate declared, historical, current-environment, loadability, and strategy-parameter evidence arrays.",
     "`Runtime verified` means the exact base-only coordinate is production-admissible from current runtime evidence; it is deliberately not Full `Verified`, which additionally requires the catalog story's lifecycle and negative-mutation signoff.",
@@ -2292,22 +2604,20 @@ function renderMarkdown(matrix) {
   ];
   for (const model of matrix.models) {
     for (const backend of model.backends) {
-      const staged = matrix.cells.some(
-        (cell) =>
-          cell.modelId === model.id &&
-          cell.backend === backend &&
-          cell.rung === "staged_residency" &&
-          isImplemented(cell.state),
+      // sc-18099: read the census, not `cells`. This column is a claim about the whole lane, and
+      // `cells` is now a subset — scanning it would silently under-report every lane whose staged
+      // coordinates were elided, which is the coverage regression the slim must not cause.
+      const row = matrix.coverage.find(
+        (candidate) =>
+          candidate.modelId === model.id &&
+          candidate.backend === backend &&
+          candidate.rung === "staged_residency",
       );
-      const stagedCells = matrix.cells.filter(
-        (cell) =>
-          cell.modelId === model.id &&
-          cell.backend === backend &&
-          cell.rung === "staged_residency",
-      );
-      const stagedState = stagedCells.some((cell) => cell.state === "Verified")
+      if (!row) throw new Error(`${model.id}:${backend}: no staged_residency coverage row`);
+      const staged = row.implemented > 0;
+      const stagedState = row.states.Verified
         ? "Verified"
-        : stagedCells.some((cell) => cell.state === "Runtime verified")
+        : row.states["Runtime verified"]
           ? "Runtime verified"
           : "Implemented/unverified";
       lines.push(

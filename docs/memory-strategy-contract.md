@@ -6,6 +6,16 @@ evidence schema; `sceneworks_worker::memory_strategy::select_strategy` is the au
 selector. Providers may reject a selected strategy defensively, but must not contain a second
 least-cost selector.
 
+> **Reading the inventory since sc-18099.** `cells` is no longer the catalog cross-product — it holds
+> only the coordinates that are planned, measured, bound to a calibration record, or cite evidence of
+> their own (`summary.publicationPredicate` states the rule; the runtime never reads this file, and
+> the cross-product was 22 MB of mostly `Missing`/`unmeasured` rows). Nothing was capped silently: the
+> INVENTORY moved to `models[].axes`, which publishes the tiers, modes, overlays and rungs every entry
+> resolves on each backend, and the COVERAGE to `coverage`, one row per (entry, backend, rung) with
+> the state distribution of every resolved coordinate. `summary.cells` is still the resolved total and
+> `summary.elidedCells` counts what was dropped. Read those two, not `cells`, for any question of the
+> form "does this lane exist" or "how much of it is implemented".
+
 ## Ownership
 
 | Owner | Responsibilities |

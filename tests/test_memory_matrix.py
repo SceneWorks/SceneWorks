@@ -50,6 +50,47 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     assert len(matrix["models"]) == len(matrix["modelSlices"]) == 53
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
 
+    # sc-18099: `cells` is a SUBSET, and the artifact has to say so in its own numbers. `summary`
+    # keeps the RESOLVED coordinate total, which is no longer `len(cells)`, and partitions it —
+    # a slim that quietly capped coverage instead of counting what it dropped is the failure this
+    # pins. Nothing here is a hardcoded population: the relations hold at any catalog size.
+    assert matrix["summary"]["publishedCells"] == len(matrix["cells"])
+    assert (
+        matrix["summary"]["publishedCells"] + matrix["summary"]["elidedCells"]
+        == matrix["summary"]["cells"]
+    )
+    assert matrix["summary"]["elidedCells"] > 0
+    assert sum(matrix["summary"]["elidedByState"].values()) == matrix["summary"]["elidedCells"]
+    assert matrix["summary"]["publicationPredicate"]
+
+    # The census covers every resolved coordinate, so a coverage claim never reads off the sample.
+    assert sum(row["coordinates"] for row in matrix["coverage"]) == matrix["summary"]["cells"]
+    assert sum(row["published"] for row in matrix["coverage"]) == len(matrix["cells"])
+    assert sum(row["elided"] for row in matrix["coverage"]) == matrix["summary"]["elidedCells"]
+    # `mlxStagedStaticCoverage` is a claim about all 53 entries. Recomputed from the census rather
+    # than from `cells`, which would silently shrink it to whatever the slim happened to publish.
+    assert (
+        len(
+            {
+                row["modelId"]
+                for row in matrix["coverage"]
+                if row["backend"] == "mlx"
+                and row["rung"] == "staged_residency"
+                and row["implemented"]
+            }
+        )
+        == matrix["summary"]["mlxStagedStaticCoverage"]
+    )
+    # Every entry keeps a slice key even when it publishes nothing, and no slice may name a cell the
+    # slim dropped.
+    published_ids = {cell["id"] for cell in matrix["cells"]}
+    assert any(not slice_ for slice_ in matrix["modelSlices"].values()), (
+        "some entry must publish nothing, or the empty-slice case is untested"
+    )
+    for model_id, slice_ in matrix["modelSlices"].items():
+        assert set(slice_) <= published_ids, model_id
+    assert {run["cellId"] for run in matrix["calibrationRuns"]} <= published_ids
+
 
 def test_aliases_bespoke_routes_and_evidence_dimensions_are_explicit():
     matrix = load_matrix()
@@ -57,12 +98,13 @@ def test_aliases_bespoke_routes_and_evidence_dimensions_are_explicit():
     assert models["z_image_edit"]["resolvedRoute"] == "z_image_turbo"
     assert models["instantid_realvisxl"]["routeKind"] == "bespoke"
     assert models["pulid_flux_dev"]["routeKind"] == "bespoke"
-    instantid_candle_tiers = {
-        cell["tier"]
-        for cell in matrix["cells"]
-        if cell["modelId"] == "instantid_realvisxl" and cell["backend"] == "candle"
-    }
-    assert instantid_candle_tiers == {"bf16"}
+    # sc-18099: read the published AXES, not `cells`. The matrix now publishes only planned-or-
+    # evidenced coordinates, and InstantID's Candle lane publishes none — reading its tiers off
+    # `cells` returns the empty set and this assertion would have to be deleted rather than moved.
+    # `models[].axes` is the resolved cross-product, reconciled against it at generation time, and is
+    # what keeps an unmeasured lane visible instead of indistinguishable from an absent one.
+    models_by_id = {model["id"]: model for model in matrix["models"]}
+    assert models_by_id["instantid_realvisxl"]["axes"]["candle"]["tiers"] == ["bf16"]
     assert matrix["evidenceDimensions"] == [
         "staticImplementation",
         "declaredCalibration",
@@ -794,17 +836,31 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
         (15524, "mlx"),
         (15525, "mlx"),
     ]
-    assert next(
+    flux2_candle = next(
         row
         for row in rows
         if row["familyStory"] == 15519 and row["backend"] == "candle"
-    ) == {
+    )
+    # sc-18099 moved the family-level `summary`/`blockStacks`/`findings` onto these rows, so the
+    # verdict survives every one of the family's cells being elided. Still an EXACT comparison of the
+    # verdict fields — a bare subset check would stop noticing a field going missing — with the three
+    # prose/inventory fields asserted as present-and-non-trivial rather than transcribed here.
+    assert {
+        key: value
+        for key, value in flux2_candle.items()
+        if key not in {"summary", "blockStacks", "findings"}
+    } == {
         "familyStory": 15519,
         "backend": "candle",
         "structuralApplicability": "partial",
         "requestPeak": "moves",
         "implementation": "shared-primitive",
     }
+    assert flux2_candle["summary"]
+    assert flux2_candle["blockStacks"]
+    # Every surveyed family/backend carries its inventory here, not only the ones that publish a
+    # cell. That is the whole reason these fields moved: none of the rows can go dark.
+    assert all(row["summary"] and row["blockStacks"] for row in rows)
     assert all(
         row["implementation"] != "none"
         for row in rows
@@ -815,39 +871,71 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
 def test_rung4_partial_applicability_and_structural_verdicts_carry_their_evidence():
     """Partial applicability is recorded, and a Structurally N/A cell always cites why."""
     matrix = load_matrix()
+    coverage = {
+        (row["modelId"], row["backend"], row["rung"]): row for row in matrix["coverage"]
+    }
+    models_by_id = {model["id"]: model for model in matrix["models"]}
 
+    # sc-18099 slimmed the artifact to planned-or-evidenced cells, and SDXL's rung-4 coordinates are
+    # neither, so this entry now publishes no rung-4 cell at all. Nothing below was dropped: the
+    # family verdict moved to `rung4SurveyRows` and the per-lane state distribution to `coverage`,
+    # both derived from EVERY resolved coordinate. The per-coordinate spellings of these same claims
+    # are asserted at full reach against the pre-publication document in
+    # scripts/generate-memory-matrix.test.mjs.
+    #
     # The story's named trap: a U-Net is not automatically Structurally N/A. SDXL's lowest level is
     # a genuine 10-deep transformer stack, so the verdict is `partial` — applicable, and now
     # partially IMPLEMENTED (SC-15525 / SC-16355 shipped the per-Transformer2D stream) rather than
     # exempt from the ladder. `partial` survives implementation: it describes the ARCHITECTURE (a
     # non-windowable conv/resnet trunk around eleven windowable Transformer2D sub-stacks), not the
     # delivery state, so it must not collapse to `full` just because the rung now ships.
-    sdxl = [
-        cell
-        for cell in matrix["cells"]
-        if cell["modelId"] == "sdxl"
-        and cell["rung"] == "bounded_transformer_residency"
+    sdxl_rows = [
+        row
+        for row in matrix["rung4SurveyRows"]
+        if row["familyStory"] == 15525
     ]
-    assert sdxl
-    assert {cell["rung4Survey"]["structuralApplicability"] for cell in sdxl} == {"partial"}
+    assert sdxl_rows
+    assert {row["structuralApplicability"] for row in sdxl_rows} == {"partial"}
     # Coverage is per entry per tier per overlay, never family-wide: the base `sdxl` entry publishes
-    # rung 4 on bf16/overlay-none only, so both states must be present on this entry's cells.
-    assert {cell["state"] for cell in sdxl} == {"Missing", "Implemented/unverified"}
-    assert {
-        (cell["tier"], cell["overlay"])
-        for cell in sdxl
-        if cell["state"] == "Implemented/unverified"
-    } == {("bf16", "none")}
+    # rung 4 on bf16/overlay-none only, so both states must be present across this entry's lane.
+    sdxl_lane = [
+        row
+        for key, row in coverage.items()
+        if key[0] == "sdxl" and key[2] == "bounded_transformer_residency"
+    ]
+    assert sdxl_lane
+    assert set().union(*(row["states"].keys() for row in sdxl_lane)) == {
+        "Missing",
+        "Implemented/unverified",
+    }
+    # Where it IS implemented it is on exactly the (bf16, overlay-none) slice, so the count is one
+    # per MODE — derived from the published axes rather than pinned, because a hardcoded number would
+    # go stale on any legitimate mode or tier drift and would stop meaning "bf16/none only". The
+    # backend that implements it is not asserted here; that is the sibling JS test's subject.
+    implementing = [row for row in sdxl_lane if row["implemented"]]
+    assert implementing, "SDXL's rung-4 coverage must not vanish"
+    for row in sdxl_lane:
+        axes = models_by_id["sdxl"]["axes"][row["backend"]]
+        assert "bf16" in axes["tiers"] and "none" in axes["overlays"]
+        assert row["coordinates"] == len(axes["tiers"]) * len(axes["modes"]) * len(
+            axes["overlays"]
+        )
+        assert row["implemented"] in (0, len(axes["modes"])), (
+            "SDXL publishes rung 4 on bf16/overlay-none only, across every mode, or not at all"
+        )
     # Rung 4 is Missing OUTRIGHT on both Illustrious entries: q8 is their only advertised tier and
     # its snapshot omits the `quantization` marker, so `streamable` refuses (inference sc-17522).
     # A partially-implemented family must not carry its siblings' coverage onto them.
-    assert {
-        cell["state"]
-        for cell in matrix["cells"]
-        if cell["rung"] == "bounded_transformer_residency"
-        and cell["modelId"] in {"illustrious_xl_v1", "illustrious_xl_v2"}
-    } == {"Missing"}
-    stacks = sdxl[0]["rung4Survey"]["blockStacks"]
+    illustrious = [
+        row
+        for key, row in coverage.items()
+        if key[0] in {"illustrious_xl_v1", "illustrious_xl_v2"}
+        and key[2] == "bounded_transformer_residency"
+    ]
+    assert illustrious
+    assert set().union(*(row["states"].keys() for row in illustrious)) == {"Missing"}
+    assert all(row["implemented"] == 0 for row in illustrious)
+    stacks = sdxl_rows[0]["blockStacks"]
     assert any(stack["windowable"] for stack in stacks)
     assert any(not stack["windowable"] for stack in stacks)
 

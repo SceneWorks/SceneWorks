@@ -15,6 +15,17 @@
  * Nothing here is an estimate presented as a measurement. Where a value cannot be known today
  * (the final Structurally-N/A count, per-run seconds) the model exposes it as a parameter and
  * reports the sensitivity instead of picking a number.
+ *
+ * ## sc-18099 — what "all cells" now means
+ *
+ * The matrix no longer PUBLISHES the catalog cross-product; `cells` there is the planned-or-evidenced
+ * subset and `summary.cells` is the resolved coordinate total. This model still counts what the
+ * artifact contains, so its population changed from "every coordinate the catalog can express" to
+ * "every coordinate somebody planned, measured, bound or cited". That is the workload epic 18093
+ * actually intends to price — R6 replaced the per-model measurement campaign with a runbook applied
+ * to selected lanes — but it is a DIFFERENT question from the one this model answered before, so the
+ * publication counts are republished verbatim in `matrixPublication` rather than left to be inferred
+ * from a shrunken total. Read them before comparing this document to an older revision of itself.
  */
 
 import { createHash } from "node:crypto";
@@ -1574,7 +1585,17 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
   // (sc-16069). `CONTROL_LANE_MODELS` is the generator's declaration source; every declared model
   // gets control cells for each backend that actually exists in the generated matrix.
   const controlCells = cells.filter((cell) => cell.overlay === "control");
-  const controlPairs = [...new Set(controlCells.map((cell) => `${cell.modelId}|${cell.backend}`))].sort();
+  // sc-18099: the emitted PAIRS come from the matrix's published axes, not from the published cells.
+  // A declared control lane with nothing planned or measured now publishes no cell — reading the
+  // pairs off `cells` would report `kolors|candle` as having no control lane, which is exactly the
+  // sc-16069 defect (absent evidence read as absent feature) that this section exists to disprove.
+  const controlPairs = matrix.models
+    .flatMap((model) =>
+      Object.entries(model.axes)
+        .filter(([, axes]) => axes.overlays.includes("control"))
+        .map(([backend]) => `${model.id}|${backend}`),
+    )
+    .sort();
   const declaredControlBlock = bodies.matrixGenerator
     .split("export const CONTROL_LANE_MODELS = [")[1]
     ?.split("];")[0];
@@ -1635,8 +1656,24 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
         ]),
       ),
     },
+    // sc-18099. The matrix publishes a subset; these are its own numbers for what it resolved and
+    // what it dropped, carried here so this model's `cells` total can never be mistaken for the
+    // catalog cross-product.
+    matrixPublication: {
+      resolvedCoordinates: matrix.summary.cells,
+      publishedCells: matrix.summary.publishedCells,
+      elidedCoordinates: matrix.summary.elidedCells,
+      elidedByState: matrix.summary.elidedByState,
+      predicate: matrix.summary.publicationPredicate,
+      note:
+        "This model prices the PUBLISHED population. An elided coordinate is unplanned, unmeasured, " +
+        "unbound and uncited; per-lane totals for every coordinate, published or not, are in " +
+        "docs/generated/memory-matrix.json#coverage.",
+    },
     confidenceTiers: {
-      cells: "FACT — counted from docs/generated/memory-matrix.json",
+      cells:
+        "FACT — counted from the PUBLISHED cells of docs/generated/memory-matrix.json (sc-18099); " +
+        "see `matrixPublication` for the resolved and elided coordinate totals",
       runs: "DERIVED — from the collapsing rule, every axis cited to code that was read",
       hours: "PARAMETERISED — per-run cost is an input with a swept range, not a measurement",
       producibility:
@@ -1685,7 +1722,10 @@ export async function buildCostModel({ sourceOverrides = {} } = {}) {
     biggestUncertainties: rankUncertainties(producible, {
       completeRecords: completedBaseline.activationEligibleRecords,
       adapterModelCount: new Set(plan.providers.map((provider) => provider.target.modelId)).size,
-      catalogEntryCount: new Set(cells.map((cell) => cell.modelId)).size,
+      // sc-18099: the CATALOG's entry count, from `models`. Counting distinct ids in `cells` used to
+      // be the same number and no longer is — the published cells are a subset, so it would say "9
+      // of 13" and read as adapter coverage being nearly complete.
+      catalogEntryCount: matrix.models.length,
     }),
   };
 
@@ -1711,6 +1751,8 @@ function renderMarkdown(model) {
     `- Inference revision: \`${model.generatedFrom.inferenceRevision}\``,
     "",
     "**Cells are a fact. Runs are derived. Hours are parameterised.** Nothing below mixes the three.",
+    "",
+    `> **What "cells" counts here (sc-18099).** ${model.matrixPublication.publishedCells} — the cells the memory matrix PUBLISHES, out of ${model.matrixPublication.resolvedCoordinates} coordinates the catalog resolves. The matrix stopped publishing the cross-product; ${model.matrixPublication.elidedCoordinates} unplanned, unmeasured, unbound and uncited coordinates are counted in \`docs/generated/memory-matrix.json#coverage\` instead of carrying a row. This document therefore prices the planned-or-evidenced workload, which is what epic 18093 intends to price — but every population figure below dropped by roughly that ratio against earlier revisions of this file, and that is a change of QUESTION, not of progress.`,
     "",
     "## 0. Read this first: the binding constraint is not GPU hours",
     "",

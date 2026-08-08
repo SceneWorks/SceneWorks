@@ -14,22 +14,34 @@ import test from "node:test";
 
 import { PlanError, buildPlan, candleTwinName } from "./split-memory-strategy-stories.mjs";
 
-/** One matrix cell. Only the four fields `buildPlan` reads are populated. */
-function cell(modelId, backend, model, family) {
-  return { modelId, backend, owningModelStory: model, owningFamilyStory: family };
+/**
+ * One matrix `models[]` row. Only the fields `buildPlan` reads are populated.
+ *
+ * sc-18099 moved `buildPlan` off `cells` and onto `models`: the matrix now publishes only the
+ * planned-or-evidenced subset of the cross-product, so an entry can have zero cells, and a plan
+ * derived from cells would lose it entirely. `owningModelStories`/`owningFamilyStories` are the
+ * per-backend ownership maps the generator has published since sc-15812.
+ */
+function model(id, stories) {
+  return {
+    id,
+    backends: Object.keys(stories).sort(),
+    owningModelStories: Object.fromEntries(
+      Object.entries(stories).map(([backend, [modelStory]]) => [backend, modelStory]),
+    ),
+    owningFamilyStories: Object.fromEntries(
+      Object.entries(stories).map(([backend, [, familyStory]]) => [backend, familyStory]),
+    ),
+  };
 }
 
 // alpha is dual (family 200), beta is mlx-only in the SAME family, gamma is mlx-only in an mlx-only
-// family 201. Two cells per (model, backend) so the agreement branch is exercised, not just the first
-// write. The mlx and candle ids differ everywhere, which is the point of sc-15812.
+// family 201. The mlx and candle ids differ everywhere, which is the point of sc-15812.
 const DUAL_MATRIX = {
-  cells: [
-    cell("alpha", "mlx", 100, 200),
-    cell("alpha", "mlx", 100, 200),
-    cell("alpha", "candle", 300, 400),
-    cell("alpha", "candle", 300, 400),
-    cell("beta", "mlx", 101, 200),
-    cell("gamma", "mlx", 102, 201),
+  models: [
+    model("alpha", { mlx: [100, 200], candle: [300, 400] }),
+    model("beta", { mlx: [101, 200] }),
+    model("gamma", { mlx: [102, 201] }),
   ],
 };
 
@@ -79,26 +91,31 @@ test("differing mlx and candle ownership is agreement, not disagreement", () => 
   assert.doesNotThrow(() => buildPlan(DUAL_MATRIX, DUAL_EXPECT));
 });
 
-test("cells of one model and one backend may not disagree about ownership", () => {
-  // Same model, same backend, two different owning model stories: the generator changed under us.
+// sc-18099 replaced the old cross-cell agreement guard, which no longer has a subject: a `models[]`
+// row holds ONE owning story per backend, so the ids cannot disagree with themselves. What can still
+// go wrong is the same defect at its source — an entry that advertises a backend nobody owns — and
+// that must stop the plan rather than create a Candle twin under `undefined`.
+test("a backend with no owning story stops the plan instead of being half-applied", () => {
+  const missingCandleModel = {
+    ...model("alpha", { mlx: [100, 200], candle: [300, 400] }),
+    owningModelStories: { mlx: 100 },
+  };
   assert.throws(
-    () =>
-      buildPlan(
-        { cells: [...DUAL_MATRIX.cells, cell("alpha", "mlx", 999, 200)] },
-        DUAL_EXPECT,
-      ),
+    () => buildPlan({ models: [missingCandleModel, ...DUAL_MATRIX.models.slice(1)] }, DUAL_EXPECT),
     (error) =>
-      error instanceof PlanError && /alpha: mlx cells disagree about owning story\/family/.test(error.message),
+      error instanceof PlanError &&
+      /alpha: no candle owning story\/family — regenerate the matrix/.test(error.message),
   );
-  // ...and the same for the family half, on the candle side.
+  // ...and the same for the family half, on the mlx side.
+  const missingMlxFamily = {
+    ...model("alpha", { mlx: [100, 200], candle: [300, 400] }),
+    owningFamilyStories: { candle: 400 },
+  };
   assert.throws(
-    () =>
-      buildPlan(
-        { cells: [...DUAL_MATRIX.cells, cell("alpha", "candle", 300, 999)] },
-        DUAL_EXPECT,
-      ),
+    () => buildPlan({ models: [missingMlxFamily, ...DUAL_MATRIX.models.slice(1)] }, DUAL_EXPECT),
     (error) =>
-      error instanceof PlanError && /alpha: candle cells disagree about owning story\/family/.test(error.message),
+      error instanceof PlanError &&
+      /alpha: no mlx owning story\/family — regenerate the matrix/.test(error.message),
   );
 });
 
@@ -107,10 +124,9 @@ test("two dual models in one family may not name different Candle family twins",
     () =>
       buildPlan(
         {
-          cells: [
-            ...DUAL_MATRIX.cells,
-            cell("delta", "mlx", 103, 200),
-            cell("delta", "candle", 301, 401),
+          models: [
+            ...DUAL_MATRIX.models,
+            model("delta", { mlx: [103, 200], candle: [301, 401] }),
           ],
         },
         { ...DUAL_EXPECT, totalModels: 4, dualModels: 2 },
@@ -130,7 +146,7 @@ test("a candle-only model stops the plan instead of being half-applied", () => {
   assert.throws(
     () =>
       buildPlan(
-        { cells: [...DUAL_MATRIX.cells, cell("epsilon", "candle", 302, 402)] },
+        { models: [...DUAL_MATRIX.models, model("epsilon", { candle: [302, 402] })] },
         { ...DUAL_EXPECT, totalModels: 4 },
       ),
     (error) =>
@@ -145,10 +161,10 @@ test("a candle-only model stops the plan instead of being half-applied", () => {
   );
 });
 
-test("an unrecognised cell backend is a defect, not a skipped row", () => {
+test("an unrecognised backend is a defect, not a skipped row", () => {
   assert.throws(
-    () => buildPlan({ cells: [cell("alpha", "rocm", 100, 200)] }, DUAL_EXPECT),
-    (error) => error instanceof PlanError && /alpha: unknown cell backend rocm/.test(error.message),
+    () => buildPlan({ models: [model("alpha", { rocm: [100, 200] })] }, DUAL_EXPECT),
+    (error) => error instanceof PlanError && /alpha: unknown backend rocm/.test(error.message),
   );
 });
 
