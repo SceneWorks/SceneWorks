@@ -20,6 +20,18 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUST_POLICY_PATH = path.join(ROOT, "crates", "sceneworks-worker", "src", "ladder_margin_policy.rs");
+const SCRIPT_POLICY_PATH = path.join(ROOT, "scripts", "derive-ladder-margins.mjs");
+
+/** The JSDoc block that ends immediately above `index` (whitespace-tolerant). */
+function docCommentAbove(source, index) {
+  const before = source.slice(0, index);
+  const close = before.lastIndexOf("*/");
+  assert.ok(close !== -1, "a doc comment closes above the declaration");
+  assert.equal(before.slice(close + 2).trim(), "", "the doc comment sits immediately above");
+  const open = before.lastIndexOf("/**", close);
+  assert.ok(open !== -1, "the doc comment opens with /**");
+  return before.slice(open, close + 2);
+}
 
 /** Extract `pub const NAME: f64 = VALUE;` pairs from the Rust policy module. */
 async function rustConstants() {
@@ -132,6 +144,27 @@ test("the estimate-admission binding-phase constraint is pinned on both sides an
   assert.ok(/MUST NOT/.test(doc), "doc states the prohibition");
   assert.ok(/binding phase/i.test(doc), "doc names the binding phase condition");
   assert.ok(/per-phase variance re-derivation/i.test(doc), "doc names the escape hatch");
+
+  // The SCOPE sentence (re-review resolution): the constraint only governs candidates
+  // extrapolated FROM a measured cell. The weights + headroom floor path of epic 18093 R1
+  // (models with zero captures) has no measured binding phase to match and must stay
+  // explicitly un-gated — pin the scoping sentence in BOTH docs so it cannot be dropped.
+  const scriptSource = await readFile(SCRIPT_POLICY_PATH, "utf8");
+  const scriptMatch = scriptSource.match(
+    /export const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE = (true|false);/,
+  );
+  assert.ok(scriptMatch, "script constraint constant exists");
+  const scriptDoc = docCommentAbove(scriptSource, scriptMatch.index);
+  for (const [name, text] of [["rust", doc], ["script", scriptDoc]]) {
+    assert.ok(
+      /NOT gated by this constraint/.test(text),
+      `${name} doc scopes out no-measured-basis candidates`,
+    );
+    assert.ok(
+      /weights \+ headroom floor/.test(text),
+      `${name} doc names the epic 18093 R1 floor path that stays admissible`,
+    );
+  }
 
   // Load-bearing on the committed corpus: the demonstrated per-phase re-capture spread exceeds
   // the widest MLX margin, so the constraint (not the margin) is what stands between an

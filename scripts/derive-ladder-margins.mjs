@@ -129,6 +129,12 @@ export const ESTIMATE_WIDENING_MULTIPLIER = 2;
  * re-deriving per-phase variance for that phase. This is the load-bearing replacement for
  * folding `maxCanBindPhaseSpread` (17.1369% as of this corpus — larger than every margin below)
  * into the estimate margin; see the header for the arithmetic that rules the fold-in out.
+ *
+ * SCOPE: this constraint governs estimate candidates extrapolated from a measured cell (fitted
+ * per-phase curves). Candidates with no measured cell in their extrapolation basis — the
+ * weights + headroom floor path of epic 18093 R1 — have no measured binding phase to match and
+ * are NOT gated by this constraint; their risk is carried by the headroom floor and the
+ * estimate margin, not this rule.
  */
 export const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE = true;
 

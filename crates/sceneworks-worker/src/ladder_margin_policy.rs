@@ -95,6 +95,12 @@ pub const CANDLE_ESTIMATE_MARGIN: f64 = 0.04;
 /// rule instead. `scripts/derive-ladder-margins.test.mjs` pins this constant against the
 /// script's mirror export and asserts the observed per-phase spread still exceeds
 /// [`MLX_ESTIMATE_MARGIN`], i.e. the constraint stays load-bearing.
+///
+/// SCOPE: this constraint governs estimate candidates extrapolated from a measured cell
+/// (fitted per-phase curves). Candidates with no measured cell in their extrapolation basis —
+/// the weights + headroom floor path of epic 18093 R1 — have no measured binding phase to
+/// match and are NOT gated by this constraint; their risk is carried by the headroom floor and
+/// the estimate margin, not this rule.
 pub const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE: bool = true;
 
 /// Structural invariants of the policy, enforced at COMPILE TIME (a violating edit fails
