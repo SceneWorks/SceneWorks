@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 733ca5d9 reconstructs the reviewed Mage delivery on SceneWorks' deployed fbb00d6b base and adds only its ignored real-weight harness, offline dispatch workflow, and workflow policy test after f1761c0d. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against the prior 87d3e1c9 audit, ten MLX candidate blob ids return to the deployed-base sources while their normalized marker hashes and classifications remain unchanged; no candidate or crate-prefix population changed. The fbb00d6b..733ca5d9 delta changes no NOTICE, LICENSE, or production include_str!/include_bytes! site.",
-  "inferenceRevision": "733ca5d9fac3c4d5fd78f8ef8e21143eb8fffdab",
-  "auditDigest": "5cba3fc1555125649a6071002d0fea40a9ec3249692e9959a5b53b28bf50cec5",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 40fa7583 carries the reviewed Mage memory-ladder delivery, parity-safe complete-head attention chunking, and a test-only real-snapshot availability assertion on current inference main. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against the prior 574f0d99 audit, all candidate paths and source-area classifications and the entire crate-prefix population remain unchanged; 113 candidate blob ids changed, and only the normalized provenance marker in the already-classified mlx-gen-krea-realtime causal source changed. The 574f0d99..40fa7583 delta changes no NOTICE, LICENSE, or production include_str!/include_bytes! site.",
+  "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
+  "auditDigest": "960e01eebffb620a034bd32328617617332e12c169fc325f99092b9dc0976dfb",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "733ca5d9fac3c4d5fd78f8ef8e21143eb8fffdab",
+    "revision": "40fa7583a01974617e2a7275052d6d446688c956",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 624,
-    "populationSha256": "9368d4ed1c22f5c7e9825d1ccfad455f6723d4af269048240e40e7b82afe8aee"
+    "populationSha256": "02272aacb8186316e21864081ea0a4063c3e949c91badefd0f0ab9387d9b89f5"
   },
   "portedSourceAreas": [
     {
@@ -818,7 +818,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "733ca5d9fac3c4d5fd78f8ef8e21143eb8fffdab",
+    "revision": "40fa7583a01974617e2a7275052d6d446688c956",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"

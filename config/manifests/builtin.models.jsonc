@@ -7791,6 +7791,16 @@
       "type": "image",
       "adapter": "kolors_diffusers",
       "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+      // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
+      // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
+      // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
+      // not an omission. They are NOT filled from the epic-15448 inference ladder evidence on
+      // purpose: those figures are request peaks under a named ladder composition, whereas these two
+      // fields are `footprint_measure.rs` quantities -- resident is `get_active_memory()` after a
+      // generation AND a `clear_cache()`, peak is `get_peak_memory()` across load + one generation on
+      // the resident hold-all path through the worker's own registry seam. Substituting one for the
+      // other would corrupt the sc-8509 RAM->tier suggestion, which is this field's only consumer.
+      // Backfill (one fresh process per tier) is tracked on sc-17727.
       "downloads": [
         {
           // Pre-quantized MLX turnkey tiers (sc-9946, epic 8506): SDXL-style UNet + ChatGLM3-6B
@@ -7857,7 +7867,79 @@
         // already-packed weights and bf16 resolves to Quant::None — no `mlx.denseTextEncoderTier` declaration.
         "minMemoryGb": 24,
         "quantize": 4,
-        "repo": "SceneWorks/kolors-mlx"
+        "repo": "SceneWorks/kolors-mlx",
+        // SC-15521: pinned export of the shared memory-strategy contract implemented by
+        // mlx-gen-kolors. Kolors runs `mlx_gen_sdxl::UNet2DConditionModel` VERBATIM, but it does NOT
+        // share SDXL's fingerprint and inherits none of SC-15525's numbers: it conditions on
+        // ChatGLM3-6B (3.98 / 6.64 / 11.63 GiB by tier) rather than SDXL's ~0.8B CLIP-L + bigG pair,
+        // and that inverts which phase carries the request peak at several advertised geometries.
+        //
+        // THIS IS THE LADDER'S FIRST GENUINELY THREE-VALUED RUNG-4 SCOPE. Kolors publishes
+        // `transformerWindowComponents: [Dit, TextEncoder, Both]` because both trunks are uniform
+        // stacks: the U-Net's eleven Transformer2D (70 blocks) and ChatGLM3-6B's 28 GlmBlocks.
+        // Measured at bf16/512² against the 11.3644 GiB staged control, the scope choice is
+        // load-bearing rather than degenerate: `Dit` 11.3644 GiB (+0.00%), `TextEncoder` 8.8396
+        // (−22.22%), `Both` 4.5436 (−60.02%). At the geometry where conditioning carries the peak,
+        // bounding the U-Net alone moves nothing at all.
+        //
+        // Per tier at 1024², rung 4 `Dit` against that tier's own staged control: q4 −7.21%
+        // (16.0411 → 14.8840 GiB), q8 −12.72%, bf16 −21.37%. The peak is FLAT across the whole
+        // cadence domain [1, 2, 5, 10]; cadence buys wall clock only (3745 → 1507 ms/step at
+        // 1024² q4), and the provider's production default stays the tight cadence 1.
+        //
+        // RUNGS 2 AND 3 ARE `Missing` WITH MEASUREMENTS, not unattempted, so they are deliberately
+        // absent from `implementations` rather than silently omitted:
+        //   * rung 2 is the family's biggest lever — 16.0412 → 9.9981 GiB (−37.67%) at 1024² q4 for
+        //     +10% wall clock — and CLEARS the inherited 48/255 drift bar at 1024² (38) and 1280²
+        //     (26), but FAILS it at 1536² (69) and 2048² (53). `decodeTileEdges` is an absolute pixel
+        //     domain with no geometry axis, so no fixed edge holds a constant tile fraction across a
+        //     2× output range. Unlock tracked as inference sc-17678.
+        //   * rung 3 reaches every attention site but moves the peak 0.00% at BOTH measured scopes —
+        //     request 16.0412 → 16.0410 GiB, U-Net seam 5.3652 → 5.3652 GiB across three runs — and
+        //     is not bit-exact on its query-row axis (max|Δeps| 3.929e-3; 16/255 of image movement at
+        //     one step, 212/255 by four). An earlier revision published the seam as +12.54% from an
+        //     un-warmed control: MLX's first `run` in a process reads ~4.6-4.8 GiB whichever plan it
+        //     executes.
+        //
+        // `overlays` are per tier because `streamable` requires `adapters_are_replayable`, which is
+        // true only on an already-packed snapshot: a LoRA load arms rung 4 at q4/q8 and is refused at
+        // the dense bf16 tier (the alternative would be rendering the base model and calling it a
+        // LoRA render). `identity` rides both, proven end to end by
+        // `the_rung_four_stream_replays_an_installed_ip_adapter`. `control` is absent: the Kolors
+        // ControlNet adds a second down-path of 34 TransformerBlocks that the window does not bound,
+        // and no rung-4 control row has been measured.
+        //
+        // NOTE: same sc-17728 constraint as the SDXL family -- an exact `mlx.calibrations` rung-4
+        // binding cannot be written for this provider until the evidence-parameter validator stops
+        // requiring rung-2/3 parameters on a composition that engages neither.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "kolors",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "kolors-mlx-chatglm3-sdxl-unet-ladder-v1",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+              "overlays": ["none", "identity"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "kolors-mlx-chatglm3-sdxl-unet-ladder-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+              "overlays": ["none", "lora", "identity"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate (sc-16095): measured on an RTX PRO 6000 Blackwell at 1024².
       // Base peaks were q4 26.681, q8 30.372, and bf16 55.102 GB. The shipping bf16
@@ -8655,7 +8737,16 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 5690000000
+          "estimatedSizeBytes": 5690000000,
+          // SC-15674: the download footprint is DECLARED rather than omitted, and it is
+          // deliberately disk-only. Anima has no hosted per-tier download variant: this pull is
+          // the raw `split_files/` SOURCE (one entry per platform), and the q4/q8/bf16 matrix is
+          // packed ON-DEVICE by the `anima_quant` converter. `residentMemoryBytes` /
+          // `peakMemoryBytes` are per-TIER quantities, so on this family they have no download
+          // variant to hang on at all -- the per-tier footprint seam here is the converted
+          // artifact, not this download. Tracked with the rest of the epic-15448 footprint
+          // backfill.
+          "footprint": { "diskSizeBytes": 5690000000 }
         },
         {
           // Non-mac dense bf16 (sc-10676): the SAME three exact `split_files/` paths, for the candle
@@ -8673,7 +8764,16 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 5690000000
+          "estimatedSizeBytes": 5690000000,
+          // SC-15674: the download footprint is DECLARED rather than omitted, and it is
+          // deliberately disk-only. Anima has no hosted per-tier download variant: this pull is
+          // the raw `split_files/` SOURCE (one entry per platform), and the q4/q8/bf16 matrix is
+          // packed ON-DEVICE by the `anima_quant` converter. `residentMemoryBytes` /
+          // `peakMemoryBytes` are per-TIER quantities, so on this family they have no download
+          // variant to hang on at all -- the per-tier footprint seam here is the converted
+          // artifact, not this download. Tracked with the rest of the epic-15448 footprint
+          // backfill.
+          "footprint": { "diskSizeBytes": 5690000000 }
         }
       ],
       "defaults": {
@@ -8725,7 +8825,85 @@
         "convertSourceRepo": "circlestone-labs/Anima",
         // epic-10285 staleness: the converted artifact is stale (needs re-convert) once THIS source file
         // is no longer in the HF cache. Must be one of `ANIMA_DIT_FILES` (validated by the convert plan).
-        "convertSourceFile": "split_files/diffusion_models/anima-base-v1.0.safetensors"
+        "convertSourceFile": "split_files/diffusion_models/anima-base-v1.0.safetensors",
+        // SC-15524: pinned export of the shared memory-strategy contract implemented by
+        // mlx-gen-anima. Anima is the FIRST family in the catalog to publish the COMPLETE ladder --
+        // rungs 1, 2, 3 and 4 -- and all three registered variants (anima_base, anima_aesthetic,
+        // anima_turbo) are real providers sharing one contract builder, one staged `Residency` seam,
+        // one tiled VAE decode, one bounded-attention primitive and one block-residency stream. They
+        // differ only in the DiT checkpoint file and their default steps/CFG, and each still owes its
+        // own per-tier evidence: sharing code is explicitly not what makes an entry Verified.
+        //
+        // Measured on real anima_base bf16 weights at 1024^2 (Apple/Metal), against the exact
+        // untiled/unwindowed reference in `tests/shared_memory_ladder_real_weights.rs`:
+        //   * rung 2 (Qwen-Image VAE `decode_tiled`): the isolated decode peak falls 12.927 -> 9.159
+        //     GiB at the published edge 640 / overlap 64, request peak 7.921 -> 4.153 GiB, at max
+        //     delta 1/255 and mean delta 0.0107. The domain [768, 640, 512, 384, 320, 256, 192] is
+        //     the ADMITTED set; 640 is the default because it is the cheapest edge that still holds
+        //     max delta 1/255 (768 costs 4.649 GiB for the same quality). Edges 160/128/96 are
+        //     measured and REJECTED on drift (0.0706 / 0.1000 / 0.1685 mean).
+        //   * rung 3 (`sdpa_budgeted_bhsd` through BOTH DiT attentions): the denoise phase goes
+        //     5.378 -> 5.229 GiB (-2.8%) with the output unchanged (max delta 0).
+        //   * rung 4 (`block_residency::run_windowed` over the 28 Cosmos DiT blocks): at the
+        //     published window 1 the denoise phase goes 5.229 -> 1.110 GiB and the REQUEST peak goes
+        //     5.229 -> 4.151 GiB, byte-identical output. Windows 2/4/14/28 are REFUSED (1.497 GiB),
+        //     so the cadence domain is genuinely [1] rather than truncated -- window 1 differs from
+        //     the next admitted plan by a real 26%.
+        //
+        // The rung-4 SCOPE is `Dit` only, and that too is a measured decision: rung 1 already sheds
+        // the Qwen3-0.6B tower before denoise, and the 6-block `llm_adapter` conditioner is ~1% of
+        // the DiT checkpoint, so a `TextEncoder` scope's only honest measured value here is 0.0%.
+        // Publishing a scope whose measured value is zero would put a meaningless choice in front of
+        // the selector.
+        //
+        // Rung 4 is declared per LOAD (`streamable` == `LoadShape::DeferredMaterialization`), not
+        // per tier, and additionally requires rung 1 ENGAGED in the same request -- without the phase
+        // release the conditioner and VAE stay resident alongside the window and the request peak
+        // does not move. Both are declared on the contract so the shared selector enforces them.
+        //
+        // TIER SCOPE CAVEAT: every measured Anima figure above is anima_base bf16. q4/q8 carry the
+        // CAPABILITY claim (the rung is per-load, not per-tier) and no measured peak. Anima has no
+        // hosted per-tier download variant at all -- the q4/q8/bf16 matrix is packed on-device by the
+        // `anima_quant` converter -- which is also why the matrix advertises only the q4 tier here.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "anima_base",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
@@ -8776,7 +8954,16 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 5690000000
+          "estimatedSizeBytes": 5690000000,
+          // SC-15674: the download footprint is DECLARED rather than omitted, and it is
+          // deliberately disk-only. Anima has no hosted per-tier download variant: this pull is
+          // the raw `split_files/` SOURCE (one entry per platform), and the q4/q8/bf16 matrix is
+          // packed ON-DEVICE by the `anima_quant` converter. `residentMemoryBytes` /
+          // `peakMemoryBytes` are per-TIER quantities, so on this family they have no download
+          // variant to hang on at all -- the per-tier footprint seam here is the converted
+          // artifact, not this download. Tracked with the rest of the epic-15448 footprint
+          // backfill.
+          "footprint": { "diskSizeBytes": 5690000000 }
         },
         {
           // Non-mac dense bf16 (sc-10676) — the candle off-Mac lane loads these raw `split_files/` paths
@@ -8790,7 +8977,16 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 5690000000
+          "estimatedSizeBytes": 5690000000,
+          // SC-15674: the download footprint is DECLARED rather than omitted, and it is
+          // deliberately disk-only. Anima has no hosted per-tier download variant: this pull is
+          // the raw `split_files/` SOURCE (one entry per platform), and the q4/q8/bf16 matrix is
+          // packed ON-DEVICE by the `anima_quant` converter. `residentMemoryBytes` /
+          // `peakMemoryBytes` are per-TIER quantities, so on this family they have no download
+          // variant to hang on at all -- the per-tier footprint seam here is the converted
+          // artifact, not this download. Tracked with the rest of the epic-15448 footprint
+          // backfill.
+          "footprint": { "diskSizeBytes": 5690000000 }
         }
       ],
       "defaults": {
@@ -8822,7 +9018,85 @@
         "requiresConversion": true,
         "converter": "anima_quant",
         "convertSourceRepo": "circlestone-labs/Anima",
-        "convertSourceFile": "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors"
+        "convertSourceFile": "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors",
+        // SC-15524: pinned export of the shared memory-strategy contract implemented by
+        // mlx-gen-anima. Anima is the FIRST family in the catalog to publish the COMPLETE ladder --
+        // rungs 1, 2, 3 and 4 -- and all three registered variants (anima_base, anima_aesthetic,
+        // anima_turbo) are real providers sharing one contract builder, one staged `Residency` seam,
+        // one tiled VAE decode, one bounded-attention primitive and one block-residency stream. They
+        // differ only in the DiT checkpoint file and their default steps/CFG, and each still owes its
+        // own per-tier evidence: sharing code is explicitly not what makes an entry Verified.
+        //
+        // Measured on real anima_base bf16 weights at 1024^2 (Apple/Metal), against the exact
+        // untiled/unwindowed reference in `tests/shared_memory_ladder_real_weights.rs`:
+        //   * rung 2 (Qwen-Image VAE `decode_tiled`): the isolated decode peak falls 12.927 -> 9.159
+        //     GiB at the published edge 640 / overlap 64, request peak 7.921 -> 4.153 GiB, at max
+        //     delta 1/255 and mean delta 0.0107. The domain [768, 640, 512, 384, 320, 256, 192] is
+        //     the ADMITTED set; 640 is the default because it is the cheapest edge that still holds
+        //     max delta 1/255 (768 costs 4.649 GiB for the same quality). Edges 160/128/96 are
+        //     measured and REJECTED on drift (0.0706 / 0.1000 / 0.1685 mean).
+        //   * rung 3 (`sdpa_budgeted_bhsd` through BOTH DiT attentions): the denoise phase goes
+        //     5.378 -> 5.229 GiB (-2.8%) with the output unchanged (max delta 0).
+        //   * rung 4 (`block_residency::run_windowed` over the 28 Cosmos DiT blocks): at the
+        //     published window 1 the denoise phase goes 5.229 -> 1.110 GiB and the REQUEST peak goes
+        //     5.229 -> 4.151 GiB, byte-identical output. Windows 2/4/14/28 are REFUSED (1.497 GiB),
+        //     so the cadence domain is genuinely [1] rather than truncated -- window 1 differs from
+        //     the next admitted plan by a real 26%.
+        //
+        // The rung-4 SCOPE is `Dit` only, and that too is a measured decision: rung 1 already sheds
+        // the Qwen3-0.6B tower before denoise, and the 6-block `llm_adapter` conditioner is ~1% of
+        // the DiT checkpoint, so a `TextEncoder` scope's only honest measured value here is 0.0%.
+        // Publishing a scope whose measured value is zero would put a meaningless choice in front of
+        // the selector.
+        //
+        // Rung 4 is declared per LOAD (`streamable` == `LoadShape::DeferredMaterialization`), not
+        // per tier, and additionally requires rung 1 ENGAGED in the same request -- without the phase
+        // release the conditioner and VAE stay resident alongside the window and the request peak
+        // does not move. Both are declared on the contract so the shared selector enforces them.
+        //
+        // TIER SCOPE CAVEAT: every measured Anima figure above is anima_base bf16. q4/q8 carry the
+        // CAPABILITY claim (the rung is per-load, not per-tier) and no measured peak. Anima has no
+        // hosted per-tier download variant at all -- the q4/q8/bf16 matrix is packed on-device by the
+        // `anima_quant` converter -- which is also why the matrix advertises only the q4 tier here.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "anima_aesthetic",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
@@ -8879,7 +9153,16 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 5690000000
+          "estimatedSizeBytes": 5690000000,
+          // SC-15674: the download footprint is DECLARED rather than omitted, and it is
+          // deliberately disk-only. Anima has no hosted per-tier download variant: this pull is
+          // the raw `split_files/` SOURCE (one entry per platform), and the q4/q8/bf16 matrix is
+          // packed ON-DEVICE by the `anima_quant` converter. `residentMemoryBytes` /
+          // `peakMemoryBytes` are per-TIER quantities, so on this family they have no download
+          // variant to hang on at all -- the per-tier footprint seam here is the converted
+          // artifact, not this download. Tracked with the rest of the epic-15448 footprint
+          // backfill.
+          "footprint": { "diskSizeBytes": 5690000000 }
         },
         {
           // Non-mac dense bf16 (sc-10676) — the candle off-Mac lane loads these raw `split_files/` paths
@@ -8893,7 +9176,16 @@
             "split_files/vae/qwen_image_vae.safetensors"
           ],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 5690000000
+          "estimatedSizeBytes": 5690000000,
+          // SC-15674: the download footprint is DECLARED rather than omitted, and it is
+          // deliberately disk-only. Anima has no hosted per-tier download variant: this pull is
+          // the raw `split_files/` SOURCE (one entry per platform), and the q4/q8/bf16 matrix is
+          // packed ON-DEVICE by the `anima_quant` converter. `residentMemoryBytes` /
+          // `peakMemoryBytes` are per-TIER quantities, so on this family they have no download
+          // variant to hang on at all -- the per-tier footprint seam here is the converted
+          // artifact, not this download. Tracked with the rest of the epic-15448 footprint
+          // backfill.
+          "footprint": { "diskSizeBytes": 5690000000 }
         }
       ],
       "defaults": {
@@ -8922,7 +9214,85 @@
         "requiresConversion": true,
         "converter": "anima_quant",
         "convertSourceRepo": "circlestone-labs/Anima",
-        "convertSourceFile": "split_files/diffusion_models/anima-turbo-v1.0.safetensors"
+        "convertSourceFile": "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+        // SC-15524: pinned export of the shared memory-strategy contract implemented by
+        // mlx-gen-anima. Anima is the FIRST family in the catalog to publish the COMPLETE ladder --
+        // rungs 1, 2, 3 and 4 -- and all three registered variants (anima_base, anima_aesthetic,
+        // anima_turbo) are real providers sharing one contract builder, one staged `Residency` seam,
+        // one tiled VAE decode, one bounded-attention primitive and one block-residency stream. They
+        // differ only in the DiT checkpoint file and their default steps/CFG, and each still owes its
+        // own per-tier evidence: sharing code is explicitly not what makes an entry Verified.
+        //
+        // Measured on real anima_base bf16 weights at 1024^2 (Apple/Metal), against the exact
+        // untiled/unwindowed reference in `tests/shared_memory_ladder_real_weights.rs`:
+        //   * rung 2 (Qwen-Image VAE `decode_tiled`): the isolated decode peak falls 12.927 -> 9.159
+        //     GiB at the published edge 640 / overlap 64, request peak 7.921 -> 4.153 GiB, at max
+        //     delta 1/255 and mean delta 0.0107. The domain [768, 640, 512, 384, 320, 256, 192] is
+        //     the ADMITTED set; 640 is the default because it is the cheapest edge that still holds
+        //     max delta 1/255 (768 costs 4.649 GiB for the same quality). Edges 160/128/96 are
+        //     measured and REJECTED on drift (0.0706 / 0.1000 / 0.1685 mean).
+        //   * rung 3 (`sdpa_budgeted_bhsd` through BOTH DiT attentions): the denoise phase goes
+        //     5.378 -> 5.229 GiB (-2.8%) with the output unchanged (max delta 0).
+        //   * rung 4 (`block_residency::run_windowed` over the 28 Cosmos DiT blocks): at the
+        //     published window 1 the denoise phase goes 5.229 -> 1.110 GiB and the REQUEST peak goes
+        //     5.229 -> 4.151 GiB, byte-identical output. Windows 2/4/14/28 are REFUSED (1.497 GiB),
+        //     so the cadence domain is genuinely [1] rather than truncated -- window 1 differs from
+        //     the next admitted plan by a real 26%.
+        //
+        // The rung-4 SCOPE is `Dit` only, and that too is a measured decision: rung 1 already sheds
+        // the Qwen3-0.6B tower before denoise, and the 6-block `llm_adapter` conditioner is ~1% of
+        // the DiT checkpoint, so a `TextEncoder` scope's only honest measured value here is 0.0%.
+        // Publishing a scope whose measured value is zero would put a meaningless choice in front of
+        // the selector.
+        //
+        // Rung 4 is declared per LOAD (`streamable` == `LoadShape::DeferredMaterialization`), not
+        // per tier, and additionally requires rung 1 ENGAGED in the same request -- without the phase
+        // release the conditioner and VAE stay resident alongside the window and the request peak
+        // does not move. Both are declared on the contract so the shared selector enforces them.
+        //
+        // TIER SCOPE CAVEAT: every measured Anima figure above is anima_base bf16. q4/q8 carry the
+        // CAPABILITY claim (the rung is per-load, not per-tier) and no measured peak. Anima has no
+        // hosted per-tier download variant at all -- the q4/q8/bf16 matrix is packed on-device by the
+        // `anima_quant` converter -- which is also why the matrix advertises only the q4 tier here.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "anima_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "anima-mlx-cosmos-shared-ladder-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "licenseUrl": "https://huggingface.co/circlestone-labs/Anima",
       "ui": {
@@ -8960,6 +9330,16 @@
       // image_inpaint: StableDiffusionXLInpaintPipeline masked edits (sc-2476).
       // image_detail: tile-ControlNet detail refine (image_detail job, sc-2437/sc-2438).
       "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
+      // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
+      // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
+      // not an omission. They are NOT filled from the epic-15448 inference ladder evidence on
+      // purpose: those figures are request peaks under a named ladder composition, whereas these two
+      // fields are `footprint_measure.rs` quantities -- resident is `get_active_memory()` after a
+      // generation AND a `clear_cache()`, peak is `get_peak_memory()` across load + one generation on
+      // the resident hold-all path through the worker's own registry seam. Substituting one for the
+      // other would corrupt the sc-8509 RAM->tier suggestion, which is this field's only consumer.
+      // Backfill (one fresh process per tier) is tracked on sc-17727.
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8746, epic 8506, Group-B): a
         // public/ungated (CreativeML OpenRAIL++-M) re-host of stabilityai/stable-diffusion-xl-base-1.0.
@@ -9112,6 +9492,79 @@
         // surface (and picks up cfg_pp when sc-8257 lands a candle dispatch + descriptor).
         "limits": {
           "guidanceMethods": ["cfg", "cfg_pp"]
+        },
+        // SC-15525 (+ SC-16355, SC-17679): pinned export of the shared memory-strategy contract
+        // implemented by mlx-gen-sdxl. ONE provider (`engine_id: "sdxl"`) serves FIVE catalog
+        // entries — sdxl, realvisxl, realvisxl_lightning, illustrious_xl_v1, illustrious_xl_v2 —
+        // so the declaration is repeated per entry with that entry's OWN measured tier coverage.
+        // Sharing code is explicitly not what makes a catalog entry Verified.
+        //
+        // Rung 4 windows each `Transformer2D` sub-stack independently through
+        // `mlx_gen::block_residency::run_windowed`. SDXL-base has ELEVEN of them at forward-order
+        // depths [2, 2, 10, 10, 10, 10, 10, 10, 2, 2, 2] — six at depth 10 and FIVE at depth 2 —
+        // for 70 windowable blocks. (SC-16355's survey text said four 2-deep; the up path carries
+        // `layers_per_block + 1 = 3` attentions, so it is five.) `BlockPlan::new` clamps a window to
+        // its stack's depth, so a cadence wider than 2 degrades the five 2-deep stacks to fully
+        // resident rather than erroring — which is why the domain is stated once, not per depth, and
+        // why 10 is the widest cadence that means anything here.
+        //
+        // The DEFAULT cadence is 10, not 1 (SC-17679). The peak column is FLAT across [1, 2, 5, 10]
+        // at every geometry the instrument can resolve, because the peak is taken in the decode
+        // rather than in the windowed forward — so cadence cannot move it and the cheap end costs
+        // nothing. The two 512² cells that once looked non-flat were allocator noise indexed by
+        // execution POSITION, not by cadence, and are withdrawn. Cadence 10 renders 1262 vs cadence
+        // 1's 3524 ms/step at 1024².
+        //
+        // Measured at 1024²/4 steps against each entry's own staged control (byte-identical output):
+        // sdxl bf16 19.005 → 14.938 GiB (−21.40%); realvisxl bf16 19.003 → 14.936 (−21.40%);
+        // realvisxl q8 17.693 → 15.516 (−12.31%); realvisxl q4 16.654 → 15.493 (−6.97%);
+        // realvisxl_lightning q4 16.654 → 15.493 (−6.97%). The saving is the whole
+        // `transformer_blocks` weight set (4.071 / 2.166 / 1.149 GiB by tier), so a selector sizing
+        // rung 4 off the q8 row under-buys at bf16 by a factor of three.
+        //
+        // RUNGS 2 AND 3 ARE `Missing` WITH MEASUREMENTS, not unattempted, so they are deliberately
+        // absent from `implementations` rather than silently omitted:
+        //   * rung 2's tiled decode works and would have bought 19.0032 → 15.8660 GiB (−16.51%) of
+        //     request peak for ~7% wall clock (isolated decode 14.360 → 11.237 GiB, −21.7%, at edge
+        //     896). It is withheld on QUALITY: the inherited sibling drift bar is 48/255, and on the
+        //     PRODUCTION latent the same 1024²/edge-896/overlap-192 geometry drifts 84/255 (the
+        //     synthetic-latent sweep read 38 — which is why the withholding had to be measured on
+        //     what the denoiser actually hands the decode phase). It fails the bar outright at
+        //     1280²/1536²/2048², and `decodeTileEdges` has no geometry axis to vary with output size.
+        //   * rung 3 reaches every attention site including the IP-Adapter decoupled branch, but
+        //     moves the peak 0.00% at BOTH measured scopes — request 19.0032 → 19.0032 GiB, U-Net
+        //     seam 6.5868 → 6.5868 GiB — and is not bit-exact on its query-row axis (max|Δeps|
+        //     5.25e-3; 57/255 of image movement at one step, a different image by six). An earlier
+        //     revision published the seam as +5.1% from an un-warmed control; warmed, the unbounded
+        //     row reads the same 6.5868 the bounded one always did.
+        //
+        // `overlays` are per tier because `streamable` requires `adapters_are_replayable`, which is
+        // true only on an already-packed snapshot: a LoRA load arms rung 4 at q4/q8 and is refused at
+        // a dense bf16 base, because the alternative is quietly rendering without the LoRA the user
+        // asked for. `identity` is absent: no rung-4 IP-armed row has been measured on this provider.
+        //
+        // NOTE for whoever records the exact evidence: no `mlx.calibrations` binding can be added for
+        // this family's rung 4 until sc-17728 lands. `parse_evidence_parameters` requires
+        // decodeTileEdge / decodeOverlap / attentionChunkSize on EVERY rung-4 binding, and this
+        // provider has none to name -- rungs 2 and 3 are Missing here, so no selectable strategy sets
+        // them. The static contract below is unaffected; it is read by the matrix generator, not by
+        // the Rust evidence-binding path.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "sdxl",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image", "style_variations", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            }
+          ]
         }
       },
       "ui": {
@@ -9142,6 +9595,16 @@
       // Plain photoreal alternative to InstantID — IP-Adapter plus-face for
       // resemblance, sdxl-family LoRA support.
       "capabilities": ["text_to_image", "edit_image", "image_inpaint", "image_detail", "character_image", "style_variations"],
+      // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
+      // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
+      // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
+      // not an omission. They are NOT filled from the epic-15448 inference ladder evidence on
+      // purpose: those figures are request peaks under a named ladder composition, whereas these two
+      // fields are `footprint_measure.rs` quantities -- resident is `get_active_memory()` after a
+      // generation AND a `clear_cache()`, peak is `get_peak_memory()` across load + one generation on
+      // the resident hold-all path through the worker's own registry seam. Substituting one for the
+      // other would corrupt the sc-8509 RAM->tier suggestion, which is this field's only consumer.
+      // Backfill (one fresh process per tier) is tracked on sc-17727.
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8746, epic 8506, Group-B): a
         // public/ungated (openrail++) re-host of SG161222/RealVisXL_V5.0. Per-tier self-contained
@@ -9251,6 +9714,46 @@
         // backend so the candle lane keeps the standard CFG surface (sc-8257 follow-on).
         "limits": {
           "guidanceMethods": ["cfg", "cfg_pp"]
+        },
+        // SC-15525: the shared `sdxl` provider contract, declared with THIS entry's own measured
+        // tier coverage. See the `sdxl` entry for the mechanism, the eleven-Transformer2D/70-block
+        // structure, the flat cadence domain, and why rungs 2 and 3 are Missing-with-measurements.
+        //
+        // RealVisXL is the only entry in the family with a rung-4 row on ALL THREE tiers, measured
+        // at 1024²/4 steps against its own staged control: bf16 19.003 → 14.936 GiB (−21.40%),
+        // q8 17.693 → 15.516 (−12.31%), q4 16.654 → 15.493 (−6.97%), byte-identical output.
+        // Its bf16 resident baseline is 20.513 GiB and rung 1 alone takes that to 19.003 (−7.4%).
+        //
+        // The bf16 tier publishes overlay `none` only: `adapters_are_replayable` refuses a LoRA load
+        // on a dense base, because the merge folds the delta into the weight and a re-read block
+        // would be the un-adapted model — a plausible wrong image with no error.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "sdxl",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image", "style_variations", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image", "style_variations", "edit_image", "image_inpaint", "image_detail", "character_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            }
+          ]
         }
       },
       "ui": {
@@ -9292,6 +9795,16 @@
       // its native ~5-step schedule everywhere — no wrong 30-step result. txt2img only on candle; its
       // edit / reference / mask / pose shapes fall back to the Python torch worker. Was `macOnly: true`
       // until the candle lightning lane landed + was GPU-validated (~5-step render) on the RTX PRO 6000.
+      // SC-15674 / sc-17727: the per-variant `footprint` blocks below carry `diskSizeBytes` and
+      // DECLARE `residentMemoryBytes` / `peakMemoryBytes` as null where they have not been measured.
+      // Null here is the schema's unmeasured value (`variantFootprint` requires only `diskSizeBytes`),
+      // not an omission. They are NOT filled from the epic-15448 inference ladder evidence on
+      // purpose: those figures are request peaks under a named ladder composition, whereas these two
+      // fields are `footprint_measure.rs` quantities -- resident is `get_active_memory()` after a
+      // generation AND a `clear_cache()`, peak is `get_peak_memory()` across load + one generation on
+      // the resident hold-all path through the worker's own registry seam. Substituting one for the
+      // other would corrupt the sc-8509 RAM->tier suggestion, which is this field's only consumer.
+      // Backfill (one fresh process per tier) is tracked on sc-17727.
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8746, epic 8506, Group-B): a
         // public/ungated (openrail++) re-host of the distilled SG161222/RealVisXL_V5.0_Lightning.
@@ -9398,7 +9911,33 @@
         // advanced.mlxQuantize. `standardTierLayout` (sc-8508 manifest-driven form) opts this id
         // into `uses_standard_tier_layout` so the worker resolves the tier subdir from the turnkey.
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // SC-15525: the shared `sdxl` provider contract, declared with THIS entry's own measured
+        // tier coverage. See the `sdxl` entry for the mechanism and for why rungs 2 and 3 are
+        // Missing-with-measurements rather than unattempted.
+        //
+        // Only the q4 tier carries a measured rung-4 row here: 16.654 → 15.493 GiB (−6.97%) at
+        // 1024²/4 steps against its own staged control, byte-identical output. q8 and bf16 are not
+        // declared — the capability is the same shared provider, but SC-16355's AC is a request peak
+        // measured PER TIER, and publishing a tier on the strength of a sibling's row is exactly the
+        // substitution that AC exists to refuse.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "sdxl",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+              "tiers": ["q4"],
+              "modes": ["text_to_image", "style_variations"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+              "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "ui": {
         "label": "RealVisXL Lightning (fast photoreal SDXL)",
@@ -9527,6 +10066,24 @@
         "limits": {
           "guidanceMethods": ["cfg", "cfg_pp"]
         }
+        // SC-15525: NO `memoryStrategyContract` here, and that is a MEASURED verdict rather than an
+        // untriaged gap. This entry runs the same shared `sdxl` provider as the other four catalog
+        // entries, but every selectable rung above staged residency is `Missing` on it:
+        //   * rungs 2 and 3 are Missing family-wide, WITH measurements -- see the `sdxl` entry for
+        //     the 48/255-bar-vs-84/255-production-drift rung-2 withholding and the rung-3 result of
+        //     0.00% at both measured scopes.
+        //   * rung 4 is Missing OUTRIGHT for this entry, because q8 is its only advertised tier and
+        //     that tier's snapshot cannot arm the window. The cause is the SNAPSHOT, not the
+        //     architecture: `unet/` IS genuinely packed (u32 codes with .scales/.biases, 3.46 GiB,
+        //     byte-for-byte realvisxl q8's shape, and its measured 17.693 GiB staged peak is
+        //     realvisxl q8's to the millibyte) but `unet/config.json` ships WITHOUT the
+        //     `quantization` marker. `mlx_gen::quant::packed_quant_bits` reads that marker and only
+        //     that marker, so `needs_load_time_quant` returns true, `load_leaves_blocks_lazy` is
+        //     false and `streamable` refuses. The rung fails closed, which is correct -- a window
+        //     over an already-materialized trunk bounds nothing. The repair is a republished
+        //     snapshot rather than a looser predicate; tracked as inference sc-17522. (The same
+        //     missing marker also makes `warn_sequential_requantize` fire on every load of these
+        //     two.)
       },
       "ui": {
         "label": "Illustrious-XL v1.0 (anime)",
@@ -9660,6 +10217,24 @@
         "limits": {
           "guidanceMethods": ["cfg", "cfg_pp"]
         }
+        // SC-15525: NO `memoryStrategyContract` here, and that is a MEASURED verdict rather than an
+        // untriaged gap. This entry runs the same shared `sdxl` provider as the other four catalog
+        // entries, but every selectable rung above staged residency is `Missing` on it:
+        //   * rungs 2 and 3 are Missing family-wide, WITH measurements -- see the `sdxl` entry for
+        //     the 48/255-bar-vs-84/255-production-drift rung-2 withholding and the rung-3 result of
+        //     0.00% at both measured scopes.
+        //   * rung 4 is Missing OUTRIGHT for this entry, because q8 is its only advertised tier and
+        //     that tier's snapshot cannot arm the window. The cause is the SNAPSHOT, not the
+        //     architecture: `unet/` IS genuinely packed (u32 codes with .scales/.biases, 3.46 GiB,
+        //     byte-for-byte realvisxl q8's shape, and its measured 17.693 GiB staged peak is
+        //     realvisxl q8's to the millibyte) but `unet/config.json` ships WITHOUT the
+        //     `quantization` marker. `mlx_gen::quant::packed_quant_bits` reads that marker and only
+        //     that marker, so `needs_load_time_quant` returns true, `load_leaves_blocks_lazy` is
+        //     false and `streamable` refuses. The rung fails closed, which is correct -- a window
+        //     over an already-materialized trunk bounds nothing. The repair is a republished
+        //     snapshot rather than a looser predicate; tracked as inference sc-17522. (The same
+        //     missing marker also makes `warn_sequential_requantize` fire on every load of these
+        //     two.)
       },
       "ui": {
         "label": "Illustrious-XL v2.0 (anime)",
