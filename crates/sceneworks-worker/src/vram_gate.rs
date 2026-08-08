@@ -2971,24 +2971,32 @@ mod tests {
                 other => panic!("{tier} expected {probe_rung:?}, got {other:?}"),
             }
 
+            // sc-18097: the mutation must now corrupt EVERY exact_request record of the tier, not
+            // only the 1024² cell. A record that cannot authorize its own cell also may not seed a
+            // fitted-curve estimate — but any OTHER still-verified record of the tier remains a
+            // legitimate anchor (q4 ships a second exact_request cell at 768²), so a single-record
+            // corruption degrades to estimate-graded admission instead of tier-wide refusal. The
+            // whole-tier corruption below is the honest fail-closed claim this assertion pins.
+            let mutate_compositions = |record: &mut Value| {
+                record["measuredCompositions"]["tiledVae"] = json!(["resident", "bounded_decode"]);
+                record["measuredCompositions"]["chunkedAttention"] =
+                    json!(["resident", "bounded_decode", "bounded_attention"]);
+                record["measuredCompositions"]["streamedBlocks"] = json!([
+                    "resident",
+                    "bounded_decode",
+                    "bounded_attention",
+                    "bounded_transformer_residency"
+                ]);
+            };
             let mut no_compatible_deeper_row = manifest.clone();
-            let record = no_compatible_deeper_row["candle"]["turboFit"]["evidenceRecords"]
+            for record in no_compatible_deeper_row["candle"]["turboFit"]["evidenceRecords"]
                 .as_array_mut()
                 .expect("evidence records")
                 .iter_mut()
-                .find(|record| {
-                    record["tier"].as_str() == Some(tier) && record["width"].as_u64() == Some(1024)
-                })
-                .expect("1024 evidence record");
-            record["measuredCompositions"]["tiledVae"] = json!(["resident", "bounded_decode"]);
-            record["measuredCompositions"]["chunkedAttention"] =
-                json!(["resident", "bounded_decode", "bounded_attention"]);
-            record["measuredCompositions"]["streamedBlocks"] = json!([
-                "resident",
-                "bounded_decode",
-                "bounded_attention",
-                "bounded_transformer_residency"
-            ]);
+                .filter(|record| record["tier"].as_str() == Some(tier))
+            {
+                mutate_compositions(record);
+            }
             assert_eq!(
                 krea_turbo_fit(
                     &no_compatible_deeper_row,
@@ -3006,6 +3014,70 @@ mod tests {
                 }),
                 "{tier} mismatched rows must fail closed when no exact deeper composition can fit"
             );
+
+            // The sc-18097 degradation semantics, pinned on the one tier with a second verified
+            // anchor: corrupting ONLY the 1024² record excludes its measured candidates, and the
+            // untouched 768² record anchors fitted estimates instead — so admission survives, but
+            // at the curve peak WIDENED by the estimate margin, never at the corrupted record's
+            // measured numbers or grade.
+            if tier == "q4" {
+                let mut single_corrupted = manifest.clone();
+                mutate_compositions(
+                    single_corrupted["candle"]["turboFit"]["evidenceRecords"]
+                        .as_array_mut()
+                        .expect("evidence records")
+                        .iter_mut()
+                        .find(|record| {
+                            record["tier"].as_str() == Some(tier)
+                                && record["width"].as_u64() == Some(1024)
+                        })
+                        .expect("1024 evidence record"),
+                );
+                match krea_turbo_fit(
+                    &single_corrupted,
+                    tier,
+                    1024,
+                    1024,
+                    Some(VramBudget {
+                        free_gb: required,
+                        total_gb: required,
+                    }),
+                    true,
+                ) {
+                    Some(KreaTurboFit::Fits {
+                        selection,
+                        needed_gb,
+                        ..
+                    }) => {
+                        assert_eq!(
+                            selection.strategy,
+                            MemoryStrategy::BoundedAttention,
+                            "the 768²-anchored estimate ladder must carry the cell"
+                        );
+                        let curve_peak = krea_rung_phase_peaks(
+                            &manifest,
+                            tier,
+                            MemoryStrategy::BoundedAttention,
+                            1024,
+                            1024,
+                        )
+                        .expect("chunked-attention curve")
+                        .peak_gb();
+                        let expected = curve_peak
+                            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+                            + HEADROOM_GB;
+                        assert!(
+                            (needed_gb - expected).abs() < 1e-3,
+                            "the admit must be graded at the WIDENED curve peak, not the \
+                             corrupted record's numbers: needed {needed_gb}, expected {expected}"
+                        );
+                    }
+                    other => panic!(
+                        "{tier}: a single corrupted record must degrade to estimate admission, \
+                         got {other:?}"
+                    ),
+                }
+            }
         }
     }
 
