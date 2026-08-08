@@ -52,6 +52,7 @@ const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
 /// The gated VAE probe reaches `load_vae` directly, with no `LoadSpec` and therefore no deferred
 /// block schedule: it bulk-materializes the VAE, which is eager materialization.
 const QWEN_VAE_PROBE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
+const QWEN_PROVIDER: &str = "qwen_image";
 const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
@@ -303,6 +304,38 @@ mod tests {
         );
         assert_eq!(overall.allocator_bytes(), 34);
         assert!(predicted_ceiling(overall.allocator_bytes()) >= overall.allocator_bytes());
+    }
+
+    /// sc-18104: an unimplemented provider must be refused by name at dispatch, not fall through to
+    /// the Qwen arm. The regression this guards is silent MISROUTING, so asserting "it errored" is
+    /// not enough — the old code errored too, just with a Qwen-shaped message after entering the
+    /// wrong arm. Assert the provider is named, and that none of the Qwen arm's own failure
+    /// vocabulary appears, which is what distinguishes a dispatch refusal from a misroute.
+    #[test]
+    fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
+        for provider in ["flux2_dev", "flux2_dev_edit", "krea_2_turbo", "sana"] {
+            let request = json!({ "planned": { "target": { "provider": provider } } });
+            let error = run(&request).expect_err("unimplemented provider must not dispatch");
+            assert_eq!(
+                error,
+                format!("MLX five-rung calibration does not implement provider {provider:?}")
+            );
+            assert!(
+                !error.contains("SCENEWORKS_QWEN") && !error.contains("calibration mismatch"),
+                "refusal leaked the Qwen arm's vocabulary, so dispatch misrouted: {error}"
+            );
+        }
+    }
+
+    /// The companion direction. Dispatching an implemented id for real loads a model, so this pins
+    /// the three constants the match arms are keyed on instead: a typo in any of them would silently
+    /// move that lane into the refusal arm, which is the same class of bug in the other direction.
+    #[test]
+    fn the_implemented_provider_ids_are_exactly_the_three_wired_arms() {
+        assert_eq!(
+            [QWEN_PROVIDER, Z_IMAGE_PROVIDER, KREA_PROVIDER],
+            ["qwen_image", "z_image_turbo", "krea_2_turbo_control"]
+        );
     }
 
     #[test]
@@ -2651,12 +2684,20 @@ fn run(request: &Value) -> Result<Value, String> {
         .pointer("/target/provider")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    if provider == Z_IMAGE_PROVIDER {
-        run_z_image_reference(request)
-    } else if provider == KREA_PROVIDER {
-        run_krea_control(request)
-    } else {
-        run_qwen_provider(request)
+    // sc-18104: this used to be `else { run_qwen_provider(request) }`, so ANY provider the MLX
+    // adapter does not implement was silently routed to the Qwen arm rather than refused. It then
+    // failed further in on a Qwen-shaped complaint that named neither the provider nor the missing
+    // arm — measured by reverting this match, capturing `flux2_dev` reported
+    // `planned.target.overlay must be a string`, which reads as a malformed plan entry and sends the
+    // operator off fixing fixtures or provisioning weights for the wrong model. Refuse by name
+    // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
+    match provider {
+        Z_IMAGE_PROVIDER => run_z_image_reference(request),
+        KREA_PROVIDER => run_krea_control(request),
+        QWEN_PROVIDER => run_qwen_provider(request),
+        other => Err(format!(
+            "MLX five-rung calibration does not implement provider {other:?}"
+        )),
     }
 }
 

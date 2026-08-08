@@ -9,6 +9,13 @@ colon (`mlx` or `candle`) and `<provider>` its part after.
 This replaces the pattern of filing a story per model. Measurements are made by following this
 document; only lanes someone actually cares about get measured.
 
+**Validation status.** This document was walked end to end by a fresh session holding only the
+runbook and a lane name (`mlx:flux2_dev`, sc-18104). §1, §2, §4a, §5, §7b, §7c `--check` and §8 were
+**executed**; the fixes from that walk are folded in below. The capture itself (§3, §6, §7a, §7d,
+§9-§10) was **not** reached: §2 correctly stopped the lane in about a minute as an
+adapter-implementation task, which is the outcome §2 exists to produce. Sections still marked
+"transcribed, not executed" in their own provenance notes remain so.
+
 Companions, not prerequisites — you should not need to open either to finish a measurement:
 
 - [memory-calibration-harness.md](memory-calibration-harness.md) — the reference: schema semantics,
@@ -54,13 +61,30 @@ DECLARED BUT NEVER CAPTURED (not stale — no measurement to be stale): candle:z
 the lane where a capture buys the most. `BINDINGS` is the **shipped admission surface** (what the
 worker's fit gates consult today); `RECORDS` is corpus debt. Prefer bindings.
 
+🔴 **This report enumerates DECLARED lanes only, so it cannot tell you a lane does not exist.** A lane
+is keyed exactly as `config/inference-provider-closures.json` keys it
+(`scripts/stale-lane-report.mjs:23-28`); a lane absent from that file appears **nowhere in the output**
+— not in the stale table, and not under "declared but never captured", which lists only lanes that
+*are* declared. Measured while validating this runbook (sc-18104): `mlx:flux2_dev` produces zero rows
+even though FLUX.2 [dev] ships an MLX lane in `builtin.models.jsonc`. If you arrived here with a lane
+name from outside this report — a product decision, a story, "the most popular model's Mac lane" —
+**do not read its absence as "nothing to do"**. Go straight to §2 and check it explicitly.
+
 The gate inventory behind the report — what does and does not grade currency — lives in
 [calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md) ("What grades what",
 "What does NOT grade currency").
 
 ## 2. Can this lane actually be captured today?
 
-Three independent things must all be true. Check them **before** booking a GPU.
+Four things must all be true. Check them **before** booking a GPU — every check below is a few
+seconds, and together they are the difference between finding out now and finding out after a
+multi-hour sweep.
+
+They are **not independent, and the order here is diagnostic order, not build order.** For a lane that
+does not exist yet the dependency runs the other way: an adapter arm (§2c) is what makes plan entries
+(§2b) meaningful, and plan entries are what make a closure declaration (§2a) worth deriving. Read
+§2a-§2d to find out *where* the lane stands; if it fails §2c or §2d, that is an implementation task
+and §3 onward does not apply — see §2d.
 
 ### 2a. The lane is declared in the closure table
 
@@ -94,24 +118,81 @@ digest and can never be current evidence.
 ### 2c. A provider adapter covers the lane
 
 The adapters are `crates/sceneworks-memory-adapter/src/bin/mlx.rs` and `.../bin/candle.rs`. Provider
-ids they name today:
+ids they cover today:
 
-| binary | providers named in the source |
-| --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` |
-| `memory-candle-adapter` | `krea_2_turbo`, `qwen_image` |
+| binary | providers covered | how it dispatches an unknown provider |
+| --- | --- | --- |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` | `mlx.rs:2682-2701` — `MLX five-rung calibration does not implement provider "<id>"` |
+| `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Grep before you schedule:
 
 ```bash
-grep -n '"<provider>"' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
+grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
 
-**This is the gate that stops most lanes.** `candle:z_image` is declared in the closure table and has
-**90 plan entries across 18 fixtures**, and
-`grep -c z_image crates/sceneworks-memory-adapter/src/bin/candle.rs` returns `0` — which is exactly
-why the stale-lane report lists it as "declared but never captured". A lane with no adapter arm is an
-adapter-implementation task, not a measurement task. Stop here and say so.
+Both adapters now refuse an unimplemented provider **by name, at dispatch, before any environment or
+model work**. Trust that message: it means the arm is missing, not that your environment is wrong.
+
+> **This was not true until sc-18104, and the old behaviour is worth knowing** because it may still be
+> what an older adapter binary or a stale build does. The MLX `run()` used to test for
+> `z_image_turbo` and `krea_2_turbo_control` and send *everything else* to `run_qwen_provider` — so an
+> unimplemented MLX lane silently **misrouted into the Qwen arm** and died further in on a Qwen-shaped
+> complaint. Measured by reverting the fix and re-running the guard test: capturing `flux2_dev`
+> produced `planned.target.overlay must be a string`. That names neither FLUX.2 nor the missing arm,
+> reads like a malformed plan entry, and is exactly the kind of message that sends an operator off
+> fixing fixtures or provisioning weights for the wrong model.
+
+**How much this gate stops, measured (sc-18104, on `origin/main`).** Only `authoritative` scope can
+ever become current evidence (§2b), and the plan holds **155 authoritative entries across 8 lanes**.
+Of those 8 lanes, **4 have no adapter arm** — `candle:flux1_dev`, `candle:flux1_schnell`,
+`candle:flux2_dev` and `candle:z_image` — which is **105 of the 155 authoritative entries**. Three of
+those four (the flux lanes) **already carry 5 committed evidence records each**: evidence captured by
+an adapter that no longer implements them, so they can be *reported* stale but cannot be re-captured
+today. `candle:z_image` is the only one the stale-lane report surfaces, because it is the only one
+with no records to be stale.
+
+Two more traps in the same area:
+
+- **A named arm is not automatically a current-evidence lane.** `candle:qwen_image` has an adapter arm
+  but its 5 plan entries are all `candidate` scope, so no capture through it can ever be `current`
+  (§2b). Check the arm *and* the scope.
+- **A closure-table entry is not an arm.** `candle:flux2_dev` is declared, digested and has committed
+  records, and still has no arm. Declaration, evidence and capturability are three separate facts.
+
+A lane with no adapter arm is an adapter-implementation task, not a measurement task. Stop here, file
+it as such, and say so — see §2d.
+
+### 2d. If the lane is missing entirely
+
+§2a-§2c can each fail on their own, but the interesting case is a lane that fails several at once:
+**it does not exist yet.** Diagnose it precisely before writing any story, because the four states
+below need very different work.
+
+| symptom | what it means | the work |
+| --- | --- | --- |
+| §2a `NOT DECLARED`, §2b throws, §2c greps empty | the lane does not exist anywhere | adapter arm → plan entries → closure stub + `--write` (§7c), **in that order** |
+| §2a declared, §2b throws | orphan closure entry | author plan entries |
+| §2a declared, §2b OK, §2c empty | declared and planned, not implementable | adapter arm only |
+| all three OK | capturable | continue to §3 |
+
+**Worked example, and the reason this section exists** — `mlx:flux2_dev`, screened for sc-18104:
+
+```
+§2a  mlx:flux2_dev → NOT DECLARED   (9 declared lanes; the mlx side has 3)
+§2b  Error: no plan entries for mlx:flux2_dev   (170 plan entries; 0 name it)
+§2c  grep -rn flux crates/sceneworks-memory-adapter/src/ → no matches   (the WHOLE crate)
+```
+
+Row one. Note what is *not* wrong: `crates/media/mlx-gen/mlx-gen-flux2` exists at the pin and declares
+`flux2_dev` (`mlx-gen-flux2/src/lib.rs:141`), FLUX.2 [dev] ships an `mlx` block in
+`builtin.models.jsonc`, and the q8 weights are on this Mac. **The engine is real and the model
+shipped; only the calibration apparatus is missing.** That combination is easy to mistake for "should
+be a quick capture", which is exactly why §2 is four greps and not a judgement call.
+
+Do **not** part-build the lane as consolation. Adding a closure stub for a lane with no plan entries
+and no arm creates a digest nothing consumes, which then has to be re-derived when the arm actually
+lands. Land the three pieces together or land none of them.
 
 ## 3. Pick the host
 
@@ -130,6 +211,25 @@ are wired: `mlx:qwen_image` and `mlx:z_image_turbo` (two separate inputs on `mac
 `candle:krea_2_turbo` (`windows-candle.yml`). Any other lane must go the local route.
 
 ## 4. Weights must really be present for the target tier
+
+### 4a. First, list the tiers that are actually on disk
+
+Before any verifier, answer the cheaper question: **which tier subdirectories exist at all?** A
+multi-tier capture is quoted per tier, and a tier that is not on disk is a download, not a
+measurement.
+
+```bash
+ls "$HOME/.cache/huggingface/hub/models--<Org>--<Repo>/snapshots/"*/
+```
+
+Measured on this Mac while validating this runbook (sc-18104):
+`models--SceneWorks--flux2-dev-mlx/snapshots/2868b1461b2b…/` contains **only `q8/`** — 57 GiB on
+disk. The manifest declares three tiers for that artifact, so a three-tier story would first have to
+fetch `q4` (33.6 GB, and it is the `default: true` tier) and `bf16` (113 GB)
+(`config/manifests/builtin.models.jsonc`, the `flux2_dev` `downloads` array). Neither absence is
+visible from the repo directory or from the marker discussed next.
+
+Then, and only then:
 
 **`.sceneworks-model-revision` is the only sound POSITIVE signal.** It lives inside
 `snapshots/<revision>/`, not in the repo directory — looking in the repo dir reads as a false
@@ -168,11 +268,14 @@ Two caveats, both measured:
   `qwen-image-mlx snapshot is incomplete; missing: bf16/model_index.json, …`. That is the check
   earning its keep — the directory exists and looks fine.
 - **Not every calibration lane has a manifest entry.** At pin `40fa7583`,
-  `release/real-weight-models.toml` has 62 `[[models]]` keys, and `SceneWorks/z-image-turbo-mlx` and
-  `SceneWorks/krea-2-turbo-mlx` are **not** among them (`z-image-turbo` there is the upstream
-  `Tongyi-MAI` repo, a different artifact). For those lanes there is no `verify_model_snapshot`
+  `release/real-weight-models.toml` has 62 `[[models]]` keys, and `SceneWorks/z-image-turbo-mlx`,
+  `SceneWorks/krea-2-turbo-mlx` and `SceneWorks/flux2-dev-mlx` are **not** among them
+  (`z-image-turbo` there is the upstream `Tongyi-MAI` repo, a different artifact; the only flux2 key
+  is `flux2-klein-9b-mlx-q4`, which is **klein**, a different model from FLUX.2 [dev] — do not
+  mistake it for a binding on this lane). For those lanes there is no `verify_model_snapshot`
   binding to run — fall back to the workflow's own resolver contract below and say plainly in the PR
-  that no manifest-bound verification exists for the lane.
+  that no manifest-bound verification exists for the lane. sc-18213 tracks closing this gap; check it
+  before concluding a lane is permanently unbound.
 
 ### Where the adapters look — one resolver block PER LANE
 
@@ -276,6 +379,16 @@ git -C <inference-clone> checkout <that SHA>
 
 Both capture workflows enforce that equality themselves and refuse the dispatch on mismatch
 (macos-mlx.yml:601-605, windows-candle.yml:386-389).
+
+**There are two spellings of the pin, and different tools read different ones.** The adapter's
+`INFERENCE_PIN` above is what the built binary stamps into its records;
+`scripts/inference-closure-digest.mjs` instead defaults `--revision` to the pin it parses from the
+workspace `Cargo.toml` (`inferencePinFromCargo`, `inference-closure-digest.mjs:670`). They agree today
+— both read `40fa7583`, and `scripts/bump-inference.mjs` moves them in lockstep and asserts the
+constant is rewritten (`bump-inference.mjs:99,161`) — so this is a thing to know, not a thing to fix.
+Do not bump either by hand; use `bump-inference.mjs`. And keep this distinct from §7d's
+`inferenceRevision`, which is a **manifest binding field** naming the revision a measurement was taken
+at, not a build pin.
 
 ## 6. The capture
 
@@ -419,6 +532,15 @@ re-derived from a real capture rather than trusted forward.
 - **Disk**: the largest MLX calibration snapshot is approximately **57 GiB**
   ([memory-calibration-harness.md](memory-calibration-harness.md)), which is why only a provisioning
   dispatch gets the 240-minute timeout. Have that much free before provisioning, per tier.
+- 🔴 **"All three tiers" is a claim about the HOST, not just the model.** A tier can be shipped,
+  downloadable and still unmeasurable on the machine in front of you, and the manifest usually already
+  says so. Check the tier's own memory note against the host before promising three tiers. Worked
+  example (sc-18104): this Mac is an M5 Max with **128 GiB** unified memory (`sysctl hw.memsize` →
+  `137438953472`), and `flux2_dev`'s bf16 download comment records an on-device finding from sc-8513
+  — *"256² fits a 128 GB box, production 1024² wants >128 GB"*. So on this host the bf16 tier of that
+  lane cannot be measured at the production geometry at all; three-tier coverage there needs a
+  ≥192 GB Mac, or bf16 rows captured at a reduced geometry and labelled as such. Establish this
+  before you accept a three-tier scope, not after two tiers have already been swept.
 
 ## 7. Ingest, stamping, and a new lane
 
@@ -498,15 +620,31 @@ genuine conflict.
 > identical derivation.
 
 Every authoritative lane in the plan must have an entry in
-`config/inference-provider-closures.json`, and `memory-calibration-harness.test.mjs` asserts it. Add
-the lane's inference crate directory and regenerate the whole table from a real clone — never by
-hand:
+`config/inference-provider-closures.json`, and `memory-calibration-harness.test.mjs` asserts it.
+
+⚠ **Exactly one field is hand-added; everything else is derived.** "Regenerate, never by hand" is the
+rule for *digests*, and it is easy to over-read into "run `--write` and the new lane appears" — it
+will not. The script builds its work list from the checked-in config's own `crate` fields —
+`declared = Object.entries(existing.providers).map(([p, e]) => [p, e.crate])`
+(`inference-closure-digest.mjs:665-668`) — so a lane that is not already in the file is simply not
+digested, and `--write` rewrites the same set it started with. Seed the stub first, then derive:
 
 ```bash
+# 1. Hand-add ONLY the key and its crate directory to config/inference-provider-closures.json:
+#      "<backend>:<provider>": { "crate": "crates/media/<backend>-gen/<engine-crate>" }
+#    Every other field (digest, closureCrates, sourceFileCount, lockedPackageCount) is derived —
+#    do not invent them, and do not copy a sibling lane's.
+#
+# 2. Derive the whole table from a real clone.
 node scripts/inference-closure-digest.mjs --repo <inference clone> --write
+
+# 3. Prove it took.
 node scripts/inference-closure-digest.mjs --repo <inference clone> --check   # verified: prints
                                                 # "config/inference-provider-closures.json matches 40fa7583"
 ```
+
+`--write` and `--check` both digest at the pin parsed from the workspace `Cargo.toml`, not at the
+adapter constant (§5).
 
 The key is `<backend>:<provider>`; a bare provider id is ambiguous (`krea_2_turbo_control` exists on
 both backends with different crates). `buildClosureConfig` also asserts the provider is really
@@ -570,6 +708,16 @@ npm run check:memory-calibration          # schema-checks the committed bundle
 
 Verified green on `origin/main` today. `check:rust-derived-docs` ends with
 `tier integrity OK: 111 declared exceptions (111 measured, 0 unmeasured).`
+
+⚠ **The cost model fingerprints the ADAPTER SOURCES, so touching an adapter invalidates it even with
+no capture.** `docs/generated/calibration-cost-model.json` records a `sha256` per source, including
+`crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs`
+(`scripts/calibration-cost-model.mjs:1486-1487`). Measured in sc-18104: a comment-and-`match` edit to
+`mlx.rs` — no evidence, no bindings, no plan change — turned `check:calibration-cost-model` red with
+`generated calibration cost model is stale`, and regenerating produced a two-line diff (the adapter
+`sha256` and the roll-up `sceneWorksRevision`). So run §8 whenever you touch an adapter, not only
+after an ingest. `docs/generated/memory-matrix.json` did **not** move on that same edit — the two
+artifacts have different input sets; regenerate both and commit whichever actually changed.
 
 **Coordinate before regenerating.** These artifacts are regenerated by several stories at once and
 are a classic merge-queue conflict. If a sibling PR is already regenerating them, rebase onto it
@@ -733,7 +881,8 @@ regenerated matrix without the relaxed pins is another:
 | `config/manifests/builtin.models.jsonc` | 🔴 the **shipped bindings** — without this the capture changes nothing the runtime reads | §7d |
 | `config/inference-provider-closures.json` | only if the lane is new, or the pin moved | §7c |
 | `docs/generated/memory-matrix.json` + `.md` | derived | §8 |
-| `docs/generated/calibration-cost-model.json` + `.md` | derived, while the generator still exists | §8 |
+| `docs/generated/calibration-cost-model.json` + `.md` | derived, while the generator still exists — **also moves on any adapter-source edit**, §8 | §8 |
+| `crates/sceneworks-memory-adapter/src/bin/<backend>.rs` | only if you had to add or fix an arm; run `cargo fmt --all` and regenerate §8 after | §2c |
 | `scripts/generate-memory-matrix.test.mjs`, `tests/test_memory_matrix.py`, and any other pin your lane reds | the corpus is no longer uniformly historical | §9 |
 
 Before pushing:
