@@ -122,7 +122,7 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` | `mlx.rs:2682-2701` — `MLX five-rung calibration does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` | `mlx.rs:2712-2723` (`run`) — `MLX five-rung calibration does not implement provider "<id>"`; `mlx.rs:1583-1587` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` |
 | `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Grep before you schedule:
@@ -131,8 +131,10 @@ Grep before you schedule:
 grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
 
-Both adapters now refuse an unimplemented provider **by name, at dispatch, before any environment or
-model work**. Trust that message: it means the arm is missing, not that your environment is wrong.
+Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
+on **both** MLX actions — `run` (`mlx.rs:2712-2723`) and `assess_batch`, where the check lives inside
+`validate_z_image_batch` (`mlx.rs:1583-1587`) so it fires before `runtime_macos::catalog()` is built.
+Trust that message: it means the arm is missing, not that your environment is wrong.
 
 > **This was not true until sc-18104, and the old behaviour is worth knowing** because it may still be
 > what an older adapter binary or a stale build does. The MLX `run()` used to test for
@@ -142,6 +144,17 @@ model work**. Trust that message: it means the arm is missing, not that your env
 > produced `planned.target.overlay must be a string`. That names neither FLUX.2 nor the missing arm,
 > reads like a malformed plan entry, and is exactly the kind of message that sends an operator off
 > fixing fixtures or provisioning weights for the wrong model.
+>
+> **`assess_batch` had the identical hole, and it is the more dangerous of the two.**
+> `validate_z_image_batch` checked batch length, canonical rung order and target-tuple stability but
+> never read `target.provider`, while `assess_z_image_batch` hardcodes `Z_IMAGE_PROVIDER` when it
+> reads the memory-strategy contract — so a foreign five-rung batch passed validation and was
+> misrouted into the **Z-Image** contract, failing on a Z-Image-shaped fingerprint complaint *after*
+> `runtime_macos::catalog()` had already done real environment work. It was reachable through the
+> documented path: `assessProviderReuse` (`scripts/memory-calibration-harness.mjs`) selects candidates
+> by backend and optional fixture only, **never by provider**. Measured by deleting the new guard: a
+> `flux2_dev` five-rung batch validated *successfully* and proceeded toward the Z-Image contract.
+> Candle has no equivalent hole — its batch path refuses by name at `candle.rs:1108`.
 
 **How much this gate stops, measured (sc-18104, on `origin/main`).** Only `authoritative` scope can
 ever become current evidence (§2b), and the plan holds **155 authoritative entries across 8 lanes**.
@@ -166,15 +179,22 @@ it as such, and say so — see §2d.
 ### 2d. If the lane is missing entirely
 
 §2a-§2c can each fail on their own, but the interesting case is a lane that fails several at once:
-**it does not exist yet.** Diagnose it precisely before writing any story, because the four states
-below need very different work.
+**it does not exist yet.** Diagnose it precisely before writing any story, because the five states
+below need very different work. Read all three gate results together — **row one and row four differ
+only in §2b**, and mistaking one for the other prescribes writing plan entries that already exist.
 
-| symptom | what it means | the work |
-| --- | --- | --- |
-| §2a `NOT DECLARED`, §2b throws, §2c greps empty | the lane does not exist anywhere | adapter arm → plan entries → closure stub + `--write` (§7c), **in that order** |
-| §2a declared, §2b throws | orphan closure entry | author plan entries |
-| §2a declared, §2b OK, §2c empty | declared and planned, not implementable | adapter arm only |
-| all three OK | capturable | continue to §3 |
+| §2a | §2b | §2c | what it means | the work |
+| --- | --- | --- | --- | --- |
+| `NOT DECLARED` | throws | empty | the lane does not exist anywhere | adapter arm → plan entries → closure stub + `--write` (§7c), **in that order** |
+| declared | throws | — | orphan closure entry | author plan entries |
+| declared | OK | empty | declared and planned, not implementable | adapter arm only |
+| `NOT DECLARED` | OK | empty | planned but never declared **or** implemented — usually a lane whose entries are all `candidate` scope, which no closure entry would make current anyway | adapter arm, then decide whether the entries should be re-scoped `authoritative`; only then a closure stub |
+| declared | OK | non-empty | capturable | continue to §3 |
+
+Row four is instantiated today: `candle:qwen_image_edit` has **9 plan entries, all `candidate`**, is
+absent from the 9 declared lanes, and has no adapter arm (its rejection is pinned by
+`candle.rs:1668-1673`). Its plan entries being candidate-scope is why nobody has missed the closure
+entry — per §2b, candidate scope can never become current evidence.
 
 **Worked example, and the reason this section exists** — `mlx:flux2_dev`, screened for sc-18104:
 
@@ -186,8 +206,9 @@ below need very different work.
 
 Row one. Note what is *not* wrong: `crates/media/mlx-gen/mlx-gen-flux2` exists at the pin and declares
 `flux2_dev` (`mlx-gen-flux2/src/lib.rs:141`), FLUX.2 [dev] ships an `mlx` block in
-`builtin.models.jsonc`, and the q8 weights are on this Mac. **The engine is real and the model
-shipped; only the calibration apparatus is missing.** That combination is easy to mistake for "should
+`builtin.models.jsonc`, and a q8 tier directory is present on this Mac (unstamped — see §4a). **The
+engine is real and the model shipped; only the calibration apparatus is missing.** That combination is
+easy to mistake for "should
 be a quick capture", which is exactly why §2 is four greps and not a judgement call.
 
 Do **not** part-build the lane as consolation. Adding a closure stub for a lane with no plan entries
@@ -228,6 +249,14 @@ disk. The manifest declares three tiers for that artifact, so a three-tier story
 fetch `q4` (33.6 GB, and it is the `default: true` tier) and `bf16` (113 GB)
 (`config/manifests/builtin.models.jsonc`, the `flux2_dev` `downloads` array). Neither absence is
 visible from the repo directory or from the marker discussed next.
+
+⚠ **This step answers "which tiers exist", NOT "which tiers are usable" — do not let it become the
+latter.** In that same worked example, `find … -name .sceneworks-model-revision` over the entire
+`models--SceneWorks--flux2-dev-mlx` tree returns **nothing**, so by the very rule stated immediately
+below, that `q8/` directory is *not* established as provisioned — a present tier directory is not a
+complete one. The honest reading is "a q8 directory exists, unverified", and it still owes the §4
+verifier. Write it that way in any story you hand off, because "the weights are already there" is
+exactly the sentence a downstream capture plan will inherit as settled fact.
 
 Then, and only then:
 

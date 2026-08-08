@@ -327,15 +327,27 @@ mod tests {
         }
     }
 
-    /// The companion direction. Dispatching an implemented id for real loads a model, so this pins
-    /// the three constants the match arms are keyed on instead: a typo in any of them would silently
-    /// move that lane into the refusal arm, which is the same class of bug in the other direction.
+    /// The companion direction, and the one the refusal arm above makes necessary: every IMPLEMENTED
+    /// provider must still reach its own arm through `run`. A typo in any match key — `"qwen_imagee"`
+    /// — would drop a live lane into the refusal arm permanently, and `mlx:qwen_image` alone carries
+    /// 9 authoritative plan entries and 41 evidence records.
+    ///
+    /// This must go through `run` to mean anything. Asserting the constants equal string literals
+    /// looks like a guard and is not one: it never exercises dispatch, so it cannot see a mis-keyed
+    /// match arm. Dispatch is cheap to probe here — each arm rejects this minimal request on a
+    /// missing field long before any env read, catalog build or weight load, so the assertion is on
+    /// WHICH complaint comes back, not on success.
     #[test]
-    fn the_implemented_provider_ids_are_exactly_the_three_wired_arms() {
-        assert_eq!(
-            [QWEN_PROVIDER, Z_IMAGE_PROVIDER, KREA_PROVIDER],
-            ["qwen_image", "z_image_turbo", "krea_2_turbo_control"]
-        );
+    fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
+        for provider in [QWEN_PROVIDER, Z_IMAGE_PROVIDER, KREA_PROVIDER] {
+            let request = json!({ "planned": { "target": { "provider": provider } } });
+            let error = run(&request)
+                .expect_err("the minimal request is incomplete, so every arm must complain");
+            assert!(
+                !error.contains("does not implement provider"),
+                "{provider} is wired but dispatch refused it — a match key is mis-typed: {error}"
+            );
+        }
     }
 
     #[test]
@@ -1555,6 +1567,24 @@ fn validate_z_image_batch(request: &Value) -> Result<&[Value], String> {
     let target = planned[0]
         .get("target")
         .ok_or_else(|| "assess_batch planned target must be present".to_owned())?;
+    // sc-18104: refuse a foreign provider by name here, for the same reason `run` does. This batch
+    // path is Z-Image-only — `assess_z_image_batch` hardcodes `Z_IMAGE_PROVIDER` when it reads the
+    // memory-strategy contract — but nothing below inspects `target.provider`, so without this check
+    // a five-rung batch for another provider is MISROUTED into the Z-Image contract and dies on a
+    // Z-Image-shaped fingerprint complaint, after `runtime_macos::catalog()` has already done real
+    // environment work. That is the same silent-misroute class the `run` refusal closes, and it is
+    // reachable: `assessProviderReuse` (scripts/memory-calibration-harness.mjs) selects candidates by
+    // backend and optional fixture only, never by provider, so a future foreign five-rung fixture
+    // passes the length and ordering checks above untouched.
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "assess_batch planned target.provider must be a string".to_owned())?;
+    if provider != Z_IMAGE_PROVIDER {
+        return Err(format!(
+            "MLX five-rung batch assessment does not implement provider {provider:?}"
+        ));
+    }
     for (index, (item, expected_rung)) in planned.iter().zip(expected).enumerate() {
         let rung = item
             .pointer("/strategy/rung")
@@ -2724,6 +2754,55 @@ mod z_image_reuse_tests {
             z_image_reuse_identity(fingerprint, LoadShape::EagerMaterialization),
             z_image_reuse_identity(fingerprint, LoadShape::DeferredMaterialization),
         );
+    }
+
+    /// A canonical five-rung batch, differing from a real Z-Image one ONLY in `target.provider`.
+    /// Every other check in `validate_z_image_batch` — length, canonical rung order, one exact
+    /// target tuple — passes on this input, which is precisely why the provider check has to exist.
+    fn foreign_five_rung_batch(provider: &str) -> Value {
+        let target = json!({ "provider": provider, "tier": "q4", "mode": "text_to_image" });
+        let planned: Vec<Value> = [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+        ]
+        .iter()
+        .map(|rung| json!({ "target": target, "strategy": { "rung": rung } }))
+        .collect();
+        json!({ "action": "assess_batch", "planned": planned })
+    }
+
+    /// sc-18104: the batch action had the same silent-misroute hole `run` had. `validate_z_image_batch`
+    /// never read `target.provider`, and `assess_z_image_batch` hardcodes `Z_IMAGE_PROVIDER` when it
+    /// reads the contract — so a foreign five-rung batch was misrouted into the Z-Image contract and
+    /// failed on a Z-Image-shaped complaint AFTER `runtime_macos::catalog()` did real environment
+    /// work. Refusal must therefore be by name and must happen inside validation, before that call.
+    #[test]
+    fn the_batch_action_refuses_a_foreign_provider_by_name_during_validation() {
+        for provider in ["flux2_dev", "qwen_image", "krea_2_turbo_control"] {
+            let error = validate_z_image_batch(&foreign_five_rung_batch(provider))
+                .expect_err("a foreign provider must not reach the Z-Image contract");
+            assert_eq!(
+                error,
+                format!("MLX five-rung batch assessment does not implement provider {provider:?}")
+            );
+            assert!(
+                !error.contains("fingerprint") && !error.contains("contract"),
+                "refusal came from the Z-Image contract, so validation let it through: {error}"
+            );
+        }
+    }
+
+    /// The companion direction: the real Z-Image provider must still pass validation unchanged, so
+    /// the new check cannot be satisfied by refusing everything.
+    #[test]
+    fn the_batch_action_still_accepts_the_z_image_provider() {
+        let batch = foreign_five_rung_batch(Z_IMAGE_PROVIDER);
+        let planned =
+            validate_z_image_batch(&batch).expect("the Z-Image batch must still validate");
+        assert_eq!(planned.len(), 5);
     }
 }
 

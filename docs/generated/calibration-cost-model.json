@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c31f4f56c646ae66c96c18d1e183e4a5620d190e75627a613a4917ecee1f4474",
+    "sceneWorksRevision": "source-tree:3e68e4a4f0739adf75cdbb85a71ab5b607791d082ac39d45e7053531ee6fb156",
     "matrixRevision": "source-tree:fe6161eeb7d3cbacd5d76d5fde858f9d46727a51e5396480a3d517d5b80e24ce",
     "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
     "sources": {
@@ -47,7 +47,7 @@
       },
       "mlxAdapter": {
         "path": "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
-        "sha256": "93edec4e123b79d3b428d4935805864b22b5a999b6bc713cff7c48991d711d58"
+        "sha256": "268d24938773b674a88ec1d5d00de8248c344f12f28dd281206ce9b3c5b0d233"
       }
     }
   },
