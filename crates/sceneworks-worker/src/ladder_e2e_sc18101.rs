@@ -11,7 +11,7 @@
 //! |---|---|
 //! | [`c1_unmeasured_cell_engages_a_deep_rung_and_renders`] | an UNMEASURED cell under `SCENEWORKS_MLX_MEMORY_CAP_GB` engages a deep rung and completes a real render |
 //! | [`c2_measured_current_cell_selection`] | a MEASURED-CURRENT cell's selection is unchanged from pre-epic main |
-//! | [`c3_stale_lane_admits_at_the_widened_peak`] | a stale-closure lane still admits, at the widened peak, and logs it |
+//! | [`c3_current_lane_enforces_exact_static_boundary`] | the current production Qwen lane admits at its raw measured peak and enforces the exact static host boundary |
 //! | [`c4_oversized_request_is_refused_not_oom_killed`] | a genuinely oversized request is refused with the actionable message |
 //!
 //! ## Why this file compiles on pre-epic main too
@@ -612,7 +612,7 @@ fn sweep_caps() -> Vec<f64> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Criteria 2 and 3 — the measured `qwen_image` q8 1024² cell, current and stale.
+// Criteria 2 and 3 — the measured, closure-current `qwen_image` q8 1024² cell.
 // ---------------------------------------------------------------------------------------------
 
 const MEASURED_REPO_DIR: &str = "models--SceneWorks--qwen-image-mlx";
@@ -628,8 +628,9 @@ const MEASURED_SENTINEL: &str = "model_index.json";
 /// from the BINDING (`mlx_fit_gate.rs`, `VerifiedAdmissionCandidate::closure_digest`), not from the
 /// evidence record. There is deliberately no override parameter: rewriting the binding in memory
 /// does NOT make a lane current, because `EvidenceBundle::evidence_for` compares the binding's
-/// digest against the record's own stamp too, so a one-sided edit makes the record unfindable. The
-/// scratch closure table (see [`c2_measured_current_cell_selection`]) is the working lever.
+/// digest against the record's own stamp too, so a one-sided edit makes the record unfindable.
+/// SC-18237 moved the shipped binding and both production-deferred records to the live closure
+/// together, so the real lane is now current without a test seam.
 fn measured_plan() -> Option<(MlxRequestPlan, LoadSpec, PathBuf, String, String)> {
     let (tier_dir, revision) =
         cached_tier_dir(MEASURED_REPO_DIR, MEASURED_TIER, MEASURED_SENTINEL)?;
@@ -788,32 +789,11 @@ fn c0_production_loadspec_probe() {
 
 /// sc-18101 criterion 2. A MEASURED-CURRENT cell must select exactly what pre-epic main selected.
 ///
-/// ## Which reading of "measured-current" this uses, and why
-///
-/// The corpus as shipped has **zero** closure-current lanes (`npm run report:stale-lanes`: "8
-/// stale, 0 current, 1 unmeasured"), so "run the same request on a calibrated cell" has two
-/// possible readings:
-///
-/// 1. *measured and admitted* — take a cell as it ships. Rejected: every shipped MLX cell is
-///    closure-STALE, and pre-epic main EXCLUDED stale candidates outright. Comparing that against
-///    main would compare the epic's intended behaviour change with itself and prove nothing.
-/// 2. *measured and closure-current* — the happy path the epic promises not to disturb. This is
-///    the reading used here. Since no shipped lane is current, the cell is MADE current with a
-///    SCRATCH CLOSURE TABLE: `config/inference-provider-closures.json` is temporarily edited so
-///    the live digest for `mlx:qwen_image` equals the digest its q8 ladder was captured under,
-///    i.e. the world in which nobody has touched the provider since the measurement. That is the
-///    single edit that makes a cell current without disturbing anything else.
-///
-/// Moving the MANIFEST BINDING instead — the runbook's §7d edit — does NOT work for a test,
-/// and finding that out is worth recording: `EvidenceBundle::evidence_for` compares the binding's
-/// `inferenceClosureDigest` against the RECORD's own stamp as well, so rewriting only the binding
-/// makes the record unfindable and the cell routes to `StaleIdentity` with no measured candidate
-/// at all (observed: `path=Legacy fallback_reason=Some(StaleIdentity)`, selection falls to the
-/// resident floor estimate). A real re-measurement moves both halves together, which is exactly
-/// why the runbook insists on both.
-///
-/// Reading 2 is the only one that can distinguish "the epic left the calibrated path alone" from
-/// "the epic changed everything", which is what the criterion is for.
+/// The original SC-18101 run had zero closure-current lanes and used a scratch closure table to
+/// exercise this happy path. SC-18237 subsequently promoted production-deferred Qwen q8 records at
+/// the live provider closure, so the shipped binding, record, and closure table now agree without
+/// any test seam. This exact-head test requires that truthful current state and fails if any of the
+/// three identities drift apart.
 ///
 /// The comparison itself is a file diff over the captured selection log, run twice from the same
 /// source: once in this checkout and once in a checkout of the epic's base commit.
@@ -832,13 +812,8 @@ fn c2_measured_current_cell_selection() {
     };
     assert_eq!(
         live, binding_digest,
-        "criterion 2 needs a measured-CURRENT cell, and the shipped corpus has none. Put the \
-         scratch closure table in place first — set `providers[\"mlx:qwen_image\"].digest` in \
-         config/inference-provider-closures.json to the digest the q8 ladder was captured under \
-         ({binding_digest}) and rebuild — then re-run. Moving the BINDING instead does not work: \
-         `EvidenceBundle::evidence_for` also compares the binding's digest against the record's \
-         own stamp, so rewriting one half makes the record unfindable and the cell routes to \
-         `StaleIdentity` with no measured candidate at all."
+        "criterion 2 requires the shipped SC-18237 Qwen q8 binding and evidence record to match \
+         the live provider closure; binding={binding_digest}, live={live}"
     );
     let request_inputs = inputs(1024, 1024);
     eprintln!(
@@ -897,7 +872,7 @@ fn c2_measured_current_cell_selection() {
         "geometry": "1024x1024",
         "capGb": cap_gb,
         "closureDigest": live,
-        "currency": "measured-current (scratch closure table: the live lane digest set to the captured one)",
+        "currency": "measured-current (shipped SC-18237 binding and record match the live provider closure)",
         "fingerprint": fingerprint.trim(),
     }));
 
@@ -914,26 +889,26 @@ fn c2_measured_current_cell_selection() {
     );
 }
 
-/// sc-18101 criterion 3. The shipped `mlx:qwen_image` lane is closure-STALE today (live
-/// `9930aa53…` versus the binding's `54a7b45b…`). Under sc-18095 that no longer excludes it: the
-/// candidate reaches the selector carrying the digest it was measured under and is graded at its
-/// peak widened by `MLX_STALE_MEASURED_MARGIN` (5%).
+/// sc-18101 criterion 3, respecified after SC-18237 promoted Qwen q8 at the live closure.
 ///
-/// The test proves the widening is REAL rather than merely logged by bracketing it: at a cap whose
-/// effective budget sits between the raw peak and the widened peak the request must REFUSE, and at
-/// a cap above the widened peak it must admit. A zeroed margin would admit both.
+/// The real-weight lane now proves the CURRENT production behavior: the exact deferred Qwen record
+/// is admitted at its raw peak, receives no stale widening, and refuses immediately below the
+/// static minimum host derived from that same record's MLX admission envelope. Stale-closure
+/// behavior remains covered through an explicit moved-live-digest condition in
+/// `mlx_fit_gate::tests::a_moved_provider_closure_admits_the_stale_ladder_behind_the_widened_margin`;
+/// `capture_host_reserve_scales_to_48_gib_without_erasing_the_stale_margin` independently pins the
+/// normalized-host arithmetic. Neither synthetic proof mislabels the current shipped lane stale.
 #[test]
 #[ignore = "sc-18101 criterion 3: needs SceneWorks/qwen-image-mlx q8 cached (~36 GB)"]
-fn c3_stale_lane_admits_at_the_widened_peak() {
+fn c3_current_lane_enforces_exact_static_boundary() {
+    let live = live_qwen_closure_digest();
     let Some((plan, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
     };
-    assert_ne!(
-        live_qwen_closure_digest(),
-        binding_digest,
-        "criterion 3 needs a STALE lane. `mlx:qwen_image` is stale as shipped, so this only fires \
-         if the scratch closure table from criterion 2 was left in place — revert \
-         config/inference-provider-closures.json and rebuild."
+    assert_eq!(
+        live, binding_digest,
+        "criterion 3 requires the current shipped SC-18237 Qwen lane; \
+         binding={binding_digest}, live={live}"
     );
     let request_inputs = inputs(1024, 1024);
     eprintln!(
@@ -964,46 +939,54 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
     let (admitted, log) = evaluate(admit_cap);
     write_log("c3-selection", &log);
     let evaluation = admitted
-        .unwrap_or_else(|error| panic!("criterion 3: a stale lane must still ADMIT: {error}"));
+        .unwrap_or_else(|error| panic!("criterion 3: the current Qwen lane must ADMIT: {error}"));
 
-    assert!(
-        log.contains("stale-closure memory-strategy candidate admitted with widened margin"),
-        "criterion 3 requires the stale admission in the logs:\n{log}"
-    );
-    assert!(
-        log.contains("memory-strategy selection uses stale-closure evidence at the widened peak"),
-        "criterion 3 requires the SELECTION to be stale-scoped:\n{log}"
-    );
-    let stale_margin_field = format!("stale_margin={STALE_MARGIN}");
-    assert!(
-        log.contains(&stale_margin_field),
-        "criterion 3 requires the applied MLX stale margin ({STALE_MARGIN}) in the logs:\n{log}"
-    );
-
-    // Pull the raw and widened peaks straight out of the emitted event so the recorded numbers are
-    // the gate's, not a restatement.
-    const C3_SELECTION: &str =
-        "memory-strategy selection uses stale-closure evidence at the widened peak";
-    let raw_peak_bytes =
-        field_in_line(&log, C3_SELECTION, "raw_peak_bytes=").expect("raw_peak_bytes in the log");
-    let widened_peak_bytes = field_in_line(&log, C3_SELECTION, "widened_peak_bytes=")
-        .expect("widened_peak_bytes in the log");
     assert_eq!(
-        widened_peak_bytes,
-        (raw_peak_bytes as f64 * (1.0 + STALE_MARGIN)).ceil() as u64,
-        "the widened peak must be the raw peak times the MLX stale-measured margin"
+        evaluation.context.selection.strategy,
+        gen_core::MemoryStrategy::BoundedAttention,
+        "the 96 GiB Resident production request must select the exact q8 bounded-attention record"
+    );
+    assert!(
+        !log.contains("stale-closure")
+            && !log.contains("stale_margin=")
+            && !log.contains("widened peak"),
+        "criterion 3 requires current evidence to be graded at the raw peak without stale \
+         widening:\n{log}"
+    );
+    let raw_peak_bytes = evaluation.context.predicted_peak_bytes;
+    assert!(
+        evaluation.process_limit_bytes.is_some(),
+        "current exact evidence must still install the request-scoped MLX process ceiling"
     );
 
-    // THE BRACKET (sc-18101 review #3). Asserting `widened == ceil(raw * STALE_MARGIN)` off one log
-    // line only proves the gate can multiply; it never shows the widened number GATED anything. So
-    // walk the budget down to the admit/refuse boundary and check the boundary itself carries the
-    // margin.
-    //
-    // The quantity that gates on this path is not the peak alone: the Evidence route preserves the
-    // capture host's foreign-reserve ratio below that host. The refusal quotes the STATIC minimum
-    // satisfying `peak + ceil(reserve * host / capture) <= host`, not the reserve sum evaluated at
-    // the current cap. So the proof compares the widened and unwidened static boundaries derived
-    // from the same captured envelope.
+    let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
+        .expect("packaged evidence must parse")
+    {
+        sceneworks_core::memory_calibration::BundleLoad::Ready(bundle) => bundle,
+        sceneworks_core::memory_calibration::BundleLoad::Stale(reason) => {
+            panic!("packaged evidence unexpectedly stale: {reason:?}")
+        }
+    };
+    let envelope = bundle
+        .records
+        .iter()
+        .filter(|record| record.target.provider == MEASURED_ENGINE)
+        .filter(|record| {
+            record.repositories.inference.closure_digest.as_deref() == Some(binding_digest.as_str())
+        })
+        .filter_map(|record| record.mlx_admission_envelope())
+        .find(|envelope| envelope.peak_bytes == raw_peak_bytes)
+        .expect("the selected current record must retain its packaged MLX envelope");
+    let exact_boundary_bytes = envelope.required_host_bytes_for_peak(raw_peak_bytes);
+    assert_eq!(
+        exact_boundary_bytes,
+        envelope.required_host_bytes(),
+        "the current candidate must use its raw measured peak when solving the static boundary"
+    );
+
+    // Walk the real production gate down to its admit/refuse boundary. The lower refusal must quote
+    // the same static minimum the packaged record derives; this couples the user-facing result to
+    // the exact evidence rather than to a duplicated test constant.
     let admits = |cap_gb: f64| evaluate(cap_gb).0.is_ok();
     let (mut refuses_at, mut admits_at) = (0.0_f64, admit_cap);
     assert!(
@@ -1030,38 +1013,11 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
         .zip(refusal.split_whitespace().skip(1))
         .find_map(|(value, unit)| (unit == "GiB").then(|| value.parse::<f64>().ok())?)
         .unwrap_or_else(|| panic!("the refusal must quote a GiB requirement: {refusal}"));
-    let raw_gib = gib(raw_peak_bytes);
-    let widened_gib = gib(widened_peak_bytes);
-    let margin_gib = widened_gib - raw_gib;
-    let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
-        .expect("packaged evidence must parse")
-    {
-        sceneworks_core::memory_calibration::BundleLoad::Ready(bundle) => bundle,
-        sceneworks_core::memory_calibration::BundleLoad::Stale(reason) => {
-            panic!("packaged evidence unexpectedly stale: {reason:?}")
-        }
-    };
-    let envelope = bundle
-        .records
-        .iter()
-        .filter(|record| record.target.provider == MEASURED_ENGINE)
-        .filter(|record| {
-            record.repositories.inference.closure_digest.as_deref() == Some(binding_digest.as_str())
-        })
-        .filter_map(|record| record.mlx_admission_envelope())
-        .find(|envelope| envelope.peak_bytes == raw_peak_bytes)
-        .expect("the selected stale record must retain its packaged MLX envelope");
-    let enforced_boundary_bytes = envelope.required_host_bytes_for_peak(widened_peak_bytes);
-    let unwidened_boundary_bytes = envelope.required_host_bytes_for_peak(raw_peak_bytes);
-    let unwidened_gib = gib(unwidened_boundary_bytes);
     assert!(
-        margin_gib > 0.0
-            && enforced_boundary_bytes > unwidened_boundary_bytes
-            && (enforced_gib - gib(enforced_boundary_bytes)).abs() < 0.011,
-        "the enforced static boundary must carry the stale widening: enforced {enforced_gib:.4} \
-         GiB, exact widened boundary {:.4} GiB, unwidened would be {unwidened_gib:.4} GiB \
-         (peak margin {margin_gib:.4} GiB)",
-        gib(enforced_boundary_bytes),
+        (enforced_gib - gib(exact_boundary_bytes)).abs() < 0.011,
+        "the refusal must quote the current record's exact static boundary: enforced \
+         {enforced_gib:.4} GiB, exact {:.4} GiB",
+        gib(exact_boundary_bytes),
     );
     // And the boundary really is where that requirement bites: the admitting cap is above it and
     // the refusing cap below, to within the bisection's resolution.
@@ -1069,17 +1025,13 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
         boundary_gb > refuses_at && boundary_gb - refuses_at < 1e-3,
         "the bisection must have converged: admits at {boundary_gb}, refuses at {refuses_at}"
     );
-    // The mutation this brackets against: with STALE_MARGIN zeroed the static boundary drops to
-    // `unwidened_gib`, so every cap in [unwidened, enforced) would flip from refuse to admit. The
-    // difference is not numerically equal to the peak margin because reserve normalization is
-    // proportional; it is derived from the same envelope instead of being re-added by hand.
     assert!(
-        enforced_gib > unwidened_gib,
-        "a zeroed stale margin would admit the whole [{unwidened_gib:.2}, {enforced_gib:.2}) GiB window"
+        boundary_gb >= gib(exact_boundary_bytes),
+        "the admitting side of the bracket must not sit below the exact boundary"
     );
 
     write_log("c3-bracket", &format!(
-        "boundary_gb={boundary_gb:.6}\nrefuses_at_gb={refuses_at:.6}\nraw_gib={raw_gib:.4}\nwidened_gib={widened_gib:.4}\nenforced_gib={enforced_gib:.4}\nunwidened_would_be_gib={unwidened_gib:.4}\nrefusal={refusal}\n\n--- tracing at the refusing cap ---\n{boundary_log}"
+        "currency=current\nboundary_gb={boundary_gb:.6}\nrefuses_at_gb={refuses_at:.6}\nraw_peak_bytes={raw_peak_bytes}\nexact_boundary_bytes={exact_boundary_bytes}\nenforced_gib={enforced_gib:.4}\nrefusal={refusal}\n\n--- tracing at the refusing cap ---\n{boundary_log}"
     ));
 
     record_row(&serde_json::json!({
@@ -1089,18 +1041,19 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
         "bracketRefusesAtGb": refuses_at,
         "bracketRefusal": refusal,
         "bracketEnforcedGib": enforced_gib,
-        "bracketUnwidenedWouldBeGib": unwidened_gib,
         "engine": MEASURED_ENGINE,
         "tier": MEASURED_TIER,
         "artifactRevision": revision,
         "geometry": "1024x1024",
         "admitCapGb": admit_cap,
+        "currency": "current",
+        "bindingClosureDigest": binding_digest,
+        "liveClosureDigest": live,
         "rung": format!("{:?}", evaluation.context.selection.strategy),
         "rawPeakBytes": raw_peak_bytes,
         "rawPeakGib": gib(raw_peak_bytes),
-        "widenedPeakBytes": widened_peak_bytes,
-        "widenedPeakGib": gib(widened_peak_bytes),
-        "staleMargin": STALE_MARGIN,
+        "exactBoundaryBytes": exact_boundary_bytes,
+        "exactBoundaryGib": gib(exact_boundary_bytes),
     }));
 }
 
@@ -1128,23 +1081,22 @@ fn admission_path_line(log: &str) -> String {
 ///    `collect_estimate_bases`;
 /// 2. a CLOSURE-CURRENT binding at a nearby geometry, because `collect_estimate_bases` deliberately
 ///    refuses stale records as extrapolation seeds (stacking the 0.05 drift allowance under an
-///    extrapolation would spend the estimate margin twice — see its doc). No shipped lane is
-///    current, so this needs the same scratch closure table criterion 2 uses;
+///    extrapolation would spend the estimate margin twice — see its doc). SC-18237's shipped Qwen q8
+///    binding and production-deferred records now match the live closure directly;
 /// 3. a load shape matching the basis record's, since `synthesize_estimate_ladder` filters bases on
 ///    `basis.load_shape == contract.load_shape`.
 ///
-/// All three hold for `qwen_image` q8 at **768×768** under the production (deferred) spec with the
-/// scratch table in place: the q8 `bounded_transformer_residency` record was captured deferred at
-/// 1024², so it seeds rung 4. The request is SMALLER than the basis, so the area scale clamps to
-/// 1.0 and the extrapolated binding phase equals the measured one — which is what lets it past
+/// All three hold for `qwen_image` q8 at **768×768** under the production (deferred) spec: the q8
+/// `bounded_transformer_residency` record was captured deferred at 1024², so it seeds rung 4. The
+/// request is SMALLER than the basis, so the area scale clamps to 1.0 and the extrapolated binding
+/// phase equals the measured one — which is what lets it past
 /// `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`.
 ///
 /// ```text
-/// # scratch closure table first (see c2), then:
 /// SC18101_TAG=fitted cargo test -p sceneworks-worker --lib -- --ignored --nocapture c5_fitted_curve
 /// ```
 #[test]
-#[ignore = "sc-18101 review #2: needs SceneWorks/qwen-image-mlx q8 cached + the scratch closure table"]
+#[ignore = "sc-18101 review #2: needs SceneWorks/qwen-image-mlx q8 cached"]
 fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
     let Some((_, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
         panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
@@ -1152,9 +1104,8 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
     assert_eq!(
         live_qwen_closure_digest(),
         binding_digest,
-        "the fitted-curve arm needs a CLOSURE-CURRENT basis, and no shipped lane is current. Put \
-         the scratch closure table in place first (see c2_measured_current_cell_selection) and \
-         rebuild."
+        "the fitted-curve arm requires the shipped SC-18237 Qwen q8 binding and records to match \
+         the live provider closure"
     );
     assert!(
         matches!(

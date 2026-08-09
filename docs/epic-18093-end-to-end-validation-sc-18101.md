@@ -9,7 +9,14 @@ regression probe).
 REGRESSION this epic shipped.** That regression is the most important thing in this document, so it
 comes first.
 
-## Environment
+> **Current-source note (SC-18237, 2026-08-09):** this document preserves the historical SC-18101
+> capture below, but its old Qwen closure-stale state is no longer the shipped state. Qwen q8 now has
+> two production-deferred records whose binding and record stamps match the live `9930aa538259…`
+> provider closure. Criterion 3 now exercises that current lane's exact static boundary; stale-margin
+> behavior is covered separately by explicit moved-digest tests. See
+> `docs/epic-18093-sc-18237-qwen-production-evidence.md` for the current evidence.
+
+## Historical SC-18101 environment
 
 | | |
 |---|---|
@@ -18,7 +25,7 @@ comes first.
 | Pre-epic baseline revision | `de756026` (`main` immediately before the sc-18094 merge `cc799d1a`) |
 | Inference pin | `40fa7583a01974617e2a7275052d6d446688c956` |
 | Evidence corpus | `docs/generated/memory-calibration-evidence.json`, 65 records (50 MLX / 15 candle) |
-| Lane currency | 8 stale, 0 current, 1 unmeasured (`npm run report:stale-lanes`) |
+| Lane currency at capture time | 8 stale, 0 current, 1 unmeasured (`npm run report:stale-lanes`) |
 | Profile | `dev` (`cargo test -p sceneworks-worker --lib`) |
 
 Artifacts (renders, per-scenario selection logs, machine-readable rows) are written outside the repo
@@ -66,10 +73,11 @@ The mismatch itself is real and pre-existing: the shipped q8 `bounded_attention`
 `eager_materialization`, while `image_jobs::apply_measured_mlx_load_shape` forces
 `DeferredMaterialization` on every `qwen_image` directory load. What this epic changed is what
 happens next. Before sc-18096, `evidence_admission_route`'s identity filter also required
-`binding.query.inference_closure_digest == expected_closure_digest`; every shipped MLX lane is
-closure-stale, so that conjunct pre-demoted the cell to `AdmissionPath::Legacy` long before
-eligibility ran, and it was served. sc-18096 retired the conjunct — correctly, that was its whole
-point — and in doing so made a previously unreachable refusal reachable on a shipping route.
+`binding.query.inference_closure_digest == expected_closure_digest`; every MLX lane shipped at the
+time of SC-18101 was closure-stale, so that conjunct pre-demoted the cell to
+`AdmissionPath::Legacy` long before eligibility ran, and it was served. sc-18096 retired the
+conjunct — correctly, that was its whole point — and in doing so made a previously unreachable
+refusal reachable on a shipping route.
 
 ### The evidence, from both commits
 
@@ -156,8 +164,8 @@ The same decomposition explains criterion 3's bisected boundary exactly: 45.2812
 MLX host boundary" refusal are all present at `de756026`, with their own tests
 (`de756026:crates/sceneworks-core/src/memory_calibration.rs:2313-2316`). What sc-18096 changed is
 that retiring the closure conjunct made the gate **reachable on stale lanes**, which is where every
-shipped MLX lane now sits. That is the honest statement of what this epic did: it did not introduce
-the rule, it exposed it.
+shipped MLX lane sat during the SC-18101 capture. That is the honest statement of what this epic did:
+it did not introduce the rule, it exposed it. SC-18237 subsequently made Qwen q8 closure-current.
 
 **The safety argument rests on the actual margin, not on 63.34.** Pre-epic admitted this request at a
 45.57 GiB estimate against **46.00 GiB** available — 0.43 GiB of headroom, about **1 %** — on a path
@@ -349,25 +357,19 @@ on a route with no windowed transformer is two rungs, not five.
 **Commits compared:** this branch vs **`de756026`** (main immediately before the sc-18094 merge
 `cc799d1a`). Cell: `qwen_image` q8 1024² at a 96 GB cap.
 
-### Which reading of "measured-current" was used, and why
+### Historical method and current status
 
-The shipped corpus has **zero** closure-current lanes, so the phrase has two possible readings:
+At the time of the original SC-18101 comparison the corpus had **zero** closure-current lanes. The
+test therefore made the q8 cell current in both checkouts with a **scratch closure table**:
+`config/inference-provider-closures.json`'s `providers["mlx:qwen_image"].digest` was temporarily set to
+`54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374`, the digest the old q8 ladder was
+captured under. That historical edit was reverted after the runs.
 
-1. *measured and admitted* — take a cell as it ships. **Rejected.** Every shipped MLX cell is
-   closure-STALE, and pre-epic main excluded stale candidates outright. Comparing that against main
-   would compare the epic's intended behaviour change with itself and prove nothing.
-2. *measured and closure-current* — the calibrated happy path the epic promises not to disturb.
-   **This is the reading used.** Since no shipped lane is current, the cell was made current with a
-   **scratch closure table**: `config/inference-provider-closures.json`'s
-   `providers["mlx:qwen_image"].digest` was temporarily set to
-   `54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374` — the digest the q8 ladder was
-   captured under — in *both* checkouts, i.e. the world in which nobody has touched the provider
-   since the measurement. Reverted after the runs; neither checkout carries it now.
-
-**The consequence, plainly: `CandidateCurrency::Current` is a state no shipped lane occupies, so this
-criterion has zero coverage of today's product.** It proves the calibrated path is undisturbed in the
-world the corpus is *supposed* to be in, and nothing about the world it is actually in. The world it
-is actually in is covered by criterion 3 (stale) and by §0 (mismatched).
+That limitation no longer applies. SC-18237 promoted two production-deferred Qwen q8 records stamped
+with the live `9930aa538259…` closure and updated the shipped binding to the same digest. The current
+exact-head test requires binding, record, and live closure to agree without a seam. Thus the original
+comparison below remains a historical pre-epic parity record, while the rerunnable current lane now
+has direct product coverage.
 
 ### Result: byte-for-byte identical
 
@@ -384,15 +386,15 @@ SELECTED strategy=BoundedAttention
   stage_residency=false tile_vae_decode=true chunk_attention=true stream_transformer_blocks=false
 ```
 
-Both emit `path=Evidence fallback_reason=None`, select record `imc-37f40254d20bc43fa925`, and emit
-**no** widening line — a current candidate is graded at its raw peak, unwidened, on both sides. This
-also pins the §0 fix: an over-broad version of it changed this selection to `Resident`, and was
-caught here.
+In the historical comparison both emit `path=Evidence fallback_reason=None`, select record
+`imc-37f40254d20bc43fa925`, and emit **no** widening line — a current candidate is graded at its raw
+peak, unwidened, on both sides. This also pinned the §0 fix: an over-broad version of it changed this
+selection to `Resident`, and was caught here.
 
 The baseline checkout carried only the harness module, its one-line `lib.rs` registration, and the
 two-line margin-constant substitution the harness documents. No production source differed.
 
-### Contrast: the same cell as it actually ships (stale)
+### Historical contrast: the same cell as it shipped during SC-18101 (stale)
 
 | | `de756026` | this branch |
 |---|---|---|
@@ -411,8 +413,9 @@ path needs: proven provenance (so the request takes the `OutOfEnvelope` arm, the
 refuses stale seeds, so the 0.05 drift allowance can never be stacked under an extrapolation), and a
 load shape matching the basis record's.
 
-All three hold for `qwen_image` q8 at 768² under the production deferred spec with the scratch table
-in place. Result (`c5_fitted_curve_estimate_is_synthesized_and_admitted`):
+All three held for `qwen_image` q8 at 768² under the production deferred spec with the historical
+scratch table in place. They now hold directly against the shipped SC-18237 current binding. Result
+(`c5_fitted_curve_estimate_is_synthesized_and_admitted`):
 
 | | |
 |---|---|
@@ -430,10 +433,12 @@ than the margin does.
 
 ---
 
-# 3. A stale lane still admits, at the widened peak, and logs it
+# 3. Historical stale bracket and current-lane exact boundary
 
-**Lane:** `mlx:qwen_image` — stale as shipped (live closure `9930aa538259…`, captured
-`54a7b45b03eb…`). No test seam needed; this is the corpus's actual state.
+### Historical SC-18101 stale bracket
+
+During SC-18101, `mlx:qwen_image` was stale as shipped (live closure `9930aa538259…`, captured
+`54a7b45b03eb…`). The following table is the preserved historical capture, not current product state.
 
 | | |
 |---|---|
@@ -477,6 +482,21 @@ the margin), but the absolute number is a capture artefact. See §0's decomposit
 
 The pre-epic contrast is the proof the widening is doing work rather than decorating a decision that
 would have happened anyway: on `de756026` this same cell produces no measured candidate at all.
+
+### Current SC-18237 lane and stale-margin coverage
+
+The shipped Qwen q8 binding is now closure-current: its two production-deferred records and the live
+provider closure all carry `9930aa538259…`. The real-weight Criterion 3 test is therefore
+`c3_current_lane_enforces_exact_static_boundary`; it refuses to call the lane stale, asserts there is
+no stale-widening event, selects current record `imc-56c1f11bd03822d9c241`, and bisects the real gate
+against that record's **73,113,341,306 B (68.0921 GiB)** exact static host boundary.
+
+Stale-margin coverage remains explicit and mutation-sensitive without falsifying product currency:
+
+* `a_moved_provider_closure_admits_the_stale_ladder_behind_the_widened_margin` supplies a deliberately
+  moved live digest and brackets the admit/refuse window introduced by the 5 % stale margin.
+* `capture_host_reserve_scales_to_48_gib_without_erasing_the_stale_margin` independently proves host
+  normalization preserves that stale-margin delta.
 
 ---
 
@@ -552,16 +572,13 @@ the sixteen `SOURCE_PATHS` the matrix fingerprints, so the §0 fix rotates
    cause. Both are now filtered before the selector, but the shape of the hazard remains: any future
    structural predicate added downstream of admission needs a fallback, not just a verdict.
 
-5. **A measured cell is only usable on a host at least as large as the one it was captured on.**
-   `required_host_bytes` charges the record's `foreign_reserve_bytes`, and that term is derived
-   purely from the CAPTURE host — `memoryBytes − min(mlxMemoryLimitBytes, wiredLimitBytes)`, 46.93
-   GiB for every record in this corpus because every record came off the same 128 GiB M5 Max — and
-   is never rescaled to the live machine. So a refusal quoting a large "smallest verified MLX host
-   boundary" is usually reporting the capture machine's size, not the request's cost: at the 48 GB
-   step the request's own widened peak is 16.41 GiB of the 63.34 GiB quoted. The rule is a
-   deliberate refusal to extrapolate downward across host sizes, it predates this epic, and
-   sc-18096 made it reachable on stale lanes — which is now every shipped MLX lane. Anyone reading
-   one of these refusals should decompose it before concluding a machine is too small.
+5. **The original SC-18101 absolute-reserve boundary was a capture-host artefact.** At that time
+   `required_host_bytes` charged the 128 GiB capture host's full `foreign_reserve_bytes` without
+   rescaling it to the live host, producing the historical 63.34 and 92.21 GiB boundaries above.
+   SC-18237 replaced that behavior with proportional host normalization while preserving the
+   measured peak, stale margin when applicable, and absolute MLX process ceiling. Current Qwen q8
+   boundaries are therefore derived from the live-host scale; the Resident record's exact boundary
+   is 68.0921 GiB, and the Sequential record is admitted at 48 GiB.
 
 6. **`image_jobs/base.rs` and `mlx_fit_gate.rs` are both fingerprinted matrix sources.** Even a
    visibility keyword in the former rotates `generatedFrom.sceneWorksRevision` and reds
@@ -574,7 +591,8 @@ the sixteen `SOURCE_PATHS` the matrix fingerprints, so the §0 fix rotates
    so a one-sided edit makes the record unfindable and the cell routes to `StaleIdentity` with no
    measured candidate at all — observed directly here. A real re-measurement moves both halves
    together, which is why `docs/calibration-runbook.md` §7d insists on both. A scratch closure table
-   is the correct single-edit lever for a test.
+   was the correct historical single-edit lever; current Qwen coverage uses the shipped matching
+   binding and records directly.
 
 ---
 
@@ -593,18 +611,15 @@ SC18101_TAG=main $QWEN SC18101_C1_W=768 SC18101_C1_H=768 SC18101_C1_CAP_GB=32 SC
   cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 \
     c1_unmeasured_cell_engages_a_deep_rung_and_renders
 
-# criteria 3 (stale, as shipped) and 4 (refusal)
-SC18101_TAG=main SC18101_MEASURED_EAGER=1 SC18101_C3_ADMIT_CAP_GB=96 $QWEN SC18101_C4_CAP_GB=24 \
+# criteria 3 (current exact boundary) and 4 (refusal)
+SC18101_TAG=main SC18101_C3_ADMIT_CAP_GB=96 $QWEN SC18101_C4_CAP_GB=24 \
   cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 \
-    c3_stale_lane_admits_at_the_widened_peak c4_oversized
+    c3_current_lane_enforces_exact_static_boundary c4_oversized
 
-# criterion 2 and the fitted-curve arm — put the scratch closure table in BOTH checkouts first:
-#   config/inference-provider-closures.json providers["mlx:qwen_image"].digest = 54a7b45b03eb…
-# then run c2 in each and diff $OUT/c2-fingerprint-{main,baseline}.log
-SC18101_TAG=main SC18101_MEASURED_EAGER=1 SC18101_C2_CAP_GB=96 \
+# criterion 2 and the fitted-curve arm now use the shipped closure-current Qwen records directly
+SC18101_TAG=main SC18101_C2_CAP_GB=96 \
   cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 \
     c2_measured_current_cell_selection
 SC18101_TAG=main SC18101_C5_CAP_GB=32 \
   cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 c5_fitted_curve
-# …then revert the scratch table.
 ```
