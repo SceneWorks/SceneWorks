@@ -500,6 +500,13 @@ mod footprint_measure;
 // is fitted to, replacing the linear-in-megapixels scaling of a 1024²-only calibration.
 #[cfg(all(test, target_os = "macos"))]
 mod resolution_sweep;
+// On-device end-to-end validation of the epic 18093 memory-ladder apparatus (sc-18101). Test-only +
+// macOS-only; four `#[ignore]`d scenarios that drive the real `mlx_fit_gate::evaluate_request` seam
+// against live loaded providers under `SCENEWORKS_MLX_MEMORY_CAP_GB` — an unmeasured cell engaging a
+// deep rung and rendering, a measured-current cell whose selection is diffed against a pre-epic
+// checkout, a stale-closure lane admitting at the widened peak, and an oversized request refusing.
+#[cfg(all(test, target_os = "macos"))]
+mod ladder_e2e_sc18101;
 // On-device build helper for the Wan2.2 T2V-A14B quant matrix (sc-9942, epic 8506). Test-only +
 // macOS-only; an #[ignore]d helper that drives `runtime_macos::providers::wan::convert::convert_t2v_14b` once per tier
 // (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier subdirs, then
