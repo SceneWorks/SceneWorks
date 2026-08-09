@@ -262,12 +262,19 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # three MLX closures moved in this pin's window because two commits touched the shared
     # `crates/media/mlx-gen` crate, a first-party dependency of every MLX provider's closure.
     #
-    # SC-18237 recaptured exactly the two production-deferred Qwen q8 records at this pin. Krea and
-    # the older Qwen tiers remain historical. Exact ids make an accidental extra promotion visible.
-    assert measured_at_live_pin == {
-        "imc-56c1f11bd03822d9c241",
-        "imc-a21d2ea9e2d95cf48e82",
-    }
+    # SC-18237 recaptured exactly the two production-deferred Qwen q8 records at 40fa7583, and while
+    # that WAS the live pin this read those two ids. The 014134e3 bump moved the pin past them, so
+    # the pin-derived set is empty again — the state this assertion held before sc-16915, and the
+    # reason every assertion below it is phrased to survive an empty set.
+    #
+    # Empty here is NOT a demotion, and the distinction is the whole point of sc-17774: those two
+    # records captured closure `9930aa538259` for `mlx:qwen_image`, which is still exactly the live
+    # digest in `config/inference-provider-closures.json` at this pin — the bump touched
+    # `mlx-gen-krea` (and, via main, `mlx-gen-z-image`), not the Qwen closure. So both records remain
+    # CURRENT by the term that decides currency; they are merely no longer measured at the pin. Were
+    # this assertion instead re-pointed at the new pin's ids, that would be claiming a re-measurement
+    # nobody ran.
+    assert measured_at_live_pin == set()
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
     # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
     # with nothing measured at the live pin there is nothing to classify, and the moment a record
@@ -291,8 +298,27 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # Zero because this live-pin recapture contains bounded-attention and transformer-residency only;
     # the historical off-point bounded-decode sweep remains in the bundle but outside the intersection.
     assert len(unbound_decode_edges) == 0
+    # Currency is the provider's COMPILE CLOSURE, not the pin (sc-17774). While nothing had moved the
+    # two coincided and this assertion could be written off `measured_at_live_pin`; a pin bump that
+    # leaves a provider's closure untouched separates them, which is exactly what the 014134e3 bump
+    # does — it moves `mlx-gen-krea` (and, via main, `mlx-gen-z-image`) and leaves `mlx:qwen_image`
+    # byte-identical. So derive the expectation from the closure the same way the generator does,
+    # rather than from the pin: a record is current when the digest it captured is still the live
+    # digest for ITS provider lane. Written this way it keeps falling away on its own the next time a
+    # closure genuinely moves, instead of needing a hand-edit per bump.
+    live_closures = json.loads(
+        (ROOT / "config/inference-provider-closures.json").read_text(encoding="utf-8")
+    )["providers"]
+    current_by_closure = {
+        record["id"]
+        for record in calibration["records"]
+        if live_closures.get(
+            f"{record['backend']}:{record['target']['provider']}", {}
+        ).get("digest")
+        == record["repositories"]["inference"]["closureDigest"]
+    }
     assert {run["record"]["id"] for run in current_eligible} == (
-        measured_at_live_pin - unbound_decode_edges
+        current_by_closure - unbound_decode_edges
     ) | (set(expected_flux2_runtime) if within_audited_window else set())
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
