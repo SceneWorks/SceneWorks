@@ -97,9 +97,10 @@ node scripts/inference-closure-digest.mjs --repo <inference clone> --write
 node scripts/backfill-closure-digests.mjs --repo <inference clone> --write
 ```
 
-Then regenerate the derived docs (`npm run generate:memory-matrix`,
-`npm run generate:calibration-cost-model`). `scripts/bump-inference.mjs` refuses a bump that would
-leave the closure config behind, and names both commands.
+Then regenerate the derived docs (`npm run generate:memory-matrix`). `scripts/bump-inference.mjs`
+refuses a bump that would leave the closure config behind, and names the command. *(sc-18100
+retired `generate:calibration-cost-model` along with the cost model itself; the staleness signal
+that table used to carry is read from `npm run report:stale-lanes` instead.)*
 
 **Lanes whose closure did not move stay `current` across the bump.** Only the ones that actually
 changed are demoted, and the regenerated files show which.
@@ -173,7 +174,8 @@ that by default.
 
 The captured-half gate exists because grading only `config/inference-provider-closures.json` left the
 other side of every comparison — 65 record digests and 31 manifest bindings — checked by nothing. That
-was not hypothetical: a constant in `scripts/sc-15833-flux2-evidence.test.mjs` carried the comment
+was not hypothetical: a constant in `scripts/sc-15833-flux2-evidence.test.mjs` *(deleted in
+sc-18100 with its one-shot)* carried the comment
 "derive it with …" and had never been a real derivation, and it survived the whole of sc-17774
 unnoticed. A plain dry run reports drift and still exits 0, which is right for a pin-bump preview and
 useless as a gate, so `--verify` is a separate mode that fails on any drift and ignores `--restamp`.
@@ -204,15 +206,18 @@ reaches. The orphan check is what makes "every digest is graded" a fact: droppin
 checked by nothing, and the skipped-block check alone does not see either. Both are checked before
 drift, because "this digest is not covered" outranks "this covered digest moved".
 
-Two test-fixture constants were the same shape of hole and are now derived instead of transcribed:
+Two test-fixture constants were the same shape of hole and were re-derived instead of transcribed:
 `SUPERSEDED_KREA_CLOSURE_DIGEST` (`scripts/generate-memory-matrix.test.mjs`) and the sc-15833
-constant (`scripts/sc-15833-flux2-evidence.test.mjs`) are read out of the evidence bundle through
+constant (`scripts/sc-15833-flux2-evidence.test.mjs`) were read out of the evidence bundle through
 `recordsNeedingDigest` — the gate's own eligibility predicate — so they inherit the CI derivation
 rather than sitting beside it. A wrong value in either did not fail anything; it made the test assert
-the right verdict for the wrong reason, which is exactly how `820bf106…` hid. By contrast the two
-constants in `scripts/sc-15823-flux1-evidence.mjs` are deliberately left as they are: that script
-*feeds* the evidence bundle, so its values land in records the gate re-derives and a drift there
-already surfaces.
+the right verdict for the wrong reason, which is exactly how `820bf106…` hid. *(As of sc-18100 the
+sc-15833 evidence test no longer exists; the krea constant in
+`scripts/generate-memory-matrix.test.mjs` is the surviving instance of the pattern.)* By contrast the
+two constants in `scripts/sc-15823-flux1-evidence.mjs` were deliberately left as they were: that
+script *fed* the evidence bundle, so its values land in records the gate re-derives and a drift there
+already surfaced. *(That one-shot is also gone as of sc-18100; the records it wrote remain in the
+bundle and stay under `backfill-closure-digests.mjs --verify`.)*
 
 The CI re-derivation matters more than it looks. Without it the currency term is checked-in data
 that nothing grades — a hand-edited digest would pass. `SceneWorks/inference` is public, so the
@@ -233,7 +238,7 @@ Three classes, and only the first would be re-measurement pressure:
 | --- | --- | --- |
 | **currency / re-measurement** | *(none)* | nothing in the composite demands a re-capture, and nothing may be added that does |
 | **integrity of the evidence and the table** | `check:memory-calibration` (schema + well-formedness of every record, `harnessVersion`, `evidenceSemantics`'s fail-closed "record carries no digest" / "lane is undeclared"); `inference-closure-digest.mjs --check` and `backfill-closure-digests.mjs --verify` in `check.yml`; `bump-inference.mjs`'s refusal of a pin bump that leaves `config/inference-provider-closures.json` un-regenerated | **stays.** These answer "is this data real and well-formed", never "is it recent" |
-| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:calibration-cost-model`, `check:tier-integrity`) in `check`, `rust:check` and pre-push | **stays.** A closure digest that rotates changes the matrix's *source fingerprint* (and its content when a lane's currency actually flips); the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
+| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:tier-integrity`; `check:calibration-cost-model` was a third member until sc-18100 retired it with its generator) in `check`, `rust:check` and pre-push | **stays.** A closure digest that rotates changes the matrix's *source fingerprint* (and its content when a lane's currency actually flips); the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
 
 Measured on the corpus at `40fa7583`: **every** measured lane is stale — 9 declared lanes, 8 of them
 carrying at least one binding or record, 0 of those closure-current, 1 declared but never captured;
