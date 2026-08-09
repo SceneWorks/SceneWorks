@@ -882,7 +882,7 @@ would have left the contract half-named: `gen_core::registry::ImageMemoryRegistr
 | schemas | `packages/schemas/image-memory-{matrix,calibration}.schema.json` → `memory-{matrix,calibration}.schema.json` |
 | generated | `docs/generated/image-memory-{matrix.json,matrix.md,calibration-evidence.json}` → `memory-*` |
 | config | `config/image-memory-calibration-plan.json` → `config/memory-calibration-plan.json` |
-| scripts | `generate-image-memory-matrix.mjs`, `image-memory-calibration-harness.mjs`, their tests, the four `scripts/fixtures/image-memory-provider-*.mjs`, plus the path/identifier citations in `bump-inference.mjs`, `platform-review-contracts.test.mjs`, `split-memory-strategy-stories.mjs`, and the four `package.json` npm scripts |
+| scripts | `generate-image-memory-matrix.mjs`, `image-memory-calibration-harness.mjs`, their tests, the four `scripts/fixtures/image-memory-provider-*.mjs`, plus the path/identifier citations in `bump-inference.mjs`, `platform-review-contracts.test.mjs`, `split-memory-strategy-stories.mjs` *(one-shot, since deleted in sc-18100)*, and the four `package.json` npm scripts |
 | tests | `tests/test_image_memory_matrix.py` → `tests/test_memory_matrix.py` |
 | docs | `image-memory-strategy-contract.md`, `image-memory-calibration-harness.md`, this file |
 

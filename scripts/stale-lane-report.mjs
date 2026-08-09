@@ -68,7 +68,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { stampManifest } from "./backfill-closure-digests.mjs";
+import { recordsNeedingDigest, stampManifest } from "./backfill-closure-digests.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
 import { validatedInferenceClosures } from "./generate-memory-matrix.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
@@ -81,6 +81,9 @@ export const SOURCE_PATHS = Object.freeze({
   evidence: "docs/generated/memory-calibration-evidence.json",
   manifest: "config/manifests/builtin.models.jsonc",
   cargo: "Cargo.toml",
+  plan: "config/memory-calibration-plan.json",
+  mlxAdapter: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+  candleAdapter: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
 });
 
 /** Provenance for the margin column, printed so a reader can check it rather than trust it. */
@@ -88,8 +91,276 @@ export const MARGIN_SOURCE =
   "scripts/derive-ladder-margins.mjs#staleMeasuredMargin (pinned against " +
   "crates/sceneworks-worker/src/ladder_margin_policy.rs by scripts/derive-ladder-margins.test.mjs)";
 
+/**
+ * Provenance for the CAPTURE column (sc-18212), printed like {@link MARGIN_SOURCE} so a reader can
+ * check the derivation rather than trust it.
+ */
+export const CAPTURABILITY_SOURCE =
+  "provider-dispatch match arms parsed from crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs" +
+  ' — every match block able to refuse with "five-rung calibration does not implement provider"; a' +
+  " provider is capturable only if EVERY such dispatch admits it";
+
 export function laneOf(backend, provider) {
   return `${backend}:${provider}`;
+}
+
+/*
+ * CAPTURABILITY — derived from the adapter's own dispatch, never from a hand list (sc-18212)
+ *
+ * `candle:z_image` is declared in the closure table and carries 90 plan entries, yet
+ * `crates/sceneworks-memory-adapter/src/bin/candle.rs` has no arm for it — no invocation of the
+ * adapter can ever capture the lane. The first version of this report printed it under "declared but
+ * never captured", which reads as pending measurement work: an operator following §3 of
+ * docs/calibration-runbook.md would book a CUDA box for a capture that fails by design. The sc-18104
+ * screening found the same declaration/reachability split on four candle lanes and one planned-but-
+ * undeclared lane (`candle:qwen_image_edit`).
+ *
+ * The fix is a "capturable" signal derived from the SAME source of truth that decides whether the
+ * adapter's `run()` can serve a provider: the dispatch `match` arms in the adapter binaries. Both
+ * adapters refuse an unimplemented provider by name (sc-18104) with the shared phrase
+ * "five-rung calibration does not implement provider", so every match block that can emit that
+ * refusal IS a dispatch gate, and the union of its non-fallback arms is the provider set it admits.
+ * A provider counts as capturable only if every such gate admits it (the candle adapter has two —
+ * entry dispatch and generator loading — and a provider missing from either cannot complete a
+ * capture). Parsing the adapter source is the same discipline `generate-memory-matrix.mjs` applies
+ * to `image_jobs/base.rs`: a hand-maintained provider list here would be a new false green, going
+ * stale the day an arm is added or retired. Every anchor below throws rather than degrades — a
+ * refactor that moves the dispatch out of reach must red the tests, not silently report nothing
+ * uncapturable.
+ */
+
+const DISPATCH_REFUSAL = "five-rung calibration does not implement provider";
+
+/** Skip a `"…"`, `r#"…"#` or `'c'` literal starting at `index`; returns the index after it. */
+function skipStringLike(text, index) {
+  const char = text[index];
+  if (char === '"') {
+    let i = index + 1;
+    while (i < text.length) {
+      if (text[i] === "\\") i += 2;
+      else if (text[i] === '"') return i + 1;
+      else i += 1;
+    }
+    return i;
+  }
+  if (char === "r" && !/[A-Za-z0-9_]/.test(text[index - 1] ?? " ")) {
+    const raw = /^r(#*)"/.exec(text.slice(index, index + 8));
+    if (raw) {
+      const close = `"${raw[1]}`;
+      const end = text.indexOf(close, index + raw[0].length);
+      return end === -1 ? text.length : end + close.length;
+    }
+  }
+  if (char === "'") {
+    // A char literal, not a lifetime: `'{'` must not unbalance a brace scan, `'static` must not
+    // swallow everything to the next apostrophe.
+    const literal = /^'(\\.|[^'\\])'/.exec(text.slice(index, index + 8));
+    if (literal) return index + literal[0].length;
+  }
+  return index;
+}
+
+/** Rust source with line comments and (nested) block comments removed; string literals preserved. */
+function stripRustComments(source) {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    // Strings first: a `//` inside a string literal (a URL, a glob) is not a comment.
+    const skipped = skipStringLike(source, i);
+    if (skipped !== i) {
+      out += source.slice(i, skipped);
+      i = skipped;
+      continue;
+    }
+    if (source.startsWith("//", i)) {
+      while (i < source.length && source[i] !== "\n") i += 1;
+      continue;
+    }
+    if (source.startsWith("/*", i)) {
+      let depth = 1;
+      i += 2;
+      while (i < source.length && depth > 0) {
+        if (source.startsWith("/*", i)) {
+          depth += 1;
+          i += 2;
+        } else if (source.startsWith("*/", i)) {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      continue;
+    }
+    out += source[i];
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Comment-free Rust source with every `#[cfg(test)] mod … { … }` excised.
+ *
+ * The MLX adapter's tests quote the refusal phrase verbatim (they pin the refusal-by-name behaviour
+ * sc-18104 introduced), so leaving them in would hand the dispatch scan below a phantom dispatch
+ * site whose "arms" are test scaffolding.
+ */
+function stripTestModules(source) {
+  let out = source;
+  for (;;) {
+    const module = /#\[cfg\(test\)\]\s*mod\s+[A-Za-z0-9_]+\s*\{/.exec(out);
+    if (!module) return out;
+    let depth = 0;
+    let i = module.index + module[0].length - 1;
+    while (i < out.length) {
+      const skipped = skipStringLike(out, i);
+      if (skipped !== i) {
+        i = skipped;
+        continue;
+      }
+      if (out[i] === "{") depth += 1;
+      else if (out[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          i += 1;
+          break;
+        }
+      }
+      i += 1;
+    }
+    if (depth !== 0) {
+      throw new Error("unbalanced braces while excising a #[cfg(test)] module from an adapter source");
+    }
+    out = out.slice(0, module.index) + out.slice(i);
+  }
+}
+
+/** The `{ … }` body of the `match` starting at `matchStart`: `{ inner, end }` (end past the `}`). */
+function matchBlockBody(text, matchStart) {
+  let i = matchStart;
+  while (i < text.length && text[i] !== "{") i = Math.max(skipStringLike(text, i), i + 1);
+  let depth = 0;
+  const open = i;
+  while (i < text.length) {
+    const skipped = skipStringLike(text, i);
+    if (skipped !== i) {
+      i = skipped;
+      continue;
+    }
+    if (text[i] === "{") depth += 1;
+    else if (text[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return { inner: text.slice(open + 1, i), end: i + 1 };
+    }
+    i += 1;
+  }
+  throw new Error("unbalanced braces while extracting an adapter dispatch match block");
+}
+
+/** Top-level arms of a match body: `{ pattern, hasArrow }` split on depth-0 commas. */
+function matchArms(inner) {
+  const arms = [];
+  let depth = 0;
+  let start = 0;
+  let arrow = -1;
+  let i = 0;
+  while (i < inner.length) {
+    const skipped = skipStringLike(inner, i);
+    if (skipped !== i) {
+      i = skipped;
+      continue;
+    }
+    const char = inner[i];
+    if ("([{".includes(char)) depth += 1;
+    else if (")]}".includes(char)) depth -= 1;
+    else if (depth === 0 && char === "=" && inner[i + 1] === ">") {
+      if (arrow === -1) arrow = i;
+      i += 2;
+      continue;
+    } else if (depth === 0 && char === ",") {
+      arms.push({ pattern: inner.slice(start, arrow === -1 ? i : arrow).trim(), hasArrow: arrow !== -1 });
+      start = i + 1;
+      arrow = -1;
+    }
+    i += 1;
+  }
+  const tail = inner.slice(start, arrow === -1 ? inner.length : arrow).trim();
+  if (tail) arms.push({ pattern: tail, hasArrow: arrow !== -1 });
+  return arms.filter((arm) => arm.hasArrow);
+}
+
+/**
+ * The provider ids one adapter binary can dispatch, parsed from its source (see the block comment
+ * above). `label` names the source in every error so a red says which adapter moved.
+ */
+export function adapterCapturableProviders(source, label) {
+  const cleaned = stripTestModules(stripRustComments(source));
+  const consts = new Map(
+    [...cleaned.matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"((?:\\.|[^"\\])*)"\s*;/g)].map(
+      (item) => [item[1], item[2]],
+    ),
+  );
+  const gates = [];
+  let from = 0;
+  for (;;) {
+    const refusal = cleaned.indexOf(DISPATCH_REFUSAL, from);
+    if (refusal === -1) break;
+    from = refusal + DISPATCH_REFUSAL.length;
+    const matchStart = cleaned.lastIndexOf("match ", refusal);
+    if (matchStart === -1) {
+      throw new Error(`${label}: the dispatch refusal phrase appears outside any match block`);
+    }
+    const block = matchBlockBody(cleaned, matchStart);
+    if (block.end <= refusal) {
+      throw new Error(`${label}: the dispatch refusal phrase escaped its own match block`);
+    }
+    const providers = new Set();
+    for (const arm of matchArms(block.inner)) {
+      const literal = /^"((?:\\.|[^"\\])*)"$/.exec(arm.pattern);
+      if (literal) {
+        providers.add(literal[1]);
+      } else if (/^[A-Z][A-Z0-9_]*$/.test(arm.pattern)) {
+        if (!consts.has(arm.pattern)) {
+          throw new Error(`${label}: dispatch arm ${arm.pattern} does not resolve to a &str const`);
+        }
+        providers.add(consts.get(arm.pattern));
+      } else if (!/^[a-z_][A-Za-z0-9_]*$/.test(arm.pattern)) {
+        // Lower-case identifiers are the fallback binding of the refusal arm itself; anything else
+        // is a dispatch shape this parser has never seen and must not guess about.
+        throw new Error(`${label}: unrecognized dispatch arm pattern ${JSON.stringify(arm.pattern)}`);
+      }
+    }
+    if (providers.size === 0) {
+      throw new Error(`${label}: a dispatch match block admits no provider at all`);
+    }
+    gates.push(providers);
+  }
+  if (gates.length === 0) {
+    throw new Error(
+      `${label}: no provider dispatch found — the anchor phrase ${JSON.stringify(DISPATCH_REFUSAL)} ` +
+        "has moved, so capturability can no longer be derived from this adapter",
+    );
+  }
+  return [...gates.reduce((acc, gate) => new Set([...acc].filter((id) => gate.has(id))))].sort();
+}
+
+/** Per-lane calibration-plan coverage: `Map<lane, { entries, authoritative }>`. */
+export function planLaneCoverage(plan) {
+  const byLane = new Map();
+  for (const entry of plan.providers ?? []) {
+    const backend = entry.backend;
+    const provider = entry.target?.provider;
+    if (typeof backend !== "string" || typeof provider !== "string") {
+      throw new Error(
+        `calibration-plan entry ${JSON.stringify(entry.name ?? "(unnamed)")} names no backend/provider lane`,
+      );
+    }
+    const lane = laneOf(backend, provider);
+    if (!byLane.has(lane)) byLane.set(lane, { entries: 0, authoritative: 0 });
+    byLane.get(lane).entries += 1;
+    if (entry.evidenceScope === "authoritative") byLane.get(lane).authoritative += 1;
+  }
+  return byLane;
 }
 
 /**
@@ -166,12 +437,22 @@ export function manifestBindings({ manifestBody, manifest }) {
   }));
 }
 
-/** Every evidence record, flattened to `{ lane, modelId, digest }`. */
+/**
+ * Every evidence record, flattened to `{ lane, modelId, digest, eligible }`.
+ *
+ * `eligible` is `recordsNeedingDigest`'s verdict — the digest backfiller's OWN population predicate,
+ * not a re-spelled filter (sc-18252). Only complete/runtime_complete authoritative records ever
+ * reach the currency comparison; a fixture, candidate or gated record legitimately carries no
+ * closure digest, and counting it as "stale" would both inflate the widened evidence surface and
+ * flip a never-captured lane out of the pending-capture list.
+ */
 export function evidenceBindings(records) {
+  const eligible = new Set(recordsNeedingDigest({ records }));
   return records.map((record) => ({
     lane: laneOf(record.backend, record.target?.provider),
     modelId: record.target?.modelId ?? null,
     digest: record.repositories?.inference?.closureDigest ?? null,
+    eligible: eligible.has(record),
   }));
 }
 
@@ -219,23 +500,57 @@ export function rankLanes(lanes) {
 /**
  * Build the report.
  *
- * @param liveDigests  `Map<lane, digest>` from `validatedInferenceClosures`.
- * @param declarations the `providers` block of the closure config (for the crate pointer).
- * @param records      the evidence bundle's records.
- * @param manifest     the parsed builtin model manifest (model attribution only).
- * @param manifestBody the raw JSONC body — the authoritative binding population is located in it.
+ * @param liveDigests    `Map<lane, digest>` from `validatedInferenceClosures`.
+ * @param declarations   the `providers` block of the closure config (for the crate pointer).
+ * @param records        the evidence bundle's records.
+ * @param manifest       the parsed builtin model manifest (model attribution only).
+ * @param manifestBody   the raw JSONC body — the authoritative binding population is located in it.
+ * @param plan           the parsed calibration plan — planned lanes join the universe (sc-18212).
+ * @param adapterSources raw Rust source of the two adapter binaries; capturability is parsed from
+ *                       them, so a report built without them refuses rather than guesses.
  */
-export function buildStaleLaneReport({ liveDigests, declarations, records, manifest, manifestBody, meta = {} }) {
+export function buildStaleLaneReport({
+  liveDigests,
+  declarations,
+  records,
+  manifest,
+  manifestBody,
+  plan,
+  adapterSources,
+  meta = {},
+}) {
+  if (typeof adapterSources?.mlx !== "string" || typeof adapterSources?.candle !== "string") {
+    throw new Error(
+      "buildStaleLaneReport needs both adapter sources — capturability cannot be reported without them",
+    );
+  }
+  const arms = {
+    mlx: adapterCapturableProviders(adapterSources.mlx, SOURCE_PATHS.mlxAdapter),
+    candle: adapterCapturableProviders(adapterSources.candle, SOURCE_PATHS.candleAdapter),
+  };
+  const planCoverage = planLaneCoverage(plan ?? { providers: [] });
   const margins = deriveMargins(records);
   const bindings = manifestBindings({ manifestBody, manifest });
   const evidence = evidenceBindings(records);
 
-  const lanes = [];
-  for (const [lane, liveDigest] of [...liveDigests].sort(([left], [right]) => left.localeCompare(right))) {
+  const laneFacts = (lane) => {
     const backend = lane.split(":")[0];
     const provider = lane.split(":").slice(1).join(":");
-    const laneBindings = bindings.filter((item) => item.lane === lane);
-    const laneRecords = evidence.filter((item) => item.lane === lane);
+    return {
+      backend,
+      provider,
+      capturable: (arms[backend] ?? []).includes(provider),
+      plan: planCoverage.get(lane) ?? { entries: 0, authoritative: 0 },
+      laneBindings: bindings.filter((item) => item.lane === lane),
+      laneRecords: evidence.filter((item) => item.lane === lane && item.eligible),
+      ineligibleRecords: evidence.filter((item) => item.lane === lane && !item.eligible).length,
+    };
+  };
+
+  const lanes = [];
+  for (const [lane, liveDigest] of [...liveDigests].sort(([left], [right]) => left.localeCompare(right))) {
+    const { backend, provider, capturable, plan: laneWork, laneBindings, laneRecords, ineligibleRecords } =
+      laneFacts(lane);
     const bindingTally = tally(laneBindings, liveDigest);
     const recordTally = tally(laneRecords, liveDigest);
     const backendMargins = margins[backend]?.margins ?? null;
@@ -249,12 +564,22 @@ export function buildStaleLaneReport({ liveDigests, declarations, records, manif
       lane,
       backend,
       provider,
+      declared: true,
+      capturable,
+      plan: laneWork,
       crate: declarations?.[lane]?.crate ?? null,
       liveDigest,
       liveDigestShort: liveDigest.slice(0, 12),
       capturedDigests: shortDigests([...laneBindings, ...laneRecords]),
+      // Measurement status and capturability are orthogonal facts, EXCEPT for the unmeasured case:
+      // "unmeasured" (pending capture) is a promise that a capture is possible, so an armless lane
+      // gets "uncapturable" instead — the recategorization sc-18212 exists for. A measured armless
+      // lane keeps its staleness status (its evidence and margins are real) and carries
+      // `capturable: false` alongside.
       status: !measured
-        ? "unmeasured"
+        ? capturable
+          ? "unmeasured"
+          : "uncapturable"
         : staleCount === 0
           ? "current"
           : bindingTally.current + recordTally.current > 0
@@ -264,7 +589,12 @@ export function buildStaleLaneReport({ liveDigests, declarations, records, manif
         ...new Set([...laneBindings, ...laneRecords].map((item) => item.modelId).filter(Boolean)),
       ].sort(),
       bindings: { total: bindingTally.total, stale: bindingTally.stale, current: bindingTally.current },
-      records: { total: recordTally.total, stale: recordTally.stale, current: recordTally.current },
+      records: {
+        total: recordTally.total,
+        stale: recordTally.stale,
+        current: recordTally.current,
+        ineligible: ineligibleRecords,
+      },
       margin: backendMargins
         ? {
             staleMeasuredMargin: backendMargins.staleMeasuredMargin,
@@ -280,7 +610,30 @@ export function buildStaleLaneReport({ liveDigests, declarations, records, manif
     });
   }
 
+  // Lanes the plan targets but the closure table never declared (sc-18104 §2d rows one and four).
+  // They have no live digest, so nothing about them can be graded for currency — but hiding them
+  // reproduced the exact blindness the runbook's §1 warning documents.
+  const undeclaredLanes = [...planCoverage.keys()]
+    .filter((lane) => !liveDigests.has(lane))
+    .sort()
+    .map((lane) => {
+      const { backend, provider, capturable, plan: laneWork, laneBindings, laneRecords, ineligibleRecords } =
+        laneFacts(lane);
+      return {
+        lane,
+        backend,
+        provider,
+        declared: false,
+        capturable,
+        plan: laneWork,
+        status: "undeclared",
+        bindings: { total: laneBindings.length },
+        records: { total: laneRecords.length, ineligible: ineligibleRecords },
+      };
+    });
+
   const stale = rankLanes(lanes.filter((lane) => lane.status === "stale" || lane.status === "partially-stale"));
+  const uncapturable = [...lanes, ...undeclaredLanes].filter((lane) => !lane.capturable);
   return {
     generatedAgainst: {
       inferenceRevision: meta.inferenceRevision ?? null,
@@ -288,24 +641,34 @@ export function buildStaleLaneReport({ liveDigests, declarations, records, manif
       evidenceRecords: records.length,
     },
     marginSource: MARGIN_SOURCE,
+    capturability: {
+      source: CAPTURABILITY_SOURCE,
+      arms,
+      uncapturableLanes: uncapturable.map((lane) => lane.lane),
+    },
     totals: {
       declaredLanes: lanes.length,
       staleLanes: stale.length,
       currentLanes: lanes.filter((lane) => lane.status === "current").length,
       unmeasuredLanes: lanes.filter((lane) => lane.status === "unmeasured").length,
+      uncapturableLanes: uncapturable.length,
+      undeclaredLanes: undeclaredLanes.length,
       staleBindings: lanes.reduce((sum, lane) => sum + lane.bindings.stale, 0),
       staleRecords: lanes.reduce((sum, lane) => sum + lane.records.stale, 0),
     },
     staleLanes: stale.map((lane, index) => ({ rank: index + 1, ...lane })),
     currentLanes: lanes.filter((lane) => lane.status === "current"),
     unmeasuredLanes: lanes.filter((lane) => lane.status === "unmeasured"),
+    uncapturableLanes: uncapturable,
+    undeclaredLanes,
   };
 }
 
 export async function loadSources(root = ROOT) {
-  const [closuresBody, evidenceBody, manifestBody, cargoBody] = await Promise.all(
-    Object.values(SOURCE_PATHS).map((relative) => readFile(path.join(root, relative), "utf8")),
-  );
+  const [closuresBody, evidenceBody, manifestBody, cargoBody, planBody, mlxAdapter, candleAdapter] =
+    await Promise.all(
+      Object.values(SOURCE_PATHS).map((relative) => readFile(path.join(root, relative), "utf8")),
+    );
   const closures = JSON.parse(closuresBody);
   return {
     // The SAME gate the matrix generator applies: a closure table not keyed to the live pin is a
@@ -315,6 +678,8 @@ export async function loadSources(root = ROOT) {
     records: JSON.parse(evidenceBody).records,
     manifest: JSON.parse(stripJsoncComments(manifestBody)),
     manifestBody,
+    plan: JSON.parse(planBody),
+    adapterSources: { mlx: mlxAdapter, candle: candleAdapter },
     meta: { inferenceRevision: closures.inferenceRevision, digestVersion: closures.digestVersion },
   };
 }
@@ -342,7 +707,8 @@ export function formatReport(report) {
   const totals = report.totals;
   out.push(
     `${totals.declaredLanes} declared lanes: ${totals.staleLanes} stale, ${totals.currentLanes} current, ` +
-      `${totals.unmeasuredLanes} unmeasured (declared but never captured).`,
+      `${totals.unmeasuredLanes} pending capture; ${totals.uncapturableLanes} lanes (declared or ` +
+      `planned) have no adapter arm, and ${totals.undeclaredLanes} planned lanes were never declared.`,
   );
   out.push(
     `${totals.staleBindings} shipped calibration bindings and ${totals.staleRecords} evidence records ` +
@@ -355,7 +721,7 @@ export function formatReport(report) {
   } else {
     out.push("STALE LANES, ranked by widened admission surface (stale bindings x margin), then evidence surface:");
     out.push("");
-    const header = ["#", "LANE", "BINDINGS", "RECORDS", "MARGIN", "ESTIMATE", "IMPACT", "MODELS"];
+    const header = ["#", "LANE", "BINDINGS", "RECORDS", "MARGIN", "ESTIMATE", "IMPACT", "CAPTURE", "MODELS"];
     const rows = report.staleLanes.map((lane) => [
       String(lane.rank),
       lane.lane,
@@ -364,6 +730,7 @@ export function formatReport(report) {
       percent(lane.margin?.staleMeasuredMargin ?? null),
       percent(lane.margin?.estimateMargin ?? null),
       lane.impact.widenedAdmissionSurface.toFixed(3),
+      lane.capturable ? "yes" : "NO ARM",
       lane.models.join(", ") || "(none)",
     ]);
     const widths = header.map((_, column) =>
@@ -391,12 +758,50 @@ export function formatReport(report) {
   if (report.unmeasuredLanes.length) {
     out.push("");
     out.push(
-      "DECLARED BUT NEVER CAPTURED (not stale — no measurement to be stale): " +
-        report.unmeasuredLanes.map((lane) => lane.lane).join(", "),
+      "PENDING CAPTURE (declared, adapter arm exists, no measurement yet): " +
+        report.unmeasuredLanes
+          .map((lane) => `${lane.lane} (${lane.plan.entries} plan entries, ${lane.plan.authoritative} authoritative)`)
+          .join(", "),
     );
+  }
+  if (report.uncapturableLanes.length) {
+    out.push("");
+    out.push(
+      "DECLARED/PLANNED BUT UNCAPTURABLE — no adapter arm can serve these; a capture host booked for",
+    );
+    out.push(
+      "one is wasted (docs/calibration-runbook.md §2c). This is missing-adapter work, not measurement work:",
+    );
+    for (const lane of report.uncapturableLanes) {
+      const evidence =
+        (lane.bindings.total ?? 0) + (lane.records.total ?? 0) > 0
+          ? `${lane.bindings.total} bindings + ${lane.records.total} records captured by a retired arm`
+          : "no evidence";
+      out.push(
+        `  ${lane.lane}  declared=${lane.declared ? "yes" : "NO"}  plan=${lane.plan.entries} entries ` +
+          `(${lane.plan.authoritative} authoritative)  evidence=${evidence}  status=${lane.status}`,
+      );
+    }
+  }
+  if (report.undeclaredLanes.some((lane) => lane.capturable)) {
+    out.push("");
+    out.push(
+      "PLANNED BUT NEVER DECLARED (adapter arm exists, but no closure entry — a capture cannot derive",
+    );
+    out.push("a digest, so its evidence could never become current; runbook §2d row four):");
+    for (const lane of report.undeclaredLanes.filter((item) => item.capturable)) {
+      out.push(
+        `  ${lane.lane}  plan=${lane.plan.entries} entries (${lane.plan.authoritative} authoritative)`,
+      );
+    }
   }
   out.push("");
   out.push(`Margin source: ${report.marginSource}`);
+  out.push(`Capturability source: ${report.capturability.source}`);
+  out.push(
+    `Adapter arms — mlx: ${report.capturability.arms.mlx.join(", ")}; candle: ` +
+      `${report.capturability.arms.candle.join(", ")}`,
+  );
   return `${out.join("\n")}\n`;
 }
 
