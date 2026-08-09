@@ -8141,6 +8141,134 @@ mod tests {
         ]
     }
 
+    /// The product surfaces whose shipped resident-only cells the band audit must cover. Provider
+    /// ids are deliberately NOT repeated here: the base id is resolved through production
+    /// `MODEL_TABLE`, while edit ids are resolved by the production FLUX.2 edit router. Keeping this
+    /// source-bound inventory independent of [`resident_only_audit_routes`] makes a dropped route or
+    /// a duplicate replacement observable instead of allowing a fixed cardinality to stay green.
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ResidentOnlyAuditSurface {
+        Base,
+        Edit,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct SourceBoundAuditSurface {
+        manifest_id: &'static str,
+        surface: ResidentOnlyAuditSurface,
+        resident_only_tiers: &'static [&'static str],
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_surfaces() -> [SourceBoundAuditSurface; 20] {
+        use ResidentOnlyAuditSurface::{Base, Edit};
+
+        [
+            SourceBoundAuditSurface {
+                manifest_id: "chroma1_base",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "chroma1_flash",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "chroma1_hd",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "sd3_5_large",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "sd3_5_large_turbo",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "sd3_5_medium",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "boogu_image",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "boogu_image_turbo",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "boogu_image_edit",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "ideogram_4",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "ideogram_4_turbo",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "flux_schnell",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "flux_dev",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "flux2_dev",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "flux2_klein_9b",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "flux2_klein_9b",
+                surface: Edit,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "flux2_klein_9b_kv",
+                surface: Edit,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "flux2_klein_9b_true_v2",
+                surface: Base,
+                resident_only_tiers: &[],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "lens",
+                surface: Base,
+                resident_only_tiers: &["q8", "bf16"],
+            },
+            SourceBoundAuditSurface {
+                manifest_id: "lens_turbo",
+                surface: Base,
+                resident_only_tiers: &["q4", "q8", "bf16"],
+            },
+        ]
+    }
+
     fn set_sparse_len(path: &Path, bytes: u64) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("sparse fixture parent");
@@ -8162,6 +8290,132 @@ mod tests {
         }
     }
 
+    type ResidentOnlyAuditCell = (String, String, String);
+
+    fn auditable_shipped_tiers<'a>(
+        model: &'a Value,
+        resident_only_tiers: &[&str],
+    ) -> Result<Vec<&'a str>, String> {
+        let downloads = model["downloads"].as_array().ok_or_else(|| {
+            format!(
+                "{} has no shipped downloads",
+                model["id"].as_str().unwrap_or("<unknown>")
+            )
+        })?;
+        let mut tiers = Vec::new();
+        for download in downloads {
+            let tier = shipped_download_tier(model, download);
+            if tier == "training"
+                || (!resident_only_tiers.is_empty() && !resident_only_tiers.contains(&tier))
+            {
+                continue;
+            }
+            if tiers.contains(&tier) {
+                return Err(format!(
+                    "{} carries duplicate shipped tier {tier}",
+                    model["id"].as_str().unwrap_or("<unknown>")
+                ));
+            }
+            tiers.push(tier);
+        }
+        Ok(tiers)
+    }
+
+    fn audit_inventory_from_routes(
+        routes: &[ResidentOnlyAuditRoute],
+        models: &[Value],
+    ) -> Result<std::collections::BTreeSet<ResidentOnlyAuditCell>, String> {
+        let mut route_keys = std::collections::BTreeSet::new();
+        let mut cells = std::collections::BTreeSet::new();
+        for route in routes {
+            if !route_keys.insert((route.manifest_id, route.provider_id)) {
+                return Err(format!(
+                    "duplicate resident-only audit route {} ({})",
+                    route.manifest_id, route.provider_id
+                ));
+            }
+            let model = models
+                .iter()
+                .find(|model| model["id"] == route.manifest_id)
+                .ok_or_else(|| format!("missing shipped {} manifest entry", route.manifest_id))?;
+            for tier in auditable_shipped_tiers(model, route.resident_only_tiers)? {
+                let cell = (
+                    route.manifest_id.to_owned(),
+                    route.provider_id.to_owned(),
+                    tier.to_owned(),
+                );
+                if !cells.insert(cell.clone()) {
+                    return Err(format!("duplicate resident-only audit cell {cell:?}"));
+                }
+            }
+        }
+        Ok(cells)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_inventory(
+        models: &[Value],
+    ) -> Result<std::collections::BTreeSet<ResidentOnlyAuditCell>, String> {
+        let mut surfaces = std::collections::BTreeSet::new();
+        let mut cells = std::collections::BTreeSet::new();
+        for expected in source_bound_audit_surfaces() {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == expected.manifest_id)
+                .ok_or_else(|| {
+                    format!("missing shipped {} manifest entry", expected.manifest_id)
+                })?;
+            if model["type"] != "image" {
+                return Err(format!(
+                    "{} is no longer a shipped image model",
+                    expected.manifest_id
+                ));
+            }
+            let resolved = crate::engines::mlx_model(expected.manifest_id).ok_or_else(|| {
+                format!(
+                    "{} no longer resolves through production MODEL_TABLE and the pinned registry",
+                    expected.manifest_id
+                )
+            })?;
+            let provider_id = match expected.surface {
+                ResidentOnlyAuditSurface::Base => resolved.engine_id(),
+                ResidentOnlyAuditSurface::Edit => crate::image_jobs::flux2_edit_engine_id(
+                    expected.manifest_id,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "{} no longer resolves through the production FLUX.2 edit router",
+                        expected.manifest_id
+                    )
+                })?,
+            };
+            if !surfaces.insert((expected.manifest_id, provider_id)) {
+                return Err(format!(
+                    "source-bound resident-only inventory resolves a duplicate route {} ({provider_id})",
+                    expected.manifest_id
+                ));
+            }
+            if crate::inference_runtime::media_descriptor(provider_id).is_none() {
+                return Err(format!(
+                    "source-bound resident-only provider {provider_id} is absent from the pinned registry"
+                ));
+            }
+            for tier in auditable_shipped_tiers(model, expected.resident_only_tiers)? {
+                let cell = (
+                    expected.manifest_id.to_owned(),
+                    provider_id.to_owned(),
+                    tier.to_owned(),
+                );
+                if !cells.insert(cell.clone()) {
+                    return Err(format!(
+                        "source-bound resident-only inventory resolves a duplicate cell {cell:?}"
+                    ));
+                }
+            }
+        }
+        Ok(cells)
+    }
+
     /// sc-18251 resident-only audit: drive shipped asset sizes, real control-overlay bytes, and
     /// provider-owned Lens/activation facts through the production request-plan and selector cores.
     ///
@@ -8179,12 +8433,15 @@ mod tests {
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
+        let routes = resident_only_audit_routes();
+        let expected_inventory = audit_inventory_from_routes(&routes, models)
+            .expect("the resident-only audit route table must be unique and resolve shipped tiers");
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
         let hosts = [48_u64, 64, 96, 128];
         let mut flips = Vec::new();
-        let mut audited_cells = Vec::new();
+        let mut audited_cells = std::collections::BTreeSet::new();
 
-        for route in resident_only_audit_routes() {
+        for route in routes {
             let model = models
                 .iter()
                 .find(|model| model["id"] == route.manifest_id)
@@ -8225,7 +8482,16 @@ mod tests {
                 {
                     continue;
                 }
-                audited_cells.push((route.manifest_id, route.provider_id, tier));
+                assert!(
+                    audited_cells.insert((
+                        route.manifest_id.to_owned(),
+                        route.provider_id.to_owned(),
+                        tier.to_owned(),
+                    )),
+                    "the executable audit must reject duplicate route-tier cells: {} ({}) {tier}",
+                    route.manifest_id,
+                    route.provider_id
+                );
                 let numeric_tier = MemoryNumericTier {
                     precision: Precision::Bf16,
                     quant: match tier {
@@ -8403,23 +8669,14 @@ mod tests {
         }
 
         assert_eq!(
+            audited_cells, expected_inventory,
+            "the executable budget walk must cover the unique route-tier inventory exactly"
+        );
+        assert_eq!(
             audited_cells.len(),
             51,
-            "the audit must retain every shipped resident-only tier-route"
+            "the source-independent route table currently resolves 51 shipped resident-only cells"
         );
-        for expected in [
-            ("lens", "lens", "q8"),
-            ("lens", "lens", "bf16"),
-            ("lens_turbo", "lens_turbo", "q4"),
-            ("lens_turbo", "lens_turbo", "q8"),
-            ("lens_turbo", "lens_turbo", "bf16"),
-        ] {
-            assert!(
-                audited_cells.contains(&expected),
-                "removing a shipped resident-only Lens tier must make the completeness check red: \
-                 {expected:?}"
-            );
-        }
 
         assert_eq!(
             flips
@@ -8443,14 +8700,47 @@ mod tests {
         );
     }
 
-    /// Source-bound completeness gate for compatibility-default image providers. This joins the
-    /// shipped manifest to the worker's production model table and the pinned runtime registry; a
-    /// newly shipped image provider with no adopted memory contract is therefore discovered here
-    /// automatically and must be present in the resident-only budget audit above.
+    /// Mutation proof for the exact loophole that escaped the first audit revision: replacing the
+    /// non-flipping FLUX.1 schnell row with a second FLUX.1 dev row preserves both the old `51`
+    /// cardinality and the expected flip list. Inventory construction must reject the duplicate
+    /// before either summary can hide that schnell disappeared.
+    #[test]
+    fn resident_only_audit_inventory_rejects_flux1_duplicate_drop_mutation() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let mut routes = resident_only_audit_routes();
+        let schnell = routes
+            .iter()
+            .position(|route| route.manifest_id == "flux_schnell")
+            .expect("FLUX.1 schnell audit route");
+        let dev = routes
+            .iter()
+            .copied()
+            .find(|route| route.manifest_id == "flux_dev")
+            .expect("FLUX.1 dev audit route");
+        routes[schnell] = dev;
+
+        let error = audit_inventory_from_routes(&routes, models)
+            .expect_err("a duplicate dev row cannot replace the schnell inventory");
+        assert!(
+            error.contains("duplicate resident-only audit route flux_dev (flux1_dev)"),
+            "the mutation must fail for the duplicate/drop reason, got: {error}"
+        );
+    }
+
+    /// Full source-bound completeness gate. It expands the independent product-surface list through
+    /// the shipped manifest tiers, production `MODEL_TABLE`, production FLUX.2 edit router, and the
+    /// pinned runtime registry/contracts, then requires the executable audit table to equal that
+    /// deduplicated route-tier set exactly. The compatibility-default discovery remains automatic,
+    /// but adopted providers are no longer skipped.
     #[cfg(target_os = "macos")]
     #[test]
-    fn shipped_generic_image_routes_using_compatibility_default_are_audited() {
-        use std::collections::HashSet;
+    fn shipped_resident_only_mlx_inventory_is_source_bound() {
+        use gen_core::{Precision, Quant};
+        use std::collections::{BTreeSet, HashSet};
 
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             include_str!("../../../config/manifests/builtin.models.jsonc"),
@@ -8458,52 +8748,197 @@ mod tests {
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
         let routes = resident_only_audit_routes();
-        let adopted = crate::inference_runtime::media()
+        let actual = audit_inventory_from_routes(&routes, models)
+            .expect("the executable route table must be unique and resolve shipped tiers");
+        let expected = source_bound_audit_inventory(models)
+            .expect("the source-bound product surface must resolve through production");
+        assert_eq!(
+            actual, expected,
+            "resident-only audit coverage must equal the manifest -> MODEL_TABLE/edit-router -> \
+             pinned-registry route-tier inventory"
+        );
+        assert_eq!(
+            expected.len(),
+            51,
+            "the source-bound inventory currently has 51 cells"
+        );
+
+        let media = crate::inference_runtime::media();
+        let adopted = media
             .memory_strategy_registrations()
             .map(|registration| registration.provider_id)
             .collect::<HashSet<_>>();
-        let mut compatibility_default_routes = Vec::new();
 
-        for model in models.iter().filter(|model| model["type"] == "image") {
-            let Some(manifest_id) = model["id"].as_str() else {
-                continue;
-            };
-            let Some(resolved) = crate::engines::mlx_model(manifest_id) else {
-                continue;
-            };
-            let provider_id = resolved.engine_id();
-            if adopted.contains(provider_id) {
-                continue;
-            }
-            compatibility_default_routes.push((manifest_id, provider_id));
-            let route = routes
-                .iter()
-                .find(|route| route.manifest_id == manifest_id && route.provider_id == provider_id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "shipped generic image route {manifest_id} ({provider_id}) uses the \
-                         production compatibility-default Resident-only contract but is missing \
-                         from the audit"
-                    )
-                });
-            assert!(
-                route.resident_only_tiers.is_empty(),
-                "compatibility-default route {manifest_id} ({provider_id}) is Resident-only for \
-                 every shipped inference tier"
-            );
-            assert_eq!(
-                crate::inference_runtime::media()
-                    .activation_memory_bytes_1024(provider_id)
-                    .expect("known shipped provider"),
-                route.activation_anchor_bytes,
-                "the audit must carry the production activation fact for {provider_id}"
-            );
-        }
+        // Representative coverage of both sides of the old skip: FLUX.1 schnell is adopted, while
+        // Boogu uses the worker's compatibility-default contract and its unlabelled download must
+        // still derive Q8 from `mlx.quantize`.
+        assert!(adopted.contains("flux1_schnell"));
+        assert!(!adopted.contains("boogu_image"));
+        assert!(expected.contains(&(
+            "flux_schnell".to_owned(),
+            "flux1_schnell".to_owned(),
+            "q4".to_owned(),
+        )));
+        assert!(expected.contains(&(
+            "boogu_image".to_owned(),
+            "boogu_image".to_owned(),
+            "q8".to_owned(),
+        )));
 
+        // Preserve automatic discovery for every shipped base route that has not adopted a memory
+        // contract. A new compatibility-default provider must still join the audited inventory.
+        let discovered_compatibility = models
+            .iter()
+            .filter(|model| model["type"] == "image")
+            .filter_map(|model| {
+                let manifest_id = model["id"].as_str()?;
+                let resolved = crate::engines::mlx_model(manifest_id)?;
+                (!adopted.contains(resolved.engine_id()))
+                    .then_some((manifest_id.to_owned(), resolved.engine_id().to_owned()))
+            })
+            .collect::<BTreeSet<_>>();
+        let audited_compatibility = routes
+            .iter()
+            .filter(|route| !adopted.contains(route.provider_id))
+            .map(|route| (route.manifest_id.to_owned(), route.provider_id.to_owned()))
+            .collect::<BTreeSet<_>>();
         assert!(
-            !compatibility_default_routes.is_empty(),
-            "the registry/manifest join must discover compatibility-default image routes"
+            discovered_compatibility.is_subset(&audited_compatibility),
+            "every shipped compatibility-default base route must remain in the audit; missing: {:?}",
+            discovered_compatibility
+                .difference(&audited_compatibility)
+                .collect::<Vec<_>>()
         );
+        assert!(!discovered_compatibility.is_empty());
+
+        // Bind every adopted and non-adopted audit cell to the provider contract actually exported
+        // by the pinned runtime. The constructed spec carries the same non-zero control overlay and
+        // tier markers as the executable budget audit; every such loaded configuration must resolve
+        // Resident-only. Activation anchors and Lens bf16 materialization are checked against the
+        // registry rather than trusting the copied audit facts.
+        for route in routes {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == route.manifest_id)
+                .expect("source-bound manifest entry");
+            let downloads = model["downloads"]
+                .as_array()
+                .expect("source-bound downloads");
+            for tier in auditable_shipped_tiers(model, route.resident_only_tiers)
+                .expect("source-bound shipped tiers")
+            {
+                let download = downloads
+                    .iter()
+                    .find(|download| shipped_download_tier(model, download) == tier)
+                    .expect("source-bound tier download");
+                let base_asset_bytes = download["estimatedSizeBytes"]
+                    .as_u64()
+                    .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
+                    .expect("source-bound shipped bytes");
+                let fixture = tempfile::tempdir().expect("source-bound fixture root");
+                let weights = fixture.path().join("weights");
+                if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
+                    set_sparse_len(
+                        &weights.join("text_encoder/model.safetensors"),
+                        LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+                    );
+                    set_sparse_len(
+                        &weights.join("transformer/model.safetensors"),
+                        base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+                    );
+                    std::fs::write(
+                        weights.join("text_encoder/config.json"),
+                        r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
+                    )
+                    .expect("Lens MXFP4 marker");
+                } else {
+                    set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
+                }
+                let mut spec = LoadSpec::new(WeightsSource::Dir(weights));
+                spec = match tier {
+                    "q4" => spec.with_quant(Quant::Q4),
+                    "q8" => spec.with_quant(Quant::Q8),
+                    "bf16" => {
+                        assert_eq!(spec.precision, Precision::Bf16);
+                        spec
+                    }
+                    other => panic!("unsupported source-bound tier {other}"),
+                };
+                if route.control_bytes > 0 {
+                    let control = fixture.path().join("control.safetensors");
+                    set_sparse_len(&control, route.control_bytes);
+                    spec = spec.with_control(WeightsSource::File(control));
+                }
+
+                assert_eq!(
+                    media
+                        .activation_memory_bytes_1024(route.provider_id)
+                        .expect("known source-bound provider"),
+                    route.activation_anchor_bytes,
+                    "the audit activation fact drifted from the pinned provider for {}",
+                    route.provider_id
+                );
+                if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
+                    let footprint = media
+                        .footprint(route.provider_id, &spec)
+                        .expect("Lens footprint query")
+                        .expect("Lens bf16 provider footprint");
+                    assert_eq!(
+                        footprint.text_encoder, LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES,
+                        "the copied Lens bf16 materialization fact drifted from the pinned provider"
+                    );
+                }
+
+                let contract = match media
+                    .memory_strategy_contract(route.provider_id, &spec)
+                    .expect("source-bound provider contract query")
+                {
+                    Some(contract) => {
+                        assert!(
+                            adopted.contains(route.provider_id),
+                            "{} returned a contract without a registration",
+                            route.provider_id
+                        );
+                        contract
+                    }
+                    None => {
+                        assert!(
+                            !adopted.contains(route.provider_id),
+                            "{} lost its adopted contract",
+                            route.provider_id
+                        );
+                        MemoryProviderContract::compatibility_default(
+                            route.provider_id,
+                            MemoryBackendRealization::MlxMetal {
+                                bounded_wired_residency: true,
+                                lazy_or_mmap_materialization: true,
+                                explicit_evaluation_and_synchronization: true,
+                                cache_eviction: true,
+                            },
+                        )
+                    }
+                };
+                let implemented = MemoryStrategy::ALL
+                    .into_iter()
+                    .filter(|strategy| strategy.is_optimized())
+                    .filter(|strategy| {
+                        matches!(
+                            contract
+                                .capability(*strategy)
+                                .map(|capability| &capability.support),
+                            Some(gen_core::MemoryStrategySupport::Implemented)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    implemented.is_empty(),
+                    "{} ({}) {tier} is not Resident-only under its audited loaded-provider \
+                     configuration: {implemented:?}",
+                    route.manifest_id,
+                    route.provider_id
+                );
+            }
+        }
     }
 
     /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core

@@ -76,13 +76,16 @@ provider activation anchor at the pinned inference revision, so they correctly u
 | FLUX.2 Klein: base/edit/KV provider routes | 24.67-39.89 GiB including the 7.667 GiB control branch | a control overlay disables conditional optimized legs; a non-adopting registered route uses the worker's Resident-only compatibility contract | no flips |
 | Lens: clean Base q8/bf16 and Turbo q4/q8/bf16 | 20.33-45.79 GiB after bf16 materialization | entry/tier cross-products are unmeasured; Turbo bf16's optimized contract additionally requires Sequential | no flips |
 
-`shipped_generic_image_routes_using_compatibility_default_are_audited` is the source-bound
-completeness gate. On macOS it joins every shipped image manifest entry through the production
-`MODEL_TABLE` to the pinned runtime's memory-strategy registrations. Any newly shipped generic image
-provider without an adopted contract is discovered automatically and fails unless the budget audit
-covers it; the test also binds the route's activation fact to the production registry. The custom
-`flux2_dev_edit` safety path remains outside the generic selector seam, while the generic
-`flux2_dev` base provider is now explicitly included.
+`shipped_resident_only_mlx_inventory_is_source_bound` is the source-bound completeness gate. On
+macOS it expands the independent product-surface list through the shipped manifest tiers, production
+`MODEL_TABLE`, production FLUX.2 edit router, and pinned runtime registry/contracts, then requires the
+executable audit to equal that deduplicated 51-cell inventory exactly. It validates both adopted and
+compatibility-default providers, binds activation and Lens materialization facts to the registry,
+and still discovers newly shipped compatibility-default base routes automatically.
+`resident_only_audit_inventory_rejects_flux1_duplicate_drop_mutation` pins the former loophole: an
+exact duplicate FLUX.1 dev row cannot replace the non-flipping schnell row while preserving a green
+cardinality/flip summary. The custom `flux2_dev_edit` safety path remains outside the generic
+selector seam, while the generic `flux2_dev` base provider is explicitly included.
 
 ## Source values
 

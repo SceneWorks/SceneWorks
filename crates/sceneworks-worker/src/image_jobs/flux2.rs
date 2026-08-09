@@ -140,7 +140,7 @@ fn fit_edit_references(
 /// distill uses `flux2_klein_9b_kv_edit` (reference-K/V cache); dev uses the
 /// `flux2_dev_edit` variant (sc-5919) — the same dev snapshot, edit conditioning via
 /// the DiT token concat (Reference / MultiReference), embedded guidance, no -kv cache.
-fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
+pub(crate) fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     match model {
         "flux2_klein_9b" | "flux2_klein_9b_true_v2" => Some("flux2_klein_9b_edit"),
         "flux2_klein_9b_kv" => Some("flux2_klein_9b_kv_edit"),
