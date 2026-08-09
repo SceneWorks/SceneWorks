@@ -1112,6 +1112,71 @@ pub(crate) fn imported_image_request_family_eligible(
     true
 }
 
+/// Minimal probe payload for a non-builtin image request of `family` at `model`, carrying exactly
+/// the fields [`imported_image_request_family_eligible`] reads: the manifest entry (family + a
+/// non-empty installed path) and, when `with_lora`, a single job LoRA. Everything else is absent, so
+/// the probe is the PLAIN t2i shape — the surface every imported lane claims — plus/minus adapters.
+fn imported_image_lora_probe(model: &str, family: &str, with_lora: bool) -> Map<String, Value> {
+    let mut payload = json!({
+        "model": model,
+        "modelManifestEntry": {
+            "id": model,
+            "family": family,
+            "paths": { "model": "/probe" }
+        }
+    });
+    if with_lora {
+        payload
+            .as_object_mut()
+            .expect("probe payload is an object")
+            .insert("loras".to_owned(), json!([{ "id": "probe" }]));
+    }
+    payload
+        .as_object()
+        .expect("probe payload is an object")
+        .clone()
+}
+
+/// Whether a non-builtin (imported / fine-tuned) image model may ADVERTISE LoRA compatibility on a
+/// deployment offering the given native lanes — the advertisement-side twin of
+/// [`imported_image_request_family_eligible`] (sc-14135 follow-up; the class sc-15328 named).
+///
+/// * `None` — the family is not served by the route-by-family path at all, so this oracle has no
+///   opinion and the entry must be left exactly as-is (its problem, if any, is that it renders
+///   nothing, not that it over-advertises adapters).
+/// * `Some(true)` — some available lane claims the model WITH a LoRA attached.
+/// * `Some(false)` — some available lane claims the plain t2i shape but NONE claims it with a LoRA.
+///   Advertising `loraCompatibility` here is the exact hang: the API accepts the submission and no
+///   worker ever claims it, so the job sits on "Waiting for an available GPU worker" forever.
+///
+/// 🔴 Derived by asking the REAL gate — the same function the scheduler calls, with the same
+/// per-lane `adapters_supported` arguments the two routers pass (`mlx.rs` `true` / `candle.rs`
+/// `false`). Restating the per-family verdict as its own table here is precisely how the
+/// advertisement and the gate drift apart again, so it is computed, never copied.
+pub fn imported_image_model_lora_advertisement(
+    model: &str,
+    family: &str,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> Option<bool> {
+    let claims = |with_lora: bool| {
+        let payload = imported_image_lora_probe(model, family, with_lora);
+        (mlx_lane_available
+            && imported_image_request_family_eligible(model, &payload, MLX_ROUTED_FAMILIES, true))
+            || (candle_lane_available
+                && imported_image_request_family_eligible(
+                    model,
+                    &payload,
+                    CANDLE_ROUTED_FAMILIES,
+                    false,
+                ))
+    };
+    if !claims(false) {
+        return None;
+    }
+    Some(claims(true))
+}
+
 derive_model_list! {
     /// The models the candle (Windows/CUDA) lane can serve for base txt2img (derived from
     /// [`IMAGE_MODEL_CAPS`]`.candle_routed`, sc-9495). Mirrors the worker's `image_jobs::is_candle_engine`.
@@ -1286,11 +1351,11 @@ mod tests {
 
     use super::{
         image_family_is_mlx_routed, image_model_mac_support,
-        imported_image_request_family_eligible, is_builtin_image_model, CANDLE_LORA_MODELS,
-        CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
-        CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS,
-        CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS,
-        MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
+        imported_image_model_lora_advertisement, imported_image_request_family_eligible,
+        is_builtin_image_model, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS,
+        CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
+        CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
+        IMAGE_MODEL_CAPS, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
         MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
     };
 
@@ -2054,6 +2119,66 @@ mod tests {
             .filter(|m| m.get("type").and_then(serde_json::Value::as_str) == Some("image"))
             .cloned()
             .collect()
+    }
+
+    /// The IMPORTED-side half of the class guard below, which reads `builtin.models.jsonc` and so
+    /// can only ever see BUILTIN rows. A non-builtin (imported / fine-tuned) entry has no manifest
+    /// row to read: its `loraCompatibility` is SYNTHESIZED from the family token by
+    /// `lora_family::apply_model_manifest_defaults`, which is why the class escaped that guard
+    /// entirely and shipped three separate hangs.
+    ///
+    /// This pins the real matrix [`imported_image_model_lora_advertisement`] computes off the gate,
+    /// so a gate change that silently flips a family's adapter verdict lands here rather than in a
+    /// queue that never drains. `mlx` = a macOS deployment (MLX lane only), `candle` = Windows/Linux
+    /// (candle lane only) — the two shipped topologies.
+    #[test]
+    fn imported_lora_advertisement_tracks_which_lane_can_claim_an_adapter() {
+        let mlx = |family: &str| {
+            imported_image_model_lora_advertisement("user_import", family, true, false)
+        };
+        let candle = |family: &str| {
+            imported_image_model_lora_advertisement("user_import", family, false, true)
+        };
+
+        // krea_2 — THE REPORTED BUG. The MLX single-file entrypoint takes adapters (inference #211);
+        // the candle one does not yet (sc-14135), so a candle-only host must not advertise them.
+        assert_eq!(mlx("krea_2"), Some(true));
+        assert_eq!(
+            candle("krea_2"),
+            Some(false),
+            "an imported Krea 2 checkpoint renders t2i on candle but CANNOT take a LoRA — \
+             advertising one is the hang this oracle exists to prevent"
+        );
+
+        // sdxl — a fused checkpoint; both native loaders accept UNet adapters, so the
+        // advertisement is honest on both lanes and must be left alone.
+        assert_eq!(mlx("sdxl"), Some(true));
+        assert_eq!(candle("sdxl"), Some(true));
+
+        // mage-flow — adapters refused on EVERY backend (`mlx_gen_mage::load_finetuned`), and there
+        // is no candle Mage engine at all, so it is not even routable there.
+        assert_eq!(
+            mlx("mage-flow"),
+            Some(false),
+            "a Mage fine-tune renders t2i on MLX but refuses adapters on every backend"
+        );
+        assert_eq!(
+            candle("mage-flow"),
+            None,
+            "mage-flow is absent from CANDLE_ROUTED_FAMILIES — not routable, so no opinion"
+        );
+
+        // A family the route-by-family path does not serve at all: no opinion, entry untouched.
+        assert_eq!(mlx("flux"), None);
+        assert_eq!(candle("z-image"), None);
+
+        // A BUILTIN id keeps its id-keyed routing and is never touched by this oracle, whatever
+        // family token it carries — otherwise the projection would rewrite shipped manifest rows.
+        assert_eq!(
+            imported_image_model_lora_advertisement("krea_2_turbo", "krea_2", true, false),
+            None,
+            "builtins route by id; the advertisement oracle must have no opinion on them"
+        );
     }
 
     /// **THE CLASS GUARD (sc-15328).** If a model advertises LoRA compatibility, then some backend

@@ -99,6 +99,25 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel(familylessLora, noFamilyModel)).toBe(true);
   });
 
+  it("fails CLOSED when the API withdrew the model's LoRA advertisement", () => {
+    // The API emits this shape for an imported/fine-tuned model no backend lane on this deployment
+    // can serve adapters for — an imported Krea 2 checkpoint on a candle host (sc-14135), or a
+    // Mage-Flow fine-tune anywhere. Submitting one 400s, so offering it is a dead-end selection.
+    //
+    // The empty family list ALONE is not enough: it lands in the permissive "cannot gate" branch
+    // asserted above (`noFamilyModel`), which is why the explicit `supported: false` signal exists.
+    // These two cases differ only by that flag, so a regression that drops it is caught here.
+    const withdrawn = {
+      id: "user_kreamania_variant5",
+      family: "krea_2",
+      loraCompatibility: { families: [], supported: false },
+    };
+    expect(loraMatchesModel({ id: "l", family: "krea_2" }, withdrawn)).toBe(false);
+    expect(loraMatchesModel(familylessLora, withdrawn)).toBe(false);
+    // ...while a model that genuinely serves adapters is untouched.
+    expect(loraMatchesModel(sdxlLora, { ...sdxlModel, loraCompatibility: { families: ["sdxl"], supported: true } })).toBe(true);
+  });
+
   it("normalizes separators/underscores on both sides before comparing", () => {
     expect(loraMatchesModel({ id: "l", family: "Z_Image" }, { id: "z", loraCompatibility: { families: ["z-image"] } })).toBe(true);
   });

@@ -1359,10 +1359,16 @@ pub(crate) async fn register_trained_base_checkpoint(
     // family token alone, which is right for an imported sibling of a builtin but wrong here: the
     // fine-tuned lane refuses adapters on every backend (`mlx_gen_mage::load_finetuned`, and the
     // `!has_loras` term in `imported_image_request_family_eligible`). Left advertised, the API
-    // accepted the job and NO worker could claim it — it queued forever with no error, the exact
-    // failure this story exists to remove, one lane over. Withdrawing the advertisement makes
-    // `validate_lora_specs_for_model` reject at submit with "has no declared LoRA families", so the
-    // combination is refused LOUDLY and terminally instead of hanging.
+    // accepted the job and NO worker could claim it — it queued forever with no error.
+    //
+    // 🔴 This removal does NOT by itself produce the rejection sc-15328 claimed for it, and for two
+    // years it did not: `families_from_value_chain` (lib.rs) falls back to the top-level `family`
+    // key — which this entry still carries, and must, for routing — so `model_lora_families` kept
+    // returning `["mage-flow"]`, the "has no declared LoRA families" branch was never taken, and the
+    // lane went on hanging. Removing the key here is kept only so the STORED entry carries no false
+    // promise; the enforcement is `models::apply_imported_lora_advertisement`, which withdraws the
+    // advertisement on the catalog projection every read goes through (an explicit EMPTY families
+    // array, which is non-null and so actually defeats that fallback).
     //
     // Whether a fine-tune SHOULD accept adapters is a separate product question (sc-15334) — this
     // only guarantees that what is advertised is what can actually run.

@@ -4007,6 +4007,73 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
             .any(|sub| dir_has_weight(&tier_dir.join(sub)))
 }
 
+/// Withdraw a synthesized LoRA advertisement that no lane on THIS deployment can honour (the
+/// sc-15328 class, reopened by sc-14135 for imported Krea 2).
+///
+/// An imported / fine-tuned image model has no manifest row: `apply_model_manifest_defaults`
+/// synthesizes `loraCompatibility.families = [family]` from the family token alone. For some
+/// families that is a promise nothing keeps — an imported Krea 2 checkpoint on a candle host (the
+/// candle single-file entrypoint takes no adapters, sc-14135) and a Mage-Flow fine-tune on any host.
+/// Left standing, the picker offers adapters, `validate_lora_specs_for_model` passes, the job is
+/// created, and NO worker claims it: it sits on "Waiting for an available GPU worker" forever, with
+/// no error and no terminal state. That is strictly worse than a rejection.
+///
+/// Applied HERE — on the catalog projection every read goes through — rather than baked into the
+/// stored manifest at import time, because the verdict is a property of the DEPLOYMENT, not of the
+/// checkpoint: the same imported Krea 2 file legitimately takes LoRAs on macOS/MLX and cannot on
+/// candle. A stored strip would be wrong on one of the two platforms the moment the data dir moved.
+///
+/// 🔴 The withdrawal is an EXPLICIT EMPTY `families` array, never `remove("loraCompatibility")`.
+/// Removing the key is a no-op: `families_from_value_chain` (lib.rs) falls back to the top-level
+/// `family` field, which an imported entry must carry for routing — so the strip sc-15328 shipped
+/// changed nothing and its lane still hangs. An empty array is non-null, so it short-circuits that
+/// fallback and `validate_lora_specs_for_model` refuses the submission LOUDLY and terminally with
+/// "has no declared LoRA families". `supported: false` is the web's signal to fail CLOSED, because
+/// `loraMatchesModel` treats an empty family set as "cannot gate" and would otherwise stay
+/// permissive and keep offering every LoRA.
+fn apply_imported_lora_advertisement(object: &mut JsonObject) {
+    if object.get("type").and_then(Value::as_str) != Some("image") {
+        return;
+    }
+    let Some(id) = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let Some(family) = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    // The lanes this deployment can actually run: macOS ships the in-process MLX worker and no
+    // candle engine; Windows/Linux/Docker ship candle and no MLX. Mirrors the worker's own
+    // `KREA_IMPORTED_SUPPORTS_ADAPTERS` cfg split, so the advertisement and the claim gate agree.
+    let mlx_lane = cfg!(target_os = "macos");
+    let serves_loras = sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
+        &id, &family, mlx_lane, !mlx_lane,
+    );
+    if serves_loras != Some(false) {
+        return;
+    }
+    let compatibility = object
+        .entry("loraCompatibility".to_owned())
+        .or_insert_with(|| json!({}));
+    let Some(compatibility) = compatibility.as_object_mut() else {
+        return;
+    };
+    // Preserve every other key (`types` drives the multi-phase surface); only the families
+    // promise is withdrawn.
+    compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
+    compatibility.insert("supported".to_owned(), Value::Bool(false));
+}
+
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     // Per-model quality FLOOR (sc-10731, epic 10721): surface the manifest `mlx.minQualityTier` as a
     // top-level `minQualityTier` so the web `defaultTierSelection` can clamp the DEFAULT generation tier
@@ -4357,6 +4424,7 @@ fn apply_model_catalog_entry(
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
     apply_mac_and_mlx_fields(object, data_dir);
+    apply_imported_lora_advertisement(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
     // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
     // THIS process may link no engines at all (docker/rust.Dockerfile builds the API without
