@@ -200,9 +200,31 @@ export async function runCheck({ root = SCRIPT_ROOT, baseRef = null, env = proce
     : resolveBaseCommit({ root, env, log });
   if (!base) throw new Error(`--base ${baseRef} does not name a commit`);
 
-  const baseText = tryGit(root, ["show", `${base}:${EVIDENCE_BUNDLE_PATH}`]);
-  // A base commit that predates the bundle has nothing to shrink from; growth-only is fine.
-  const baseIds = baseText === null ? new Set() : recordIdSet(baseText, `${base.slice(0, 12)}:${EVIDENCE_BUNDLE_PATH}`);
+  // "Bundle absent at the base" must be CONFIRMED from the base commit's tree, never inferred
+  // from a failed `git show` — a read failure (corrupt object, partial clone whose promisor fetch
+  // failed, ...) would otherwise degrade to an empty base set and vacuously pass a real deletion.
+  // `ls-tree` needs only the tree objects: empty output is a confirmed-absent path, any other
+  // failure fails closed.
+  const baseEntry = tryGit(root, ["ls-tree", base, "--", EVIDENCE_BUNDLE_PATH]);
+  if (baseEntry === null) {
+    throw new Error(`cannot read the tree of base commit ${base}; failing closed rather than skipping the shrink check`);
+  }
+  let baseIds;
+  if (baseEntry === "") {
+    // Confirmed: the base commit predates the bundle. Nothing to shrink from; growth-only.
+    baseIds = new Set();
+  } else {
+    let baseText;
+    try {
+      baseText = git(root, ["show", `${base}:${EVIDENCE_BUNDLE_PATH}`]);
+    } catch (error) {
+      throw new Error(
+        `${EVIDENCE_BUNDLE_PATH} exists at base commit ${base} but its blob cannot be read ` +
+          `(${error.message.trim().split("\n")[0]}); failing closed rather than treating it as an empty corpus`,
+      );
+    }
+    baseIds = recordIdSet(baseText, `${base.slice(0, 12)}:${EVIDENCE_BUNDLE_PATH}`);
+  }
   const headIds = recordIdSet(await readFile(path.join(root, EVIDENCE_BUNDLE_PATH), "utf8"), EVIDENCE_BUNDLE_PATH);
   // The tombstone file itself must exist at HEAD — deleting it would delete the allowlist's audit
   // trail along with the gate's escape hatch, so its absence fails rather than defaulting to empty.

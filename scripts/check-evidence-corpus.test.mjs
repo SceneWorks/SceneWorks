@@ -194,9 +194,58 @@ test("e2e: SCENEWORKS_EVIDENCE_BASE overrides base resolution and fails closed o
   );
 });
 
+test("e2e: an unreadable base blob fails closed instead of passing vacuously", async (t) => {
+  const { dir, upstream } = await scaffoldUpstream(t);
+  const work = path.join(dir, "unreadable");
+  // fetch.unpackLimit forces the transferred pack to explode into loose objects so a single
+  // blob can be removed — the shape of a partial clone whose promisor fetch fails at read time.
+  gitIn(dir, "init", "-q", "-b", "deletes-b", work);
+  gitIn(work, "remote", "add", "origin", upstream);
+  gitIn(work, "-c", "fetch.unpackLimit=1000000", "fetch", "-q", "origin");
+  gitIn(work, "checkout", "-q", "-b", "deletes-b", "origin/deletes-b");
+
+  const blob = gitIn(work, "rev-parse", "origin/main:" + EVIDENCE_BUNDLE_PATH).trim();
+  const object = path.join(work, ".git", "objects", blob.slice(0, 2), blob.slice(2));
+  await rm(object);
+
+  // The deletion of B is real and untombstoned; with the base blob unreadable the gate must
+  // throw, never degrade to an empty base set and report zero errors.
+  await assert.rejects(runCheck({ root: work }), /cannot be read.*failing closed/s);
+});
+
+test("e2e: a base commit that predates the bundle is confirmed-absent and growth-only", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "evidence-corpus-e2e-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const upstream = path.join(dir, "upstream");
+  gitIn(dir, "init", "-q", "-b", "main", upstream);
+  await writeFile(path.join(upstream, "README.md"), "pre-bundle era\n");
+  gitIn(upstream, "add", "-A");
+  gitIn(upstream, "commit", "-q", "-m", "no bundle yet");
+  gitIn(upstream, "checkout", "-q", "-b", "introduces-bundle");
+  await mkdir(path.join(upstream, path.dirname(EVIDENCE_BUNDLE_PATH)), { recursive: true });
+  await mkdir(path.join(upstream, path.dirname(TOMBSTONES_PATH)), { recursive: true });
+  await writeCorpus(upstream, { ids: [A, B] });
+  gitIn(upstream, "add", "-A");
+  gitIn(upstream, "commit", "-q", "-m", "introduce bundle");
+  gitIn(upstream, "checkout", "-q", "main");
+
+  const work = path.join(dir, "work");
+  gitIn(dir, "clone", "-q", upstream, work);
+  gitIn(work, "checkout", "-q", "introduces-bundle");
+  const outcome = await runCheck({ root: work });
+  assert.deepEqual(outcome.errors, []);
+  assert.equal(outcome.baseIds.size, 0);
+  assert.deepEqual([...outcome.headIds], [A, B]);
+});
+
 test("the gate and this suite are wired into npm run check", async () => {
   const { scripts } = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
-  assert.match(scripts.check, /check-evidence-corpus\.mjs --self-test/);
-  assert.match(scripts.check, /node scripts\/check-evidence-corpus\.mjs(?: |$|&)/);
+  // The self-test invocation and the LIVE invocation are separate claims: a lone `.mjs`-suffix
+  // match would be satisfied by the `--self-test` call alone, letting the live run be deleted
+  // unnoticed. Pin the exact self-test-then-live sequence instead.
+  assert.match(
+    scripts.check,
+    /node scripts\/check-evidence-corpus\.mjs --self-test && node scripts\/check-evidence-corpus\.mjs(?: &&|$)/,
+  );
   assert.match(scripts.check, /scripts\/check-evidence-corpus\.test\.mjs/);
 });
