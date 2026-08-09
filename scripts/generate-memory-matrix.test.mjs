@@ -2971,21 +2971,43 @@ test("the published summary re-derives from the evidence bundle and the closure 
 
   assert.equal(matrix.summary.currentCalibrationRuns, currentRuns(closures.providers));
 
-  // The recomputation is currently in its fail-closed state (every eligible record sits at a
-  // superseded closure, so both sides are 0). Prove it is a live derivation rather than a constant:
-  // re-stamping the ledger with each record's own captured digest must move it off zero.
-  const asCaptured = Object.fromEntries(
-    evidence.records
-      .filter((record) => eligibleByRecord.get(record.id))
-      .map((record) => [
-        `${record.backend}:${record.target.provider}`,
-        { digest: record.repositories.inference.closureDigest },
-      ]),
+  // The equality above is only as good as the recomputation being a live derivation. Today the
+  // corpus is fully fail-closed (every eligible record sits at a superseded closure, so both sides
+  // are 0) and a hardwired `0` would satisfy it. Prove sensitivity in BOTH directions against two
+  // synthetic ledgers, so the proof holds whatever the real corpus currently says.
+  //
+  // Deliberately NOT compared against `matrix.summary.currentCalibrationRuns`: refreshing every lane
+  // to the live closure is the stated end state of epic 18093, and at that point the as-captured
+  // ledger and the live ledger agree. A strict `>` against the live count would red on that entirely
+  // correct state — the same "fails on correct change" defect that disqualified the census literals
+  // this test replaced.
+  const eligibleRecords = evidence.records.filter((record) =>
+    ["complete", "runtime_complete"].includes(record.status) &&
+    !["fixture", "candidate"].includes(record.evidenceScope) &&
+    eligibleByRecord.get(record.id),
   );
+  assert.ok(eligibleRecords.length > 0, "the corpus must hold eligible records to prove anything");
+
+  // Admits: a ledger stamped with the records' own captured digests makes eligible records current.
+  // Not an equality against `eligibleRecords.length` — the ledger is keyed by LANE, and a lane whose
+  // records were captured at more than one closure collapses to whichever digest is written last, so
+  // some eligible records legitimately stay non-current here (31 of 35 today). The claim that has to
+  // hold is that the count is driven off zero at all.
+  const asCaptured = Object.fromEntries(eligibleRecords.map((record) => [
+    `${record.backend}:${record.target.provider}`,
+    { digest: record.repositories.inference.closureDigest },
+  ]));
   assert.ok(
-    currentRuns(asCaptured) > matrix.summary.currentCalibrationRuns,
-    "the currency recomputation must respond to the closure ledger, not report a constant",
+    currentRuns(asCaptured) > 0,
+    "a ledger matching the captured digests must make eligible records current",
   );
+
+  // Refuses: a ledger where no digest can match makes nothing current. Together with the admitting
+  // case this pins the comparison itself, not the count it happens to produce today.
+  const allSuperseded = Object.fromEntries(
+    Object.keys(closures.providers).map((lane) => [lane, { digest: "0".repeat(64) }]),
+  );
+  assert.equal(currentRuns(allSuperseded), 0);
 });
 
 test("the published document is closed: no reference outlives its row (sc-18099)", async () => {
