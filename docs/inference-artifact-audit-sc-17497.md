@@ -514,7 +514,8 @@ Moving the live pin at all — with or without a build — also means:
   every audited object is `capturedObject === compatibleObject` — true only on the free path;
 - `crates/sceneworks-worker/src/candle_memory_strategy.rs`'s binding test, which asserts the literal
   revision pair;
-- the evidence-classification test in `scripts/calibration-cost-model.test.mjs` and
+- the evidence-classification test in `scripts/generate-memory-matrix.test.mjs` (rehomed there by
+  sc-18100 from the deleted `scripts/calibration-cost-model.test.mjs`) and
   `tests/test_memory_matrix.py::test_calibration_evidence_is_schema_valid_and_matrix_ingested` on the
   parity lane.
 

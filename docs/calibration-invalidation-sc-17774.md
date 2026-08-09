@@ -97,9 +97,10 @@ node scripts/inference-closure-digest.mjs --repo <inference clone> --write
 node scripts/backfill-closure-digests.mjs --repo <inference clone> --write
 ```
 
-Then regenerate the derived docs (`npm run generate:memory-matrix`,
-`npm run generate:calibration-cost-model`). `scripts/bump-inference.mjs` refuses a bump that would
-leave the closure config behind, and names both commands.
+Then regenerate the derived docs (`npm run generate:memory-matrix`). `scripts/bump-inference.mjs`
+refuses a bump that would leave the closure config behind, and names the command. *(sc-18100
+retired `generate:calibration-cost-model` along with the cost model itself; the staleness signal
+that table used to carry is read from `npm run report:stale-lanes` instead.)*
 
 **Lanes whose closure did not move stay `current` across the bump.** Only the ones that actually
 changed are demoted, and the regenerated files show which.
@@ -233,7 +234,7 @@ Three classes, and only the first would be re-measurement pressure:
 | --- | --- | --- |
 | **currency / re-measurement** | *(none)* | nothing in the composite demands a re-capture, and nothing may be added that does |
 | **integrity of the evidence and the table** | `check:memory-calibration` (schema + well-formedness of every record, `harnessVersion`, `evidenceSemantics`'s fail-closed "record carries no digest" / "lane is undeclared"); `inference-closure-digest.mjs --check` and `backfill-closure-digests.mjs --verify` in `check.yml`; `bump-inference.mjs`'s refusal of a pin bump that leaves `config/inference-provider-closures.json` un-regenerated | **stays.** These answer "is this data real and well-formed", never "is it recent" |
-| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:calibration-cost-model`, `check:tier-integrity`) in `check`, `rust:check` and pre-push | **stays.** A closure digest that rotates changes the matrix's *source fingerprint* (and its content when a lane's currency actually flips); the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
+| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:tier-integrity`; `check:calibration-cost-model` was a third member until sc-18100 retired it with its generator) in `check`, `rust:check` and pre-push | **stays.** A closure digest that rotates changes the matrix's *source fingerprint* (and its content when a lane's currency actually flips); the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
 
 Measured on the corpus at `40fa7583`: **every** measured lane is stale — 9 declared lanes, 8 of them
 carrying at least one binding or record, 0 of those closure-current, 1 declared but never captured;
