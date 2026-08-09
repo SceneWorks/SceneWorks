@@ -4116,7 +4116,10 @@ mod tests {
         let declared = shipped_mlx_declared_closure_digest("qwen_image");
         let live = live_mlx_closure_digest("qwen_image");
 
-        for (tier, quant, expected_rungs) in [("q8", Some(gen_core::Quant::Q8), 2_usize)] {
+        let tier = "q8";
+        let quant = Some(gen_core::Quant::Q8);
+        let expected_rungs = 2_usize;
+        {
             // Take the request identity from the opt-in itself rather than restating it, so the
             // test cannot drift from the manifest it is checking.
             let binding = calibrations
