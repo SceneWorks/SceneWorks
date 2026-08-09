@@ -4619,28 +4619,7 @@ fn generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
-    // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
-    // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
-    let mut conditioning = if !multi_references.is_empty() {
-        build_reference_conditioning(multi_references)
-    } else {
-        match reference {
-            Some((image, strength)) => vec![Conditioning::Reference {
-                image: image.clone(),
-                strength: Some(*strength),
-            }],
-            None => Vec::new(),
-        }
-    };
-    // Inpaint / outpaint mask (Ideogram 4 edit, sc-6303): a `Conditioning::Mask` (white = repaint)
-    // alongside the source `Reference`. Only the Ideogram edit path supplies one today; every other
-    // base-path family passes `None`.
-    if let Some(mask) = edit_mask {
-        conditioning.push(Conditioning::Mask {
-            image: mask.clone(),
-        });
-    }
+    let conditioning = build_lane_conditioning(reference, multi_references, edit_mask);
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -4727,6 +4706,100 @@ fn resolve_hires_fix_plan(
     })
 }
 
+/// The conditioning one generic-lane render carries. Split out of [`generate_one`] so
+/// [`lane_reference_count`] — the count the backend request scope grades the request against — can be
+/// tested against the conditioning this lane REALLY sends rather than against a restatement of it.
+fn build_lane_conditioning(
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+) -> Vec<Conditioning> {
+    // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
+    // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
+    // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
+    let mut conditioning = if !multi_references.is_empty() {
+        build_reference_conditioning(multi_references)
+    } else {
+        match reference {
+            Some((image, strength)) => vec![Conditioning::Reference {
+                image: image.clone(),
+                strength: Some(*strength),
+            }],
+            None => Vec::new(),
+        }
+    };
+    // Inpaint / outpaint mask (Ideogram 4 edit, sc-6303): a `Conditioning::Mask` (white = repaint)
+    // alongside the source `Reference`. Only the Ideogram edit path supplies one today; every other
+    // base-path family passes `None`.
+    if let Some(mask) = edit_mask {
+        conditioning.push(Conditioning::Mask {
+            image: mask.clone(),
+        });
+    }
+    conditioning
+}
+
+/// The image-conditioning count gen-core derives from the request [`generate_one`] builds for these
+/// lane inputs — the SAME rule as `GenerationRequest::image_reference_count`: multi-reference
+/// carriers contribute their image count, a single reference contributes one, and an edit mask
+/// contributes one MORE (it is a `Conditioning::Mask` alongside the source `Reference`, not a
+/// replacement for it).
+///
+/// This is not bookkeeping. The admitted geometry is re-derived from the live request by the
+/// backend request scopes (`mlx-gen`'s `MlxRequestScopeCore::configure_request` and its candle twin),
+/// which refuse any request whose geometry differs from the one admitted, and gen-core's shared
+/// safety check rejects a `has_reference` that disagrees with `reference_count > 0`. Declaring a
+/// count the request does not carry fails the render outright. The old formula
+/// (`edit_refs.len().max(reference || mask)`) undercounted every reference+mask edit by one.
+fn lane_reference_count(
+    has_identity_init: bool,
+    multi_reference_count: usize,
+    has_edit_mask: bool,
+) -> u32 {
+    let references = if multi_reference_count > 0 {
+        multi_reference_count
+    } else {
+        usize::from(has_identity_init)
+    };
+    u32::try_from(references.saturating_add(usize::from(has_edit_mask))).unwrap_or(u32::MAX)
+}
+
+/// The hires-fix refinement pass conditions on exactly one image: the upscaled first-pass render,
+/// passed as the single `Conditioning::Reference` (no multi-reference, no mask). Derived through
+/// [`lane_reference_count`] rather than written as a literal so it cannot drift from the rule the
+/// request scope grades against.
+///
+/// macOS-gated to match its only non-test caller (the MLX lane's admission declaration): on the
+/// parity/candle configurations an ungated helper used only from `cfg(macos)` code is dead.
+#[cfg(target_os = "macos")]
+fn hires_fix_reference_count() -> u32 {
+    lane_reference_count(true, 0, false)
+}
+
+/// The request-scope identity of the hires FIRST pass, derived from the admitted (final-pass)
+/// context.
+///
+/// Admission describes the heaviest pass — the upscaled refinement — because that is what sets the
+/// memory ceiling. The first pass renders at the BASE size with the caller's own conditioning, so
+/// running it under the admitted context hands the backend request scope a geometry the request does
+/// not match, and the scope refuses it (`request geometry … does not fit admitted …`) — which failed
+/// the first pass of every hires render on a scope-adopting provider. Only the geometry identity
+/// moves: the memory SELECTION is reused verbatim, since a strategy chosen for the larger pass is
+/// the conservative choice for the smaller one.
+fn hires_first_pass_context(
+    admitted: &gen_core::MemoryRunContext,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+) -> gen_core::MemoryRunContext {
+    let mut context = admitted.clone();
+    context.geometry.width = width;
+    context.geometry.height = height;
+    context.geometry.reference_count = reference_count;
+    context.has_reference = reference_count > 0;
+    context
+}
+
 /// Run the normal first pass followed by an optional high-resolution img2img refinement while
 /// keeping progress monotonic across both denoise schedules.
 #[allow(clippy::too_many_arguments)]
@@ -4786,6 +4859,14 @@ fn generate_one_with_hires(
         );
     };
 
+    let first_pass_context = memory_strategy_context.map(|context| {
+        hires_first_pass_context(
+            context,
+            width,
+            height,
+            lane_reference_count(reference.is_some(), multi_references.len(), edit_mask.is_some()),
+        )
+    });
     let combined_steps = steps.saturating_add(hires.steps);
     let mut first_progress = |progress| match progress {
         Progress::Step { current, .. } => on_progress(Progress::Step {
@@ -4816,7 +4897,7 @@ fn generate_one_with_hires(
         use_pid,
         text_style_gain,
         memory,
-        memory_strategy_context,
+        first_pass_context.as_ref(),
         enhance,
         preview.clone(),
         cancel,
@@ -6217,9 +6298,19 @@ async fn generate_stream(
     );
     let has_request_reference =
         identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
-    let reference_count = edit_refs.len().max(usize::from(
-        identity_init.is_some() || ideogram_edit_mask.is_some() || hires_fix.is_some(),
-    ));
+    // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
+    // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
+    // first hires pass renders at the base size with the caller's own conditioning and gets its own
+    // request-scope identity inside `generate_one_with_hires`.
+    let reference_count = if hires_fix.is_some() {
+        hires_fix_reference_count()
+    } else {
+        lane_reference_count(
+            identity_init.is_some(),
+            edit_refs.len(),
+            ideogram_edit_mask.is_some(),
+        )
+    };
     let mut memory_overlays = Vec::new();
     if has_request_reference {
         memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
@@ -6249,8 +6340,8 @@ async fn generate_stream(
         mode: request.mode.clone(),
         overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
         adapter_count,
-        has_reference: has_request_reference || hires_fix.is_some(),
-        reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
+        has_reference: reference_count > 0,
+        reference_count,
         use_pid,
         has_phases: false,
     };

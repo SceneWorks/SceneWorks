@@ -71,6 +71,10 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
 struct HiresProbeGenerator {
     descriptor: gen_core::ModelDescriptor,
     requests: std::sync::Mutex<Vec<GenerationRequest>>,
+    /// The memory-run context each pass opened, in pass order. Recorded so a test can grade the
+    /// DECLARED geometry of every pass against the request that pass actually sent — the exact
+    /// agreement the backend request scopes enforce.
+    contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
 }
 
 #[cfg(any(
@@ -90,6 +94,7 @@ impl HiresProbeGenerator {
                 required_components: &[],
             },
             requests: Default::default(),
+            contexts: Default::default(),
         }
     }
 }
@@ -105,6 +110,14 @@ impl Generator for HiresProbeGenerator {
 
     fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
         Ok(())
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        self.contexts.lock().unwrap().push(context.clone());
+        Ok(None)
     }
 
     fn generate(
@@ -205,6 +218,218 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             .filter(|event| matches!(event, Progress::Decoding))
             .count(),
         1
+    );
+}
+
+/// An admitted memory geometry that a pass's own request does not match is not a bookkeeping slip:
+/// the backend request scopes (`mlx-gen`'s `MlxRequestScopeCore::configure_request` and its candle
+/// twin) re-derive width/height/`image_reference_count` from the LIVE request and refuse anything
+/// that differs from the admitted geometry, and gen-core's shared safety check rejects a
+/// `has_reference` disagreeing with `reference_count > 0`.
+///
+/// Hires fix runs TWO passes under ONE admission: the base-size first pass, then the upscaled
+/// refinement. Admission describes the upscaled pass (it sets the memory ceiling), so running the
+/// first pass under that same context declared the WRONG width/height (and, with no request
+/// reference, the wrong count) and refused the first pass of every hires render on a scope-adopting
+/// provider. This grades what each pass DECLARED against what that same pass SENT, so neither side
+/// can be restated wrongly without the test failing.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    // The admission the lane makes for a hires job: the FINAL pass's geometry.
+    let admitted = gen_core::MemoryRunContext {
+        selection: gen_core::MemorySelection {
+            strategy: gen_core::MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier: gen_core::MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: None,
+                component_precision_floors: &[],
+            },
+        },
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: "test".to_owned(),
+        load_shape: gen_core::LoadShape::EagerMaterialization,
+        mode: gen_core::MemoryMode::TextToImage,
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width: 8,
+            height: 8,
+            batch: 1,
+            frames: 1,
+            reference_count: lane_reference_count(true, 0, false),
+        },
+        overlay: None,
+        budget: gen_core::MemoryBudget {
+            total_bytes: 1 << 40,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1 << 20,
+        cache_state: gen_core::MemoryCacheState::Cold,
+        evidence_revision: "test".to_owned(),
+    };
+
+    generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        // A plain text-to-image job: the FIRST pass carries no conditioning at all, while the
+        // admitted (final) geometry carries one reference. This is the case the old single-context
+        // wiring got wrong on both axes.
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        Some(&admitted),
+        &PromptEnhance::default(),
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("two-pass generation");
+
+    let requests = generator.requests.lock().unwrap();
+    let contexts = generator.contexts.lock().unwrap();
+    assert_eq!(requests.len(), 2, "hires fix runs exactly two passes");
+    assert_eq!(
+        contexts.len(),
+        requests.len(),
+        "every pass must open its own request scope"
+    );
+    for (pass, (request, context)) in requests.iter().zip(contexts.iter()).enumerate() {
+        assert_eq!(
+            (context.geometry.width, context.geometry.height),
+            (request.width, request.height),
+            "pass {} declared {}x{} but rendered {}x{}",
+            pass + 1,
+            context.geometry.width,
+            context.geometry.height,
+            request.width,
+            request.height
+        );
+        assert_eq!(
+            context.geometry.reference_count,
+            request.image_reference_count(),
+            "pass {} declared references={} but sent references={}",
+            pass + 1,
+            context.geometry.reference_count,
+            request.image_reference_count()
+        );
+        assert_eq!(
+            context.has_reference,
+            context.geometry.reference_count > 0,
+            "pass {}: gen-core rejects a has_reference/reference_count disagreement",
+            pass + 1
+        );
+        assert_eq!(
+            context.selection.strategy,
+            admitted.selection.strategy,
+            "pass {}: only the geometry identity may differ from the admitted selection",
+            pass + 1
+        );
+    }
+    // The final pass is the one admission was made for, and it is unchanged.
+    assert_eq!(contexts[1].geometry, admitted.geometry);
+}
+
+/// The generic lane's declared reference count must equal the count gen-core derives from the
+/// conditioning that lane really builds, for every shape it can build.
+///
+/// The old formula (`edit_refs.len().max(reference || mask || hires)`) treated a mask as an
+/// ALTERNATIVE to the source reference rather than an addition, so an Ideogram 4 inpaint/outpaint
+/// edit declared one reference and sent two. That is inert only for as long as its provider has not
+/// adopted the shared request scope; the moment it does, the render is refused.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn lane_reference_count_matches_the_conditioning_the_lane_builds() {
+    // Built inline rather than with the macOS-gated `control_fixture`: this gate must hold on the
+    // candle lane too, which compiles without it.
+    let image = Image {
+        width: 4,
+        height: 4,
+        pixels: vec![7; 4 * 4 * 3],
+    };
+    let reference = (image.clone(), 0.5);
+    /// `(single reference, multi-references, edit mask)` — one shape the lane can build.
+    type LaneCase<'a> = (Option<&'a (Image, f32)>, &'a [Image], Option<&'a Image>);
+    let cases: [LaneCase; 6] = [
+        // Plain text-to-image.
+        (None, &[], None),
+        // img2img / IP-Adapter init.
+        (Some(&reference), &[], None),
+        // Ideogram 4 edit: the source reference AND the inpaint / outpaint mask.
+        (Some(&reference), &[], Some(&image)),
+        // Boogu instruction edit, one and many.
+        (None, std::slice::from_ref(&image), None),
+        (None, &[image.clone(), image.clone(), image.clone()], None),
+        // A masked multi-reference edit — no family builds this today, but the count must hold.
+        (
+            None,
+            &[image.clone(), image.clone(), image.clone()],
+            Some(&image),
+        ),
+    ];
+
+    for (reference, multi_references, edit_mask) in cases {
+        let conditioning = build_lane_conditioning(reference, multi_references, edit_mask);
+        let request = GenerationRequest {
+            conditioning,
+            ..Default::default()
+        };
+        assert_eq!(
+            lane_reference_count(
+                reference.is_some(),
+                multi_references.len(),
+                edit_mask.is_some()
+            ),
+            request.image_reference_count(),
+            "declared count drifted from the conditioning (reference={}, multi={}, mask={})",
+            reference.is_some(),
+            multi_references.len(),
+            edit_mask.is_some()
+        );
+    }
+
+    // The hires refinement pass sends exactly one reference — the upscaled first-pass render.
+    assert_eq!(
+        lane_reference_count(true, 0, false),
+        GenerationRequest {
+            conditioning: build_lane_conditioning(Some(&reference), &[], None),
+            ..Default::default()
+        }
+        .image_reference_count()
     );
 }
 
@@ -10999,6 +11224,55 @@ fn build_control_conditioning_matches_legacy_shape() {
     assert!(
         matches!(cond[0], Conditioning::Depth { .. }),
         "depth uses Conditioning::Depth"
+    );
+}
+
+/// The MLX Krea pose-control lane's DECLARED request geometry must equal the geometry gen-core
+/// derives from the request that lane actually sends.
+///
+/// The declaration is not advisory: gen-core's shared memory-strategy safety check rejects
+/// `has_reference != (reference_count > 0)`, and the MLX request scope re-derives
+/// `GenerationRequest::image_reference_count()` at `configure_request` and refuses anything that
+/// differs from the admitted geometry. Declaring `references=0` while sending the pose
+/// `Conditioning::Control` (which gen-core charges as one image reference) failed EVERY pose render
+/// with `krea_2_turbo_control: request geometry 1024x1024x1 references=1 does not fit admitted
+/// 1024x1024x1 references=0`. Grading the declaration against `image_reference_count()` — rather than
+/// against a second hand-written constant — is what keeps the two from drifting apart again.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request() {
+    let inputs = krea_control_memory_inputs(1024, 1024, "image_generation".to_owned(), 0);
+
+    // The conditioning the lane builds for one pose: the pose `Control`, no identity init.
+    let conditioning = build_control_conditioning(
+        control_fixture(8, 8, [1, 2, 3]),
+        ControlKind::Pose,
+        KREA_CONTROL_DEFAULT_SCALE,
+        None,
+    );
+    let request = gen_core::GenerationRequest {
+        width: 1024,
+        height: 1024,
+        count: 1,
+        conditioning,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        inputs.reference_count,
+        request.image_reference_count(),
+        "the admitted reference count must equal what the MLX request scope re-derives from the \
+         pose request"
+    );
+    assert_eq!(
+        inputs.has_reference,
+        inputs.reference_count > 0,
+        "gen-core's shared safety check rejects a has_reference/reference_count disagreement"
+    );
+    assert_eq!(
+        (inputs.width, inputs.height, inputs.count),
+        (request.width, request.height, request.count),
+        "the admitted frame geometry must be the geometry the lane renders at"
     );
 }
 
