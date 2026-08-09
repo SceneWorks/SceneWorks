@@ -122,7 +122,7 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` | `mlx.rs:2724-2732` (`run`) — `MLX five-rung calibration does not implement provider "<id>"`; `mlx.rs:1560-1566` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` | `mlx.rs:2733-2740` (`run`) — `MLX five-rung calibration does not implement provider "<id>"`; `mlx.rs:1576-1586` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` |
 | `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Grep before you schedule:
@@ -132,8 +132,8 @@ grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
 
 Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
-on **both** MLX actions — `run` (`mlx.rs:2712-2723`) and `assess_batch`, where the check lives inside
-`validate_z_image_batch` (`mlx.rs:1583-1587`) so it fires before `runtime_macos::catalog()` is built.
+on **both** MLX actions — `run` (`mlx.rs:2733-2740`) and `assess_batch`, where the check lives inside
+`validate_z_image_batch` (`mlx.rs:1576-1586`) so it fires before `runtime_macos::catalog()` is built.
 Trust that message: it means the arm is missing, not that your environment is wrong.
 
 > **This was not true until sc-18104, and the old behaviour is worth knowing** because it may still be
@@ -342,12 +342,12 @@ SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx   # fixed; validated 
 SCENEWORKS_QWEN_IMAGE_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
 
-# memory-mlx-adapter — z_image_turbo   (mlx.rs:1013-1031)
+# memory-mlx-adapter — z_image_turbo   (mlx.rs:1063-1076)
 SCENEWORKS_Z_IMAGE_REPOSITORY=SceneWorks/z-image-turbo-mlx   # fixed; validated against Z_IMAGE_REPOSITORY
 SCENEWORKS_Z_IMAGE_REVISION=<exact artifact revision>
 SCENEWORKS_Z_IMAGE_ROOT=/abs/path/.../snapshots/<rev>/q4     # tier hardcoded q4
 
-# memory-mlx-adapter — krea_2_turbo_control   (mlx.rs:1645-1667)
+# memory-mlx-adapter — krea_2_turbo_control   (mlx.rs:1717-1735)
 SCENEWORKS_KREA_CONTROL_REPOSITORY=SceneWorks/krea-2-turbo-mlx  # validated against KREA_REPOSITORY
 SCENEWORKS_KREA_CONTROL_REVISION=<exact base artifact revision>
 SCENEWORKS_KREA_CONTROL_ROOT=/abs/path/.../snapshots/<rev>/q4   # tier hardcoded q4
@@ -412,7 +412,7 @@ Both capture workflows enforce that equality themselves and refuse the dispatch 
 **There are two spellings of the pin, and different tools read different ones.** The adapter's
 `INFERENCE_PIN` above is what the built binary stamps into its records;
 `scripts/inference-closure-digest.mjs` instead defaults `--revision` to the pin it parses from the
-workspace `Cargo.toml` (`inferencePinFromCargo`, `inference-closure-digest.mjs:670`). They agree today
+workspace `Cargo.toml` (`inferencePinFromCargo`, `inference-closure-digest.mjs:671`). They agree today
 — both read `40fa7583`, and `scripts/bump-inference.mjs` moves them in lockstep and asserts the
 constant is rewritten (`bump-inference.mjs:99,161`) — so this is a thing to know, not a thing to fix.
 Do not bump either by hand; use `bump-inference.mjs`. And keep this distinct from §7d's
@@ -769,11 +769,11 @@ simulating an `mlx:z_image_turbo` capture on `origin/main`, both ways (§7d):
 
 | test | assertion | evidence half only | + §7d bindings |
 | --- | --- | --- | --- |
-| `scripts/generate-memory-matrix.test.mjs:700` | `"no historical Z-Image capture may be promoted across an exact inference-pin change"` | 🔴 reds | (superseded by :653 below) |
-| `scripts/generate-memory-matrix.test.mjs:653` | `"historical bindings must not mask the pinned MLX provider contract"` | green | 🔴 reds |
-| `scripts/generate-memory-matrix.test.mjs:2439` | `"current evidence cannot promote through a historical exact manifest binding"` | **green** — it cannot red until a binding moves | 🔴 reds |
-| `tests/test_memory_matrix.py:147-148` | `{… for run in full_runs} == {"historical"}` and current count `== 0` | 🔴 reds | 🔴 reds |
-| `tests/test_memory_matrix.py:514/530` | `test_historical_records_remain_unverified_after_the_z_image_pin_advance` | 🔴 reds | 🔴 reds |
+| `scripts/generate-memory-matrix.test.mjs:717` | `"no historical Z-Image capture may be promoted across an exact inference-pin change"` | 🔴 reds | (superseded by :670 below) |
+| `scripts/generate-memory-matrix.test.mjs:670` | `"historical bindings must not mask the pinned MLX provider contract"` | green | 🔴 reds |
+| `scripts/generate-memory-matrix.test.mjs:2506` | `"current evidence cannot promote through a historical exact manifest binding"` | **green** — it cannot red until a binding moves | 🔴 reds |
+| `tests/test_memory_matrix.py:189-190` | `{… for run in full_runs} == {"historical"}` and current count `== 0` | 🔴 reds | 🔴 reds |
+| `tests/test_memory_matrix.py:531` | `test_historical_records_remain_unverified_after_the_z_image_pin_advance` | 🔴 reds | 🔴 reds |
 | `scripts/generate-memory-matrix.test.mjs` (`"the published summary re-derives from the evidence bundle and the closure ledger"`) | `summary.calibrationRunsByStatus` and `summary.currentCalibrationRuns`, recomputed from the bundle and `config/inference-provider-closures.json` | 🔴 reds on the status tally the moment a record lands | 🔴 reds until §8 regenerates |
 
 sc-18100 deleted the flux1/flux2 evidence one-shots, whose lane-specific `semantics === "historical"`
@@ -809,7 +809,7 @@ Verified on `origin/main` today: `9 passed in 19.16s`. Note the bare `python3.12
 `pytest` — the venv is not optional.
 
 How to handle a red: **relax the pin to the new truth, do not delete the assertion.** The comment
-above `tests/test_memory_matrix.py:147` explains why it is pinned as an exact set and count — "a bare
+above `tests/test_memory_matrix.py:189` explains why it is pinned as an exact set and count — "a bare
 `<= {"current", "historical"}` would accept any mixture, and a count alone would let one family's
 promotion mask another's demotion". Preserve that property: assert the exact new set and the exact
 new count for your lane, and leave every other family's pin untouched. Say in the PR body which pins
