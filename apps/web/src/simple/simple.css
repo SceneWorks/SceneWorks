@@ -576,6 +576,16 @@
   gap: 7px;
 }
 
+/* Built-in edit instructions under the Edit-tab prompt. Unlike .su-pill-row this wraps —
+   five recipes plus a label never fit one phone-width line. */
+.su-edit-templates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+}
+
 .su-pill-btn.active {
   border-color: var(--accent);
   background: var(--accent-soft);

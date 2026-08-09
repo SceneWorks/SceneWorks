@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { mountRoot, unmountRoot } from "../../testUtils/dom.js";
 import {
+  ImageEditorEditPanel,
   ImageEditorToolPanel,
   setImageEditorToolPanelRenderObserverForTests,
   useStableImageEditorToolPanelScope,
 } from "./ImageEditorToolPanel.jsx";
+import { EDIT_PROMPT_TEMPLATES } from "../../data/editPromptTemplates.js";
 
 let container;
 let root;
@@ -53,5 +55,90 @@ describe("ImageEditorToolPanel memo boundary", () => {
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(fitCalls).toEqual([200]);
+  });
+});
+
+describe("ImageEditorEditPanel quick edit instructions", () => {
+  const model = { id: "z_image_edit", name: "Z-Image-Edit" };
+
+  function editScope(overrides) {
+    return {
+      EDIT_OUTPUT_ASPECTS: [{ key: "match", label: "Match" }],
+      EditorLoraPanel: () => null,
+      FitModeControl: () => null,
+      MAX_EDIT_REFERENCES: 3,
+      StudioUpdateBadge: () => null,
+      StudioUpdateNotice: () => null,
+      aiOp: null,
+      assetUrl: () => "",
+      canMask: false,
+      clearMask: () => {},
+      createLoraDownloadJob: () => {},
+      createModelDownloadJob: () => {},
+      editAspect: "match",
+      editFitMode: "contain",
+      editGuidance: "",
+      editLora: null,
+      editLoraDownloadRequested: false,
+      editLoraInstalled: false,
+      editLoraRequiredMissing: false,
+      editLoraSelection: { selectedLoraIds: [], toggleLora: () => {}, weightFor: () => 1, setWeight: () => {} },
+      editModel: model.id,
+      editModels: [model],
+      editPrompt: "",
+      editSeed: "",
+      editorPickerLoras: [],
+      effectiveFitMode: (value) => value,
+      guidanceDefaultFromModel: () => null,
+      imageAssets: [],
+      maskActive: false,
+      maskBaseImage: null,
+      maskBrush: 40,
+      maskErase: false,
+      maskHasContent: () => false,
+      maskLines: [],
+      maskMode: false,
+      maskRefineRadius: 4,
+      maskSubTool: "brush",
+      multiRefCapable: false,
+      refAssetIds: [],
+      refineMask: () => {},
+      requestEditLoraDownload: () => {},
+      runEdit: () => {},
+      selectedEditLoras: [],
+      selectedEditModel: model,
+      setEditAspect: () => {},
+      setEditFitMode: () => {},
+      setEditGuidance: () => {},
+      setEditModel: () => {},
+      setEditPrompt: () => {},
+      setEditSeed: () => {},
+      setMaskBrush: () => {},
+      setMaskErase: () => {},
+      setMaskMode: () => {},
+      setMaskRefineRadius: () => {},
+      setMaskSubTool: () => {},
+      setRefAssetIds: () => {},
+      setRefPickerOpen: () => {},
+      setShowIncompatibleEditLoras: () => {},
+      showIncompatibleEditLoras: false,
+      smartSelectSupported: false,
+      updateOptionLabel: (entry) => entry.name,
+      ...overrides,
+    };
+  }
+
+  it("offers every built-in recipe and writes its full instruction into the box", async () => {
+    const setEditPrompt = vi.fn();
+    await act(async () => root.render(<ImageEditorEditPanel scope={editScope({ setEditPrompt })} />));
+
+    const pills = [...container.querySelectorAll(".ie-chip-row .ie-chip")];
+    expect(pills.map((pill) => pill.textContent)).toEqual(EDIT_PROMPT_TEMPLATES.map((template) => template.label));
+
+    await act(async () => {
+      pills.find((pill) => pill.textContent === "Fix colors")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(setEditPrompt).toHaveBeenCalledWith("correct the colors of this photo");
   });
 });

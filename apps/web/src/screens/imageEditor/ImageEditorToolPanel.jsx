@@ -1,4 +1,5 @@
 import React from "react";
+import { EditPromptTemplates } from "../../components/EditPromptTemplates.jsx";
 
 let renderObserverForTests = null;
 
@@ -73,6 +74,9 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
               value={editPrompt}
             />
           </div>
+          {/* Built-in edit recipes — the same five the studios offer, so the two Edit
+              surfaces stay in step. Each REPLACES the instruction (see the module note). */}
+          <EditPromptTemplates label="" onApply={setEditPrompt} variant="editor" />
         </div>
 
         {/* Managed image-edit LoRA (epic 10871, sc-11069): auto-applied for the user — a status note
