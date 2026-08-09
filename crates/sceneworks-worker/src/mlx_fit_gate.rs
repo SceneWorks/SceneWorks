@@ -655,8 +655,13 @@ type ClosureDigestLookup<'a> = &'a dyn Fn(&str, &str) -> Option<String>;
 #[derive(Clone, Debug)]
 struct VerifiedAdmissionCandidate {
     evidence: MemoryEvidence,
+    /// Reserve enforced on this live host and passed to MLX as an absolute process ceiling.
     foreign_reserve_bytes: u64,
-    required_host_bytes: u64,
+    /// Actionable static host boundaries under the captured reserve policy. The stale value uses
+    /// the selector's canonical widened peak rather than treating a current-host reserve sum as a
+    /// portable recommendation.
+    minimum_host_bytes: u64,
+    stale_minimum_host_bytes: u64,
     record_id: String,
     /// The provider closure digest this candidate's binding was measured under (sc-17774).
     closure_digest: String,
@@ -1282,10 +1287,18 @@ fn evidence_admission_route(
                     parity: MemoryParityContract::Exact,
                     parity_result: MemoryParityResult::Passed,
                 };
+                let foreign_reserve_bytes =
+                    envelope.foreign_reserve_for_host_bytes(budget.total_bytes);
+                let stale_peak_bytes = crate::memory_strategy::stale_widened_peak_bytes(
+                    gen_core::MemoryBackend::Mlx,
+                    envelope.peak_bytes,
+                );
                 evidence.push(VerifiedAdmissionCandidate {
                     evidence: memory_evidence,
-                    foreign_reserve_bytes: envelope.foreign_reserve_bytes,
-                    required_host_bytes: envelope.required_host_bytes(),
+                    foreign_reserve_bytes,
+                    minimum_host_bytes: envelope.required_host_bytes(),
+                    stale_minimum_host_bytes: envelope
+                        .required_host_bytes_for_peak(stale_peak_bytes),
                     record_id: record.id.clone(),
                     closure_digest: binding.query.inference_closure_digest.clone(),
                 });
@@ -1847,7 +1860,7 @@ fn verified_lower_alternative(
             let envelope = record.mlx_admission_envelope()?;
             let effective = budget.effective_bytes();
             let strategy = evidence_strategy(record.strategy.rung);
-            (envelope.required_host_bytes() <= budget.total_bytes
+            (envelope.fits_scaled_host_bytes(budget.total_bytes)
                 && envelope.peak_bytes <= effective)
                 .then_some(VerifiedGeometryAlternative {
                     geometry: binding.geometry,
@@ -2378,16 +2391,14 @@ fn evaluate_request_with_budget_using_bundle(
                 .evidence
                 .iter()
                 .map(|candidate| {
-                    // Same stale-aware grading as the pre-check above, so the refusal quotes the
-                    // requirement that was actually enforced.
+                    // Same stale-aware grading as the pre-check above, expressed as the smallest
+                    // host that satisfies the reserve policy. The current-host enforced sum is a
+                    // useful diagnostic but not a portable minimum: the reserve changes when the
+                    // host capacity changes.
                     if candidate.closure_digest == live_closure_digest {
-                        candidate.required_host_bytes
+                        candidate.minimum_host_bytes
                     } else {
-                        crate::memory_strategy::stale_widened_peak_bytes(
-                            gen_core::MemoryBackend::Mlx,
-                            candidate.evidence.predicted_peak_bytes,
-                        )
-                        .saturating_add(candidate.foreign_reserve_bytes)
+                        candidate.stale_minimum_host_bytes
                     }
                 })
                 .min()
@@ -3637,6 +3648,15 @@ fn weights_floor_load_admission(
     }
 }
 
+fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    let spec = spec.with_offload_policy(OffloadPolicy::Sequential);
+    if engine_id == "z_image_turbo" {
+        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+    } else {
+        spec
+    }
+}
+
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
 /// generator cache's cold-load path, before `crate::inference_runtime::load` allocates — never on a warm cache hit,
 /// so an already-resident model is never re-gated. Resolves the budget + on-disk component bytes,
@@ -3664,7 +3684,12 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
                 total_gb = (total_bytes as f64 / BYTES_PER_GIB).round() as i64,
                 text_encoder_gb = (te_bytes as f64 / BYTES_PER_GIB).round() as i64,
             );
-            Ok(spec.with_offload_policy(OffloadPolicy::Sequential))
+            let spec = with_selected_sequential_shape(engine_id, spec);
+            // Z-Image's shipped rung-4 evidence was captured under an independent deferred loader
+            // shape, while its lower rungs are eager. Production reaches both honestly by coupling
+            // the deferred shape only to the cold-load branch that selected Sequential residency.
+            // Resident hosts retain the eager shape and its four lower-rung bindings.
+            Ok(spec)
         }
         ResidencyOutcome::Reject {
             needed_gb,
@@ -4034,29 +4059,14 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
-    /// SC-16915 recaptured these measurements, so this test pins the opposite of what it originally
-    /// did: it asserted the bindings were historical, with the note "must remain historical until
-    /// they are recaptured on the new runtime". They have been, and every shipped Qwen binding is
-    /// current.
-    ///
-    /// sc-17774 retargets "current" from the inference pin to `mlx:qwen_image`'s own compile-closure
-    /// digest. Grading the pin made this red on EVERY bump, including a documentation-only commit or
-    /// a commit to a model Qwen shares no code with; grading the closure makes it red only when the
-    /// code these measurements describe actually moved, which is a true statement that the ladder
-    /// needs recapturing. `inference_revision` survives on the binding as capture provenance and is
-    /// deliberately not compared.
-    ///
-    /// The rest of the assertion is unweakened. It still requires the full five-rung bf16 ladder —
-    /// checked as a rung SET on the bf16 subset rather than as a total count, so adding the q8/q4
-    /// tiers cannot mask a dropped bf16 rung the way a bare `bindings.len()` would.
-    ///
-    /// What this test grades is the SHAPE of the shipped opt-in — one captured closure, the full
-    /// per-tier ladder — not its currency. Currency is a comparison against the live table and it
-    /// belongs where the consequence is observable, which is the two admission-route tests below.
-    /// Grading it here as well made this red whenever a shared `mlx-gen` crate moved, which says
-    /// nothing about whether the ladder is complete.
+    /// sc-18237: every shipped Qwen binding must describe a load shape the production route can
+    /// execute. Native Qwen is deliberately deferred under both Resident and Sequential policies;
+    /// q8 was re-captured under that exact materialization contract, while the old eager BF16/Q4
+    /// records remain historical corpus entries only.
+    /// This is deliberately mutation-sensitive: adding any eager binding, or reintroducing an
+    /// uncaptured tier, makes the production-shape assertion red.
     #[test]
-    fn shipped_qwen_manifest_carries_every_tier_ladder_at_one_captured_closure() {
+    fn shipped_qwen_bindings_are_producible_by_the_production_deferred_route() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -4070,24 +4080,18 @@ mod tests {
             .expect("Qwen calibration bindings are valid")
             .expect("Qwen declares exact MLX calibration bindings");
 
-        assert_eq!(
-            bindings.len(),
-            9,
-            "bf16 five-rung ladder plus q8 and q4 pairs"
-        );
+        assert_eq!(bindings.len(), 2, "the recaptured q8 pair only");
         assert!(
             !live_mlx_closure_digest("qwen_image").is_empty(),
             "qwen_image must be declared in config/inference-provider-closures.json; an undeclared \
              lane resolves to the fail-closed empty expectation, which would make every currency \
              comparison in this module discriminating for the wrong reason"
         );
-        // Read from the manifest, so this is "every binding agrees with every other" rather than a
-        // hex literal that has to be re-typed on each re-capture. `shipped_mlx_declared_closure_digest`
-        // already refuses a split opt-in, so a single stale row cannot hide inside a current ladder.
         let declared = shipped_mlx_declared_closure_digest("qwen_image");
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
                 && binding.provider == "qwen_image"
+                && binding.tier == "q8"
                 && binding.mode == "text_to_image"
                 && binding.overlay == "none"
                 && binding.geometry
@@ -4099,17 +4103,9 @@ mod tests {
                     }
                 && binding.query.inference_closure_digest == declared
         }));
-        // The load shape is a receipt axis, not a naming convention: rung 4 goes deferred and every
-        // other rung is eager, on every tier. A bundle where one shape covers all rows is the tell
-        // that the axis was derived from a fingerprint suffix instead of measured.
-        assert!(bindings.iter().all(|binding| {
-            binding.query.load_shape
-                == if binding.rung == StrategyRung::BoundedTransformerResidency {
-                    LoadShapeKey::DeferredMaterialization
-                } else {
-                    LoadShapeKey::EagerMaterialization
-                }
-        }));
+        assert!(bindings
+            .iter()
+            .all(|binding| { binding.query.load_shape == LoadShapeKey::DeferredMaterialization }));
 
         let rungs_for = |tier: &str| {
             let mut rungs = bindings
@@ -4121,23 +4117,64 @@ mod tests {
             rungs
         };
         assert_eq!(
-            rungs_for("bf16"),
-            [
-                "BoundedAttention",
-                "BoundedDecode",
-                "BoundedTransformerResidency",
-                "Resident",
-                "StagedResidency",
-            ]
+            rungs_for("q8"),
+            ["BoundedAttention", "BoundedTransformerResidency"]
         );
-        // `mlx.quantize` for qwen_image is 4, so the default install lands on q4. Before sc-16915
-        // the shipped opt-in was bf16-only and that install always reached the legacy estimator.
-        for tier in ["q8", "q4"] {
-            assert_eq!(
-                rungs_for(tier),
-                ["BoundedAttention", "BoundedTransformerResidency"],
-                "{tier} carries the two rungs the plan declares"
-            );
+        assert!(rungs_for("bf16").is_empty());
+        assert!(rungs_for("q4").is_empty());
+    }
+
+    #[test]
+    fn every_shipped_audited_mlx_binding_has_a_producible_production_load_shape() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin model manifest parses");
+        let models = manifest["models"].as_array().expect("models array");
+
+        let eager = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")));
+        let qwen_shape = apply_residency_policy(
+            eager
+                .clone()
+                .with_load_shape(gen_core::LoadShape::DeferredMaterialization),
+            "qwen_image",
+        )
+        .expect("production Qwen load policy")
+        .load_shape;
+        let z_resident_shape = eager.load_shape;
+        let z_sequential_shape =
+            with_selected_sequential_shape("z_image_turbo", eager.clone()).load_shape;
+        let krea_shape = eager.load_shape;
+
+        for model_id in ["qwen_image", "z_image_turbo", "krea_2_turbo"] {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("shipped {model_id} manifest entry"));
+            let bindings = MlxCalibrationBinding::from_manifest(model)
+                .unwrap_or_else(|error| panic!("{model_id} bindings parse: {error}"))
+                .unwrap_or_else(|| panic!("{model_id} declares audited MLX bindings"));
+            for binding in bindings {
+                let actual =
+                    crate::memory_strategy::load_shape_from_receipt(binding.query.load_shape);
+                let expected = match (binding.provider.as_str(), binding.rung) {
+                    ("qwen_image", _) => qwen_shape,
+                    ("z_image_turbo", StrategyRung::BoundedTransformerResidency) => {
+                        z_sequential_shape
+                    }
+                    ("z_image_turbo", _) => z_resident_shape,
+                    ("krea_2_turbo_control", _) => krea_shape,
+                    (provider, rung) => {
+                        panic!("audited model exposed unexpected binding {provider}:{rung:?}")
+                    }
+                };
+                assert_eq!(
+                    actual, expected,
+                    "{model_id} {:?} binding names a shape no production cold-load branch produces",
+                    binding.rung
+                );
+            }
         }
     }
 
@@ -4147,14 +4184,9 @@ mod tests {
     /// two real artefacts have drifted apart — which is exactly the state this story had to repair.
     /// This one reads both real files and nothing else.
     ///
-    /// Driven over EVERY shipped tier, not just bf16. `packaged_admission_route` filters candidates
-    /// by `binding.tier == plan_tier_key(plan.tier)`, so a bf16-only spec never even considers the
-    /// q8/q4 bindings — asserting `path == Evidence` on bf16 alone would leave 8 of the 9 qwen
-    /// bindings free to lose their backing record with the test still green. `mlx.quantize` for
-    /// qwen_image is 4, so q4 is the tier a default install actually reaches.
-    ///
-    /// The count assertion is what makes a dropped record fail: `path == Evidence` only needs the
-    /// candidate list to be non-empty, so one surviving rung would mask the loss of every other.
+    /// The manifest now ships only the q8 pair re-captured under the production deferred route.
+    /// BF16/Q4 continue through the estimate ladder until production-shaped measurements exist.
+    /// The count assertion makes a dropped q8 record fail rather than hiding behind its sibling.
     ///
     /// sc-17774 split this into the two questions it had been conflating. AGREEMENT — do the two
     /// shipped artefacts describe the same measurements — is graded at the closure they were both
@@ -4185,11 +4217,10 @@ mod tests {
         let declared = shipped_mlx_declared_closure_digest("qwen_image");
         let live = live_mlx_closure_digest("qwen_image");
 
-        for (tier, quant, expected_rungs) in [
-            ("bf16", None, 5_usize),
-            ("q8", Some(gen_core::Quant::Q8), 2),
-            ("q4", Some(gen_core::Quant::Q4), 2),
-        ] {
+        let tier = "q8";
+        let quant = Some(gen_core::Quant::Q8);
+        let expected_rungs = 2_usize;
+        {
             // Take the request identity from the opt-in itself rather than restating it, so the
             // test cannot drift from the manifest it is checking.
             let binding = calibrations
@@ -4308,18 +4339,18 @@ mod tests {
         // Mutation check for the axis this story exists to restore. Asserting only the route above
         // is a FALSE GREEN for `loadShape`: the route matches whichever binding fits the request,
         // so corrupting one cell's shape just selects a different cell and still reaches Evidence.
-        // Flip EVERY declared shape and the whole opt-in must stop matching — the receipts say
-        // which cells were measured eager and which deferred, and the two are not interchangeable.
+        // Flip EVERY declared shape and the whole opt-in must stop matching — these q8 receipts say
+        // deferred, and an eager claim is not interchangeable.
         //
         // Driven at `declared`, not at the live closure. Once the two diverge the live route is
         // ALREADY `Legacy`/`StaleIdentity` for currency reasons, so a mutation graded there proves
         // nothing about the load-shape axis — the assertion would pass with the mutation reverted.
-        let bf16 = calibrations
+        let q8 = calibrations
             .iter()
-            .find(|item| item.get("tier").and_then(Value::as_str) == Some("bf16"))
-            .expect("bf16 binding");
+            .find(|item| item.get("tier").and_then(Value::as_str) == Some("q8"))
+            .expect("q8 binding");
         let text = |key: &str| {
-            bf16.get(key)
+            q8.get(key)
                 .and_then(Value::as_str)
                 .unwrap_or_else(|| panic!("binding is missing {key}"))
                 .to_owned()
@@ -4341,8 +4372,9 @@ mod tests {
             });
         }
         let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
-            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/bf16",
-        )));
+            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/q8",
+        )))
+        .with_quant(gen_core::Quant::Q8);
         let mut inputs = fixture_inputs(1024, 1024);
         inputs.overlay = None;
         let mutated_route = packaged_admission_route(
@@ -4358,7 +4390,7 @@ mod tests {
                         variant: text("artifactVariant"),
                         fingerprint: text("resolvedPathFingerprint"),
                     },
-                    fixed_artifact_tier: Some("bf16".to_owned()),
+                    fixed_artifact_tier: Some("q8".to_owned()),
                 }),
             ),
             &inputs,
@@ -5920,7 +5952,7 @@ mod tests {
         let mut exact_896 = inputs.clone();
         exact_896.width = 896;
         exact_896.height = 896;
-        let message = evaluate_request_with_budget_using_bundle(
+        let exact = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &exact_896,
@@ -5933,11 +5965,14 @@ mod tests {
             Some(&packaged_bundle()),
             Some(&packaged_krea_closure_lookup),
         )
-        .expect_err("the exact 896 cell exceeds 83 GiB including its captured foreign reserve")
-        .to_string();
-        assert!(
-            message.contains("current verified alternative: 768x768"),
-            "a packaged exact-cell refusal must retain its fitting lower record: {message}"
+        .expect("the exact 896 cell fits once its 128 GiB-host reserve is normalized to 83 GiB");
+        assert_eq!(
+            exact.context.selection.strategy,
+            MemoryStrategy::BoundedDecode
+        );
+        assert_eq!(
+            exact.context.evidence_revision, "imc-2cd840a85ce33b4f22a9",
+            "host normalization must admit the exact verified cell, not silently demote to estimates"
         );
 
         // A loaded provider whose calibration identity DRIFTED from the packaged records must not
@@ -7200,9 +7235,12 @@ mod tests {
             Some(&fixture_closure_lookup),
         )
         .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
-        assert!(unfit
-            .to_string()
-            .contains("smallest verified MLX host boundary"));
+        let unfit = unfit.to_string();
+        assert!(unfit.contains("smallest verified MLX host boundary"));
+        assert!(
+            unfit.contains("needs at least 8.00 GiB"),
+            "the refusal must quote the static proportional boundary, not the 7.25 GiB reserve sum evaluated only at this 6 GiB host: {unfit}"
+        );
     }
 
     #[test]
@@ -9834,6 +9872,50 @@ mod tests {
     }
 
     #[test]
+    fn capture_host_reserve_scales_to_48_gib_without_erasing_the_stale_margin() {
+        use sceneworks_core::memory_calibration::MlxAdmissionEnvelope;
+
+        let capture_host = gib_to_bytes(128.0);
+        let envelope = MlxAdmissionEnvelope {
+            peak_bytes: gib_to_bytes(16.41),
+            observed_non_reclaimable_wired_bytes: gib_to_bytes(15.0),
+            capture_host_bytes: capture_host,
+            foreign_reserve_bytes: gib_to_bytes(46.93),
+        };
+        let live_host = gib_to_bytes(48.0);
+        assert!(
+            envelope
+                .peak_bytes
+                .saturating_add(envelope.foreign_reserve_bytes)
+                > live_host,
+            "the old absolute 128 GiB-host reserve reproduces the false 48 GiB refusal"
+        );
+        assert!(
+            envelope.required_host_bytes() <= live_host,
+            "the true static boundary must agree that this candidate can fit below 48 GiB"
+        );
+        let live_reserve = envelope.foreign_reserve_for_host_bytes(live_host);
+        let stale_peak = crate::memory_strategy::stale_widened_peak_bytes(
+            gen_core::MemoryBackend::Mlx,
+            envelope.peak_bytes,
+        );
+        assert!(
+            stale_peak.saturating_add(live_reserve) <= live_host,
+            "the stale widening remains charged after host-capacity normalization"
+        );
+        let process_limit = live_host.saturating_sub(live_reserve);
+        assert!(
+            stale_peak <= process_limit,
+            "the request remains below the absolute MLX process limit used for OOM containment"
+        );
+        assert_eq!(
+            live_reserve,
+            18_896_513_925,
+            "46.93 GiB reserved on 128 GiB scales, conservatively rounded up, to 17.59875 GiB on 48 GiB"
+        );
+    }
+
+    #[test]
     fn packaged_bundle_without_an_exact_record_is_a_normal_no_record_reason() {
         // The packaged evidence is current for schema v4 / ABI 3. An uncovered fixture therefore
         // degrades to the legacy path with the precise `NoRecord` reason, not bundle drift.
@@ -11476,6 +11558,43 @@ mod tests {
     #[test]
     fn engine_supports_sequential_is_false_for_an_unregistered_id() {
         assert!(!engine_supports_sequential("no_such_engine_xyz"));
+    }
+
+    #[test]
+    fn production_residency_policies_materialize_each_provider_under_its_bound_shape() {
+        let eager = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")));
+        let z_image = with_selected_sequential_shape("z_image_turbo", eager.clone());
+        assert_eq!(z_image.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            z_image.load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+            "the shipped Z-Image rung-4 binding must be producible by the production cold-load route"
+        );
+
+        let qwen_resident = eager
+            .clone()
+            .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+        let qwen_resident = apply_residency_policy(qwen_resident, "qwen_image")
+            .expect("production deferred Qwen resident route");
+        assert_eq!(qwen_resident.offload_policy, OffloadPolicy::Resident);
+        assert_eq!(
+            qwen_resident.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+        let qwen_sequential = with_selected_sequential_shape("qwen_image", qwen_resident.clone());
+        assert_eq!(qwen_sequential.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            qwen_sequential.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+
+        let krea = with_selected_sequential_shape("krea_2_turbo_control", eager);
+        assert_eq!(krea.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            krea.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "Krea's shipped bounded-decode bindings remain on its production eager route"
+        );
     }
 
     /// Candle's sc-12130 twin of the macOS registry sweep above. These are the generic generator ids that
