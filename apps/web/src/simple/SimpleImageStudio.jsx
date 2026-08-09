@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
+import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
@@ -331,6 +332,9 @@ export function SimpleImageStudio() {
           placeholder="Describe the image you want…"
           value={prompt}
         />
+        {/* Edit tab only: the built-in edit recipes. Text mode has the Style strip for the
+            same job; an instruction like "deblur this image" means nothing to text-to-image. */}
+        {mode === "edit_image" ? <EditPromptTemplates onApply={setPrompt} variant="simple" /> : null}
         {refineOpen ? (
           <RefinePanel
             blurb="Rewrite this prompt with richer detail using the Anubis-8B refiner."
