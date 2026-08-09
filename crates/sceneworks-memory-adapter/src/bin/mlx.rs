@@ -332,14 +332,20 @@ mod tests {
     /// — would drop a live lane into the refusal arm permanently, and `mlx:qwen_image` alone carries
     /// 9 authoritative plan entries and 41 evidence records.
     ///
-    /// This must go through `run` to mean anything. Asserting the constants equal string literals
-    /// looks like a guard and is not one: it never exercises dispatch, so it cannot see a mis-keyed
-    /// match arm. Dispatch is cheap to probe here — each arm rejects this minimal request on a
-    /// missing field long before any env read, catalog build or weight load, so the assertion is on
-    /// WHICH complaint comes back, not on success.
+    /// Two properties are necessary (sc-18250):
+    ///
+    ///   1. dispatch is probed with LITERAL provider ids, exactly the strings the plan carries, so a
+    ///      corrupted constant or mis-keyed match arm is caught by the refusal complaint leaking
+    ///      through;
+    ///   2. the constants are pinned to those same literals, so an arm's internal use of its
+    ///      constant cannot drift from the id dispatch routes on.
+    ///
+    /// This must go through `run` to mean anything. Dispatch is cheap to probe here — each arm
+    /// rejects this minimal request on a missing field long before any env read, catalog build or
+    /// weight load, so the assertion is on WHICH complaint comes back, not on success.
     #[test]
     fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
-        for provider in [QWEN_PROVIDER, Z_IMAGE_PROVIDER, KREA_PROVIDER] {
+        for provider in ["qwen_image", "z_image_turbo", "krea_2_turbo_control"] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
                 .expect_err("the minimal request is incomplete, so every arm must complain");
@@ -348,6 +354,9 @@ mod tests {
                 "{provider} is wired but dispatch refused it — a match key is mis-typed: {error}"
             );
         }
+        assert_eq!(QWEN_PROVIDER, "qwen_image");
+        assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
+        assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
     }
 
     #[test]
@@ -2862,7 +2871,7 @@ mod z_image_reuse_tests {
     /// the new check cannot be satisfied by refusing everything.
     #[test]
     fn the_batch_action_still_accepts_the_z_image_provider() {
-        let batch = foreign_five_rung_batch(Z_IMAGE_PROVIDER);
+        let batch = foreign_five_rung_batch("z_image_turbo");
         let planned =
             validate_z_image_batch(&batch).expect("the Z-Image batch must still validate");
         assert_eq!(planned.len(), 5);
