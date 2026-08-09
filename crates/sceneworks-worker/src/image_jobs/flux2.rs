@@ -149,6 +149,13 @@ pub(crate) fn flux2_edit_engine_id(model: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether the edit provider owns its request-time memory safety instead of flowing through the
+/// generic MLX estimate selector. FLUX.2 Dev has a calibrated multi-reference safety contract;
+/// the Klein edit variants do not use that provider-specific branch.
+pub(crate) fn flux2_edit_uses_provider_memory_safety(engine_id: &str) -> bool {
+    engine_id == "flux2_dev_edit"
+}
+
 // `MAX_EDIT_REFERENCES` / `edit_reference_ids` moved to base.rs (sc-8946, F-144): shared by the
 // FLUX.2 / SenseNova-via-grouping edit lanes, so they live with the other shared edit helpers.
 
@@ -487,7 +494,7 @@ async fn generate_flux2_edit_stream(
     // The provider owns the final multi-reference memory-safety decision. Resolve the worker-owned
     // live total once on the async side; each concrete conditioning set below supplies its actual
     // reference count (including the pose skeleton + identity-reference pair).
-    let use_provider_memory_safety = engine_id == "flux2_dev_edit";
+    let use_provider_memory_safety = flux2_edit_uses_provider_memory_safety(engine_id);
     let total_unified_memory_gb = if use_provider_memory_safety {
         crate::gpu::total_unified_memory_gb().await
     } else {
@@ -693,7 +700,7 @@ const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
 /// presence is NOT part of the gate: they are fetched on first use in the stream (a missing checkpoint
 /// downloads, then errors loudly only on a real failure — never silently drops the poses).
 fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model == "flux2_dev"
+    mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX2_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))

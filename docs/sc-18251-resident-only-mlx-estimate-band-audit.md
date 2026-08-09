@@ -2,90 +2,94 @@
 
 ## Result
 
-At the shipped manifest sizes, pinned inference revision, and exact pinned control-branch sizes, the
-1.10x MLX estimate margin changes admission at the requested 48/64/96/128 GiB host sizes only for
-these resident-only loaded-provider configurations:
+At the shipped manifest sizes and pinned inference revision, the 1.10x MLX estimate margin changes
+admission at the requested 48/64/96/128 GiB host sizes only for these two source-derived
+Resident-only configurations:
 
 | Provider | Tier | Host | Shipped assets | Incremental budget after assets + 2 GiB legacy reserve | Raw incremental estimate | 1.10x estimate |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `chroma1_base` + FLUX.1 control branch | bf16 | 48 GiB | 29.593 GiB | 16.407 GiB | 16.000 GiB (fits) | 17.600 GiB (refuses) |
-| `chroma1_flash` + FLUX.1 control branch | bf16 | 48 GiB | 29.593 GiB | 16.407 GiB | 16.000 GiB (fits) | 17.600 GiB (refuses) |
-| `chroma1_hd` + FLUX.1 control branch | bf16 | 48 GiB | 29.593 GiB | 16.407 GiB | 16.000 GiB (fits) | 17.600 GiB (refuses) |
-| `sd3_5_large` (when its exact calibrated artifact/optimized legs are unavailable) | q8 | 48 GiB | 29.102 GiB | 16.898 GiB | 16.000 GiB (fits) | 17.600 GiB (refuses) |
-| `sd3_5_large_turbo` (resident-only at this pin) | q8 | 48 GiB | 29.094 GiB | 16.906 GiB | 16.000 GiB (fits) | 17.600 GiB (refuses) |
+| `sd3_5_large` | q8 | 48 GiB | 29.102 GiB | 16.898 GiB | 16.000 GiB (fits) | 17.600 GiB (refuses) |
+| `sd3_5_large_turbo` | q8 | 48 GiB | 29.094 GiB | 16.906 GiB | 16.000 GiB (fits) | 17.600 GiB (refuses) |
 
-There are no flips at 64, 96, or 128 GiB among the audited configurations. In particular,
-`flux2_dev_edit` q4 on a 48 GiB host is **not** a flip: the earlier audit compared its full estimate
-to all 48 GiB and omitted the legacy reserve and post-load accounting. It is also served by the
-provider-owned safety path in `image_jobs/flux2.rs`, not by the generic MLX request selector audited
-here.
+There are no flips at 64, 96, or 128 GiB. The earlier Chroma flips were impossible configurations:
+Chroma has no strict-control lane, and its base providers cannot be combined with the FLUX.1 Dev
+control checkpoint. FLUX.1 Schnell and every FLUX.2 Klein base/edit variant likewise have no strict
+control checkpoint.
+
+Strict FLUX control exists only for `flux_dev` and `flux2_dev`. Production routes them to the
+dedicated `flux1_dev_control` and `flux2_dev_control` providers, respectively. Those real control
+routes remain in the audit and do not flip at the tested host sizes.
+
+`flux2_dev_edit` is also not part of this generic estimate-band result. Production sends that route
+through the provider-owned calibrated multi-reference safety path in `image_jobs/flux2.rs`.
 
 ## Production accounting
 
 The executable audit is
 `mlx_fit_gate::tests::shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path`.
-It uses the production seams rather than treating physical host capacity as the selector budget:
+It uses the same accounting seams as the production selector:
 
-1. `live_request_budget` records the physical host total and the 2 GiB legacy foreign-resident
+1. `live_request_budget` records physical host capacity and the 2 GiB legacy foreign-resident
    reserve.
-2. After load, provider assets remain in `committed_bytes`.
-3. The request gate credits the same loaded provider assets out of the modeled full peak.
+2. Loaded provider assets remain in `committed_bytes`.
+3. The request gate credits those same loaded assets out of the modeled full peak.
 4. `CandidateBasis::EstimateFloor` widens the remaining incremental estimate by
    `MLX_ESTIMATE_MARGIN` (0.10).
 
-For the ordinary unanchored 1024x1024 routes, including the compatibility-default Boogu, Ideogram,
-and FLUX.2-dev providers, the incremental raw estimate is 16 GiB: the remaining
-2 GiB fixed OS/app allowance plus the generic 14 GiB activation transient. Thus a 48 GiB SD3 q8 load
-has roughly 16.9 GiB left after its assets and the legacy reserve: 16 GiB fit before the epic, while
-17.6 GiB does not. The Chroma bf16 rows have roughly 16.4 GiB left after adding the exact 3.988 GiB
-FLUX.1 control branch to the shipped base assets, so they cross the same band. The audit creates a
-sparse file at the exact checkpoint length and lets `MlxRequestPlan::for_spec_and_manifest`'s shared
-production core discover it; the control is not a zero-byte marker or hand-added arithmetic.
+For the ordinary unanchored 1024x1024 routes, the incremental raw estimate is 16 GiB: the remaining
+2 GiB fixed OS/app allowance plus the generic 14 GiB activation transient. A 48 GiB SD3 q8 load has
+about 16.9 GiB left after assets and the legacy reserve. The former 16 GiB estimate fit; the current
+17.6 GiB estimate does not.
 
-Lens uses a different production rule. The clean unmeasured Base q8/bf16 and Turbo q4/q8/bf16 cells
-are included. Packed q4/q8 remain disk-derived with the generic activation fallback. Bf16 retains
-the provider's 30.07 GiB materialized text-encoder footprint (17.241 GiB above its three MXFP4 source
-shards) and the architecture-specific 29.88 GiB activation transient. None of those five cells lands
-inside the 10% band at the audited host sizes.
+The audit builds sparse artifacts at each exact shipped logical size, queries provider footprint and
+1024x1024 activation facts from the pinned runtime registry, constructs the production
+`MlxRequestPlan`, and calls the production request selector. Control bytes are discovered only after
+the production router has resolved a dedicated strict-control provider; they are never injected into
+a base-provider contract.
 
-## Completeness
+## Source-bound inventory
 
-The audit reads the shipped `estimatedSizeBytes`/`diskSizeBytes` values directly from
-`config/manifests/builtin.models.jsonc`, injects the exact provider-owned activation and Lens
-footprint facts exported by the pinned inference sources, and evaluates all 51 resident-only tier
-routes at 48/64/96/128 GiB. The injected seam is the platform-neutral core of the production request
-planner: macOS obtains the same facts from its registry, while the default Linux workspace (which
-intentionally has an empty media registry) runs the complete audit deterministically.
+The audit derives 35 Resident-only route/tier cells from these sources:
 
-The three Boogu downloads do not carry a `variant` field. Their production tier comes from each
-manifest model's `mlx.quantize: 8`, so the audit scores them as the shipped Q8 artifacts instead of
-silently treating them as bf16. Ideogram Turbo's manifest sizes already include its load-time Turbo
-LoRA where shipped, and those complete artifact sizes flow through the same filesystem-backed
-production planner core as every other route. The six compatibility-default providers have no
-provider activation anchor at the pinned inference revision, so they correctly use the generic
-14 GiB activation transient plus the fixed 2 GiB allowance.
+- shipped image entries and tier sizes in `config/manifests/builtin.models.jsonc`;
+- base providers from production `MODEL_TABLE` resolution;
+- edit providers from the production FLUX.2 edit router;
+- strict-control providers from the production FLUX control router used by both availability arms;
+- provider existence, footprint, activation facts, and strategy contracts from the pinned runtime
+  registry;
+- manifest strategy implementations for tier bindings whose deliberately sparse fixture cannot
+  reproduce a full turnkey component tree; and
+- the production measured-load-shape seam, which keeps base Lens q4 on its exact measured contract
+  instead of misclassifying it as Resident-only.
 
-| Family / routes | Shipped asset range | Resident-only condition | Band result |
+The resulting inventory is:
+
+| Family / routes | Resident-only cells | Why they remain in the estimate audit | Band result |
 | --- | ---: | --- | --- |
-| Chroma: `chroma1_base`, `chroma1_flash`, `chroma1_hd` | 18.07-29.59 GiB including the 3.988 GiB control branch | a control overlay disables conditional optimized legs | all three bf16 variants flip at 48 GiB |
-| SD3: `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` | 22.55-36.13 GiB | Turbo/Medium lack exact calibration; Large also fails closed when its exact artifact or clean/streamable conditions are absent | q8 Large and Large-Turbo flip at 48 GiB only |
-| Boogu: `boogu_image`, `boogu_image_turbo`, `boogu_image_edit` | 21.775 GiB | the pinned providers have no adopted memory contract and use the worker's Resident-only compatibility default | no flips |
-| Ideogram: `ideogram_4`, `ideogram_4_turbo` | 14.343-51.000 GiB | the pinned providers have no adopted memory contract and use the worker's Resident-only compatibility default | no flips |
-| FLUX.1: `flux1_schnell`, `flux1_dev` | 12.94-35.42 GiB including the 3.988 GiB control branch | a control overlay disables conditional optimized legs | no flips |
-| FLUX.2 dev: `flux2_dev` | 31.292-105.239 GiB | the base provider has no adopted memory contract and uses the worker's Resident-only compatibility default | no flips |
-| FLUX.2 Klein: base/edit/KV provider routes | 24.67-39.89 GiB including the 7.667 GiB control branch | a control overlay disables conditional optimized legs; a non-adopting registered route uses the worker's Resident-only compatibility contract | no flips |
-| Lens: clean Base q8/bf16 and Turbo q4/q8/bf16 | 20.33-45.79 GiB after bf16 materialization | entry/tier cross-products are unmeasured; Turbo bf16's optimized contract additionally requires Sequential | no flips |
+| SD3: `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` base | 9 | the loaded cells expose no implemented optimized strategy at this pin | Large q8 and Large-Turbo q8 flip at 48 GiB only |
+| Boogu: base, turbo, edit | 3 | registered providers use the compatibility Resident contract | no flips |
+| Ideogram: base and turbo | 6 | registered providers use the compatibility Resident contract | no flips |
+| FLUX.1: `flux_dev` strict control | 3 | only the dedicated control provider is Resident-only; Schnell has no control route | no flips |
+| FLUX.2 Dev: base and strict control | 6 | base and the dedicated control provider are Resident-only; Dev edit uses provider-owned safety | no flips |
+| FLUX.2 Klein: KV edit | 3 | this routed edit provider uses the compatibility Resident contract; no Klein route has a control checkpoint | no flips |
+| Lens: base q8/bf16 and Turbo q4/q8/bf16 | 5 | these entry/tier cells lack an applicable implemented optimized contract; base Lens q4 is measured and excluded | no flips |
 
-`shipped_resident_only_mlx_inventory_is_source_bound` is the source-bound completeness gate. On
-macOS it expands the independent product-surface list through the shipped manifest tiers, production
-`MODEL_TABLE`, production FLUX.2 edit router, and pinned runtime registry/contracts, then requires the
-executable audit to equal that deduplicated 51-cell inventory exactly. It validates both adopted and
-compatibility-default providers, binds activation and Lens materialization facts to the registry,
-and still discovers newly shipped compatibility-default base routes automatically.
-`resident_only_audit_inventory_rejects_flux1_duplicate_drop_mutation` pins the former loophole: an
-exact duplicate FLUX.1 dev row cannot replace the non-flipping schnell row while preserving a green
-cardinality/flip summary. The custom `flux2_dev_edit` safety path remains outside the generic
-selector seam, while the generic `flux2_dev` base provider is explicitly included.
+Chroma, clean FLUX.1 base, and the remaining FLUX.2 Klein base/edit cells resolve to implemented
+optimized contracts and are filtered out before the Resident-only walk. The three Boogu downloads
+have no `variant`; their manifest `mlx.quantize: 8` supplies the shipped q8 tier.
+
+## Mutation coverage
+
+`resident_only_audit_rejects_impossible_control_routes_and_keeps_real_ones` injects the prior bad
+strict-control assumptions for all three Chroma entries, FLUX.1 Schnell, and the FLUX.2 Klein
+base/KV/True-V2 entries. Every mutation must fail closed at the production control router. The same
+test proves that:
+
+- `flux_dev` resolves to `flux1_dev_control` with the exact FLUX.1 checkpoint size;
+- `flux2_dev` resolves to `flux2_dev_control` with the exact FLUX.2 checkpoint size;
+- no other provider receives nonzero control bytes;
+- base Lens q4 remains excluded by its measured contract; and
+- `flux2_dev_edit` remains excluded from the generic selector audit.
 
 ## Source values
 
@@ -93,9 +97,8 @@ selector seam, while the generic `flux2_dev` base provider is explicitly include
 - Generic activation/fixed decomposition: `mlx_fit_gate::{HEADROOM_GB, OS_APP_RESERVE_GB}`.
 - Estimate widening: `ladder_margin_policy::MLX_ESTIMATE_MARGIN`.
 - Shipped assets: `config/manifests/builtin.models.jsonc`.
-- FLUX.1 control: `Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0` at the pinned
-  `5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5` revision, exact checkpoint size 4,281,779,224 bytes.
-- FLUX.2 control: `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` at the pinned
-  `b3dcd7836a0e926248dac3ccba8fc0853495764b` revision, exact checkpoint size 8,232,506,680 bytes.
-- Provider activation anchors and Lens load-exact footprint: pinned `mlx-gen-catalog` and
-  `mlx-gen-lens` sources at inference revision `40fa7583a01974617e2a7275052d6d446688c956`.
+- FLUX.1 control: `Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0` at revision
+  `5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5`, exact checkpoint size 4,281,779,224 bytes.
+- FLUX.2 control: `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` at revision
+  `b3dcd7836a0e926248dac3ccba8fc0853495764b`, exact checkpoint size 8,232,506,680 bytes.
+- Provider facts and contracts: the pinned SceneWorks inference revision.

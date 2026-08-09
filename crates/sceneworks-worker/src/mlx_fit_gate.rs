@@ -7967,190 +7967,24 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct ResidentOnlyAuditRoute {
-        manifest_id: &'static str,
-        provider_id: &'static str,
-        /// A real filesystem-backed control branch used to make the conditional Chroma/FLUX
-        /// contracts resident-only. Zero means the shipped clean route is already resident-only.
-        control_bytes: u64,
-        /// Provider-owned 1024² activation anchor exported by the pinned MLX catalog. `None` means
-        /// the production consumer fallback applies.
-        activation_anchor_bytes: Option<u64>,
-        /// Clean shipped tiers whose loaded provider contract is resident-only. An empty slice means
-        /// every inference tier in the manifest is audited (the control overlay closes optimized
-        /// legs for conditional routes).
-        resident_only_tiers: &'static [&'static str],
-    }
-
-    // Exact LFS object sizes for the pinned control branches used by the shipped FLUX.1/FLUX.2
-    // strict-control routes. The audit materializes sparse files with these logical lengths, so the
-    // production `weights_source_bytes` seam prices a real non-zero overlay without downloading it.
+    // Exact LFS object sizes for the two control checkpoints the production FLUX router can actually
+    // select. The audit creates sparse files with these logical lengths so the production
+    // `weights_source_bytes` seam prices the real overlay without downloading it.
+    #[cfg(target_os = "macos")]
     const FLUX1_CONTROL_BYTES: u64 = 4_281_779_224;
+    #[cfg(target_os = "macos")]
     const FLUX2_CONTROL_BYTES: u64 = 8_232_506_680;
     // The pinned Lens bf16 turnkeys share this exact three-shard MXFP4 encoder on disk. The provider
-    // publishes a 30.07 GiB load-exact footprint because MLX materializes those experts as bf16.
-    const LENS_BF16_TEXT_ENCODER_DISK_BYTES: u64 = 4_845_744_456 + 4_774_186_632 + 4_154_656_824;
-    const LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES: u64 = (30.07 * BYTES_PER_GIB).ceil() as u64;
-
-    fn resident_only_audit_routes() -> [ResidentOnlyAuditRoute; 20] {
-        [
-            ResidentOnlyAuditRoute {
-                manifest_id: "chroma1_base",
-                provider_id: "chroma1_base",
-                control_bytes: FLUX1_CONTROL_BYTES,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "chroma1_flash",
-                provider_id: "chroma1_flash",
-                control_bytes: FLUX1_CONTROL_BYTES,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "chroma1_hd",
-                provider_id: "chroma1_hd",
-                control_bytes: FLUX1_CONTROL_BYTES,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "sd3_5_large",
-                provider_id: "sd3_5_large",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "sd3_5_large_turbo",
-                provider_id: "sd3_5_large_turbo",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "sd3_5_medium",
-                provider_id: "sd3_5_medium",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "boogu_image",
-                provider_id: "boogu_image",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "boogu_image_turbo",
-                provider_id: "boogu_image_turbo",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "boogu_image_edit",
-                provider_id: "boogu_image_edit",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "ideogram_4",
-                provider_id: "ideogram_4",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "ideogram_4_turbo",
-                provider_id: "ideogram_4_turbo",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "flux_schnell",
-                provider_id: "flux1_schnell",
-                control_bytes: FLUX1_CONTROL_BYTES,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "flux_dev",
-                provider_id: "flux1_dev",
-                control_bytes: FLUX1_CONTROL_BYTES,
-                activation_anchor_bytes: Some(15_096_810_046),
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "flux2_dev",
-                provider_id: "flux2_dev",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "flux2_klein_9b",
-                provider_id: "flux2_klein_9b",
-                control_bytes: FLUX2_CONTROL_BYTES,
-                activation_anchor_bytes: Some(15_107_547_464),
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "flux2_klein_9b",
-                provider_id: "flux2_klein_9b_edit",
-                control_bytes: FLUX2_CONTROL_BYTES,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "flux2_klein_9b_kv",
-                provider_id: "flux2_klein_9b_kv_edit",
-                control_bytes: FLUX2_CONTROL_BYTES,
-                activation_anchor_bytes: None,
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "flux2_klein_9b_true_v2",
-                provider_id: "flux2_klein_9b",
-                control_bytes: FLUX2_CONTROL_BYTES,
-                activation_anchor_bytes: Some(15_107_547_464),
-                resident_only_tiers: &[],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "lens",
-                provider_id: "lens",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                // Base Lens q4 is the one exact measured clean tier; q8/bf16 are unmeasured.
-                resident_only_tiers: &["q8", "bf16"],
-            },
-            ResidentOnlyAuditRoute {
-                manifest_id: "lens_turbo",
-                provider_id: "lens_turbo",
-                control_bytes: 0,
-                activation_anchor_bytes: None,
-                // Turbo q4/q8 are unmeasured. Its bf16 optimized contract requires Sequential;
-                // a resident load therefore also collapses to Resident-only.
-                resident_only_tiers: &["q4", "q8", "bf16"],
-            },
-        ]
-    }
-
-    /// The product surfaces whose shipped resident-only cells the band audit must cover. Provider
-    /// ids are deliberately NOT repeated here: the base id is resolved through production
-    /// `MODEL_TABLE`, while edit ids are resolved by the production FLUX.2 edit router. Keeping this
-    /// source-bound inventory independent of [`resident_only_audit_routes`] makes a dropped route or
-    /// a duplicate replacement observable instead of allowing a fixed cardinality to stay green.
+    // footprint query, not a copied resident-byte constant, supplies its load-exact expansion.
     #[cfg(target_os = "macos")]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    const LENS_BF16_TEXT_ENCODER_DISK_BYTES: u64 = 4_845_744_456 + 4_774_186_632 + 4_154_656_824;
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
     enum ResidentOnlyAuditSurface {
         Base,
         Edit,
+        StrictControl,
     }
 
     #[cfg(target_os = "macos")]
@@ -8158,115 +7992,74 @@ mod tests {
     struct SourceBoundAuditSurface {
         manifest_id: &'static str,
         surface: ResidentOnlyAuditSurface,
-        resident_only_tiers: &'static [&'static str],
     }
 
     #[cfg(target_os = "macos")]
-    fn source_bound_audit_surfaces() -> [SourceBoundAuditSurface; 20] {
-        use ResidentOnlyAuditSurface::{Base, Edit};
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct ResidentOnlyAuditCell {
+        manifest_id: String,
+        provider_id: &'static str,
+        tier: String,
+        surface: ResidentOnlyAuditSurface,
+        base_asset_bytes: u64,
+        control_bytes: u64,
+    }
 
-        [
-            SourceBoundAuditSurface {
-                manifest_id: "chroma1_base",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "chroma1_flash",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "chroma1_hd",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "sd3_5_large",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "sd3_5_large_turbo",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "sd3_5_medium",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "boogu_image",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "boogu_image_turbo",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "boogu_image_edit",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "ideogram_4",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "ideogram_4_turbo",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "flux_schnell",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "flux_dev",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "flux2_dev",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "flux2_klein_9b",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "flux2_klein_9b",
-                surface: Edit,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "flux2_klein_9b_kv",
-                surface: Edit,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "flux2_klein_9b_true_v2",
-                surface: Base,
-                resident_only_tiers: &[],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "lens",
-                surface: Base,
-                resident_only_tiers: &["q8", "bf16"],
-            },
-            SourceBoundAuditSurface {
-                manifest_id: "lens_turbo",
-                surface: Base,
-                resident_only_tiers: &["q4", "q8", "bf16"],
-            },
-        ]
+    /// Candidate manifests for the audit's established model families. Reachable routes are not
+    /// encoded here: base providers come from production `MODEL_TABLE`, edit providers from the
+    /// production FLUX.2 edit router, strict-control providers from the production FLUX router, and
+    /// the pinned contract decides which shipped tier is actually Resident-only.
+    #[cfg(target_os = "macos")]
+    const RESIDENT_ONLY_AUDIT_MANIFESTS: &[&str] = &[
+        "chroma1_base",
+        "chroma1_flash",
+        "chroma1_hd",
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
+        "boogu_image",
+        "boogu_image_turbo",
+        "boogu_image_edit",
+        "ideogram_4",
+        "ideogram_4_turbo",
+        "flux_schnell",
+        "flux_dev",
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+        "lens",
+        "lens_turbo",
+    ];
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_surfaces() -> Result<Vec<SourceBoundAuditSurface>, String> {
+        use ResidentOnlyAuditSurface::{Base, Edit, StrictControl};
+
+        let mut surfaces = std::collections::BTreeSet::new();
+        for &manifest_id in RESIDENT_ONLY_AUDIT_MANIFESTS {
+            if crate::engines::mlx_model(manifest_id).is_none() {
+                return Err(format!(
+                    "{manifest_id} no longer resolves through production MODEL_TABLE and the pinned registry"
+                ));
+            }
+            surfaces.insert((manifest_id, Base));
+            if let Some(edit_engine_id) = crate::image_jobs::flux2_edit_engine_id(manifest_id) {
+                if !crate::image_jobs::flux2_edit_uses_provider_memory_safety(edit_engine_id) {
+                    surfaces.insert((manifest_id, Edit));
+                }
+            }
+            if crate::image_jobs::mlx_flux_strict_control_engine_id(manifest_id).is_some() {
+                surfaces.insert((manifest_id, StrictControl));
+            }
+        }
+        Ok(surfaces
+            .into_iter()
+            .map(|(manifest_id, surface)| SourceBoundAuditSurface {
+                manifest_id,
+                surface,
+            })
+            .collect())
     }
 
     fn set_sparse_len(path: &Path, bytes: u64) {
@@ -8276,6 +8069,37 @@ mod tests {
         std::fs::File::create(path)
             .and_then(|file| file.set_len(bytes))
             .expect("sparse fixture size");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_sparse_valid_safetensor(path: &Path, bytes: u64) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut data_bytes = bytes
+            .checked_sub(128)
+            .ok_or_else(|| format!("{bytes} bytes is too small for a safetensors fixture"))?;
+        let header = loop {
+            let mut header = format!(
+                r#"{{"weight":{{"dtype":"U8","shape":[{data_bytes}],"data_offsets":[0,{data_bytes}]}}}}"#
+            );
+            while (8 + header.len()) % 8 != 0 {
+                header.push(' ');
+            }
+            let next_data_bytes = bytes
+                .checked_sub(8 + header.len() as u64)
+                .ok_or_else(|| format!("{bytes} bytes is too small for its safetensors header"))?;
+            if next_data_bytes == data_bytes {
+                break header;
+            }
+            data_bytes = next_data_bytes;
+        };
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .and_then(|()| file.write_all(header.as_bytes()))
+            .and_then(|()| file.set_len(bytes))
+            .map_err(|error| error.to_string())
     }
 
     fn shipped_download_tier<'a>(model: &'a Value, download: &'a Value) -> &'a str {
@@ -8290,12 +8114,8 @@ mod tests {
         }
     }
 
-    type ResidentOnlyAuditCell = (String, String, String);
-
-    fn auditable_shipped_tiers<'a>(
-        model: &'a Value,
-        resident_only_tiers: &[&str],
-    ) -> Result<Vec<&'a str>, String> {
+    #[cfg(target_os = "macos")]
+    fn auditable_shipped_tiers(model: &Value) -> Result<Vec<&str>, String> {
         let downloads = model["downloads"].as_array().ok_or_else(|| {
             format!(
                 "{} has no shipped downloads",
@@ -8305,9 +8125,7 @@ mod tests {
         let mut tiers = Vec::new();
         for download in downloads {
             let tier = shipped_download_tier(model, download);
-            if tier == "training"
-                || (!resident_only_tiers.is_empty() && !resident_only_tiers.contains(&tier))
-            {
+            if tier == "training" {
                 continue;
             }
             if tiers.contains(&tier) {
@@ -8321,44 +8139,205 @@ mod tests {
         Ok(tiers)
     }
 
-    fn audit_inventory_from_routes(
-        routes: &[ResidentOnlyAuditRoute],
-        models: &[Value],
-    ) -> Result<std::collections::BTreeSet<ResidentOnlyAuditCell>, String> {
-        let mut route_keys = std::collections::BTreeSet::new();
-        let mut cells = std::collections::BTreeSet::new();
-        for route in routes {
-            if !route_keys.insert((route.manifest_id, route.provider_id)) {
-                return Err(format!(
-                    "duplicate resident-only audit route {} ({})",
-                    route.manifest_id, route.provider_id
-                ));
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_provider(
+        surface: SourceBoundAuditSurface,
+    ) -> Result<&'static str, String> {
+        match surface.surface {
+            ResidentOnlyAuditSurface::Base => crate::engines::mlx_model(surface.manifest_id)
+                .map(|resolved| resolved.engine_id())
+                .ok_or_else(|| {
+                    format!(
+                        "{} no longer resolves through production MODEL_TABLE and the pinned registry",
+                        surface.manifest_id
+                    )
+                }),
+            ResidentOnlyAuditSurface::Edit => {
+                crate::image_jobs::flux2_edit_engine_id(surface.manifest_id).ok_or_else(|| {
+                    format!(
+                        "{} has no production FLUX.2 edit route",
+                        surface.manifest_id
+                    )
+                })
             }
-            let model = models
-                .iter()
-                .find(|model| model["id"] == route.manifest_id)
-                .ok_or_else(|| format!("missing shipped {} manifest entry", route.manifest_id))?;
-            for tier in auditable_shipped_tiers(model, route.resident_only_tiers)? {
-                let cell = (
-                    route.manifest_id.to_owned(),
-                    route.provider_id.to_owned(),
-                    tier.to_owned(),
-                );
-                if !cells.insert(cell.clone()) {
-                    return Err(format!("duplicate resident-only audit cell {cell:?}"));
-                }
+            ResidentOnlyAuditSurface::StrictControl => {
+                crate::image_jobs::mlx_flux_strict_control_engine_id(surface.manifest_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "{} has no production FLUX strict-control route",
+                            surface.manifest_id
+                        )
+                    })
             }
         }
-        Ok(cells)
     }
 
     #[cfg(target_os = "macos")]
-    fn source_bound_audit_inventory(
+    fn source_bound_control_bytes(
+        surface: SourceBoundAuditSurface,
+        provider_id: &str,
+    ) -> Result<u64, String> {
+        if surface.surface != ResidentOnlyAuditSurface::StrictControl {
+            return Ok(0);
+        }
+        match provider_id {
+            "flux1_dev_control" => Ok(FLUX1_CONTROL_BYTES),
+            "flux2_dev_control" => Ok(FLUX2_CONTROL_BYTES),
+            other => Err(format!(
+                "production strict-control provider {other} has no audited control checkpoint size"
+            )),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn audit_load_spec(
+        provider_id: &str,
+        tier: &str,
+        base_asset_bytes: u64,
+        control_bytes: u64,
+    ) -> Result<(tempfile::TempDir, LoadSpec), String> {
+        use gen_core::Quant;
+
+        let fixture = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let weights = fixture.path().join("weights");
+        if provider_id == "lens" && tier == "q4" {
+            // The production worker opts this one route into the load-exact deferred contract.
+            // Build the same component/config shape its registry contract inspects; a flat sparse
+            // file would make the lookup fall back and falsely classify measured Lens q4 as
+            // Resident-only.
+            let text_encoder_bytes = base_asset_bytes / 3;
+            let transformer_bytes = base_asset_bytes / 3;
+            let vae_bytes = base_asset_bytes - text_encoder_bytes - transformer_bytes;
+            for (component, bytes) in [
+                ("text_encoder", text_encoder_bytes),
+                ("transformer", transformer_bytes),
+                ("vae", vae_bytes),
+            ] {
+                set_sparse_valid_safetensor(
+                    &weights.join(component).join("model.safetensors"),
+                    bytes,
+                )?;
+            }
+            for component in ["text_encoder", "transformer"] {
+                std::fs::write(
+                    weights.join(component).join("config.json"),
+                    r#"{"quantization":{"bits":4,"group_size":64}}"#,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        } else if matches!(provider_id, "lens" | "lens_turbo") && tier == "bf16" {
+            if base_asset_bytes < LENS_BF16_TEXT_ENCODER_DISK_BYTES {
+                return Err(format!(
+                    "Lens bf16 asset {base_asset_bytes} is smaller than its source encoder"
+                ));
+            }
+            set_sparse_len(
+                &weights.join("text_encoder/model.safetensors"),
+                LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+            );
+            set_sparse_len(
+                &weights.join("transformer/model.safetensors"),
+                base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+            );
+            std::fs::write(
+                weights.join("text_encoder/config.json"),
+                r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
+            )
+            .map_err(|error| error.to_string())?;
+        } else {
+            set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
+        }
+        let spec = match tier {
+            "q4" => LoadSpec::new(WeightsSource::Dir(weights)).with_quant(Quant::Q4),
+            "q8" => LoadSpec::new(WeightsSource::Dir(weights)).with_quant(Quant::Q8),
+            "bf16" => LoadSpec::new(WeightsSource::Dir(weights)),
+            other => return Err(format!("unsupported audited tier {other}")),
+        };
+        let spec = if control_bytes == 0 {
+            spec
+        } else {
+            let control = fixture.path().join("control.safetensors");
+            set_sparse_len(&control, control_bytes);
+            spec.with_control(WeightsSource::File(control))
+        };
+        Ok((
+            fixture,
+            crate::image_jobs::apply_measured_mlx_load_shape(provider_id, spec),
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_contract(
+        provider_id: &'static str,
+        spec: &LoadSpec,
+    ) -> Result<(MemoryProviderContract, bool), String> {
+        crate::inference_runtime::media()
+            .memory_strategy_contract(provider_id, spec)
+            .map_err(|error| error.to_string())
+            .map(|contract| {
+                contract.map_or_else(
+                    || {
+                        (
+                            MemoryProviderContract::compatibility_default(
+                                provider_id,
+                                MemoryBackendRealization::MlxMetal {
+                                    bounded_wired_residency: true,
+                                    lazy_or_mmap_materialization: true,
+                                    explicit_evaluation_and_synchronization: true,
+                                    cache_eviction: true,
+                                },
+                            ),
+                            false,
+                        )
+                    },
+                    |contract| (contract, true),
+                )
+            })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn implemented_optimized_strategies(contract: &MemoryProviderContract) -> Vec<MemoryStrategy> {
+        MemoryStrategy::ALL
+            .into_iter()
+            .filter(|strategy| strategy.is_optimized())
+            .filter(|strategy| {
+                matches!(
+                    contract
+                        .capability(*strategy)
+                        .map(|capability| &capability.support),
+                    Some(gen_core::MemoryStrategySupport::Implemented)
+                )
+            })
+            .collect()
+    }
+
+    /// The shipped manifest is the product-side binding of provider capability to a concrete tier.
+    /// Provider contract construction may inspect the on-disk component tree, which this audit
+    /// represents with sparse total-size files; use the manifest's explicit tier declaration to
+    /// prevent that deliberately minimal filesystem fixture from turning an optimized clean route
+    /// (Chroma/FLUX/Klein) into a fake Resident-only cell.
+    #[cfg(target_os = "macos")]
+    fn manifest_declares_optimized_tier(model: &Value, tier: &str) -> bool {
+        model["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .is_some_and(|implementations| {
+                implementations.iter().any(|implementation| {
+                    implementation["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|item| item.as_str() == Some(tier)))
+                })
+            })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_resident_only_cells_from_surfaces(
         models: &[Value],
-    ) -> Result<std::collections::BTreeSet<ResidentOnlyAuditCell>, String> {
+        source_surfaces: &[SourceBoundAuditSurface],
+    ) -> Result<Vec<ResidentOnlyAuditCell>, String> {
         let mut surfaces = std::collections::BTreeSet::new();
         let mut cells = std::collections::BTreeSet::new();
-        for expected in source_bound_audit_surfaces() {
+        let mut cell_keys = std::collections::BTreeSet::new();
+        for &expected in source_surfaces {
             let model = models
                 .iter()
                 .find(|model| model["id"] == expected.manifest_id)
@@ -8371,28 +8350,12 @@ mod tests {
                     expected.manifest_id
                 ));
             }
-            let resolved = crate::engines::mlx_model(expected.manifest_id).ok_or_else(|| {
-                format!(
-                    "{} no longer resolves through production MODEL_TABLE and the pinned registry",
-                    expected.manifest_id
-                )
-            })?;
-            let provider_id = match expected.surface {
-                ResidentOnlyAuditSurface::Base => resolved.engine_id(),
-                ResidentOnlyAuditSurface::Edit => crate::image_jobs::flux2_edit_engine_id(
-                    expected.manifest_id,
-                )
-                .ok_or_else(|| {
-                    format!(
-                        "{} no longer resolves through the production FLUX.2 edit router",
-                        expected.manifest_id
-                    )
-                })?,
-            };
-            if !surfaces.insert((expected.manifest_id, provider_id)) {
+            let provider_id = source_bound_audit_provider(expected)?;
+            let control_bytes = source_bound_control_bytes(expected, provider_id)?;
+            if !surfaces.insert((expected.manifest_id, expected.surface, provider_id)) {
                 return Err(format!(
-                    "source-bound resident-only inventory resolves a duplicate route {} ({provider_id})",
-                    expected.manifest_id
+                    "source-bound resident-only inventory resolves a duplicate {:?} route {} ({provider_id})",
+                    expected.surface, expected.manifest_id
                 ));
             }
             if crate::inference_runtime::media_descriptor(provider_id).is_none() {
@@ -8400,282 +8363,224 @@ mod tests {
                     "source-bound resident-only provider {provider_id} is absent from the pinned registry"
                 ));
             }
-            for tier in auditable_shipped_tiers(model, expected.resident_only_tiers)? {
-                let cell = (
+            let downloads = model["downloads"]
+                .as_array()
+                .ok_or_else(|| format!("{} has no shipped downloads", expected.manifest_id))?;
+            for tier in auditable_shipped_tiers(model)? {
+                let download = downloads
+                    .iter()
+                    .find(|download| shipped_download_tier(model, download) == tier)
+                    .ok_or_else(|| format!("{} is missing tier {tier}", expected.manifest_id))?;
+                let base_asset_bytes = download["estimatedSizeBytes"]
+                    .as_u64()
+                    .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
+                    .ok_or_else(|| {
+                        format!(
+                            "{} {tier} needs an auditable shipped byte size",
+                            expected.manifest_id
+                        )
+                    })?;
+                let (_fixture, spec) =
+                    audit_load_spec(provider_id, tier, base_asset_bytes, control_bytes)?;
+                let (contract, _) = source_bound_contract(provider_id, &spec)?;
+                if (expected.surface != ResidentOnlyAuditSurface::StrictControl
+                    && manifest_declares_optimized_tier(model, tier))
+                    || !implemented_optimized_strategies(&contract).is_empty()
+                {
+                    continue;
+                }
+                let key = (
                     expected.manifest_id.to_owned(),
-                    provider_id.to_owned(),
+                    provider_id,
                     tier.to_owned(),
+                    expected.surface,
                 );
-                if !cells.insert(cell.clone()) {
+                if !cell_keys.insert(key) {
                     return Err(format!(
-                        "source-bound resident-only inventory resolves a duplicate cell {cell:?}"
+                        "source-bound resident-only inventory resolves a duplicate cell {} ({provider_id}) {tier} {:?}",
+                        expected.manifest_id, expected.surface
                     ));
                 }
+                cells.insert(ResidentOnlyAuditCell {
+                    manifest_id: expected.manifest_id.to_owned(),
+                    provider_id,
+                    tier: tier.to_owned(),
+                    surface: expected.surface,
+                    base_asset_bytes,
+                    control_bytes,
+                });
             }
         }
-        Ok(cells)
+        Ok(cells.into_iter().collect())
     }
 
-    /// sc-18251 resident-only audit: drive shipped asset sizes, real control-overlay bytes, and
-    /// provider-owned Lens/activation facts through the production request-plan and selector cores.
-    ///
-    /// The active registry is deliberately absent in the default Linux workspace. The injected facts
-    /// are the exact values exported by the pinned provider sources; macOS production obtains the same
-    /// values before delegating to `for_spec_and_manifest_with_provider_facts`. This keeps the test
-    /// platform-neutral without replacing filesystem accounting or request selection with a second
-    /// implementation.
+    /// sc-18251 resident-only audit: derive every reachable candidate through the production base,
+    /// edit, and FLUX strict-control routers, retain only tiers whose pinned loaded-provider contract
+    /// is actually Resident-only, then drive those exact cells through the production request plan and
+    /// selector. A base provider never receives an invented control checkpoint.
+    #[cfg(target_os = "macos")]
     #[test]
     fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path() {
-        use gen_core::{Capabilities, Modality, ModelDescriptor, Precision, Quant};
-
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             include_str!("../../../config/manifests/builtin.models.jsonc"),
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
-        let routes = resident_only_audit_routes();
-        let expected_inventory = audit_inventory_from_routes(&routes, models)
-            .expect("the resident-only audit route table must be unique and resolve shipped tiers");
+        let surfaces = source_bound_audit_surfaces().expect("source-bound audit surfaces");
+        let cells = source_bound_resident_only_cells_from_surfaces(models, &surfaces)
+            .expect("source-bound resident-only inventory");
+        assert_eq!(
+            cells.len(),
+            35,
+            "the source-derived Resident-only inventory changed; update the recorded audit result"
+        );
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
         let hosts = [48_u64, 64, 96, 128];
         let mut flips = Vec::new();
         let mut audited_cells = std::collections::BTreeSet::new();
 
-        for route in routes {
-            let model = models
-                .iter()
-                .find(|model| model["id"] == route.manifest_id)
-                .unwrap_or_else(|| panic!("shipped {} manifest entry", route.manifest_id));
-            let downloads = model["downloads"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{} downloads", route.manifest_id));
-            for download in downloads {
-                let base_asset_bytes = download["estimatedSizeBytes"]
-                    .as_u64()
-                    .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{} download needs an auditable shipped byte size",
-                            route.manifest_id
-                        )
-                    });
-                let tier = shipped_download_tier(model, download);
-                if download["variant"].is_null() {
-                    match model["mlx"]["quantize"].as_u64() {
-                        Some(bits @ (4 | 8)) => assert_eq!(
-                            tier,
-                            format!("q{bits}"),
-                            "{} unlabelled download must use its production mlx.quantize tier",
-                            route.manifest_id
-                        ),
-                        None | Some(0) => assert_eq!(
-                            tier, "bf16",
-                            "{} unlabelled dense download must remain bf16",
-                            route.manifest_id
-                        ),
-                        Some(other) => panic!("unsupported shipped mlx.quantize tier {other}"),
-                    }
-                }
-                if tier == "training"
-                    || (!route.resident_only_tiers.is_empty()
-                        && !route.resident_only_tiers.contains(&tier))
-                {
-                    continue;
-                }
-                assert!(
-                    audited_cells.insert((
-                        route.manifest_id.to_owned(),
-                        route.provider_id.to_owned(),
-                        tier.to_owned(),
-                    )),
-                    "the executable audit must reject duplicate route-tier cells: {} ({}) {tier}",
-                    route.manifest_id,
-                    route.provider_id
-                );
-                let numeric_tier = MemoryNumericTier {
-                    precision: Precision::Bf16,
-                    quant: match tier {
-                        "q4" => Some(Quant::Q4),
-                        "q8" => Some(Quant::Q8),
-                        "bf16" => None,
-                        other => panic!("unsupported audited tier {other}"),
-                    },
-                    component_precision_floors: &[],
-                };
-                let fixture = tempfile::tempdir().expect("audit fixture root");
-                let weights = fixture.path().join("weights");
-                let mut provider_footprint = None;
-                if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
-                    assert!(
-                        base_asset_bytes >= LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-                        "Lens bf16 asset must contain its source encoder"
-                    );
-                    set_sparse_len(
-                        &weights.join("text_encoder/model.safetensors"),
-                        LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-                    );
-                    set_sparse_len(
-                        &weights.join("transformer/model.safetensors"),
-                        base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-                    );
-                    std::fs::write(
-                        weights.join("text_encoder/config.json"),
-                        r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
-                    )
-                    .expect("Lens MXFP4 marker");
-                    provider_footprint = Some(PerComponentBytes {
-                        text_encoder: LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES,
-                        ..Default::default()
-                    });
-                } else {
-                    set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
-                }
-                let mut spec = LoadSpec::new(WeightsSource::Dir(weights));
-                spec = match tier {
-                    "q4" => spec.with_quant(Quant::Q4),
-                    "q8" => spec.with_quant(Quant::Q8),
-                    "bf16" => spec,
-                    other => panic!("unsupported audited tier {other}"),
-                };
-                if route.control_bytes > 0 {
-                    let control = fixture.path().join("control.safetensors");
-                    set_sparse_len(&control, route.control_bytes);
-                    spec = spec.with_control(WeightsSource::File(control));
-                }
-                let plan = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
-                    route.provider_id,
-                    route.manifest_id,
-                    &spec,
-                    None,
-                    None,
-                    provider_footprint,
-                    route.activation_anchor_bytes,
-                );
-                let lens_expansion =
-                    if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
-                        LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES - LENS_BF16_TEXT_ENCODER_DISK_BYTES
-                    } else {
-                        0
-                    };
-                assert_eq!(
-                    plan.folded_control_bytes, route.control_bytes,
-                    "{} ({}) {tier}: deleting production control-source accounting must make this \
+        for cell in &cells {
+            assert!(
+                audited_cells.insert((
+                    cell.manifest_id.clone(),
+                    cell.provider_id,
+                    cell.tier.clone(),
+                    cell.surface,
+                )),
+                "the executable audit must reject duplicate route-tier cells: {cell:?}"
+            );
+            let (_fixture, spec) = audit_load_spec(
+                cell.provider_id,
+                &cell.tier,
+                cell.base_asset_bytes,
+                cell.control_bytes,
+            )
+            .expect("source-bound audit spec");
+            let media = crate::inference_runtime::media();
+            let provider_footprint = media
+                .footprint(cell.provider_id, &spec)
+                .expect("source-bound provider footprint");
+            let activation_anchor_bytes = media
+                .activation_memory_bytes_1024(cell.provider_id)
+                .expect("source-bound activation query");
+            let plan = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
+                cell.provider_id,
+                &cell.manifest_id,
+                &spec,
+                None,
+                None,
+                provider_footprint,
+                activation_anchor_bytes,
+            );
+            assert_eq!(
+                plan.folded_control_bytes, cell.control_bytes,
+                "{} ({}) {}: deleting production control-source accounting must make this \
                      audit red",
-                    route.manifest_id, route.provider_id
+                cell.manifest_id, cell.provider_id, cell.tier
+            );
+            assert!(
+                plan.asset_bytes >= cell.base_asset_bytes + cell.control_bytes,
+                "{} ({}) {}: provider materialization cannot erase shipped base/control bytes",
+                cell.manifest_id,
+                cell.provider_id,
+                cell.tier
+            );
+            let geometry = MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
+            let raw_incremental_peak = plan.generic_headroom_bytes(geometry);
+            let widened_incremental_peak = (raw_incremental_peak as f64
+                * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN))
+                .ceil()
+                .clamp(0.0, u64::MAX as f64) as u64;
+            // These are precisely the cells for which no optimized product contract applies. Model
+            // their legacy Resident fallback with the same compatibility contract production uses
+            // when a provider has no applicable adopted cell, and bind its aggregate base fact to
+            // the source-derived load plan so post-load cache credit is exact.
+            let mut contract = MemoryProviderContract::compatibility_default(
+                cell.provider_id,
+                MemoryBackendRealization::MlxMetal {
+                    bounded_wired_residency: true,
+                    lazy_or_mmap_materialization: true,
+                    explicit_evaluation_and_synchronization: true,
+                    cache_eviction: true,
+                },
+            );
+            contract.asset_facts.base_bytes = plan.asset_bytes;
+            contract.asset_facts.transformer_bytes = plan.asset_bytes;
+            assert!(
+                contract.conformance_errors().is_empty(),
+                "audit contract must stay conformant for {cell:?}: {:?}",
+                contract.conformance_errors()
+            );
+            let generator = RequestGenerator {
+                descriptor: crate::inference_runtime::media_descriptor(cell.provider_id)
+                    .expect("source-bound provider descriptor"),
+                contract: Some(contract),
+            };
+            let legacy_total_peak = plan.generic_total_peak_bytes(geometry);
+
+            for host_gib in hosts {
+                let host_bytes = gib_to_bytes(host_gib as f64);
+                // This is exactly the live legacy budget after the generator has loaded:
+                // committed provider assets remain on the available side, while the modeled
+                // peak receives the matching provider-resident cache credit.
+                let available_incremental = host_bytes
+                    .saturating_sub(plan.asset_bytes)
+                    .saturating_sub(legacy_reserve_bytes);
+                let admitted_before_margin = raw_incremental_peak <= available_incremental;
+                let admitted_now = widened_incremental_peak <= available_incremental;
+                if admitted_before_margin && !admitted_now {
+                    flips.push((
+                        cell.manifest_id.as_str(),
+                        cell.provider_id,
+                        cell.tier.as_str(),
+                        host_gib,
+                        plan.asset_bytes,
+                        raw_incremental_peak,
+                        widened_incremental_peak,
+                    ));
+                }
+
+                // Exercise the production selector seam too; the arithmetic above names the
+                // historical no-margin counterfactual, while this call proves the current side
+                // uses cache credit + reserve + EstimateFloor margin together.
+                let evaluated = evaluate_request_with_budget(
+                    &generator,
+                    &plan,
+                    &fixture_inputs(1024, 1024),
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Resident,
+                    MemoryBudget {
+                        total_bytes: host_bytes,
+                        committed_bytes: plan.asset_bytes,
+                        reclaimable_bytes: 0,
+                        reserved_headroom_bytes: legacy_reserve_bytes,
+                    },
+                    legacy_total_peak,
+                    0,
+                    &[],
                 );
                 assert_eq!(
-                    plan.asset_bytes,
-                    base_asset_bytes + route.control_bytes + lens_expansion,
-                    "{} ({}) {tier}: production assets must include the real control branch and \
-                     Lens materialization delta",
-                    route.manifest_id,
-                    route.provider_id
-                );
-                let geometry = MemoryGeometry {
-                    width: 1024,
-                    height: 1024,
-                    batch: 1,
-                    frames: 1,
-                    reference_count: 0,
-                };
-                let raw_incremental_peak = plan.generic_headroom_bytes(geometry);
-                let widened_incremental_peak = (raw_incremental_peak as f64
-                    * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN))
-                    .ceil()
-                    .clamp(0.0, u64::MAX as f64)
-                    as u64;
-
-                for host_gib in hosts {
-                    let host_bytes = gib_to_bytes(host_gib as f64);
-                    // This is exactly the live legacy budget after the generator has loaded:
-                    // committed provider assets remain on the available side, while the modeled
-                    // peak receives the matching provider-resident cache credit.
-                    let available_incremental = host_bytes
-                        .saturating_sub(plan.asset_bytes)
-                        .saturating_sub(legacy_reserve_bytes);
-                    let admitted_before_margin = raw_incremental_peak <= available_incremental;
-                    let admitted_now = widened_incremental_peak <= available_incremental;
-                    if admitted_before_margin && !admitted_now {
-                        flips.push((
-                            route.manifest_id,
-                            route.provider_id,
-                            tier,
-                            host_gib,
-                            plan.asset_bytes,
-                            raw_incremental_peak,
-                            widened_incremental_peak,
-                        ));
-                    }
-
-                    // Exercise the production selector seam too; the arithmetic above names the
-                    // historical no-margin counterfactual, while this call proves the current side
-                    // uses cache credit + reserve + EstimateFloor margin together.
-                    let mut contract = MemoryProviderContract::compatibility_default(
-                        route.provider_id,
-                        MemoryBackendRealization::MlxMetal {
-                            bounded_wired_residency: true,
-                            lazy_or_mmap_materialization: true,
-                            explicit_evaluation_and_synchronization: true,
-                            cache_eviction: true,
-                        },
-                    );
-                    contract.asset_facts.base_bytes = plan.asset_bytes;
-                    contract.asset_facts.transformer_bytes = plan.asset_bytes;
-                    assert!(
-                        contract.conformance_errors().is_empty(),
-                        "audit contract must stay conformant: {:?}",
-                        contract.conformance_errors()
-                    );
-                    let generator = RequestGenerator {
-                        descriptor: ModelDescriptor {
-                            id: route.provider_id,
-                            family: "sc-18251-audit",
-                            backend: "mlx",
-                            modality: Modality::Image,
-                            capabilities: Capabilities::default(),
-                            required_components: &[],
-                            control_kinds: None,
-                        },
-                        contract: Some(contract),
-                    };
-                    assert_eq!(plan.tier.precision, numeric_tier.precision);
-                    assert_eq!(plan.tier.quant, numeric_tier.quant);
-                    let evaluated = evaluate_request_with_budget(
-                        &generator,
-                        &plan,
-                        &fixture_inputs(1024, 1024),
-                        MemoryCacheState::Cold,
-                        OffloadPolicy::Resident,
-                        MemoryBudget {
-                            total_bytes: host_bytes,
-                            committed_bytes: plan.asset_bytes,
-                            reclaimable_bytes: 0,
-                            reserved_headroom_bytes: legacy_reserve_bytes,
-                        },
-                        plan.generic_total_peak_bytes(geometry),
-                        0,
-                        &[],
-                    );
-                    assert_eq!(
-                        evaluated.is_ok(),
-                        admitted_now,
-                        "production-path result drifted for {} ({}) {tier} on {host_gib} GiB: \
+                    evaluated.is_ok(),
+                    admitted_now,
+                    "production-path result drifted for {} ({}) {} on {host_gib} GiB: \
                          {evaluated:?}",
-                        route.manifest_id,
-                        route.provider_id
-                    );
-                }
+                    cell.manifest_id,
+                    cell.provider_id,
+                    cell.tier
+                );
             }
         }
 
         assert_eq!(
-            audited_cells, expected_inventory,
-            "the executable budget walk must cover the unique route-tier inventory exactly"
-        );
-        assert_eq!(
             audited_cells.len(),
-            51,
-            "the source-independent route table currently resolves 51 shipped resident-only cells"
+            cells.len(),
+            "the executable budget walk must cover every unique source-derived cell exactly"
         );
 
         assert_eq!(
@@ -8684,261 +8589,79 @@ mod tests {
                 .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
                 .collect::<Vec<_>>(),
             vec![
-                ("chroma1_base", "chroma1_base", "bf16", 48),
-                ("chroma1_flash", "chroma1_flash", "bf16", 48),
-                ("chroma1_hd", "chroma1_hd", "bf16", 48),
                 ("sd3_5_large", "sd3_5_large", "q8", 48),
-                (
-                    "sd3_5_large_turbo",
-                    "sd3_5_large_turbo",
-                    "q8",
-                    48,
-                ),
+                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48,),
             ],
-            "the complete shipped resident-only-capable audit changed; update the recorded result, \
+            "the source-bound resident-only audit changed; update the recorded result, \
              not only this expectation: {flips:?}"
         );
     }
 
-    /// Mutation proof for the exact loophole that escaped the first audit revision: replacing the
-    /// non-flipping FLUX.1 schnell row with a second FLUX.1 dev row preserves both the old `51`
-    /// cardinality and the expected flip list. Inventory construction must reject the duplicate
-    /// before either summary can hide that schnell disappeared.
-    #[test]
-    fn resident_only_audit_inventory_rejects_flux1_duplicate_drop_mutation() {
-        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-            include_str!("../../../config/manifests/builtin.models.jsonc"),
-        ))
-        .expect("builtin.models.jsonc parses");
-        let models = manifest["models"].as_array().expect("manifest models");
-        let mut routes = resident_only_audit_routes();
-        let schnell = routes
-            .iter()
-            .position(|route| route.manifest_id == "flux_schnell")
-            .expect("FLUX.1 schnell audit route");
-        let dev = routes
-            .iter()
-            .copied()
-            .find(|route| route.manifest_id == "flux_dev")
-            .expect("FLUX.1 dev audit route");
-        routes[schnell] = dev;
-
-        let error = audit_inventory_from_routes(&routes, models)
-            .expect_err("a duplicate dev row cannot replace the schnell inventory");
-        assert!(
-            error.contains("duplicate resident-only audit route flux_dev (flux1_dev)"),
-            "the mutation must fail for the duplicate/drop reason, got: {error}"
-        );
-    }
-
-    /// Full source-bound completeness gate. It expands the independent product-surface list through
-    /// the shipped manifest tiers, production `MODEL_TABLE`, production FLUX.2 edit router, and the
-    /// pinned runtime registry/contracts, then requires the executable audit table to equal that
-    /// deduplicated route-tier set exactly. The compatibility-default discovery remains automatic,
-    /// but adopted providers are no longer skipped.
+    /// Mutation proof for the source-truth failure found in the prior audit: no control checkpoint
+    /// may be injected into Chroma, FLUX.1 Schnell, or FLUX.2 Klein, while the two real Dev routes
+    /// must resolve to their dedicated control providers and remain covered.
     #[cfg(target_os = "macos")]
     #[test]
-    fn shipped_resident_only_mlx_inventory_is_source_bound() {
-        use gen_core::{Precision, Quant};
-        use std::collections::{BTreeSet, HashSet};
-
+    fn resident_only_audit_rejects_impossible_control_routes_and_keeps_real_ones() {
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             include_str!("../../../config/manifests/builtin.models.jsonc"),
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
-        let routes = resident_only_audit_routes();
-        let actual = audit_inventory_from_routes(&routes, models)
-            .expect("the executable route table must be unique and resolve shipped tiers");
-        let expected = source_bound_audit_inventory(models)
-            .expect("the source-bound product surface must resolve through production");
-        assert_eq!(
-            actual, expected,
-            "resident-only audit coverage must equal the manifest -> MODEL_TABLE/edit-router -> \
-             pinned-registry route-tier inventory"
-        );
-        assert_eq!(
-            expected.len(),
-            51,
-            "the source-bound inventory currently has 51 cells"
-        );
-
-        let media = crate::inference_runtime::media();
-        let adopted = media
-            .memory_strategy_registrations()
-            .map(|registration| registration.provider_id)
-            .collect::<HashSet<_>>();
-
-        // Representative coverage of both sides of the old skip: FLUX.1 schnell is adopted, while
-        // Boogu uses the worker's compatibility-default contract and its unlabelled download must
-        // still derive Q8 from `mlx.quantize`.
-        assert!(adopted.contains("flux1_schnell"));
-        assert!(!adopted.contains("boogu_image"));
-        assert!(expected.contains(&(
-            "flux_schnell".to_owned(),
-            "flux1_schnell".to_owned(),
-            "q4".to_owned(),
-        )));
-        assert!(expected.contains(&(
-            "boogu_image".to_owned(),
-            "boogu_image".to_owned(),
-            "q8".to_owned(),
-        )));
-
-        // Preserve automatic discovery for every shipped base route that has not adopted a memory
-        // contract. A new compatibility-default provider must still join the audited inventory.
-        let discovered_compatibility = models
-            .iter()
-            .filter(|model| model["type"] == "image")
-            .filter_map(|model| {
-                let manifest_id = model["id"].as_str()?;
-                let resolved = crate::engines::mlx_model(manifest_id)?;
-                (!adopted.contains(resolved.engine_id()))
-                    .then_some((manifest_id.to_owned(), resolved.engine_id().to_owned()))
-            })
-            .collect::<BTreeSet<_>>();
-        let audited_compatibility = routes
-            .iter()
-            .filter(|route| !adopted.contains(route.provider_id))
-            .map(|route| (route.manifest_id.to_owned(), route.provider_id.to_owned()))
-            .collect::<BTreeSet<_>>();
-        assert!(
-            discovered_compatibility.is_subset(&audited_compatibility),
-            "every shipped compatibility-default base route must remain in the audit; missing: {:?}",
-            discovered_compatibility
-                .difference(&audited_compatibility)
-                .collect::<Vec<_>>()
-        );
-        assert!(!discovered_compatibility.is_empty());
-
-        // Bind every adopted and non-adopted audit cell to the provider contract actually exported
-        // by the pinned runtime. The constructed spec carries the same non-zero control overlay and
-        // tier markers as the executable budget audit; every such loaded configuration must resolve
-        // Resident-only. Activation anchors and Lens bf16 materialization are checked against the
-        // registry rather than trusting the copied audit facts.
-        for route in routes {
-            let model = models
-                .iter()
-                .find(|model| model["id"] == route.manifest_id)
-                .expect("source-bound manifest entry");
-            let downloads = model["downloads"]
-                .as_array()
-                .expect("source-bound downloads");
-            for tier in auditable_shipped_tiers(model, route.resident_only_tiers)
-                .expect("source-bound shipped tiers")
-            {
-                let download = downloads
-                    .iter()
-                    .find(|download| shipped_download_tier(model, download) == tier)
-                    .expect("source-bound tier download");
-                let base_asset_bytes = download["estimatedSizeBytes"]
-                    .as_u64()
-                    .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
-                    .expect("source-bound shipped bytes");
-                let fixture = tempfile::tempdir().expect("source-bound fixture root");
-                let weights = fixture.path().join("weights");
-                if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
-                    set_sparse_len(
-                        &weights.join("text_encoder/model.safetensors"),
-                        LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-                    );
-                    set_sparse_len(
-                        &weights.join("transformer/model.safetensors"),
-                        base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-                    );
-                    std::fs::write(
-                        weights.join("text_encoder/config.json"),
-                        r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
-                    )
-                    .expect("Lens MXFP4 marker");
-                } else {
-                    set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
-                }
-                let mut spec = LoadSpec::new(WeightsSource::Dir(weights));
-                spec = match tier {
-                    "q4" => spec.with_quant(Quant::Q4),
-                    "q8" => spec.with_quant(Quant::Q8),
-                    "bf16" => {
-                        assert_eq!(spec.precision, Precision::Bf16);
-                        spec
-                    }
-                    other => panic!("unsupported source-bound tier {other}"),
-                };
-                if route.control_bytes > 0 {
-                    let control = fixture.path().join("control.safetensors");
-                    set_sparse_len(&control, route.control_bytes);
-                    spec = spec.with_control(WeightsSource::File(control));
-                }
-
-                assert_eq!(
-                    media
-                        .activation_memory_bytes_1024(route.provider_id)
-                        .expect("known source-bound provider"),
-                    route.activation_anchor_bytes,
-                    "the audit activation fact drifted from the pinned provider for {}",
-                    route.provider_id
-                );
-                if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
-                    let footprint = media
-                        .footprint(route.provider_id, &spec)
-                        .expect("Lens footprint query")
-                        .expect("Lens bf16 provider footprint");
-                    assert_eq!(
-                        footprint.text_encoder, LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES,
-                        "the copied Lens bf16 materialization fact drifted from the pinned provider"
-                    );
-                }
-
-                let contract = match media
-                    .memory_strategy_contract(route.provider_id, &spec)
-                    .expect("source-bound provider contract query")
-                {
-                    Some(contract) => {
-                        assert!(
-                            adopted.contains(route.provider_id),
-                            "{} returned a contract without a registration",
-                            route.provider_id
-                        );
-                        contract
-                    }
-                    None => {
-                        assert!(
-                            !adopted.contains(route.provider_id),
-                            "{} lost its adopted contract",
-                            route.provider_id
-                        );
-                        MemoryProviderContract::compatibility_default(
-                            route.provider_id,
-                            MemoryBackendRealization::MlxMetal {
-                                bounded_wired_residency: true,
-                                lazy_or_mmap_materialization: true,
-                                explicit_evaluation_and_synchronization: true,
-                                cache_eviction: true,
-                            },
-                        )
-                    }
-                };
-                let implemented = MemoryStrategy::ALL
-                    .into_iter()
-                    .filter(|strategy| strategy.is_optimized())
-                    .filter(|strategy| {
-                        matches!(
-                            contract
-                                .capability(*strategy)
-                                .map(|capability| &capability.support),
-                            Some(gen_core::MemoryStrategySupport::Implemented)
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                assert!(
-                    implemented.is_empty(),
-                    "{} ({}) {tier} is not Resident-only under its audited loaded-provider \
-                     configuration: {implemented:?}",
-                    route.manifest_id,
-                    route.provider_id
-                );
-            }
+        for fake in [
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd",
+            "flux_schnell",
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ] {
+            let injected = SourceBoundAuditSurface {
+                manifest_id: fake,
+                surface: ResidentOnlyAuditSurface::StrictControl,
+            };
+            let error = source_bound_resident_only_cells_from_surfaces(models, &[injected])
+                .expect_err("an impossible strict-control route must fail closed");
+            assert!(
+                error.contains("has no production FLUX strict-control route"),
+                "{fake} must fail at the production control router, got: {error}"
+            );
         }
+
+        let surfaces = source_bound_audit_surfaces().expect("production source surfaces");
+        let cells = source_bound_resident_only_cells_from_surfaces(models, &surfaces)
+            .expect("production resident-only cells");
+        assert!(
+            !cells.iter().any(|cell| {
+                cell.manifest_id == "lens"
+                    && cell.tier == "q4"
+                    && cell.surface == ResidentOnlyAuditSurface::Base
+            }),
+            "base Lens q4 must remain on its production measured deferred-materialization contract"
+        );
+        assert!(
+            !cells
+                .iter()
+                .any(|cell| cell.provider_id == "flux2_dev_edit"),
+            "FLUX.2 Dev edit must remain on its provider-owned request-safety path"
+        );
+        assert!(cells.iter().any(|cell| {
+            cell.manifest_id == "flux_dev"
+                && cell.provider_id == "flux1_dev_control"
+                && cell.surface == ResidentOnlyAuditSurface::StrictControl
+                && cell.control_bytes == FLUX1_CONTROL_BYTES
+        }));
+        assert!(cells.iter().any(|cell| {
+            cell.manifest_id == "flux2_dev"
+                && cell.provider_id == "flux2_dev_control"
+                && cell.surface == ResidentOnlyAuditSurface::StrictControl
+                && cell.control_bytes == FLUX2_CONTROL_BYTES
+        }));
+        assert!(cells.iter().all(|cell| {
+            cell.control_bytes == 0
+                || matches!(cell.provider_id, "flux1_dev_control" | "flux2_dev_control")
+        }));
     }
 
     /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core

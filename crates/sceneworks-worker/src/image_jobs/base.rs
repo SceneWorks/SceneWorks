@@ -171,6 +171,22 @@ const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
     "flux2_dev",
 ];
 
+/// The production FLUX strict-control router, expressed as the exact base-model → dedicated
+/// provider mapping used by the two `..._control_available` arms below. Keeping this pure seam next
+/// to [`resolve_image_route`] lets source-bound audits ask the router whether a model really has a
+/// strict-control lane instead of attaching arbitrary control bytes to a base provider.
+///
+/// Chroma, FLUX.1 Schnell, and FLUX.2 Klein deliberately resolve to `None`: none ships a control
+/// checkpoint. Only the two Dev bases route to their dedicated registry providers.
+#[cfg(target_os = "macos")]
+pub(crate) fn mlx_flux_strict_control_engine_id(model: &str) -> Option<&'static str> {
+    match model {
+        "flux_dev" => Some(FLUX1_DEV_CONTROL_ENGINE_ID),
+        "flux2_dev" => Some(FLUX2_DEV_CONTROL_ENGINE_ID),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
@@ -3750,7 +3766,7 @@ mod candle_image_load_shape_tests {
 /// Lens-Turbo BF16 retains its legacy text-encoder-only rung. Qwen base/edit also cover Q4/Q8 and
 /// forward-time adapters because the block stream replays packed quantization and captured residuals.
 #[cfg(target_os = "macos")]
-fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+pub(crate) fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     let directory_native = matches!(&spec.weights, WeightsSource::Dir(_))
         && spec.precision == gen_core::Precision::Bf16;
     let lens_native = directory_native
