@@ -927,6 +927,12 @@ impl MlxAdmissionEnvelope {
         if self.capture_host_bytes == 0 {
             return u64::MAX;
         }
+        // A measurement cannot prove that foreign demand grows on a larger machine. Preserve its
+        // captured absolute reserve there; normalization exists to avoid carrying an impossible
+        // large-host reserve onto a smaller host.
+        if host_bytes >= self.capture_host_bytes {
+            return self.foreign_reserve_bytes;
+        }
         let numerator = u128::from(self.foreign_reserve_bytes) * u128::from(host_bytes);
         let denominator = u128::from(self.capture_host_bytes);
         let scaled = numerator.saturating_add(denominator.saturating_sub(1)) / denominator;
@@ -2375,6 +2381,11 @@ mod tests {
             "capacity normalization rounds up rather than granting an extra process byte"
         );
         assert_eq!(mid.required_host_bytes_for(8 * gib), 3 * gib + 230);
+        assert_eq!(
+            mid.foreign_reserve_for_host_bytes(64 * gib),
+            12 * gib,
+            "capture evidence does not speculate that foreign demand grows on a larger host"
+        );
     }
 
     fn exact_query() -> EvidenceQuery {
@@ -2553,7 +2564,7 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 50);
+        assert_eq!(complete_count, 52);
         let runtime_keys = bundle
             .records
             .iter()
@@ -2584,7 +2595,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            15
+            17
         );
     }
 

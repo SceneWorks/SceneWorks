@@ -208,13 +208,13 @@ nothing. A candidate is unusable when either
 
 Two design points are load-bearing:
 
-1. **It is a per-candidate filter, not a whole-route demotion.** A route legitimately carries
-   bindings captured under different shapes — `qwen_image` q8 ships `bounded_attention` measured
-   eager and `bounded_transformer_residency` measured deferred. Demoting the whole route when any
-   sibling mismatches would discard the candidate that *does* match and silently downgrade a
-   calibrated request to an estimate. An earlier iteration of this fix did exactly that, and
-   criterion 2 caught it by flipping from `BoundedAttention` to `Resident`; the regression test's
-   positive arm now pins it.
+1. **It is a per-candidate filter, not a whole-route demotion.** At the time of this validation the
+   q8 route mixed an eager `bounded_attention` record with a deferred
+   `bounded_transformer_residency` record. Demoting the whole route when any sibling mismatches
+   would discard the candidate that *does* match and silently downgrade a calibrated request to an
+   estimate. An earlier iteration of this fix did exactly that, and criterion 2 caught it by
+   flipping from `BoundedAttention` to `Resident`; the regression test's positive arm now pins it.
+   SC-18237 subsequently replaced that mixed historical pair with two production-deferred records.
 2. **Degrading, not refusing, is the epic's own thesis.** A calibration identity that does not match
    the loaded provider is a reason to stop *claiming* the measurement, not a reason to deny service.
    The estimate ladder the cell falls to is strictly more capable than the pre-epic resident-only
@@ -247,11 +247,14 @@ the gate this filter exists to anticipate, and would silently discard a usable m
 the same failure mode as the whole-route demotion. Reachable in the shipped corpus: `qwen_image`
 bf16 carries a resident binding captured eager against a production deferred load.
 
-### What is still open
+### SC-18237 resolution
 
-The measured cell is still *unused* under the production shape — it degrades to an estimate rather
-than serving its 43.125 GiB measurement. That half remains **sc-18237**, rescoped: the hard refusal
-is fixed here, the wasted measurement is not.
+SC-18237 closed the remaining gap on 2026-08-09. The q8 bounded-attention case was recaptured through
+the production-deferred adapter and promoted alongside a fresh deferred bounded-transformer-
+residency record. The shipped q8 pair now has one executable load shape, and real-weight probes prove
+Resident reaches bounded attention at 96 GiB while Sequential reaches bounded transformer residency
+at 48 GiB. See `docs/epic-18093-sc-18237-qwen-production-evidence.md` for exact records, revisions,
+memory accounting, and the audited shipped-binding matrix.
 
 ---
 

@@ -130,8 +130,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     records_by_status = Counter(record["status"] for record in calibration["records"])
     # sc-16915 added seventeen Full-complete MLX records (qwen_image x15,
     # krea_2_turbo_control x2) measured at the current pin: complete 33 -> 50. The
-    # base-only runtime-complete FLUX population is untouched.
-    assert records_by_status == {"complete": 50, "runtime_complete": 15}
+    # base-only runtime-complete FLUX population is untouched. SC-18237 adds the two
+    # production-deferred q8 records: complete 50 -> 52.
+    assert records_by_status == {"complete": 52, "runtime_complete": 15}
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -176,18 +177,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["record"]["status"] == "runtime_complete"
     ]
-    # sc-16915 measured seventeen Full-complete runs AT the then-live pin, and this briefly read
-    # {"current", "historical"} with a current count of 17. Under sc-17774 currency is the provider's
-    # compile closure, and all three MLX closures those runs belong to moved in this pin's window
-    # (the shared `crates/media/mlx-gen` crate is a first-party dependency of every MLX provider), so
-    # the complete population is uniformly historical again.
+    # sc-16915 measured seventeen Full-complete runs at the then-live closure; those records are now
+    # historical. SC-18237 adds exactly two current production-deferred Qwen q8 records.
     #
     # Pinned as an exact set AND an exact count, the same way it was when runs were current: a bare
     # `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
-    # family's promotion mask another's demotion. Recapturing is the Qwen and Krea calibration
-    # stories' work, not a delivery PR's.
-    assert {run["semantics"] for run in full_runs} == {"historical"}
-    assert sum(1 for run in full_runs if run["semantics"] == "current") == 0
+    # family's promotion mask another's demotion.
+    assert {run["semantics"] for run in full_runs} == {"current", "historical"}
+    assert sum(1 for run in full_runs if run["semantics"] == "current") == 2
     expected_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
@@ -265,14 +262,12 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # three MLX closures moved in this pin's window because two commits touched the shared
     # `crates/media/mlx-gen` crate, a first-party dependency of every MLX provider's closure.
     #
-    # So this set is empty and MLX calibrated admission is on the legacy estimator until the Qwen and
-    # Krea calibration stories recapture. That is the expected consequence of advancing the pin, not a
-    # regression. Asserted as an equality rather than dropped, so it still trips in BOTH directions:
-    # if a record appears here without a recapture, or if a recapture lands and nobody updates this.
-    assert measured_at_live_pin == set(), (
-        "MLX calibrated admission is expected to be on the legacy estimator at this pin; if "
-        "evidence has been recaptured, update this and the currency expectations below with it"
-    )
+    # SC-18237 recaptured exactly the two production-deferred Qwen q8 records at this pin. Krea and
+    # the older Qwen tiers remain historical. Exact ids make an accidental extra promotion visible.
+    assert measured_at_live_pin == {
+        "imc-56c1f11bd03822d9c241",
+        "imc-a21d2ea9e2d95cf48e82",
+    }
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
     # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
     # with nothing measured at the live pin there is nothing to classify, and the moment a record
@@ -293,9 +288,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
-    # Zero, because `measured_at_live_pin` is empty — the six off-point edges are still in the bundle,
-    # they are simply no longer measured at the live pin. This counts the intersection, so it returns
-    # to six the moment the sweep is recaptured, and it still catches the sweep being narrowed.
+    # Zero because this live-pin recapture contains bounded-attention and transformer-residency only;
+    # the historical off-point bounded-decode sweep remains in the bundle but outside the intersection.
     assert len(unbound_decode_edges) == 0
     assert {run["record"]["id"] for run in current_eligible} == (
         measured_at_live_pin - unbound_decode_edges
@@ -346,25 +340,18 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # population grew because currency moved, not because anything about these records changed.
     assert len(historical_qwen) == 6
     # The six are two distinct populations, and flattening them would lose the distinction that
-    # matters. Four are historical AND rejected: their fingerprint carries the collapsed `-eager`
-    # load-shape suffix, so no binding claims them. Two are historical but still BIND cleanly — they
-    # carry the live fingerprint and were current until `mlx:qwen_image`'s closure moved. Superseded
-    # by closure, not rejected, which is the same distinction the runtime-complete rows below draw.
+    # matters. Four carry the retired `-eager` fingerprint. Two carry the shared fingerprint but were
+    # also captured eager; after SC-18237 made every production Qwen plan case deferred and removed
+    # BF16 from the shipped opt-in, neither population may bind a production cell.
     rejected = [
         run for run in historical_qwen if run["binding"]["reasons"] == ["fingerprint-mismatch"]
     ]
-    superseded = [run for run in historical_qwen if run["binding"]["reasons"] == []]
-    assert len(rejected) == 4
-    assert len(superseded) == 2
+    assert len(rejected) == 6
     assert all(not run["binding"]["eligible"] for run in rejected)
-    assert all(
-        run["record"]["calibrationFingerprint"].endswith("-eager") for run in rejected
-    ), "the mismatch must be the collapsed load-shape suffix, not some other drift"
-    assert all(run["binding"]["eligible"] for run in superseded)
-    assert all(
-        not run["record"]["calibrationFingerprint"].endswith("-eager")
-        for run in superseded
-    ), "a closure-superseded row must still carry the live fingerprint, or it belongs above"
+    assert Counter(run["record"]["calibrationFingerprint"] for run in rejected) == {
+        "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager": 4,
+        "qwen-image-mlx-shared-ladder-2026-08-01-v1": 2,
+    }
     assert {
         (
             run["record"]["backend"],
@@ -544,16 +531,16 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
         for cell in matrix["cells"]
         if cell["state"] == "Verified"
     }
-    # Back to empty. sc-17774 made currency the provider's compile closure rather than the pin, and
-    # all three MLX closures that carried these promotions — mlx:qwen_image, mlx:krea_2_turbo_control,
-    # mlx:z_image_turbo — moved in this pin's window, because two commits touched the shared
-    # `crates/media/mlx-gen` crate and that crate is a first-party dependency of every MLX provider's
-    # closure. The records are unchanged and still in the bundle; recapturing them belongs to the Qwen
-    # and Krea calibration stories, not to a delivery PR that merely advanced the pin.
+    # SC-18237 recaptured the Qwen q8 pair at the live provider closure. Krea and Z-Image remain
+    # stale after their closures moved; this test's actual subject — Z-Image's history failing
+    # closed — is pinned directly below and is unaffected.
     #
     # This assertion is incidental context for this test either way. Its actual subject — Z-Image's
     # history failing closed — is pinned directly below and is unaffected.
-    assert verified == set()
+    assert verified == {
+        ("qwen_image", "mlx", "q8", "bounded_attention"),
+        ("qwen_image", "mlx", "q8", "bounded_transformer_residency"),
+    }
     assert not [
         cell
         for cell in matrix["cells"]
@@ -624,7 +611,7 @@ def test_historical_records_remain_unverified_after_the_z_image_pin_advance():
     # 128 / 128 MiB point — the two backends are not required to agree.
     expected_qwen_parameters = {
         "resident": {},
-        "staged_residency": {},
+        "staged_residency": {"phaseOrder": ["conditioning", "denoise", "decode"]},
         "bounded_decode": {"decodeTileEdge": 512, "decodeOverlap": 64},
         "bounded_attention": {
             "decodeTileEdge": 512,

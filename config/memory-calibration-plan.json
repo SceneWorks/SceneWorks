@@ -1248,7 +1248,7 @@
       "name": "mlx-qwen-bf16-resident",
       "evidenceScope": "authoritative",
       "backend": "mlx",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -1279,7 +1279,7 @@
       "name": "mlx-qwen-bf16-staged-residency",
       "evidenceScope": "authoritative",
       "backend": "mlx",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -1311,7 +1311,7 @@
       "name": "mlx-qwen-bf16-bounded-decode",
       "evidenceScope": "authoritative",
       "backend": "mlx",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -1388,7 +1388,7 @@
       "name": "mlx-qwen-bf16-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",
@@ -1465,7 +1465,7 @@
       "name": "mlx-qwen-q4-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",

@@ -115,9 +115,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -341,9 +341,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -551,9 +551,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -801,9 +801,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325",
           "dirty": false,
-          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325"
+          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1025,9 +1025,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1251,9 +1251,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1467,9 +1467,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1685,9 +1685,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -1920,9 +1920,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2144,9 +2144,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2370,9 +2370,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2574,9 +2574,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -2776,9 +2776,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3009,9 +3009,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3091,6 +3091,233 @@
         "overlay": "none",
         "provider": "qwen_image",
         "tier": "bf16"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/qwen-image-mlx",
+        "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "capturedAt": "2026-08-09T14:05:51Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:qwen-shared-ladder",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 15977625912
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 37257468908
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 40203970608
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 44056333980
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "qwen-image-q8-seed16353-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-56c1f11bd03822d9c241",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-406a7f930c7defbac7f0",
+      "negativeMutation": {
+        "maximumError": 0.8235294117647058,
+        "meanError": 0.29519470565922984,
+        "measured": true,
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 64,
+          "decodeTileEdge": 512
+        },
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 15977625912,
+          "allocatorBytes": 17898575000,
+          "deviceBytes": 17898575000,
+          "reclaimableBytes": 1920949088,
+          "wiredBytes": 17898575000
+        },
+        "decode": {
+          "activeBytes": 40203970608,
+          "allocatorBytes": 40203970608,
+          "deviceBytes": 40203970608,
+          "reclaimableBytes": 0,
+          "wiredBytes": 40203970608
+        },
+        "denoise": {
+          "activeBytes": 37257468908,
+          "allocatorBytes": 41109832280,
+          "deviceBytes": 41109832280,
+          "reclaimableBytes": 3852363372,
+          "wiredBytes": 41109832280
+        },
+        "overall": {
+          "activeBytes": 40203970608,
+          "allocatorBytes": 44056333980,
+          "deviceBytes": 44056333980,
+          "reclaimableBytes": 3852363372,
+          "wiredBytes": 44056333980
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 18857590784,
+        "decode": 42278584320,
+        "denoise": 43218108416,
+        "overall": 46305116160
+      },
+      "quality": {
+        "contract": "same seed, conditioning, sampling, precision, and loaded provider; selected rung versus unselected request",
+        "identicalInputs": true,
+        "identicalLatents": false,
+        "maximumError": 0.11764705882352941,
+        "maximumErrorThreshold": 0.18823529411764706,
+        "meanError": 0.0005071303423709008,
+        "meanErrorThreshold": 0.00196078431372549,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "dirty": false,
+          "revision": "40fa7583a01974617e2a7275052d6d446688c956"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:d7f313b635435309b547206faa6526e272735d41b47e6c903ec928cb29bd24fa",
+          "revision": "4a649d9c46e8b56b232422cb92550028108b44c9"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 46305116160,
+          "name": "exact_fit",
+          "predictedBytes": 46305116160,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the pinned MLX Qwen base provider path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "bounded_decode",
+          "bounded_attention"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 64,
+          "decodeTileEdge": 512
+        },
+        "rung": "bounded_attention"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              64
+            ]
+          },
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 64,
+              "decodeTileEdge": 512
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "qwen_image",
+        "overlay": "none",
+        "provider": "qwen_image",
+        "tier": "q8"
       }
     },
     {
@@ -3206,9 +3433,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3419,9 +3646,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3617,9 +3844,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -3843,9 +4070,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325",
           "dirty": false,
-          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-          "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325"
+          "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4066,9 +4293,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4284,9 +4511,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4497,9 +4724,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4714,9 +4941,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -4914,9 +5141,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5193,9 +5420,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5391,9 +5618,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5608,9 +5835,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -5825,9 +6052,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6050,9 +6277,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6264,9 +6491,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6527,9 +6754,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
         "sceneWorks": {
           "dirty": false,
@@ -6808,9 +7035,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7008,9 +7235,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7226,9 +7453,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7452,9 +7679,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7671,9 +7898,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
         "sceneWorks": {
           "dirty": false,
@@ -7908,9 +8135,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
           "dirty": false,
-          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-          "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+          "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8133,9 +8360,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8337,9 +8564,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8522,9 +8749,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8744,9 +8971,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -8928,9 +9155,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -9171,14 +9398,252 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
           "matrixSourceRevision": "source-tree:f0adc69a6260aa311a71e720c2214e6ef9464f5cdbace8c2de4f474b2fdd8bc5",
           "revision": "41186dcca4e5bd0009723c7e0fc80ad3da760416"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 16777216000,
+          "name": "exact_fit",
+          "predictedBytes": 16777216000,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the pinned MLX Qwen base provider path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention",
+          "bounded_transformer_residency"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 64,
+          "decodeTileEdge": 512,
+          "transformerWindowSize": 1
+        },
+        "rung": "bounded_transformer_residency"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              64
+            ]
+          },
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          },
+          {
+            "parameter": "transformerWindowSize",
+            "testedValues": [
+              1
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 64,
+              "decodeTileEdge": 512,
+              "transformerWindowSize": 1
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "qwen_image",
+        "overlay": "none",
+        "provider": "qwen_image",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/qwen-image-mlx",
+        "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "capturedAt": "2026-08-09T14:08:53Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:qwen-shared-ladder",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 15977625784
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 1056682832
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 4480169102
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 15977855160
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "qwen-image-q8-seed16353-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-a21d2ea9e2d95cf48e82",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-af9f65172233c56b3a17",
+      "negativeMutation": {
+        "maximumError": 0.8235294117647058,
+        "meanError": 0.29519470565922984,
+        "measured": true,
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 64,
+          "decodeTileEdge": 512,
+          "transformerWindowSize": 1
+        },
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 15977625784,
+          "allocatorBytes": 15977625784,
+          "deviceBytes": 15977625784,
+          "reclaimableBytes": 0,
+          "wiredBytes": 15977625784
+        },
+        "decode": {
+          "activeBytes": 4480169102,
+          "allocatorBytes": 4480169102,
+          "deviceBytes": 4480169102,
+          "reclaimableBytes": 0,
+          "wiredBytes": 4480169102
+        },
+        "denoise": {
+          "activeBytes": 1056682832,
+          "allocatorBytes": 1056912208,
+          "deviceBytes": 1056912208,
+          "reclaimableBytes": 229376,
+          "wiredBytes": 1056912208
+        },
+        "overall": {
+          "activeBytes": 15977625784,
+          "allocatorBytes": 15977855160,
+          "deviceBytes": 15977855160,
+          "reclaimableBytes": 229376,
+          "wiredBytes": 15977855160
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 16777216000,
+        "decode": 4764729344,
+        "denoise": 1140850688,
+        "overall": 16777216000
+      },
+      "quality": {
+        "contract": "same seed, conditioning, sampling, precision, and loaded provider; selected rung versus unselected request",
+        "identicalInputs": true,
+        "identicalLatents": false,
+        "maximumError": 0.11764705882352941,
+        "maximumErrorThreshold": 0.18823529411764706,
+        "meanError": 0.0005071303423709008,
+        "meanErrorThreshold": 0.00196078431372549,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+          "dirty": false,
+          "revision": "40fa7583a01974617e2a7275052d6d446688c956"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:d7f313b635435309b547206faa6526e272735d41b47e6c903ec928cb29bd24fa",
+          "revision": "4a649d9c46e8b56b232422cb92550028108b44c9"
         }
       },
       "scenarios": [
@@ -9409,9 +9874,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -9712,9 +10177,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
         "sceneWorks": {
           "dirty": false,
@@ -9946,9 +10411,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10107,9 +10572,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10267,9 +10732,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10471,9 +10936,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10636,9 +11101,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -10835,9 +11300,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11073,9 +11538,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11309,9 +11774,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11513,9 +11978,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11711,9 +12176,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -11909,9 +12374,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12132,9 +12597,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12340,9 +12805,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
           "dirty": false,
-          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-          "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+          "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12636,9 +13101,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
           "dirty": false,
-          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-          "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+          "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
         },
         "sceneWorks": {
           "dirty": false,
@@ -12864,9 +13329,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13081,9 +13546,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13298,9 +13763,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
           "dirty": false,
-          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-          "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+          "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13479,9 +13944,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
           "dirty": false,
-          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-          "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+          "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13715,9 +14180,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -13931,9 +14396,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
           "dirty": false,
-          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-          "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+          "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
         },
         "sceneWorks": {
           "dirty": false,
@@ -14148,9 +14613,9 @@
       },
       "repositories": {
         "inference": {
+          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
           "dirty": false,
-          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-          "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+          "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
         },
         "sceneWorks": {
           "dirty": false,

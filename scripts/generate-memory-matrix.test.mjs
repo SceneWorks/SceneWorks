@@ -584,10 +584,9 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // points and attach to no cell; the sweep widens the published range, it does not multiply the
   // bound cell's evidence.
   //
-  // q8/q4 carry two ONLY in this fixture: `qwenRung4OnCurrentPin` re-stamps the four superseded
-  // rung-4 records onto the current pin, so they join the sc-16915 measurements on those cells. On
-  // the shipped matrix each of these is 1 current + 1 historical — the Qwen provider fingerprint did
-  // not change, so the old records stay attached as this cell's history.
+  // q4 carries two in this fixture. q8 carries three because `qwenRung4OnCurrentPin` re-stamps the
+  // superseded records and also includes SC-18237's new production-deferred pair, all of which share
+  // the provider fingerprint. Exact counts keep that provenance visible.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
@@ -598,8 +597,8 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
       "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 2,
       "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 2,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 2,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
     },
     "every Verified Qwen cell must carry its exact dynamic evidence",
   );
@@ -2424,10 +2423,10 @@ async function currentManifestCalibrationFixture({
   return JSON.stringify(parsed);
 }
 
-/// The four rung-4 Qwen records sc-16353 ingested, re-stamped onto the current inference pin.
+/// Qwen records using the shared rung-4 fingerprint, re-stamped onto the current inference pin.
 ///
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
-/// records in the bundle: the rung-4 ingest carries the bare
+/// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
 /// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
 /// `-deferred` load-shape variants. Re-stamping the whole provider instead would promote nine cells
 /// and quietly widen the very claim these tests exist to keep exact.
@@ -2480,13 +2479,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(promotedQwen),
-    9,
+    7,
     "the exact current Qwen cells must promote only the rungs their bindings name",
   );
   assert.equal(
     verifiedQwen(shipped),
-    0,
-    "the shipped Qwen opt-in was captured against a superseded provider closure",
+    2,
+    "the shipped Qwen opt-in contains exactly the production-deferred q8 pair",
   );
 
   const evidenceOnlyZ = await buildMatrix({
@@ -2538,7 +2537,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(pinOnlyQwen),
-    9,
+    7,
     "a pin move that leaves Qwen's compile closure alone must NOT demote its measurements",
   );
 
@@ -2555,7 +2554,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(otherProviderMoved),
-    9,
+    7,
     "another model's code path moving must never demote Qwen — the defect sc-17774 removed",
   );
 
@@ -2824,24 +2823,21 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, admits ZERO coordinates at this pin, and
-  // saying so out loud is the honest version of leaving it off the list above. Two facts keep that
-  // from being a hole:
+  // The seventh arm, `currentEnvironmentVerification`, admits exactly the two SC-18237 Qwen q8
+  // coordinates at this pin. Two facts keep this assertion useful:
   //
-  //   1. It is empty for a REASON, not because it is broken. sc-17774 made currency the provider's
-  //      compile closure, and every closure carrying a promotion moved in this pin's window. The
-  //      promotion path itself is live and is driven against a fixture in "current evidence promotes
-  //      a cell to Verified, and historical evidence does not (sc-16060)".
+  //   1. It is exact: bounded attention and bounded transformer residency were recaptured at the
+  //      current provider closure; no historical BF16/Q4 or other provider row may join them.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm being empty therefore cannot elide anything.
   //
-  // Asserted as an exact count so a recapture flips this test rather than silently passing, and the
+  // Asserted as an exact count so another recapture flips this test rather than silently passing, and the
   // field's presence is asserted separately so a rename cannot make the arm quietly vanish.
   assert.equal(
     resolved.cells.filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0).length,
-    0,
-    "no lane is measured at a current provider closure at this pin; if one was recaptured, update this",
+    2,
+    "only the two SC-18237 Qwen q8 cells are measured at a current provider closure",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
