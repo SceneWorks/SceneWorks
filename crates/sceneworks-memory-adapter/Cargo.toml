@@ -9,18 +9,22 @@ publish = false
 serde_json = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
-mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
+# SC-18218 exact merged inference main used by the authoritative q4/q8 captures. Keep these four
+# MLX dependencies on one revision to avoid cross-revision gen-core types and preserve receipt
+# provenance.
+mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
+mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
+mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "932beb4e60db44d378ffa1fe648defea59b5cbd0", optional = true }
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", features = ["cuda", "testkit"], optional = true }
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", features = ["cuda", "testkit"], optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 
 [features]
 default = []
-mlx = ["dep:mlx-gen", "dep:mlx-gen-krea", "dep:mlx-rs", "dep:runtime-macos"]
+mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-krea", "dep:mlx-rs", "dep:runtime-macos"]
 candle = ["dep:candle-gen", "dep:runtime-cuda"]
 
 [[bin]]

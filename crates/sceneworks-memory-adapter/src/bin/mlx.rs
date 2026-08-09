@@ -57,6 +57,20 @@ const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
 const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-only text-to-image path";
+/// The `mlx:flux2_dev` lane: the FLUX.2-dev text-to-image provider the measured renders load.
+const FLUX2_PROVIDER: &str = "flux2_dev";
+const FLUX2_CALIBRATION_FINGERPRINT: &str = "sc-18218-flux2-dev-t2i-resident-evidence-v1";
+const FLUX2_PLAIN_EXECUTION_PATH: &str = "the MLX FLUX.2-dev base-only text-to-image path";
+/// FLUX.2-dev quality here is repeat determinism on one loaded provider: the resident rung selects
+/// no alternate code path, so the cold measured render and its warm unscoped repeats must agree to
+/// within Metal allocator jitter. 3/255 max and 1/255 mean sit far above observed same-process
+/// fp jitter and far below the mandatory +64/255 broad-bias mutation, which must breach both.
+const FLUX2_MAX_THRESHOLD: f64 = 3.0 / 255.0;
+const FLUX2_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
+const FLUX2_RMS_THRESHOLD: f64 = 1.5 / 255.0;
+/// One fixed seed for every q4/q8 `mlx:flux2_dev` fixture
+/// (`flux2-dev-mlx-<tier>-<edge>-seed18218-step2`).
+const FLUX2_SEED: u64 = 18218;
 const MIB: u64 = 1024 * 1024;
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
@@ -313,7 +327,9 @@ mod tests {
     /// vocabulary appears, which is what distinguishes a dispatch refusal from a misroute.
     #[test]
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
-        for provider in ["flux2_dev", "flux2_dev_edit", "krea_2_turbo", "sana"] {
+        // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
+        // contract provider is not a dispatchable lane.
+        for provider in ["flux2_klein_9b", "flux2_dev_edit", "krea_2_turbo", "sana"] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request).expect_err("unimplemented provider must not dispatch");
             assert_eq!(
@@ -345,7 +361,12 @@ mod tests {
     /// weight load, so the assertion is on WHICH complaint comes back, not on success.
     #[test]
     fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
-        for provider in ["qwen_image", "z_image_turbo", "krea_2_turbo_control"] {
+        for provider in [
+            "qwen_image",
+            "z_image_turbo",
+            "krea_2_turbo_control",
+            "flux2_dev",
+        ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
                 .expect_err("the minimal request is incomplete, so every arm must complain");
@@ -357,6 +378,7 @@ mod tests {
         assert_eq!(QWEN_PROVIDER, "qwen_image");
         assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
+        assert_eq!(FLUX2_PROVIDER, "flux2_dev");
     }
 
     #[test]
@@ -1606,6 +1628,500 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
     )
 }
 
+/// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
+/// runtime_complete quality shape requires the RMS metric alongside max/mean
+/// (`memory-calibration-harness.mjs#validateRuntimeComplete`), which is why this exists next to
+/// `image_max_mean_abs` instead of replacing it.
+fn image_max_mean_rms_abs(left: &Image, right: &Image) -> Result<(f64, f64, f64), String> {
+    let (maximum, mean) = image_max_mean_abs(left, right)?;
+    let mut sum_squares = 0.0_f64;
+    for (&left, &right) in left.pixels.iter().zip(&right.pixels) {
+        let difference = (f64::from(left) - f64::from(right)).abs() / 255.0;
+        sum_squares += difference * difference;
+    }
+    Ok((
+        maximum,
+        mean,
+        (sum_squares / left.pixels.len() as f64).sqrt(),
+    ))
+}
+
+fn flux2_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= FLUX2_MAX_THRESHOLD && mean <= FLUX2_MEAN_THRESHOLD && rms <= FLUX2_RMS_THRESHOLD
+}
+
+/// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
+/// (sc-18104): `run` dispatches by name today, but this arm hardcodes the FLUX.2-dev contract, so a
+/// future caller must be refused by name here rather than misrouted into that contract.
+fn validate_flux2_target(request: &Value) -> Result<(), String> {
+    let provider = protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != FLUX2_PROVIDER {
+        return Err(format!(
+            "MLX FLUX.2-dev calibration does not implement provider {provider:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Bind the fixture to the planned tier AND geometry edge, deriving the seed — the same
+/// fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this lane's
+/// plan carries each of its q4 and q8 tiers at two geometries (768² and 1024²).
+fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("flux2-dev-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse FLUX.2-dev fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse FLUX.2-dev fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn flux2_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a lighthouse on a rocky coastline at golden hour, photorealistic".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        // The first Step callback closes the conditioning envelope; the second supplies a real
+        // denoise-only interval before Decoding — the z_image/qwen phase-boundary pattern.
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+/// Resolve and validate the `SCENEWORKS_FLUX2_*` environment family into a tier-exact load spec.
+/// The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix check and
+/// `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the Candle side).
+fn flux2_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, LoadSpec), String> {
+    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
+    let repository = protocol::required_env("SCENEWORKS_FLUX2_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_FLUX2_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::FLUX2_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_FLUX2_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_FLUX2_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::FLUX2_REPOSITORY,
+    )?;
+    Ok((repository, revision, flux2_spec(root, selection)))
+}
+
+/// The tier-exact FLUX.2-dev load spec: resident offload, eager materialization (the contract's
+/// calibrated load shape), and the quant DERIVED from the planned selection.
+fn flux2_spec(root: PathBuf, selection: &MemorySelection) -> LoadSpec {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization);
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    spec
+}
+
+/// The admission context for the FLUX.2-dev safety scenarios. It exactly describes the base
+/// text-to-image route: `MemoryMode::TextToImage`, no reference, and `reference_count == 0`.
+/// `overlay` stays `None` because this authoritative lane is base-only.
+fn flux2_admission_context(
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18218@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn flux2_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact resident tuple per plan row; marking it range-verified promotes no sibling tuple
+    // (the generated matrix still requires a matching manifest binding per cell).
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// The `mlx:flux2_dev` arm (sc-18218) — RESIDENT ONLY, deliberately.
+///
+/// At the interim inference PR #531 head, `flux2_dev` owns a distinct reference-free T2I contract.
+/// Every non-Resident strategy remains `Missing`; this arm refuses those rungs, reads the registry
+/// contract under the exact T2I provider id, and then proves that the loaded generator exposes the
+/// byte-for-byte same contract before measuring it. No edit-provider declaration or edit-shaped
+/// context participates in this lane.
+fn run_flux2_dev(request: &Value) -> Result<Value, String> {
+    validate_flux2_target(request)?;
+    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
+    let rung = protocol::planned_rung(request)?;
+    if rung != "resident" {
+        return Err(format!(
+            "the pinned MLX FLUX.2-dev provider implements only the resident strategy (every other \
+             strategy is declared Missing at the pin); rung {rung:?} is not capturable"
+        ));
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+    if !matches!(tier, "q4" | "q8") {
+        return Err(format!(
+            "the authoritative MLX FLUX.2-dev plan supports only q4 and q8; tier {tier:?} is not capturable"
+        ));
+    }
+    let (width, height) = protocol::target_geometry(request)?;
+    let seed = planned_flux2_seed(request, tier, width)?;
+    let (repository, revision, spec) = flux2_load_spec(request, tier, &selection)?;
+    let registry = mlx_gen_flux2::provider_registry()
+        .map_err(|error| format!("build FLUX.2 registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(FLUX2_PROVIDER, &spec)
+        .map_err(|error| format!("read {FLUX2_PROVIDER} T2I memory-strategy contract: {error}"))?
+        .ok_or_else(|| {
+            format!("{FLUX2_PROVIDER} has no T2I memory-strategy contract at the pin")
+        })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned FLUX.2-dev contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned FLUX.2-dev contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != FLUX2_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned FLUX.2-dev T2I contract fingerprint changed: expected {FLUX2_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if seed != FLUX2_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the FLUX.2-dev calibration seed {FLUX2_SEED}"
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+            &spec,
+            &contract,
+            &flux2_admission_context(
+                &selection,
+                calibration,
+                fingerprint,
+                width,
+                height,
+                total_bytes,
+                predicted,
+            ),
+        )
+    };
+    // Admission mutation hygiene BEFORE the expensive load: the gate must accept a fitting
+    // request (so the two rejections below cannot pass via a blanket refusal), reject an
+    // unknown/zero budget, and reject a mutated calibration fingerprint.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "FLUX.2-dev admission rejected a fitting probe budget; the scenario rejections below \
+             would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("FLUX.2-dev admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-flux2-dev-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("FLUX.2-dev admission accepted stale calibration evidence".to_owned());
+    }
+
+    let generator = registry
+        .load(FLUX2_PROVIDER, &spec)
+        .map_err(|error| format!("load real FLUX.2-dev {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded FLUX.2-dev generator exposed no T2I memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded FLUX.2-dev generator contract differs from the registry contract".to_owned(),
+        );
+    }
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &flux2_request(width, height, seed),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured FLUX.2-dev render: {error}"))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized FLUX.2-dev lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let exact_fit = flux2_admission_context(
+        &selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        predicted,
+        predicted,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact_fit),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("FLUX.2-dev admission rejected an exact-fit calibrated budget".to_owned());
+    }
+
+    // Warm repeat determinism + cleanup bounds on this exact loaded provider. The scoped
+    // lifecycle scenarios cannot run (no request scope, no injection site), so the unscoped
+    // repeats gate quality and the allocator bounds gate cleanup instead.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&flux2_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm FLUX.2-dev control: {error}"))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "FLUX.2-dev warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&flux2_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm FLUX.2-dev repeat: {error}"))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "FLUX.2-dev warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "FLUX.2-dev warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+            cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err("FLUX.2-dev second warm repeat changed the deterministic output".to_owned());
+    }
+
+    // Arm-internal negative-mutation falsifiability check. A runtime_complete record must keep
+    // `negativeMutation` null (`memory-calibration-harness.mjs#validateRuntimeComplete`), so the
+    // breach is verified here — the capture fails if the envelope cannot be breached — and the
+    // measured numbers land in diagnostics rather than in the record field.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(
+            "FLUX.2-dev output mutation did not breach the determinism envelope".to_owned(),
+        );
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev ",
+        "variants and has no calibration fault-injection site, so the scoped lifecycle scenario ",
+        "cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in ",
+        "quality and diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": flux2_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:flux2-dev-resident",
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", 0),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, FLUX2_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
 fn validate_z_image_batch(request: &Value) -> Result<&[Value], String> {
     let planned = request
         .get("planned")
@@ -2797,6 +3313,7 @@ fn run(request: &Value) -> Result<Value, String> {
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
+        FLUX2_PROVIDER => run_flux2_dev(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -2913,6 +3430,336 @@ mod z_image_reuse_tests {
             error,
             "Z-Image rung batch must contain exactly 5 cases, got 3"
         );
+    }
+}
+
+#[cfg(test)]
+mod flux2_tests {
+    use super::*;
+    use mlx_gen::gen_core::MemoryStrategySupport;
+
+    fn minimal_request(provider: &str, rung: &str) -> Value {
+        json!({
+            "planned": {
+                "target": { "provider": provider, "overlay": "none" },
+                "strategy": { "rung": rung, "parameters": {} }
+            }
+        })
+    }
+
+    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104): dispatch routes by
+    /// name today, but this arm hardcodes the FLUX.2-dev contract, so a misrouted target must be
+    /// refused by name INSIDE the arm, and the refusal must not read like a missing-field complaint.
+    #[test]
+    fn the_flux2_arm_refuses_a_foreign_provider_by_name() {
+        for provider in [
+            "z_image_turbo",
+            "qwen_image",
+            "flux2_dev_edit",
+            "flux2_klein_9b",
+        ] {
+            let error = run_flux2_dev(&minimal_request(provider, "resident"))
+                .expect_err("a foreign provider must not reach the FLUX.2-dev contract");
+            assert_eq!(
+                error,
+                format!("MLX FLUX.2-dev calibration does not implement provider {provider:?}")
+            );
+            assert!(
+                !error.contains("must be a string") && !error.contains("fingerprint"),
+                "refusal came from deeper in the arm, so the guard let it through: {error}"
+            );
+        }
+    }
+
+    /// sc-18218's scope correction (story comment activity-18225): at the pin, mlx-gen-flux2 marks
+    /// every non-Resident strategy `Missing`, so the arm is resident-only BY REFUSAL, not by
+    /// accident of the plan. Each of the other four rungs must be named back.
+    #[test]
+    fn the_flux2_arm_is_resident_only_by_refusal() {
+        for rung in [
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+        ] {
+            let error = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, rung))
+                .expect_err("a non-resident rung must be refused");
+            assert!(
+                error.contains(rung) && error.contains("resident"),
+                "refusal must name the rung and the resident-only contract: {error}"
+            );
+        }
+        let resident = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, "resident"))
+            .expect_err("the minimal resident request is still incomplete");
+        assert!(
+            !resident.contains("not capturable"),
+            "the resident rung itself must pass the rung gate: {resident}"
+        );
+    }
+
+    #[test]
+    fn flux2_fixture_is_bound_to_tier_geometry_and_step_count() {
+        let request = json!({
+            "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step2" }
+        });
+        assert_eq!(planned_flux2_seed(&request, "q4", 768).unwrap(), 18218);
+        assert!(planned_flux2_seed(&request, "q8", 768)
+            .unwrap_err()
+            .contains("must start with"));
+        assert!(planned_flux2_seed(&request, "q4", 1024)
+            .unwrap_err()
+            .contains("must start with"));
+        let three_step = json!({
+            "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step3" }
+        });
+        assert!(planned_flux2_seed(&three_step, "q4", 768)
+            .unwrap_err()
+            .contains("two-step"));
+    }
+
+    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target and each
+    /// declared authoritative tier maps to its own quant, never a hardcoded q4.
+    #[test]
+    fn flux2_load_spec_preserves_every_planned_numeric_tier() {
+        for (tier, expected_quant) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+            let request = json!({
+                "planned": {
+                    "strategy": { "rung": "resident", "parameters": {} },
+                    "target": { "tier": tier }
+                }
+            });
+            let selection = planned_selection(&request).unwrap();
+            let spec = flux2_spec(PathBuf::from(format!("/tmp/flux2-dev-{tier}")), &selection);
+            assert_eq!(spec.quantize, Some(expected_quant), "numeric tier {tier}");
+        }
+    }
+
+    #[test]
+    fn flux2_admission_context_is_reference_free_text_to_image() {
+        let contract = mlx_gen_flux2::memory_strategy::registered_dev_t2i_contract(
+            &weights_free_spec(Some(Quant::Q4)),
+        )
+        .unwrap();
+        let calibration = contract.calibration.as_ref().unwrap();
+        let context = flux2_admission_context(
+            &resident_selection(Some(Quant::Q4)),
+            calibration,
+            &calibration.fingerprint,
+            768,
+            768,
+            1_000_000,
+            1_000_000,
+        );
+        assert_eq!(context.mode, MemoryMode::TextToImage);
+        assert!(!context.has_reference);
+        assert_eq!(context.geometry.reference_count, 0);
+        assert!(context.overlay.is_none());
+    }
+
+    #[test]
+    fn flux2_repeat_envelope_accepts_jitter_and_rejects_the_mandatory_mutation() {
+        assert!(flux2_quality_passes(2.0 / 255.0, 0.5 / 255.0, 1.0 / 255.0));
+        assert!(!flux2_quality_passes(4.0 / 255.0, 0.5 / 255.0, 1.0 / 255.0));
+        assert!(!flux2_quality_passes(2.0 / 255.0, 1.5 / 255.0, 1.0 / 255.0));
+        assert!(!flux2_quality_passes(2.0 / 255.0, 0.5 / 255.0, 2.0 / 255.0));
+
+        let baseline = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 63, 127, 128, 191, 255],
+        };
+        let mutated = qwen_negative_mutation(&baseline);
+        let (maximum, mean, rms) = image_max_mean_rms_abs(&mutated, &baseline).unwrap();
+        assert!(maximum >= 64.0 / 255.0);
+        assert!(mean >= 64.0 / 255.0);
+        assert!(rms >= 64.0 / 255.0);
+        assert!(!flux2_quality_passes(maximum, mean, rms));
+    }
+
+    #[test]
+    fn rms_is_measured_from_the_same_pixels_as_max_and_mean() {
+        let left = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 0, 0, 0, 0, 0],
+        };
+        let right = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![51, 0, 0, 0, 0, 0],
+        };
+        let (maximum, mean, rms) = image_max_mean_rms_abs(&left, &right).unwrap();
+        assert!((maximum - 0.2).abs() < 1e-9);
+        assert!((mean - 0.2 / 6.0).abs() < 1e-9);
+        assert!((rms - 0.2 / 6.0_f64.sqrt()).abs() < 1e-9);
+    }
+
+    fn weights_free_spec(quant: Option<Quant>) -> LoadSpec {
+        let mut spec = LoadSpec::new(WeightsSource::Dir("/nonexistent".into()))
+            .with_offload_policy(OffloadPolicy::Resident)
+            .with_load_shape(LoadShape::EagerMaterialization);
+        if let Some(quant) = quant {
+            spec = spec.with_quant(quant);
+        }
+        spec
+    }
+
+    fn resident_selection(quant: Option<Quant>) -> MemorySelection {
+        MemorySelection {
+            strategy: MemoryStrategy::Resident,
+            parameters: MemoryStrategyParameters::default(),
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant,
+                component_precision_floors: &[],
+            },
+        }
+    }
+
+    /// Pins the arm's load-bearing premises to the PINNED provider crate, weights-free:
+    ///
+    ///   1. `flux2_dev` directly registers its own T2I contract;
+    ///   2. that T2I contract is resident-only (every other strategy `Missing`) — the reason the arm
+    ///      and the plan carry a single rung;
+    ///   3. its calibration fingerprint is the exact string the plan entries pin.
+    ///
+    /// If a pin bump changes any of these, this test reds and the arm must be revisited rather
+    /// than silently measuring under a different contract.
+    #[test]
+    fn the_pinned_flux2_t2i_contract_is_direct_resident_only_and_plan_exact() {
+        let registry = mlx_gen_flux2::provider_registry().unwrap();
+        let spec = weights_free_spec(Some(Quant::Q4));
+        let contract = registry
+            .memory_strategy_contract(FLUX2_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned FLUX.2-dev T2I contract");
+        assert_eq!(contract.provider_id, FLUX2_PROVIDER);
+        for capability in &contract.strategies {
+            if capability.strategy == MemoryStrategy::Resident {
+                assert!(
+                    !matches!(capability.support, MemoryStrategySupport::Missing),
+                    "the resident strategy must be supported"
+                );
+            } else {
+                assert!(
+                    matches!(capability.support, MemoryStrategySupport::Missing),
+                    "{:?} is no longer Missing at the pin; the resident-only arm is stale",
+                    capability.strategy
+                );
+            }
+        }
+        assert_eq!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            FLUX2_CALIBRATION_FINGERPRINT,
+            "the plan entries pin this fingerprint; regenerate them with the provider"
+        );
+        // The plan's `engagedRungs: ["resident"]` must equal the provider's engaged composition,
+        // or `attested_strategy` fails every capture at plan/measured comparison time.
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::Resident),
+            vec![MemoryStrategy::Resident],
+            "the plan entries pin engagedRungs [\"resident\"]; regenerate them with the provider"
+        );
+    }
+
+    /// The admission-scenario legs the capture will run, exercised weights-free through the SAME
+    /// registered function the loaded T2I generator delegates to. Mutation-verified in both
+    /// directions: the accept leg proves the two rejects are not a blanket refusal, and the
+    /// route-gate leg proves the accept is not a blanket accept.
+    #[test]
+    fn flux2_admission_scenarios_accept_exact_fit_and_reject_unknown_stale_and_foreign_routes() {
+        let registry = mlx_gen_flux2::provider_registry().unwrap();
+        let spec = weights_free_spec(Some(Quant::Q4));
+        let contract = registry
+            .memory_strategy_contract(FLUX2_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned FLUX.2-dev T2I contract");
+        let calibration = contract.calibration.as_ref().unwrap();
+        let selection = resident_selection(Some(Quant::Q4));
+        let check = |context: &MemoryRunContext| {
+            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+                &spec, &contract, context,
+            )
+        };
+
+        let exact = flux2_admission_context(
+            &selection,
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1_000_000,
+            1_000_000,
+        );
+        assert!(
+            matches!(check(&exact), MemorySafetyDecision::Accept),
+            "exact-fit admission must accept: {:?}",
+            check(&exact)
+        );
+
+        let unknown = flux2_admission_context(
+            &selection,
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            0,
+            1,
+        );
+        assert!(matches!(
+            check(&unknown),
+            MemorySafetyDecision::Reject { .. }
+        ));
+
+        let stale = flux2_admission_context(
+            &selection,
+            calibration,
+            "stale-flux2-dev-fingerprint",
+            1024,
+            1024,
+            1_000_000,
+            1,
+        );
+        assert!(matches!(check(&stale), MemorySafetyDecision::Reject { .. }));
+
+        // The route-gate mutation: the same fitting budget in an edit shape must be refused — the
+        // T2I contract admits only reference-free text-to-image.
+        let mut edit_shaped = flux2_admission_context(
+            &selection,
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1_000_000,
+            1_000_000,
+        );
+        edit_shaped.mode = MemoryMode::Edit;
+        edit_shaped.has_reference = true;
+        edit_shaped.geometry.reference_count = 2;
+        assert!(matches!(
+            check(&edit_shaped),
+            MemorySafetyDecision::Reject { .. }
+        ));
+
+        // NVFP4 is the one tier the route gate refuses by name.
+        let nvfp4_spec = weights_free_spec(Some(Quant::Nvfp4));
+        let nvfp4 = flux2_admission_context(
+            &resident_selection(Some(Quant::Nvfp4)),
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1_000_000,
+            1_000_000,
+        );
+        assert!(matches!(
+            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+                &nvfp4_spec,
+                &contract,
+                &nvfp4
+            ),
+            MemorySafetyDecision::Reject { .. }
+        ));
     }
 }
 
