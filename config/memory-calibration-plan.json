@@ -1686,6 +1686,161 @@
       ]
     },
     {
+      "name": "mlx-flux2-dev-q4-resident-768",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-16593-flux2-dev-edit-evidence-v2",
+      "fixture": "flux2-dev-mlx-q4-768-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-flux2-dev-q4-resident-1024",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-16593-flux2-dev-edit-evidence-v2",
+      "fixture": "flux2-dev-mlx-q4-1024-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-flux2-dev-q8-resident-768",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-16593-flux2-dev-edit-evidence-v2",
+      "fixture": "flux2-dev-mlx-q8-768-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-flux2-dev-q8-resident-1024",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-16593-flux2-dev-edit-evidence-v2",
+      "fixture": "flux2-dev-mlx-q8-1024-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-flux2-dev-bf16-resident-256-reduced-geometry",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "bf16",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 256,
+          "height": 256,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-16593-flux2-dev-edit-evidence-v2",
+      "fixture": "flux2-dev-mlx-bf16-256-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
       "name": "candle-krea-production-current-v1",
       "evidenceScope": "authoritative",
       "backend": "candle",

@@ -10,6 +10,7 @@ serde_json = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
+mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
 mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "932beb4e60db44d378ffa1fe648defea59b5cbd0", optional = true }
 runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
@@ -20,7 +21,7 @@ runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "40fa758
 
 [features]
 default = []
-mlx = ["dep:mlx-gen", "dep:mlx-gen-krea", "dep:mlx-rs", "dep:runtime-macos"]
+mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-krea", "dep:mlx-rs", "dep:runtime-macos"]
 candle = ["dep:candle-gen", "dep:runtime-cuda"]
 
 [[bin]]
