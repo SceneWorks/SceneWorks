@@ -496,6 +496,44 @@ mod tests {
             assert_eq!(spec.quantize, expected_quant, "numeric tier {tier}");
         }
     }
+
+    #[test]
+    fn qwen_capture_uses_the_plans_typed_load_shape_independently_of_rung() {
+        for (rung, load_shape, expected) in [
+            (
+                "bounded_attention",
+                protocol::LOAD_SHAPE_DEFERRED,
+                LoadShape::DeferredMaterialization,
+            ),
+            (
+                "bounded_transformer_residency",
+                protocol::LOAD_SHAPE_DEFERRED,
+                LoadShape::DeferredMaterialization,
+            ),
+            (
+                "bounded_attention",
+                protocol::LOAD_SHAPE_EAGER,
+                LoadShape::EagerMaterialization,
+            ),
+        ] {
+            let request = json!({
+                "planned": {
+                    "loadShape": load_shape,
+                    "strategy": { "rung": rung, "parameters": {} }
+                }
+            });
+            assert_eq!(planned_load_shape(&request).unwrap(), expected, "{rung}");
+        }
+
+        let missing = json!({ "planned": {} });
+        assert!(planned_load_shape(&missing)
+            .unwrap_err()
+            .contains("planned.loadShape must be a string"));
+        let mutated = json!({ "planned": { "loadShape": "deferred-ish" } });
+        assert!(planned_load_shape(&mutated)
+            .unwrap_err()
+            .contains("deferred-ish"));
+    }
 }
 
 fn encoded_latent(vae: &QwenVae, width: u32, height: u32) -> Result<Array, String> {
@@ -1064,6 +1102,25 @@ fn load_shape_key(load_shape: LoadShape) -> &'static str {
     }
 }
 
+/// Parse the load shape the capture plan requires. The adapter must execute this shape and then
+/// attest the loaded provider's calibration identity; deriving it from the selected rung silently
+/// rewrites a declared production-shaped capture (the sc-18237 Qwen q8 bounded-attention defect).
+fn planned_load_shape(request: &Value) -> Result<LoadShape, String> {
+    match protocol::planned(request)?
+        .get("loadShape")
+        .and_then(Value::as_str)
+    {
+        Some(protocol::LOAD_SHAPE_EAGER) => Ok(LoadShape::EagerMaterialization),
+        Some(protocol::LOAD_SHAPE_DEFERRED) => Ok(LoadShape::DeferredMaterialization),
+        Some(other) => Err(format!(
+            "planned.loadShape must be {:?} or {:?}, got {other:?}",
+            protocol::LOAD_SHAPE_EAGER,
+            protocol::LOAD_SHAPE_DEFERRED
+        )),
+        None => Err("planned.loadShape must be a string".to_owned()),
+    }
+}
+
 fn z_image_load_spec(
     request: &Value,
     load_shape: LoadShape,
@@ -1538,12 +1595,7 @@ fn run_z_image_reference_loaded(
 }
 
 fn run_z_image_reference(request: &Value) -> Result<Value, String> {
-    let selection = planned_selection(request)?;
-    let load_shape = if selection.strategy == MemoryStrategy::BoundedTransformerResidency {
-        LoadShape::DeferredMaterialization
-    } else {
-        LoadShape::EagerMaterialization
-    };
+    let load_shape = planned_load_shape(request)?;
     let (repository, revision, generator) = load_z_image_generator(request, load_shape)?;
     run_z_image_reference_loaded(
         request,
@@ -1775,7 +1827,6 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-
     let stale_context = krea_context(
         width,
         height,
@@ -2404,11 +2455,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
     let seed = planned_qwen_seed(request, tier)?;
-    let load_shape = if selection.strategy == MemoryStrategy::BoundedTransformerResidency {
-        LoadShape::DeferredMaterialization
-    } else {
-        LoadShape::EagerMaterialization
-    };
+    let load_shape = planned_load_shape(request)?;
     let offload = if matches!(
         selection.strategy,
         MemoryStrategy::StagedResidency | MemoryStrategy::BoundedTransformerResidency
@@ -2462,6 +2509,13 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
             calibration.fingerprint
+        ));
+    }
+    if load_shape != calibration.load_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(load_shape),
+            load_shape_key(calibration.load_shape)
         ));
     }
     let hardware_bytes = request

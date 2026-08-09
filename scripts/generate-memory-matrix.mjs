@@ -565,8 +565,11 @@ function expectedEngagedRungs({
   return matches[0];
 }
 
-// Derive the exact additive host requirement used by the Rust MLX admission envelope.
-// This is a generated-data bridge only. It does not suggest a tier or add model-specific policy.
+// Derive the smallest host that satisfies the same piecewise reserve policy as the Rust MLX
+// admission envelope. Below the capture host, solve
+// `peak + ceil(reserve * host / capture) <= host`; at and above it preserve the captured absolute
+// reserve. BigInt keeps the peak*host intermediate exact even though every published byte value
+// must remain a JSON-safe integer.
 export function mlxRequiredHostBytes(record) {
   if (record?.backend !== "mlx") return null;
   const memoryBytes = record.hardware?.memoryBytes;
@@ -578,11 +581,22 @@ export function mlxRequiredHostBytes(record) {
   const inputs = [memoryBytes, mlxLimit, wiredLimit, predicted, wired, reclaimable];
   if (!inputs.every((value) => Number.isSafeInteger(value) && value >= 0)) return null;
 
-  const processCeiling = Math.min(memoryBytes, mlxLimit, wiredLimit);
-  const foreignReserve = memoryBytes - processCeiling;
-  const nonReclaimableWired = Math.max(0, wired - reclaimable);
-  const required = Math.max(predicted, nonReclaimableWired) + foreignReserve;
-  return Number.isSafeInteger(required) ? required : null;
+  const captureHost = BigInt(memoryBytes);
+  if (captureHost === 0n) return null;
+  const processCeiling = BigInt(Math.min(memoryBytes, mlxLimit, wiredLimit));
+  const foreignReserve = captureHost - processCeiling;
+  const nonReclaimableWired = BigInt(Math.max(0, wired - reclaimable));
+  const peak = BigInt(predicted) > nonReclaimableWired ? BigInt(predicted) : nonReclaimableWired;
+  const absoluteRequirement = peak + foreignReserve;
+
+  let required = absoluteRequirement;
+  if (foreignReserve < captureHost) {
+    const denominator = captureHost - foreignReserve;
+    const proportionalRequirement = (peak * captureHost + denominator - 1n) / denominator;
+    if (proportionalRequirement <= captureHost) required = proportionalRequirement;
+  }
+
+  return required <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(required) : null;
 }
 
 export function observedPeakBytes(record) {
