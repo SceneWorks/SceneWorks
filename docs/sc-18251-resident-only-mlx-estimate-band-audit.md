@@ -49,9 +49,12 @@ a base-provider contract.
 
 ## Source-bound inventory
 
-The audit derives 62 candidate route/tier cells from these sources and explicitly requires the
-executable classifier to cover that exact set. Provider/manifest contracts classify 35 of those
-cells as Resident-only, and the budget walk evaluates every one of the 35:
+The eight-family story scope contains 65 source-selected route/tier cells. The audit exhaustively
+classifies them as 62 generic-selector candidates plus the three q4/q8/bf16 PuLID-FLUX cells.
+Provider/manifest contracts classify 35 of the 62 generic cells as Resident-only, and the budget
+walk evaluates every one of those 35. Exact set equality binds both the generic inventory and the
+explicit-exclusion inventory, so a route that produces no Resident-only result cannot silently
+disappear:
 
 - every shipped MLX image entry in the story-scoped Boogu, Chroma, FLUX.1, FLUX.2 Dev, FLUX.2
   Klein, Ideogram, Lens, and SD3 families, discovered from
@@ -67,6 +70,22 @@ cells as Resident-only, and the budget walk evaluates every one of the 35:
   reproduce a full turnkey component tree; and
 - the production measured-load-shape seam, which keeps base Lens q4 on its exact measured contract
   instead of misclassifying it as Resident-only.
+
+`pulid_flux_dev` is the one explicit exclusion inside the eight-family scope. It is a shipped
+`family=flux`, `type=image`, MLX entry with three tiers, but deliberately has no `MODEL_TABLE` row:
+production recognizes the identity-conditioned request directly and loads the inventory-registered
+`pulid_flux` provider with `LoadSpec::identity`, adding the adapter, EVA face encoder, and face stack
+outside the generic base-image plan. Treating its backbone as a plain FLUX route would undercount
+that composition, so all three cells are source-accounted and explicitly excluded from the generic
+fixture instead.
+
+The classifier also pins Mage even though `family=mage-flow` is outside the story's eight-family
+result scope. Its six production routes contribute 18 q4/q8/bf16 cells. Every Mage tier is a split
+load whose model-specific DiT is combined with shared, tier-specific text-encoder and VAE
+co-requisites and component precision floors. The generic single-root sparse fixture cannot model
+that accounting truthfully, so those 18 cells are separately source-accounted as an explicit
+split-component exclusion. This prevents a future family/scope edit from making Mage vanish by
+accident while keeping it out of the 65-cell story result.
 
 The resulting Resident-only subset is:
 
@@ -103,6 +122,12 @@ must fail before any set conversion can hide the duplicate. Dropping `flux_schne
 more subtle mutation: Schnell contributes zero Resident-only cells, so the old 35-cell subset and
 two-flip summary remain unchanged, but exact equality against the 62-cell manifest/router source
 inventory fails and names the missing route.
+
+`resident_only_audit_exclusions_reject_pulid_and_mage_scope_mutations` pins the complementary
+exclusion inventory. Removing PuLID, changing its disposition, or changing its `flux` family must
+fail; removing the six-model Mage scope or changing a Mage route's `mage-flow` family must likewise
+fail. The test also binds the expected three PuLID tiers and 18 Mage split-component tiers to current
+production provider resolution and manifest byte accounting.
 
 ## Source values
 

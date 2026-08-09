@@ -8012,6 +8012,33 @@ mod tests {
         base_asset_bytes: u64,
     }
 
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum SourceBoundManifestDisposition {
+        GenericSelector,
+        PulidIdentityExcluded,
+        MageSplitComponentsExcluded,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct SourceBoundManifestClassification {
+        manifest_id: String,
+        family: String,
+        disposition: SourceBoundManifestDisposition,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct SourceBoundExcludedCell {
+        manifest_id: String,
+        family: String,
+        provider_id: &'static str,
+        tier: String,
+        base_asset_bytes: u64,
+        disposition: SourceBoundManifestDisposition,
+    }
+
     /// Story-scoped product families for the Resident-only estimate-band audit. Individual
     /// manifest entries and tiers are deliberately not enumerated: the shipped manifest and
     /// production routers expand this family scope into the exact candidate inventory.
@@ -8028,28 +8055,38 @@ mod tests {
     ];
 
     #[cfg(target_os = "macos")]
-    fn source_bound_audit_manifest_ids<'a>(models: &'a [Value]) -> Result<Vec<&'a str>, String> {
-        let mut manifest_ids = Vec::new();
+    fn source_bound_manifest_classifications(
+        models: &[Value],
+    ) -> Result<Vec<SourceBoundManifestClassification>, String> {
+        use SourceBoundManifestDisposition::{
+            GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
+        };
+
+        let mut classifications = Vec::new();
         let mut unique = std::collections::BTreeSet::new();
         for model in models {
             if model["type"] != "image" || !model["mlx"].is_object() {
                 continue;
             }
-            let Some(family) = model["family"].as_str() else {
-                continue;
-            };
-            if !RESIDENT_ONLY_AUDIT_FAMILIES.contains(&family) {
-                continue;
-            }
             let manifest_id = model["id"]
                 .as_str()
                 .ok_or_else(|| "shipped MLX image entry has no string id".to_owned())?;
-            if crate::engines::mlx_model(manifest_id).is_none() {
+            let family = model["family"].as_str().ok_or_else(|| {
+                format!("shipped MLX image entry {manifest_id} has no string family")
+            })?;
+            let resolved = crate::engines::mlx_model(manifest_id);
+            let is_pulid = crate::image_jobs::is_pulid_flux_model(manifest_id);
+            let routed_as_mage = resolved
+                .as_ref()
+                .is_some_and(|model| model.adapter_label() == "mlx_mage");
+            let in_mage_family = family == "mage-flow";
+            let in_audit_family = RESIDENT_ONLY_AUDIT_FAMILIES.contains(&family);
+            if !in_audit_family && !is_pulid && !in_mage_family && !routed_as_mage {
                 continue;
             }
             if !unique.insert(manifest_id) {
                 return Err(format!(
-                    "shipped manifest declares duplicate production MLX image id {manifest_id}"
+                    "shipped manifest declares duplicate classified MLX image id {manifest_id}"
                 ));
             }
             if source_bound_shipped_tiers(model)?.is_empty() {
@@ -8057,12 +8094,52 @@ mod tests {
                     "production MLX image route {manifest_id} has no auditable shipped q4/q8/bf16 tier"
                 ));
             }
-            manifest_ids.push(manifest_id);
+            let disposition = if is_pulid {
+                if family != "flux" || resolved.is_some() {
+                    return Err(format!(
+                        "{manifest_id} PuLID bespoke classification drifted: expected family=flux and no MODEL_TABLE row"
+                    ));
+                }
+                PulidIdentityExcluded
+            } else if in_mage_family || routed_as_mage {
+                if !in_mage_family || !routed_as_mage {
+                    return Err(format!(
+                        "{manifest_id} Mage split-component classification drifted: expected family=mage-flow and a production mlx_mage route"
+                    ));
+                }
+                MageSplitComponentsExcluded
+            } else if in_audit_family {
+                if resolved.is_none() {
+                    return Err(format!(
+                        "{manifest_id} is in an audited family but has neither a production MODEL_TABLE route nor an explicit bespoke exclusion"
+                    ));
+                }
+                GenericSelector
+            } else {
+                return Err(format!(
+                    "{manifest_id} reached the source classifier without a disposition"
+                ));
+            };
+            classifications.push(SourceBoundManifestClassification {
+                manifest_id: manifest_id.to_owned(),
+                family: family.to_owned(),
+                disposition,
+            });
         }
-        if manifest_ids.is_empty() {
-            return Err("shipped manifest exposes no production MLX image routes".to_owned());
+        if classifications.is_empty() {
+            return Err("shipped manifest exposes no classified MLX image routes".to_owned());
         }
-        Ok(manifest_ids)
+        Ok(classifications)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_generic_manifest_ids(
+        classifications: &[SourceBoundManifestClassification],
+    ) -> impl Iterator<Item = &str> {
+        classifications.iter().filter_map(|classification| {
+            (classification.disposition == SourceBoundManifestDisposition::GenericSelector)
+                .then_some(classification.manifest_id.as_str())
+        })
     }
 
     #[cfg(target_os = "macos")]
@@ -8110,7 +8187,10 @@ mod tests {
     fn source_bound_audit_surfaces(
         models: &[Value],
     ) -> Result<Vec<SourceBoundAuditSurface>, String> {
-        source_bound_audit_surfaces_from_manifest_ids(source_bound_audit_manifest_ids(models)?)
+        let classifications = source_bound_manifest_classifications(models)?;
+        source_bound_audit_surfaces_from_manifest_ids(source_bound_generic_manifest_ids(
+            &classifications,
+        ))
     }
 
     fn set_sparse_len(path: &Path, bytes: u64) {
@@ -8226,6 +8306,137 @@ mod tests {
                 base_asset_bytes,
             })
             .collect())
+    }
+
+    /// Expand every explicitly excluded manifest entry into the same route/tier accounting shape
+    /// as the generic-selector audit. These are exclusions from the generic sparse-`LoadSpec`
+    /// fixture, not exclusions from source-truth accounting: every shipped tier remains pinned.
+    #[cfg(target_os = "macos")]
+    fn source_bound_excluded_inventory_from_classifications(
+        models: &[Value],
+        classifications: &[SourceBoundManifestClassification],
+    ) -> Result<Vec<SourceBoundExcludedCell>, String> {
+        use SourceBoundManifestDisposition::{
+            GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
+        };
+
+        let mut cells = std::collections::BTreeSet::new();
+        for classification in classifications {
+            if classification.disposition == GenericSelector {
+                continue;
+            }
+            let model = models
+                .iter()
+                .find(|model| model["id"] == classification.manifest_id)
+                .ok_or_else(|| {
+                    format!(
+                        "missing explicitly excluded {} manifest entry",
+                        classification.manifest_id
+                    )
+                })?;
+            let provider_id = match classification.disposition {
+                PulidIdentityExcluded => {
+                    if !crate::image_jobs::is_pulid_flux_model(&classification.manifest_id)
+                        || classification.family != "flux"
+                        || crate::engines::mlx_model(&classification.manifest_id).is_some()
+                    {
+                        return Err(format!(
+                            "{} no longer matches the PuLID identity-path exclusion",
+                            classification.manifest_id
+                        ));
+                    }
+                    "pulid_flux"
+                }
+                MageSplitComponentsExcluded => {
+                    let resolved = crate::engines::mlx_model(&classification.manifest_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "{} no longer resolves through the production Mage route",
+                                classification.manifest_id
+                            )
+                        })?;
+                    if classification.family != "mage-flow"
+                        || resolved.adapter_label() != "mlx_mage"
+                    {
+                        return Err(format!(
+                            "{} no longer matches the Mage split-component exclusion",
+                            classification.manifest_id
+                        ));
+                    }
+                    resolved.engine_id()
+                }
+                GenericSelector => unreachable!("generic entries were skipped above"),
+            };
+            if crate::inference_runtime::media_descriptor(provider_id).is_none() {
+                return Err(format!(
+                    "explicitly excluded provider {provider_id} is absent from the pinned registry"
+                ));
+            }
+            for shipped in source_bound_shipped_tiers(model)? {
+                let cell = SourceBoundExcludedCell {
+                    manifest_id: classification.manifest_id.clone(),
+                    family: classification.family.clone(),
+                    provider_id,
+                    tier: shipped.tier,
+                    base_asset_bytes: shipped.base_asset_bytes,
+                    disposition: classification.disposition,
+                };
+                if !cells.insert(cell.clone()) {
+                    return Err(format!(
+                        "source-bound excluded inventory resolves a duplicate cell {cell:?}"
+                    ));
+                }
+            }
+        }
+        Ok(cells.into_iter().collect())
+    }
+
+    /// Revalidate each exclusion against current production routing and current manifest tier
+    /// accounting. Exact equality with the source-derived inventory below prevents a caller from
+    /// silently dropping an excluded model or tier before this classifier runs.
+    #[cfg(target_os = "macos")]
+    fn source_bound_classified_excluded_inventory(
+        models: &[Value],
+        source_inventory: &[SourceBoundExcludedCell],
+    ) -> Result<Vec<SourceBoundExcludedCell>, String> {
+        let classifications = source_bound_manifest_classifications(models)?;
+        let canonical =
+            source_bound_excluded_inventory_from_classifications(models, &classifications)?
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+        let mut classified = Vec::new();
+        for candidate in source_inventory {
+            if !canonical.contains(candidate) {
+                return Err(format!(
+                    "source-bound exclusion no longer matches production source/routing/accounting: {candidate:?}"
+                ));
+            }
+            classified.push(candidate.clone());
+        }
+        Ok(classified)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn require_exact_source_bound_excluded_inventory(
+        expected: &[SourceBoundExcludedCell],
+        actual: &[SourceBoundExcludedCell],
+    ) -> Result<(), String> {
+        let expected = expected
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual = actual
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if expected == actual {
+            return Ok(());
+        }
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+        Err(format!(
+            "source-bound excluded inventory mismatch; missing={missing:?}; unexpected={unexpected:?}"
+        ))
     }
 
     #[cfg(target_os = "macos")]
@@ -8559,7 +8770,22 @@ mod tests {
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
-        let surfaces = source_bound_audit_surfaces(models).expect("source-bound audit surfaces");
+        let classifications =
+            source_bound_manifest_classifications(models).expect("source-bound classifications");
+        assert_eq!(
+            classifications.len(),
+            26,
+            "the source-derived generic-plus-excluded model inventory changed"
+        );
+        let generic_manifest_ids =
+            source_bound_generic_manifest_ids(&classifications).collect::<Vec<_>>();
+        assert_eq!(
+            generic_manifest_ids.len(),
+            19,
+            "the generic-selector model inventory changed"
+        );
+        let surfaces = source_bound_audit_surfaces_from_manifest_ids(generic_manifest_ids)
+            .expect("source-bound audit surfaces");
         let source_inventory = source_bound_audit_inventory_from_surfaces(models, &surfaces)
             .expect("source-bound candidate inventory");
         assert_eq!(
@@ -8567,6 +8793,36 @@ mod tests {
             62,
             "the source-derived candidate inventory changed; update the recorded audit result"
         );
+        let excluded_inventory =
+            source_bound_excluded_inventory_from_classifications(models, &classifications)
+                .expect("source-bound excluded inventory");
+        let pulid_excluded = excluded_inventory
+            .iter()
+            .filter(|cell| {
+                cell.disposition == SourceBoundManifestDisposition::PulidIdentityExcluded
+            })
+            .count();
+        let mage_excluded = excluded_inventory
+            .iter()
+            .filter(|cell| {
+                cell.disposition == SourceBoundManifestDisposition::MageSplitComponentsExcluded
+            })
+            .count();
+        assert_eq!(pulid_excluded, 3, "PuLID must account for q4/q8/bf16");
+        assert_eq!(
+            mage_excluded, 18,
+            "the six Mage variants must each account for q4/q8/bf16"
+        );
+        assert_eq!(
+            source_inventory.len() + pulid_excluded,
+            65,
+            "every route/tier cell in the eight-family story scope must be classified"
+        );
+        let classified_excluded =
+            source_bound_classified_excluded_inventory(models, &excluded_inventory)
+                .expect("classified source-bound exclusions");
+        require_exact_source_bound_excluded_inventory(&excluded_inventory, &classified_excluded)
+            .expect("the executable audit must classify the exact excluded inventory");
         let (classified_inventory, cells) =
             source_bound_resident_only_cells_from_inventory(models, &source_inventory)
                 .expect("source-bound resident-only inventory");
@@ -8823,7 +9079,9 @@ mod tests {
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
-        let manifest_ids = source_bound_audit_manifest_ids(models).expect("source manifest ids");
+        let classifications =
+            source_bound_manifest_classifications(models).expect("source classifications");
+        let manifest_ids = source_bound_generic_manifest_ids(&classifications).collect::<Vec<_>>();
         let expected_surfaces =
             source_bound_audit_surfaces_from_manifest_ids(manifest_ids.iter().copied())
                 .expect("source surfaces");
@@ -8886,6 +9144,84 @@ mod tests {
             drop_error.contains("flux_schnell"),
             "zero-cell drop must name its missing source route: {drop_error}"
         );
+    }
+
+    /// Explicit-exclusion mutation proof. PuLID is inside the eight-family story scope but takes
+    /// the identity-conditioned route outside MODEL_TABLE; Mage is outside that family scope but
+    /// must remain named because its split component tree cannot be represented by the generic
+    /// single-root sparse fixture. Neither exclusion may disappear or drift families silently.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resident_only_audit_exclusions_reject_pulid_and_mage_scope_mutations() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let classifications =
+            source_bound_manifest_classifications(models).expect("source classifications");
+        let expected =
+            source_bound_excluded_inventory_from_classifications(models, &classifications)
+                .expect("source excluded inventory");
+
+        let missing_pulid = classifications
+            .iter()
+            .filter(|item| item.manifest_id != "pulid_flux_dev")
+            .cloned()
+            .collect::<Vec<_>>();
+        let actual = source_bound_excluded_inventory_from_classifications(models, &missing_pulid)
+            .expect("the mutated exclusion list still resolves");
+        let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
+            .expect_err("removing PuLID classification must fail exact equality");
+        assert!(error.contains("pulid_flux_dev"), "wrong failure: {error}");
+
+        let reclassified_pulid = classifications
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                if item.manifest_id == "pulid_flux_dev" {
+                    item.disposition = SourceBoundManifestDisposition::GenericSelector;
+                }
+                item
+            })
+            .collect::<Vec<_>>();
+        let actual =
+            source_bound_excluded_inventory_from_classifications(models, &reclassified_pulid)
+                .expect("the mutated disposition list still resolves");
+        let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
+            .expect_err("changing PuLID classification must fail exact equality");
+        assert!(error.contains("pulid_flux_dev"), "wrong failure: {error}");
+
+        let missing_mage = classifications
+            .iter()
+            .filter(|item| {
+                item.disposition != SourceBoundManifestDisposition::MageSplitComponentsExcluded
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let actual = source_bound_excluded_inventory_from_classifications(models, &missing_mage)
+            .expect("the mutated exclusion list still resolves");
+        let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
+            .expect_err("removing Mage scope must fail exact equality");
+        assert!(error.contains("mage_flow"), "wrong failure: {error}");
+
+        let mut pulid_family_drift = models.clone();
+        pulid_family_drift
+            .iter_mut()
+            .find(|model| model["id"] == "pulid_flux_dev")
+            .expect("PuLID manifest entry")["family"] = Value::String("not-flux".to_owned());
+        let error = source_bound_manifest_classifications(&pulid_family_drift)
+            .expect_err("PuLID family drift must fail classification");
+        assert!(error.contains("PuLID bespoke classification drifted"));
+
+        let mut mage_family_drift = models.clone();
+        mage_family_drift
+            .iter_mut()
+            .find(|model| model["id"] == "mage_flow")
+            .expect("Mage manifest entry")["family"] = Value::String("flux".to_owned());
+        let error = source_bound_manifest_classifications(&mage_family_drift)
+            .expect_err("Mage family drift must fail classification");
+        assert!(error.contains("Mage split-component classification drifted"));
     }
 
     /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core
