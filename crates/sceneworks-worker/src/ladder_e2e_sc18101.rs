@@ -45,6 +45,22 @@ use gen_core::{LoadSpec, WeightsSource};
 
 use crate::mlx_fit_gate::{MlxRequestInputs, MlxRequestPlan};
 
+// ---------------------------------------------------------------------------------------------
+// The margins, taken FROM the policy rather than restated (sc-18101 review #4).
+//
+// Every margin-shaped literal in this file is derived from these two constants: the arithmetic
+// (`1.0 + …`) and the tracing substrings (`estimate_margin={…}`) alike. Editing a policy constant
+// therefore changes what these scenarios assert, instead of leaving them asserting a margin nobody
+// ships. `margin_substrings_match_the_emitted_tracing` pins the one step the compiler cannot check:
+// that `{}`-formatting a constant reproduces the token `tracing` actually writes.
+//
+// BASELINE-CHECKOUT PATCH: `crate::ladder_margin_policy` does not exist before sc-18094, so a
+// pre-epic checkout replaces exactly these two lines with `= 0.10;` and `= 0.05;`. Nothing else in
+// this file differs there.
+// ---------------------------------------------------------------------------------------------
+const ESTIMATE_MARGIN: f64 = crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN;
+const STALE_MARGIN: f64 = crate::ladder_margin_policy::MLX_STALE_MEASURED_MARGIN;
+
 /// Where renders, selection logs, and the machine-readable evidence rows are written. Stable and
 /// outside the repo so a run's artifacts survive a `git clean` and can be diffed across commits.
 fn out_dir() -> PathBuf {
@@ -168,6 +184,57 @@ fn quant_for_tier(tier: &str) -> Option<gen_core::Quant> {
 /// which comes from the load-time residency gate rather than from here).
 const DEFERRED_MATERIALIZATION_ROUTES: &[&str] =
     &["qwen_image", "qwen_image_edit", "lens", "lens_turbo"];
+
+/// The resolved-artifact provenance for a subject, derived from the shipped binding that names its
+/// provider AND tier — `None` only when no such binding exists.
+///
+/// Supplying this decides WHICH legacy arm a request takes, which is not cosmetic (sc-18101 review
+/// #1). With `resolved_artifact: None` the plan is `MlxCalibrationConfig::Unproven` and
+/// `evidence_admission_route` short-circuits to `NoProvenance` — an arm that returns
+/// `estimate_bases: Vec::new()` and `lower_alternative: None`, so a fitted-curve estimate can never
+/// be synthesized and no refusal alternative can ever be named. The geometry-miss arm
+/// (`OutOfEnvelope`) is the one a real install with a real receipt takes, and it calls both
+/// `collect_estimate_bases` and `verified_lower_alternative`. A validation that means to exercise
+/// "this cell has no record at this geometry" must therefore prove provenance first.
+fn shipped_provenance(
+    engine: &str,
+    tier: &str,
+    revision: &str,
+) -> Option<crate::model_jobs::ResolvedArtifactProvenance> {
+    let entry = shipped_manifest_entry(engine);
+    let binding = entry
+        .get("mlx")
+        .and_then(Value::as_object)?
+        .get("calibrations")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|item| {
+            item.get("provider").and_then(Value::as_str) == Some(engine)
+                && item.get("tier").and_then(Value::as_str) == Some(tier)
+        })?
+        .clone();
+    let declared = |key: &str| {
+        binding
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("binding is missing {key}"))
+            .to_owned()
+    };
+    assert_eq!(
+        revision,
+        declared("artifactResolvedRevision"),
+        "the on-disk snapshot must be the exact artifact the shipped opt-in names"
+    );
+    Some(crate::model_jobs::ResolvedArtifactProvenance {
+        identity: crate::model_jobs::ResolvedArtifactIdentity {
+            repository: declared("artifactRepository"),
+            revision: revision.to_owned(),
+            variant: declared("artifactVariant"),
+            fingerprint: declared("resolvedPathFingerprint"),
+        },
+        fixed_artifact_tier: Some(declared("tier")),
+    })
+}
 
 /// Build the `LoadSpec` production would build for one engine + tier directory, up to (but not
 /// including) the load-time residency decision.
@@ -332,17 +399,17 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
                 let base = production_spec(engine, &tier_dir, &tier);
                 let spec = crate::mlx_fit_gate::apply_residency_policy(base, engine)?;
                 let load_policy = spec.offload_policy;
-                // No `resolved_artifact`: the shipped `krea_2_turbo` bindings name provider
-                // `krea_2_turbo_control` at q4 with a control overlay, so there is nothing for
-                // provenance to prove about THIS cell. The plan therefore carries no covering
-                // calibration and the request is admitted from synthesized estimates — the state
-                // under test.
+                // Real provenance whenever the shipped manifest names this provider AND tier, so
+                // the request takes the geometry-miss arm a real install takes rather than the
+                // no-provenance short-circuit. `None` only where no binding names the subject at
+                // all (e.g. `krea_2_turbo`, whose bindings all name `krea_2_turbo_control` at q4
+                // with a control overlay) — there provenance has nothing to prove.
                 let plan = MlxRequestPlan::for_spec_and_manifest(
                     engine,
                     engine,
                     &spec,
                     Some(&entry),
-                    None,
+                    shipped_provenance(engine, &tier, &revision),
                 );
                 let generator = crate::inference_runtime::load(engine, &spec)
                     .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))?;
@@ -404,9 +471,10 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         ),
         "criterion 1 requires the SELECTION to be estimate-scoped:\n{log}"
     );
+    let estimate_margin_field = format!("estimate_margin={ESTIMATE_MARGIN}");
     assert!(
-        log.contains("estimate_margin=0.1"),
-        "criterion 1 requires the applied MLX estimate margin (0.10) in the logs:\n{log}"
+        log.contains(&estimate_margin_field),
+        "criterion 1 requires the applied MLX estimate margin ({ESTIMATE_MARGIN}) in the logs:\n{log}"
     );
 
     // The admitted ceiling is the WIDENED peak, not `context.predicted_peak_bytes`.
@@ -432,8 +500,8 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
     .expect("the selection event carries widened_peak_bytes");
     assert_eq!(
         admitted_ceiling_bytes,
-        (raw_peak_bytes as f64 * 1.1).ceil() as u64,
-        "the admitted ceiling must be the raw estimate times the 10% MLX estimate margin"
+        (raw_peak_bytes as f64 * (1.0 + ESTIMATE_MARGIN)).ceil() as u64,
+        "the admitted ceiling must be the raw estimate times the MLX estimate margin"
     );
 
     let render_memory = evaluation.memory;
@@ -492,11 +560,12 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
         "rung": format!("{strategy:?}"),
         "parameters": format!("{:?}", evaluation.context.selection.parameters),
         "loadPolicy": format!("{load_policy:?}"),
+        "admissionPath": admission_path_line(&log),
         "rawEstimateBytes": raw_peak_bytes,
         "rawEstimateGib": gib(raw_peak_bytes),
         "admittedCeilingBytes": admitted_ceiling_bytes,
         "admittedCeilingGib": gib(admitted_ceiling_bytes),
-        "estimateMargin": 0.10,
+        "estimateMargin": ESTIMATE_MARGIN,
         "contextPredictedPeakGib": gib(evaluation.context.predicted_peak_bytes),
         "observedPeakBytes": observed_peak_bytes,
         "observedPeakGib": gib(observed_peak_bytes),
@@ -552,15 +621,15 @@ const MEASURED_TIER: &str = "q8";
 const MEASURED_SENTINEL: &str = "model_index.json";
 
 /// Build the plan for the measured `qwen_image` q8 1024² cell from the SHIPPED manifest binding and
-/// the snapshot actually on disk, optionally rewriting the binding's `inferenceClosureDigest`.
+/// the snapshot actually on disk, and return the digest that binding declares.
 ///
-/// `closure_digest_override` is the currency seam. The worker compares
-/// `binding.query.inference_closure_digest` (mlx_fit_gate.rs:1257 — the candidate's digest comes
-/// from the BINDING, not from the evidence record) against
-/// `sceneworks_core::memory_calibration::packaged_closure_digest`. Rewriting the binding to the
-/// live digest is exactly the edit `docs/calibration-runbook.md` §7d prescribes for moving a lane
-/// to `current`, applied here in memory instead of to the shipped file — so a measured-CURRENT cell
-/// can be exercised on a corpus that today contains none.
+/// Currency is decided by comparing the returned `inferenceClosureDigest` against
+/// `sceneworks_core::memory_calibration::packaged_closure_digest` — the candidate's digest comes
+/// from the BINDING (`mlx_fit_gate.rs`, `VerifiedAdmissionCandidate::closure_digest`), not from the
+/// evidence record. There is deliberately no override parameter: rewriting the binding in memory
+/// does NOT make a lane current, because `EvidenceBundle::evidence_for` compares the binding's
+/// digest against the record's own stamp too, so a one-sided edit makes the record unfindable. The
+/// scratch closure table (see [`c2_measured_current_cell_selection`]) is the working lever.
 fn measured_plan() -> Option<(MlxRequestPlan, LoadSpec, PathBuf, String, String)> {
     let (tier_dir, revision) =
         cached_tier_dir(MEASURED_REPO_DIR, MEASURED_TIER, MEASURED_SENTINEL)?;
@@ -629,6 +698,83 @@ fn measured_plan() -> Option<(MlxRequestPlan, LoadSpec, PathBuf, String, String)
 fn live_qwen_closure_digest() -> String {
     sceneworks_core::memory_calibration::packaged_closure_digest("mlx", MEASURED_ENGINE)
         .expect("mlx:qwen_image is a declared lane")
+}
+
+/// sc-18101 #0 — REGRESSION PROBE, portable across the epic boundary.
+///
+/// Drives the shipped `mlx:qwen_image` q8 1024² cell through `evaluate_request` with the
+/// PRODUCTION `LoadSpec` (the deferred load shape `image_jobs::apply_measured_mlx_load_shape`
+/// forces on every `qwen_image` directory load) and RECORDS the outcome without asserting it, so
+/// the identical source can run at this commit and at the epic's base commit and the two answers
+/// can be diffed.
+///
+/// It asserts nothing about admission on purpose: the question it exists to answer is whether the
+/// behaviour CHANGED, and a test that panics on one side of the comparison cannot answer that.
+///
+/// ```text
+/// SC18101_TAG=main     cargo test -p sceneworks-worker --lib -- --ignored --nocapture c0_production_loadspec_probe
+/// SC18101_TAG=baseline cargo test -p sceneworks-worker --lib -- --ignored --nocapture c0_production_loadspec_probe
+/// diff <out>/c0-outcome-main.log <out>/c0-outcome-baseline.log
+/// ```
+#[test]
+#[ignore = "sc-18101 #0 regression probe: needs SceneWorks/qwen-image-mlx q8 cached (~36 GB)"]
+fn c0_production_loadspec_probe() {
+    let Some((plan, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
+        panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
+    };
+    assert!(
+        matches!(
+            spec.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        ),
+        "the probe must use the PRODUCTION load shape; unset SC18101_MEASURED_EAGER"
+    );
+    let request_inputs = inputs(1024, 1024);
+    let generator =
+        crate::inference_runtime::load(MEASURED_ENGINE, &spec).expect("load qwen_image");
+    let cap_gb = crate::smoke_support::env_or("SC18101_C0_CAP_GB", "96");
+    let (result, log) =
+        crate::test_env::temp_env_var("SCENEWORKS_MLX_MEMORY_CAP_GB", &cap_gb, || {
+            with_captured_tracing(|| {
+                crate::mlx_fit_gate::evaluate_request(
+                    &*generator,
+                    &plan,
+                    &request_inputs,
+                    gen_core::MemoryCacheState::Warm,
+                    gen_core::OffloadPolicy::Resident,
+                    0,
+                )
+            })
+        });
+    let outcome = match &result {
+        Ok(evaluation) => format!(
+            "ADMITTED strategy={:?} parameters={:?} predicted_peak_bytes={} process_limit_bytes={:?}\n",
+            evaluation.context.selection.strategy,
+            evaluation.context.selection.parameters,
+            evaluation.context.predicted_peak_bytes,
+            evaluation.process_limit_bytes,
+        ),
+        Err(error) => format!("REFUSED {error}\n"),
+    };
+    eprintln!("[sc18101/c0] cap={cap_gb} GB load_shape=Deferred -> {outcome}");
+    write_log("c0-outcome", &outcome);
+    write_log(
+        "c0-selection",
+        &format!("{outcome}\n--- tracing ---\n{log}"),
+    );
+    record_row(&serde_json::json!({
+        "probe": 0,
+        "engine": MEASURED_ENGINE,
+        "tier": MEASURED_TIER,
+        "artifactRevision": revision,
+        "geometry": "1024x1024",
+        "loadShape": "deferred_materialization (production)",
+        "capGb": cap_gb,
+        "bindingClosureDigest": binding_digest,
+        "liveClosureDigest": live_qwen_closure_digest(),
+        "outcome": outcome.trim(),
+        "tierDir": tier_dir.display().to_string(),
+    }));
 }
 
 /// sc-18101 criterion 2. A MEASURED-CURRENT cell must select exactly what pre-epic main selected.
@@ -819,9 +965,10 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
         log.contains("memory-strategy selection uses stale-closure evidence at the widened peak"),
         "criterion 3 requires the SELECTION to be stale-scoped:\n{log}"
     );
+    let stale_margin_field = format!("stale_margin={STALE_MARGIN}");
     assert!(
-        log.contains("stale_margin=0.05"),
-        "criterion 3 requires the applied MLX stale margin (0.05) in the logs:\n{log}"
+        log.contains(&stale_margin_field),
+        "criterion 3 requires the applied MLX stale margin ({STALE_MARGIN}) in the logs:\n{log}"
     );
 
     // Pull the raw and widened peaks straight out of the emitted event so the recorded numbers are
@@ -834,13 +981,84 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
         .expect("widened_peak_bytes in the log");
     assert_eq!(
         widened_peak_bytes,
-        (raw_peak_bytes as f64 * 1.05).ceil() as u64,
-        "the widened peak must be the raw peak times the 5% MLX stale-measured margin"
+        (raw_peak_bytes as f64 * (1.0 + STALE_MARGIN)).ceil() as u64,
+        "the widened peak must be the raw peak times the MLX stale-measured margin"
     );
+
+    // THE BRACKET (sc-18101 review #3). Asserting `widened == ceil(raw * STALE_MARGIN)` off one log
+    // line only proves the gate can multiply; it never shows the widened number GATED anything. So
+    // walk the budget down to the admit/refuse boundary and check the boundary itself carries the
+    // margin.
+    //
+    // The quantity that gates on this path is not the peak alone: the Evidence route charges each
+    // candidate's CAPTURED FOREIGN RESERVE on top, and the selection event reports that sum as
+    // `needed_gb`. The refusal just below the boundary quotes the same sum ("needs at least N GiB at
+    // its smallest verified MLX host boundary"). So the proof is: that requirement must exceed the
+    // one a zero-margin gate would have computed by exactly `widened - raw`.
+    let admits = |cap_gb: f64| evaluate(cap_gb).0.is_ok();
+    let (mut refuses_at, mut admits_at) = (0.0_f64, admit_cap);
+    assert!(
+        admits(admits_at),
+        "the bracket needs an admitting upper bound"
+    );
+    for _ in 0..24 {
+        let midpoint = (refuses_at + admits_at) / 2.0;
+        if admits(midpoint) {
+            admits_at = midpoint;
+        } else {
+            refuses_at = midpoint;
+        }
+    }
+    let boundary_gb = admits_at;
+    eprintln!(
+        "[sc18101/c3] admit/refuse boundary at {boundary_gb:.4} GB (refuses at {refuses_at:.4})"
+    );
+    let (refused, boundary_log) = evaluate(refuses_at);
+    let refusal = refused.expect_err("the lower bracket refuses").to_string();
+    // The enforced requirement, read off the refusal the gate actually produced.
+    let enforced_gib = refusal
+        .split_whitespace()
+        .zip(refusal.split_whitespace().skip(1))
+        .find_map(|(value, unit)| (unit == "GiB").then(|| value.parse::<f64>().ok())?)
+        .unwrap_or_else(|| panic!("the refusal must quote a GiB requirement: {refusal}"));
+    let raw_gib = gib(raw_peak_bytes);
+    let widened_gib = gib(widened_peak_bytes);
+    let margin_gib = widened_gib - raw_gib;
+    // What the SAME refusal would have quoted with the margin zeroed: the enforced requirement less
+    // the widening. If the margin were not applied to the admission boundary these two would be
+    // equal; they differ by 2.16 GiB on this cell, far outside the bisection's resolution.
+    let unwidened_gib = enforced_gib - margin_gib;
+    assert!(
+        margin_gib > 0.0 && (enforced_gib - unwidened_gib - margin_gib).abs() < 1e-6,
+        "the enforced requirement must carry the stale widening: enforced {enforced_gib:.4} GiB, \
+         unwidened would be {unwidened_gib:.4} GiB (margin {margin_gib:.4} GiB)"
+    );
+    // And the boundary really is where that requirement bites: the admitting cap is above it and
+    // the refusing cap below, to within the bisection's resolution.
+    assert!(
+        boundary_gb > refuses_at && boundary_gb - refuses_at < 1e-3,
+        "the bisection must have converged: admits at {boundary_gb}, refuses at {refuses_at}"
+    );
+    // The mutation this brackets against: with STALE_MARGIN zeroed the enforced requirement drops
+    // to `unwidened_gib`, so every cap in [unwidened, enforced) would flip from refuse to admit.
+    // That window is non-empty precisely because the margin is applied.
+    assert!(
+        enforced_gib > unwidened_gib,
+        "a zeroed stale margin would admit the whole [{unwidened_gib:.2}, {enforced_gib:.2}) GiB window"
+    );
+
+    write_log("c3-bracket", &format!(
+        "boundary_gb={boundary_gb:.6}\nrefuses_at_gb={refuses_at:.6}\nraw_gib={raw_gib:.4}\nwidened_gib={widened_gib:.4}\nenforced_gib={enforced_gib:.4}\nunwidened_would_be_gib={unwidened_gib:.4}\nrefusal={refusal}\n\n--- tracing at the refusing cap ---\n{boundary_log}"
+    ));
 
     record_row(&serde_json::json!({
         "criterion": 3,
         "lane": "mlx:qwen_image",
+        "bracketBoundaryGb": boundary_gb,
+        "bracketRefusesAtGb": refuses_at,
+        "bracketRefusal": refusal,
+        "bracketEnforcedGib": enforced_gib,
+        "bracketUnwidenedWouldBeGib": unwidened_gib,
         "engine": MEASURED_ENGINE,
         "tier": MEASURED_TIER,
         "artifactRevision": revision,
@@ -851,7 +1069,148 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
         "rawPeakGib": gib(raw_peak_bytes),
         "widenedPeakBytes": widened_peak_bytes,
         "widenedPeakGib": gib(widened_peak_bytes),
-        "staleMargin": 0.05,
+        "staleMargin": STALE_MARGIN,
+    }));
+}
+
+/// The `path=…`/`fallback_reason=…` pair from the admission event, recorded alongside a scenario so
+/// the written record can never claim a route the run did not take (sc-18101 review #1).
+fn admission_path_line(log: &str) -> String {
+    log.lines()
+        .find(|line| line.contains("mlx_memory_admission_path"))
+        .and_then(|line| {
+            line.find("path=")
+                .map(|start| line[start..].trim().to_owned())
+        })
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+/// sc-18101 review #2 — the FITTED-CURVE arm, which nothing else here reaches.
+///
+/// `CandidateBasis::EstimateFittedCurve` is half of sc-18096's estimate machinery: rather than the
+/// weights+headroom floor, it extrapolates a MEASURED cell's per-phase peaks over output area. The
+/// original validation never produced one — every synthesized candidate was `basis="floor"` —
+/// because reaching it needs three things at once, and the floor path needs none of them:
+///
+/// 1. proven artifact provenance, so the request reaches the geometry-miss (`OutOfEnvelope`) arm
+///    rather than the `NoProvenance` short-circuit — that arm is the only caller of
+///    `collect_estimate_bases`;
+/// 2. a CLOSURE-CURRENT binding at a nearby geometry, because `collect_estimate_bases` deliberately
+///    refuses stale records as extrapolation seeds (stacking the 0.05 drift allowance under an
+///    extrapolation would spend the estimate margin twice — see its doc). No shipped lane is
+///    current, so this needs the same scratch closure table criterion 2 uses;
+/// 3. a load shape matching the basis record's, since `synthesize_estimate_ladder` filters bases on
+///    `basis.load_shape == contract.load_shape`.
+///
+/// All three hold for `qwen_image` q8 at **768×768** under the production (deferred) spec with the
+/// scratch table in place: the q8 `bounded_transformer_residency` record was captured deferred at
+/// 1024², so it seeds rung 4. The request is SMALLER than the basis, so the area scale clamps to
+/// 1.0 and the extrapolated binding phase equals the measured one — which is what lets it past
+/// `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`.
+///
+/// ```text
+/// # scratch closure table first (see c2), then:
+/// SC18101_TAG=fitted cargo test -p sceneworks-worker --lib -- --ignored --nocapture c5_fitted_curve
+/// ```
+#[test]
+#[ignore = "sc-18101 review #2: needs SceneWorks/qwen-image-mlx q8 cached + the scratch closure table"]
+fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
+    let Some((_, spec, tier_dir, revision, binding_digest)) = measured_plan() else {
+        panic!("SKIP-AS-FAILURE: no {MEASURED_REPO_DIR} {MEASURED_TIER} weights cached");
+    };
+    assert_eq!(
+        live_qwen_closure_digest(),
+        binding_digest,
+        "the fitted-curve arm needs a CLOSURE-CURRENT basis, and no shipped lane is current. Put \
+         the scratch closure table in place first (see c2_measured_current_cell_selection) and \
+         rebuild."
+    );
+    assert!(
+        matches!(
+            spec.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        ),
+        "the deferred basis record is the seed; unset SC18101_MEASURED_EAGER"
+    );
+
+    // A geometry with no record of its own, SMALLER than the 1024² basis so the area scale clamps
+    // to 1.0 and the binding phase cannot flip.
+    let request_inputs = inputs(768, 768);
+    let entry = shipped_manifest_entry(MEASURED_ENGINE);
+    let cap_gb = crate::smoke_support::env_or("SC18101_C5_CAP_GB", "32");
+    let (result, log) =
+        crate::test_env::temp_env_var("SCENEWORKS_MLX_MEMORY_CAP_GB", &cap_gb, || {
+            with_captured_tracing(|| {
+                // Through the load-time residency gate, exactly as criterion 1 does: the basis
+                // record sits on rung 4, and `qwen_image` only declares rung 4 `Implemented` when
+                // the SPEC carries `OffloadPolicy::Sequential`, which is a decision that gate makes
+                // from the same cap. Loading `Resident` would leave the fitted basis on a rung the
+                // contract does not implement and the ladder would fall back to the floor.
+                let spec =
+                    crate::mlx_fit_gate::apply_residency_policy(spec.clone(), MEASURED_ENGINE)?;
+                let load_policy = spec.offload_policy;
+                let plan = MlxRequestPlan::for_spec_and_manifest(
+                    MEASURED_ENGINE,
+                    MEASURED_ENGINE,
+                    &spec,
+                    Some(&entry),
+                    shipped_provenance(MEASURED_ENGINE, MEASURED_TIER, &revision),
+                );
+                let generator = crate::inference_runtime::load(MEASURED_ENGINE, &spec)
+                    .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))?;
+                crate::mlx_fit_gate::evaluate_request(
+                    &*generator,
+                    &plan,
+                    &request_inputs,
+                    gen_core::MemoryCacheState::Cold,
+                    load_policy,
+                    0,
+                )
+            })
+        });
+    write_log("c5-selection", &log);
+
+    // The route: proven provenance + a geometry miss.
+    assert!(
+        log.contains("fallback_reason=Some(OutOfEnvelope)"),
+        "the fitted-curve arm is only reachable from the geometry-miss route:\n{log}"
+    );
+    assert!(
+        log.contains("synthesized fitted-curve estimate candidate from a measured cell"),
+        "no fitted-curve candidate was synthesized:\n{log}"
+    );
+    assert!(
+        log.contains("basis=\"fitted_curve\""),
+        "the admitted candidate must carry the fitted-curve basis, not the floor:\n{log}"
+    );
+
+    let evaluation =
+        result.unwrap_or_else(|error| panic!("the fitted-curve ladder must admit: {error}"));
+    let raw = field_in_line(
+        &log,
+        "synthesized fitted-curve estimate candidate from a measured cell",
+        "raw_peak_bytes=",
+    )
+    .expect("the synthesis event carries raw_peak_bytes");
+    let widened = field_in_line(
+        &log,
+        "estimate-backed memory-strategy candidate admitted with widened margin",
+        "widened_peak_bytes=",
+    );
+    record_row(&serde_json::json!({
+        "criterion": "2-fitted-curve",
+        "engine": MEASURED_ENGINE,
+        "tier": MEASURED_TIER,
+        "artifactRevision": revision,
+        "geometry": "768x768",
+        "capGb": cap_gb,
+        "admissionPath": admission_path_line(&log),
+        "rung": format!("{:?}", evaluation.context.selection.strategy),
+        "fittedRawPeakBytes": raw,
+        "fittedRawPeakGib": gib(raw),
+        "firstWidenedPeakBytes": widened,
+        "estimateMargin": ESTIMATE_MARGIN,
+        "tierDir": tier_dir.display().to_string(),
     }));
 }
 
@@ -903,7 +1262,13 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
     // rung was missing.
     let spec = production_spec(engine, &tier_dir, &tier)
         .with_offload_policy(gen_core::OffloadPolicy::Sequential);
-    let plan = MlxRequestPlan::for_spec_and_manifest(engine, engine, &spec, Some(&entry), None);
+    let plan = MlxRequestPlan::for_spec_and_manifest(
+        engine,
+        engine,
+        &spec,
+        Some(&entry),
+        shipped_provenance(engine, &tier, &revision),
+    );
     let generator = crate::inference_runtime::load(engine, &spec).expect("load the C1 subject");
 
     // A genuinely oversized request: a large geometry (whose area-scaled activation headroom alone
@@ -941,8 +1306,15 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
         "criterion 4: the refusal must quote the request geometry: {error}"
     );
     assert!(
-        error.contains("is safely available") || error.contains("no structurally admissible"),
-        "criterion 4: the refusal must be one of the two actionable MLX refusals: {error}"
+        error.contains("is safely available"),
+        "criterion 4 requires the BUDGET refusal, not a structural one: {error}"
+    );
+    // Accepting "no structurally admissible" as well would have accepted the FingerprintMismatch
+    // structural refusal — the sc-18101 #0 regression — as proof that budget refusal works, which
+    // it is not (sc-18101 review #6).
+    assert!(
+        !error.contains("no structurally admissible"),
+        "criterion 4 must not be satisfied by a STRUCTURAL refusal: {error}"
     );
 
     // Still alive, and not wedged: the same provider admits the same geometry at a cap that fits.
@@ -1017,19 +1389,33 @@ fn load_shape_mirror_matches_the_documented_routes() {
     );
 }
 
-/// The margin literals this file asserts on are the policy's. Not `#[ignore]`d and not portable to
-/// the base commit: it is the coupling that stops the ignored tests above from silently drifting
-/// into asserting a margin nobody ships.
+/// The one margin coupling the compiler cannot check: that `{}`-formatting a policy constant
+/// reproduces the exact token `tracing` writes into the event.
+///
+/// The scenarios above grep for `estimate_margin={ESTIMATE_MARGIN}`. `tracing` records an `f64`
+/// field with `Display`, so `0.10` is emitted as `0.1` — a substring built with `{:.2}` would never
+/// match, and a substring built from a literal would silently stop matching if the policy moved.
+/// Building it from the constant with `{}` is correct only as long as both sides agree, which is
+/// what this asserts.
 #[test]
-fn margin_literals_match_the_policy() {
+fn margin_substrings_match_the_emitted_tracing() {
+    use std::fmt::Write as _;
+
+    // Reproduce exactly how `tracing`'s field formatter renders the value the gate passes it.
+    let mut rendered = String::new();
+    write!(rendered, "{ESTIMATE_MARGIN}").expect("f64 formats");
+    assert_eq!(rendered, "0.1", "MLX estimate margin token drifted");
+    rendered.clear();
+    write!(rendered, "{STALE_MARGIN}").expect("f64 formats");
+    assert_eq!(rendered, "0.05", "MLX stale-measured margin token drifted");
+
+    // And the constants really are the policy's, not a local copy that happens to agree.
     assert_eq!(
-        crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN,
-        0.10,
-        "c1 asserts `estimate_margin=0.1` in the tracing output"
+        ESTIMATE_MARGIN,
+        crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN
     );
     assert_eq!(
-        crate::ladder_margin_policy::MLX_STALE_MEASURED_MARGIN,
-        0.05,
-        "c3 asserts `stale_margin=0.05` and recomputes the widened peak with 1.05"
+        STALE_MARGIN,
+        crate::ladder_margin_policy::MLX_STALE_MEASURED_MARGIN
     );
 }

@@ -2,103 +2,216 @@
 
 On-device validation of the whole right-sized calibration apparatus, run after every epic 18093
 story had merged to `main`. This file is the durable record; the harness that produced it is
-`crates/sceneworks-worker/src/ladder_e2e_sc18101.rs` (four `#[ignore]`d tests, one per criterion).
+`crates/sceneworks-worker/src/ladder_e2e_sc18101.rs` (five `#[ignore]`d scenarios plus a portable
+regression probe).
 
-**Verdict: all five success criteria pass. No margin breach.**
+**Verdict: all five success criteria pass, no margin breach — and the validation found and fixed a
+REGRESSION this epic shipped.** That regression is the most important thing in this document, so it
+comes first.
 
 ## Environment
 
 | | |
 |---|---|
 | Host | Apple M5 Max, `Mac17,6`, 128 GiB unified memory, macOS 26.5.2 (the `nax-macos` self-hosted runner) |
-| SceneWorks revision under test | `8842036d` (`main` after the sc-18100 merge — the last epic 18093 story) |
+| SceneWorks revision under test | `main` after the sc-18100 and sc-18104 merges, plus this branch |
 | Pre-epic baseline revision | `de756026` (`main` immediately before the sc-18094 merge `cc799d1a`) |
 | Inference pin | `40fa7583a01974617e2a7275052d6d446688c956` |
 | Evidence corpus | `docs/generated/memory-calibration-evidence.json`, 65 records (50 MLX / 15 candle) |
 | Lane currency | 8 stale, 0 current, 1 unmeasured (`npm run report:stale-lanes`) |
 | Profile | `dev` (`cargo test -p sceneworks-worker --lib`) |
 
-Artifacts (renders, per-criterion selection logs, machine-readable rows) are written outside the
-repo to `~/SceneWorks/render-validation-sc18101/`.
+Artifacts (renders, per-scenario selection logs, machine-readable rows) are written outside the repo
+to `~/SceneWorks/render-validation-sc18101/`.
 
 ## What the emulated cap does and does not prove
 
 `SCENEWORKS_MLX_MEMORY_CAP_GB` replaces the machine's real unified-memory total in
-`mlx_fit_gate::resolve_budget`. It drives admission arithmetic exactly as a smaller Mac would, and
-it is read on **every** request and on **every** cold load — so the whole production chain
-(load-time residency decision → provider contract → request-scoped ladder) sees it.
+`mlx_fit_gate::resolve_budget`. It drives admission arithmetic exactly as a smaller Mac would, and it
+is read on **every** request and on **every** cold load — so the whole production chain (load-time
+residency decision → provider contract → request-scoped ladder) sees it.
 
-It does not shrink the Metal heap. The render that follows still runs against the real 128 GiB
-pool, so a peak sampled under a cap is what that geometry and rung genuinely cost. On a machine
-that really was that small, page-cache eviction would add re-materialization traffic on top; the
-numbers below are therefore a **lower bound** on the small-machine cost. That is the safe direction
-for validating a margin — an emulated run cannot flatter the prediction.
+It does not shrink the Metal heap. The render that follows still runs against the real 128 GiB pool,
+so a peak sampled under a cap is what that geometry and rung genuinely cost. On a machine that really
+was that small, page-cache eviction would add re-materialization traffic on top; the numbers below
+are therefore a **lower bound** on the small-machine cost. That is the safe direction for validating
+a margin — an emulated run cannot flatter the prediction.
 
-## Criterion 1 — an unmeasured cell engages a deep rung and completes a real render
+---
 
-**Subject:** `qwen_image` q8, text-to-image, no overlay, **768×768**.
-Artifact `SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8` — the exact
-snapshot the shipped opt-in names, present in this machine's HF cache.
+# 0. The regression this epic shipped, and its fix
 
-The MLX corpus holds `qwen_image` q8 only at 1024². The 768² request cell has **no calibration
-record and no manifest binding**, so `evidence_admission_route` finds no geometry match, routes to
-`AdmissionPath::Legacy` with `fallback_reason = OutOfEnvelope`, and the request is served entirely
-from synthesized estimates.
+**The flagship `qwen_image` q8 route hard-refused its most common geometry, at a 96 GB cap on a
+128 GiB machine, under the production `LoadSpec`.**
+
+```
+InvalidPayload("qwen_image request 1024x1024 count 1 has no structurally admissible MLX
+                memory strategy (FingerprintMismatch); refusing to enter MLX's
+                process-terminating allocation path")
+```
+
+`image_jobs/base.rs` propagates that with `?` from its per-generation `evaluate_request` call, so it
+is a user-facing job failure, not a degraded prediction.
+
+### Why it happened
+
+`MemoryCalibrationIdentity` has three fields — `abi`, `fingerprint`, and `load_shape`. gen-core's
+`optimized_eligibility` rejects a candidate whose `key.load_shape` disagrees with either
+`contract.load_shape` or `identity.load_shape`, returning `FingerprintMismatch`. The identity
+demotion in `evaluate_request_with_budget_using_bundle` compared only the first two fields, so a
+shape mismatch sailed past it, reached `AdmissionPath::Evidence`, lost every candidate inside
+`select_strategy` — and refused, because estimate synthesis runs **only** on the Legacy route.
+
+The mismatch itself is real and pre-existing: the shipped q8 `bounded_attention` binding was captured
+`eager_materialization`, while `image_jobs::apply_measured_mlx_load_shape` forces
+`DeferredMaterialization` on every `qwen_image` directory load. What this epic changed is what
+happens next. Before sc-18096, `evidence_admission_route`'s identity filter also required
+`binding.query.inference_closure_digest == expected_closure_digest`; every shipped MLX lane is
+closure-stale, so that conjunct pre-demoted the cell to `AdmissionPath::Legacy` long before
+eligibility ran, and it was served. sc-18096 retired the conjunct — correctly, that was its whole
+point — and in doing so made a previously unreachable refusal reachable on a shipping route.
+
+### The evidence, from both commits
+
+Identical source (`c0_production_loadspec_probe`, which records the outcome and asserts nothing, so
+it can run on both sides), same weights, same cap:
+
+| commit | admission route | outcome |
+|---|---|---|
+| `de756026` (pre-epic) | `Legacy`, `fallback_reason=StaleIdentity` | **ADMITTED** `Resident`, `predicted_peak_bytes=48934269317` |
+| epic `main` | `Evidence`, `fallback_reason=None` | **REFUSED** `FingerprintMismatch` |
+| this branch (fixed) | `Legacy`, `fallback_reason=StaleIdentity` | **ADMITTED** `Resident`, `predicted_peak_bytes=48934269317` |
+
+`diff c0-outcome-main.log c0-outcome-baseline.log` is clean after the fix — byte-identical to the
+pre-epic outcome, including the predicted peak.
+
+### The fix
+
+`crates/sceneworks-worker/src/mlx_fit_gate.rs`: on the Evidence route, filter out candidates the
+loaded provider **cannot serve**, and degrade to the Legacy estimate ladder only if that leaves
+nothing. A candidate is unusable when either
+
+* it was measured under a materialization shape this load does not use, or
+* it sits on a rung the loaded contract does not declare `Implemented` — which `select_strategy`
+  skips *without even recording an exclusion*, so the request died with a bare `Missing`.
+
+Two design points are load-bearing:
+
+1. **It is a per-candidate filter, not a whole-route demotion.** A route legitimately carries
+   bindings captured under different shapes — `qwen_image` q8 ships `bounded_attention` measured
+   eager and `bounded_transformer_residency` measured deferred. Demoting the whole route when any
+   sibling mismatches would discard the candidate that *does* match and silently downgrade a
+   calibrated request to an estimate. An earlier iteration of this fix did exactly that, and
+   criterion 2 caught it by flipping from `BoundedAttention` to `Resident`; the regression test's
+   positive arm now pins it.
+2. **Degrading, not refusing, is the epic's own thesis.** A calibration identity that does not match
+   the loaded provider is a reason to stop *claiming* the measurement, not a reason to deny service.
+   The estimate ladder the cell falls to is strictly more capable than the pre-epic resident-only
+   freeze it replaces.
+
+Guarded by `mlx_fit_gate::tests::a_load_shape_mismatch_degrades_to_estimates_instead_of_refusing`
+(not `#[ignore]`d). Mutation-checked: reverting the fix makes it fail with the exact production
+message above.
+
+### What is still open
+
+The measured cell is still *unused* under the production shape — it degrades to an estimate rather
+than serving its 43.125 GiB measurement. That half remains **sc-18237**, rescoped: the hard refusal
+is fixed here, the wasted measurement is not.
+
+---
+
+# 1. An unmeasured cell engages a deep rung and completes a real render
+
+**Subject:** `qwen_image` q8, text-to-image, no overlay, **768×768**, artifact
+`SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8` — the exact snapshot the
+shipped opt-in names, present in this machine's HF cache, with **real resolved provenance** supplied
+from the shipped binding.
+
+Provenance decides *which* legacy arm the request takes, and the arm is the thing under test. With
+`resolved_artifact: None` the plan is `MlxCalibrationConfig::Unproven` and `evidence_admission_route`
+short-circuits to `NoProvenance` — an arm that returns `estimate_bases: Vec::new()` and
+`lower_alternative: None`, so a fitted-curve estimate can never be synthesized and no refusal
+alternative can ever be named. The route a real install actually takes is the geometry miss, and that
+arm calls both `collect_estimate_bases` and `verified_lower_alternative`. The recorded run takes it:
+
+```
+path=Legacy fallback_reason=Some(OutOfEnvelope) width=768 height=768 count=1
+```
+
+The MLX corpus holds `qwen_image` q8 only at 1024², so the 768² request cell has no calibration
+record and no binding, and is served entirely from synthesized estimates.
 
 | | |
 |---|---|
 | Emulated cap | **32 GB** |
-| Load-time residency decision | `OffloadPolicy::Sequential` (chosen by `apply_residency_policy` under the same cap) |
+| Load-time residency decision | `OffloadPolicy::Sequential` (from `apply_residency_policy`, same cap) |
 | Rung engaged | **`BoundedTransformerResidency`** (rung 4) |
 | Parameters | `decode_tile_edge=256`, `decode_overlap=64`, `attention_chunk_size=67108864`, `transformer_window_size=1` |
-| Basis | `floor` (weights + headroom; no measured basis exists for this cell) |
+| Basis | `floor` (weights + headroom) |
 | Raw floor estimate | 26 967 416 751 B = **25.12 GiB** |
 | Estimate margin applied | **0.10** (`MLX_ESTIMATE_MARGIN`) |
 | Admitted ceiling (predicted-with-margin) | 29 664 158 427 B = **27.63 GiB** |
 | Observed peak (`mlx_rs::memory::get_peak_memory`, active) | 15 975 492 864 B = **14.88 GiB** |
-| Headroom against the admitted ceiling | **13 688 665 563 B = 12.75 GiB (46.1 % under)** |
-| Render | 768×768, 8 steps, seed 18101, 92.6 s, pixel std 46.25, non-degenerate |
+| Render | 768×768, 8 steps, seed 18101, 91.7 s, pixel std 46.25, non-degenerate |
 | PNG | `~/SceneWorks/render-validation-sc18101/c1-qwen_image-q8-768x768-main.png` |
 
-Log evidence (`c1-selection-main.log`), estimate-scoped selection and the applied margin:
+Two different over-prediction figures, both true and easy to conflate:
 
-```
-INFO  synthesized weights+headroom floor estimate candidate route="qwen_image" backend="mlx"
-      strategy=BoundedTransformerResidency raw_peak_bytes=26967416751
-INFO  estimate-backed memory-strategy candidate admitted with widened margin route="qwen_image"
-      backend="mlx" strategy=BoundedTransformerResidency basis="floor"
-      raw_peak_bytes=26967416751 widened_peak_bytes=29664158427 estimate_margin=0.1
-WARN  memory-strategy selection uses an estimate-backed candidate at the widened peak
-      route="qwen_image" backend="mlx" strategy=BoundedTransformerResidency basis="floor"
-      raw_peak_bytes=26967416751 widened_peak_bytes=29664158427 estimate_margin=0.1
-```
+* the **admitted ceiling** is 27.63 GiB and the render used 14.88 GiB, so **46.1 % of the ceiling
+  went unused** — that is the headroom the margin check had;
+* the **raw floor estimate** before any margin is 25.12 GiB, which **over-predicts the observed peak
+  by 68.8 %** — that is how conservative the weights+headroom floor is on this cell.
 
-Independent corroboration of the observed number: the corpus's **measured** rung-4 cell for the
-same provider/tier at the *larger* 1024² geometry (`imc-4426a6e84c4d39d9bff3`) recorded
-15 977 625 784 B observed. The unmeasured 768² run came in at 15 975 492 864 B — within 0.014 % of
-it. Rung 4 windows the transformer, so the request peak is carried by the area-flat conditioning
-phase, which is exactly why the two geometries agree; the floor estimate does not model that and
-over-predicts by 46 %, which is the conservative direction.
+Corroboration: the corpus's **measured** rung-4 cell for the same provider/tier at the *larger* 1024²
+geometry (`imc-4426a6e84c4d39d9bff3`) recorded 15 977 625 784 B observed. The unmeasured 768² run came
+in at 15 975 492 864 B — within 0.014 %. Rung 4 windows the transformer, so the request peak is
+carried by the area-flat conditioning phase; the floor estimate does not model that, which is exactly
+why it over-predicts, and in the conservative direction.
 
 ### The cap ladder
-
-Recorded from the harness's sweep mode (same subject, same request):
 
 | cap (GB) | load policy | rung selected | raw estimate |
 |---:|---|---|---:|
 | 128 → 56 | `Resident` | `Resident` | 45.57 GiB |
 | 48 → 36 | `Sequential` | `StagedResidency` | 30.13 GiB |
 | **32, 30** | `Sequential` | **`BoundedTransformerResidency`** | **25.12 GiB** |
-| 28 → 24 | `Sequential` | refused — `needs 27.63 GiB but only 26.00 GiB is safely available` |  |
-| ≤ 22 | — | refused at the **load-time** gate before the ladder is reached |  |
+| 28 | `Sequential` | refused — `needs 27.63 GiB but only 26.00 GiB is safely available` | |
+| 26 | `Sequential` | refused — `… but only 24.00 GiB is safely available` | |
+| 24 | `Sequential` | refused — `… but only 22.00 GiB is safely available` | |
+| ≤ 22 | — | refused at the **load-time** gate, before the ladder is reached | |
 
-## Criterion 2 — a measured-current cell selects identically to pre-epic main
+### Scope gap: no *wholly* unmeasured MLX model reaches a deep rung
 
-**Commits compared:** `8842036d` (main, all of epic 18093) vs **`de756026`** (main immediately
-before sc-18094 merged).
+Criterion 1 is satisfied at the granularity of an uncalibrated **coordinate** — a geometry with no
+record — not at the granularity of a wholly unmeasured **route**. The distinction is not pedantic,
+and the consequence is a real limit on what this validation demonstrates:
 
-**Subject:** `qwen_image` q8 1024² — a cell with a shipped binding and a verified record — at a
-96 GB emulated cap.
+* No MLX provider+tier is wholly unmeasured in the corpus (finding 1 below), so an "unmeasured MLX
+  model" in the strict sense does not exist to test.
+* The nearest thing that does exist — `krea_2_turbo` plain text-to-image, which has zero records and
+  zero bindings at any tier — reaches only **`StagedResidency`** (rung 1) under a cap, then refuses:
+
+  | cap (GB) | rung | raw estimate |
+  |---:|---|---:|
+  | 128 → 56 | `Resident` | 42.89 GiB |
+  | 48, 44 | `StagedResidency` | 34.62 GiB |
+  | 40 → 28 | refused — at cap 40, `needs 38.08 GiB but only 38.00 GiB is safely available` | |
+  | ≤ 26 | refused at the load-time gate | |
+
+  It cannot go deeper for a structural reason unrelated to this epic (finding 2): its rung 4 needs a
+  streamable transformer, which the bf16 route does not offer.
+
+So the honest statement is: **an uncalibrated coordinate of a partially measured route engages rung 4
+and renders; a wholly unmeasured route engages rung 1.** The epic's machinery is validated; its reach
+on a route with no windowed transformer is two rungs, not five.
+
+---
+
+# 2. A measured-current cell selects identically to pre-epic main
+
+**Commits compared:** this branch vs **`de756026`** (main immediately before the sc-18094 merge
+`cc799d1a`). Cell: `qwen_image` q8 1024² at a 96 GB cap.
 
 ### Which reading of "measured-current" was used, and why
 
@@ -111,18 +224,19 @@ The shipped corpus has **zero** closure-current lanes, so the phrase has two pos
    **This is the reading used.** Since no shipped lane is current, the cell was made current with a
    **scratch closure table**: `config/inference-provider-closures.json`'s
    `providers["mlx:qwen_image"].digest` was temporarily set to
-   `54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374` — the digest the q8 ladder
-   was captured under — in *both* checkouts, i.e. the world in which nobody has touched the
-   provider since the measurement. The edit was reverted after the runs; neither checkout carries
-   it now.
+   `54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374` — the digest the q8 ladder was
+   captured under — in *both* checkouts, i.e. the world in which nobody has touched the provider
+   since the measurement. Reverted after the runs; neither checkout carries it now.
 
-Reading 2 is the only one that can distinguish "the epic left the calibrated path alone" from "the
-epic changed everything", which is what the criterion exists to check.
+**The consequence, plainly: `CandidateCurrency::Current` is a state no shipped lane occupies, so this
+criterion has zero coverage of today's product.** It proves the calibrated path is undisturbed in the
+world the corpus is *supposed* to be in, and nothing about the world it is actually in. The world it
+is actually in is covered by criterion 3 (stale) and by §0 (mismatched).
 
 ### Result: byte-for-byte identical
 
-Both the selection fingerprint and the **entire** captured tracing output are identical
-(`diff` clean) between the two commits:
+Both the selection fingerprint and the **entire** captured tracing output are identical (`diff`
+clean) between the two commits:
 
 ```
 SELECTED strategy=BoundedAttention
@@ -134,30 +248,56 @@ SELECTED strategy=BoundedAttention
   stage_residency=false tile_vae_decode=true chunk_attention=true stream_transformer_blocks=false
 ```
 
-Both commits emit `path=Evidence fallback_reason=None`, select record
-`imc-37f40254d20bc43fa925`, and emit **no** widening line — a current candidate is graded at its
-raw peak, unwidened, on both sides.
+Both emit `path=Evidence fallback_reason=None`, select record `imc-37f40254d20bc43fa925`, and emit
+**no** widening line — a current candidate is graded at its raw peak, unwidened, on both sides. This
+also pins the §0 fix: an over-broad version of it changed this selection to `Resident`, and was
+caught here.
 
-The baseline checkout carried exactly one local, uncommitted change beyond the scratch closure
-table: the harness module itself, plus its one-line registration in `lib.rs` (and, in that
-checkout, `margin_literals_match_the_policy` elided, since `ladder_margin_policy` does not exist
-before sc-18094). No production source differs between the two runs.
+The baseline checkout carried only the harness module, its one-line `lib.rs` registration, and the
+two-line margin-constant substitution the harness documents. No production source differed.
 
 ### Contrast: the same cell as it actually ships (stale)
 
-With the shipped (stale) closure table, the two commits diverge exactly as the epic intends:
-
-| | pre-epic `de756026` | main `8842036d` |
+| | `de756026` | this branch |
 |---|---|---|
 | admission path | `Legacy`, `fallback_reason=StaleIdentity` | `Evidence`, `fallback_reason=None` |
 | measured candidate | none — excluded before the selector | admitted, carrying its captured digest |
 | rung selected | `Resident` (frozen to the baseline) | `BoundedAttention` |
 | needed | 45.57 GiB (resident estimate) | 45.28 GiB (measured peak, widened 5 %) |
 
-## Criterion 3 — a stale lane still admits, at the widened peak, and logs it
+### The fitted-curve arm
+
+`CandidateBasis::EstimateFittedCurve` is the other half of sc-18096's estimate machinery — per-phase
+extrapolation from a measured cell rather than the weights+headroom floor — and nothing in the first
+round of this validation reached it. Reaching it needs three things at once, none of which the floor
+path needs: proven provenance (so the request takes the `OutOfEnvelope` arm, the only caller of
+`collect_estimate_bases`), a **closure-current** nearby-geometry binding (that collector deliberately
+refuses stale seeds, so the 0.05 drift allowance can never be stacked under an extrapolation), and a
+load shape matching the basis record's.
+
+All three hold for `qwen_image` q8 at 768² under the production deferred spec with the scratch table
+in place. Result (`c5_fitted_curve_estimate_is_synthesized_and_admitted`):
+
+| | |
+|---|---|
+| Admission route | `Legacy`, `fallback_reason=OutOfEnvelope` |
+| Basis record | the deferred `bounded_transformer_residency` cell at 1024² |
+| Rung admitted | `BoundedTransformerResidency`, `basis="fitted_curve"` |
+| Fitted raw peak | 16 777 216 000 B = **15.625 GiB** |
+
+The request is *smaller* than the basis, so the area scale clamps to 1.0, the extrapolated binding
+phase equals the measured one, and `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` is satisfied.
+Worth setting against criterion 1's floor: the fitted curve predicts **15.63 GiB** where the floor
+predicted **25.12 GiB** for the same cell, against an observed 14.88 GiB. When a measured basis
+exists the estimate is dramatically tighter — which is also why the corpus's currency matters more
+than the margin does.
+
+---
+
+# 3. A stale lane still admits, at the widened peak, and logs it
 
 **Lane:** `mlx:qwen_image` — stale as shipped (live closure `9930aa538259…`, captured
-`54a7b45b03eb…`). No test seam was needed; this is the corpus's actual state.
+`54a7b45b03eb…`). No test seam needed; this is the corpus's actual state.
 
 | | |
 |---|---|
@@ -166,30 +306,42 @@ With the shipped (stale) closure table, the two commits diverge exactly as the e
 | Stale margin applied | **0.05** (`MLX_STALE_MEASURED_MARGIN`) |
 | Widened admitted peak | 48 620 371 968 B = **45.281 GiB** |
 
-`widened == ceil(raw × 1.05)` is asserted, not eyeballed. Log evidence:
+`widened == ceil(raw × (1 + STALE_MARGIN))` is asserted, not eyeballed.
 
-```
-INFO  stale-closure memory-strategy candidate admitted with widened margin route="qwen_image"
-      backend="mlx" strategy=BoundedAttention raw_peak_bytes=46305116160
-      widened_peak_bytes=48620371968 stale_margin=0.05
-      candidate_closure_digest="54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
-      expected_closure_digest="9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae"
-WARN  memory-strategy selection uses stale-closure evidence at the widened peak route="qwen_image"
-      backend="mlx" strategy=BoundedAttention raw_peak_bytes=46305116160
-      widened_peak_bytes=48620371968 stale_margin=0.05
-```
+### The bracket: the widened number actually gates
 
-The pre-epic contrast above is the proof that the widening is doing work rather than decorating a
-decision that would have happened anyway: on `de756026` this same cell produced no measured
-candidate at all.
+Asserting the multiplication off one log line proves the gate can multiply; it does not show the
+widened peak gated anything. So the budget is bisected down to the admit/refuse boundary and the
+boundary itself is checked:
 
-## Criterion 4 — an oversized request is refused, not OOM-killed
+| | |
+|---|---|
+| Admit/refuse boundary | **92.2146 GB** (admits above, refuses below; converged to < 1e-3 GB) |
+| Requirement the refusal quotes | **92.21 GiB** — `needs at least 92.21 GiB at its smallest verified MLX host boundary` |
+| What a zero-margin gate would have required | **90.05 GiB** |
+| Window a zeroed margin would wrongly admit | **[90.05, 92.21) GiB** |
 
-**Request:** `qwen_image` q8 **2048×2048** at a 24 GB emulated cap, loaded `Sequential` so the
-provider offers its deepest possible ladder.
+The gating quantity on this path is not the peak alone: the Evidence route charges each candidate's
+captured foreign reserve on top, and both the selection event's `needed_gb` and the refusal quote
+that sum. The margin is visible in it — the enforced requirement exceeds the unwidened one by exactly
+`widened − raw` = 2.16 GiB, three orders of magnitude above the bisection's resolution.
 
-The full five-rung estimate ladder is synthesized and every rung is graded — so the refusal is
-"nothing fits with margins", not "a rung was missing":
+**Production-conditions status:** this bracket is measured on the eager `LoadSpec` the binding was
+captured under (`SC18101_MEASURED_EAGER=1`), not on the deferred spec production uses for
+`qwen_image`. Under the production spec this cell degrades to the estimate ladder (§0), so the
+stale-measured path is exercised on a real shipped binding and real weights, but not on a
+configuration `qwen_image` reaches in production today. Closing that is sc-18237.
+
+The pre-epic contrast is the proof the widening is doing work rather than decorating a decision that
+would have happened anyway: on `de756026` this same cell produces no measured candidate at all.
+
+---
+
+# 4. An oversized request is refused, not OOM-killed
+
+**Request:** `qwen_image` q8 **2048×2048** at a 24 GB cap, loaded `Sequential` so the provider offers
+its deepest possible ladder. The full five-rung estimate ladder is synthesized and every rung graded,
+so the refusal is "nothing fits with margins", not "a rung was missing":
 
 | rung | raw floor | widened (×1.10) |
 |---|---:|---:|
@@ -199,97 +351,106 @@ The full five-rung estimate ladder is synthesized and every rung is graded — s
 | `BoundedAttention` | 73 640 535 842 | 81 004 589 427 |
 | `BoundedTransformerResidency` | 51 674 216 124 | **56 841 637 737 = 52.94 GiB** |
 
-Refusal, quoting the deepest widened requirement:
-
 ```
 qwen_image request 2048x2048 count 1 needs 52.94 GiB but only 22.00 GiB is safely available
 ```
 
-**Proof it refused rather than averted an OOM** is structural, not statistical:
+The assertion requires *that* message specifically and explicitly rejects the structural refusal —
+accepting `no structurally admissible` as well would have accepted the §0 regression as proof that
+budget refusal works.
 
-* the refusal is produced by `mlx_fit_gate::evaluate_request`, which runs **before**
-  `generator.generate`, so no allocation for the request is ever attempted;
-* MLX's default error handler calls `exit(-1)` on an allocator overshoot, so an OOM would end the
-  process. The test continues in the same process and re-submits the identical request at a 512 GB
-  cap, which is admitted. Both facts are asserted.
+**Proof it refused rather than averted an OOM** is structural, not statistical: the refusal is
+produced by `mlx_fit_gate::evaluate_request`, which runs **before** `generator.generate`, so no
+allocation for the request is ever attempted; and MLX's default error handler calls `exit(-1)`, so an
+OOM would end the process — the test continues in the same process and re-submits the identical
+request at a 512 GB cap, which is admitted. Both are asserted.
 
-## Criterion 5 — suites
+---
+
+# 5. Suites
 
 See the PR for CI. Locally: `npm run check`, `npm run rust:check`, the parity pytest gate
 (`python -m pytest -q tests/ -m "not e2e and not parity" --strict-markers`), and `cargo fmt --all`.
 
-## Findings worth carrying forward
+`docs/generated/memory-matrix.{json,md}` are regenerated in this branch: `mlx_fit_gate.rs` is one of
+the sixteen `SOURCE_PATHS` the matrix fingerprints, so the §0 fix rotates
+`generatedFrom.sceneWorksRevision`.
 
-1. **No MLX provider+tier is wholly unmeasured in the corpus.** All three MLX lanes
-   (`qwen_image`, `z_image_turbo`, `krea_2_turbo_control`) have records; the single unmeasured lane
-   is `candle:z_image`, which has no adapter arm. "An unmeasured cell" on the MLX side therefore
-   means an uncalibrated *coordinate* — a geometry, tier, or rung with no record — which is what
-   criterion 1 exercises. Worth stating plainly so a future reader does not go looking for an
-   unmeasured MLX lane that does not exist.
+---
+
+# Findings worth carrying forward
+
+1. **No MLX provider+tier is wholly unmeasured in the corpus.** All three MLX lanes (`qwen_image`,
+   `z_image_turbo`, `krea_2_turbo_control`) have records; the single unmeasured lane is
+   `candle:z_image`, which has no adapter arm. On MLX, "an unmeasured cell" necessarily means an
+   uncalibrated coordinate. See the criterion-1 scope gap for what that costs the validation.
 
 2. **On a floor-only ladder, rung 4 is the only deep rung that can ever be engaged.** By deliberate
-   design (`mlx_fit_gate.rs:1485-1488`), bounded decode and bounded attention bound *transients*,
-   not weights, and take no floor reduction on an unmeasured cell — so their floors equal
-   `Resident`'s and no budget can admit them while excluding `Resident`. A provider that does not
-   implement `BoundedTransformerResidency` therefore has a **flat** estimate ladder: under a cap it
-   can reach `StagedResidency` at best and then refuses. `krea_2_turbo` bf16 is such a provider
-   (its rung 4 needs `streamable_transformer`, which the bf16 route does not offer), measured here
-   at a 44 GB cap selecting `StagedResidency` at a 34.62 GiB floor. This is correct behaviour, not
-   a defect — but it does mean the epic's "estimates admit the full ladder" delivers a *two*-rung
-   improvement, not a five-rung one, on providers without a windowed transformer.
+   design (`mlx_fit_gate.rs`, `estimate_floor_weights_bytes`) bounded decode and bounded attention
+   bound *transients*, not weights, and take no floor reduction on an unmeasured cell — so their
+   floors equal `Resident`'s and no budget can admit them while excluding `Resident`. A provider that
+   does not implement `BoundedTransformerResidency` therefore has a **flat** ladder: under a cap it
+   reaches `StagedResidency` at best, then refuses (`krea_2_turbo` bf16, measured above: rung 1 at
+   caps 48 and 44, refusing from cap 40 down). Correct behaviour, not a defect — but "estimates admit
+   the full ladder" delivers a two-rung improvement, not a five-rung one, on providers without a
+   windowed transformer.
 
-3. **The memory-matrix source fingerprint makes `base.rs` expensive to touch, even by one keyword.**
-   `image_jobs/base.rs` is one of the sixteen `SOURCE_PATHS` the matrix hashes, so widening
-   `apply_measured_mlx_load_shape` from `fn` to `pub(crate) fn` — purely so a test could call it —
-   rotated `generatedFrom.sceneWorksRevision` and reddened `npm run check:memory-matrix`. The
-   harness therefore mirrors the route list instead, with a text-coupling test
-   (`load_shape_mirror_matches_the_documented_routes`) that reds if production's list changes. Any
-   future change to a fingerprinted source should expect to regenerate the 860 KB artifact and
-   every binding's `matrixSourceRevision`.
+3. **Which rungs a provider declares is a function of the `LoadSpec`, not of the request.** Rung 4
+   needs `LoadShape::DeferredMaterialization` (z-image, lens) or `OffloadPolicy::Sequential` (krea,
+   qwen), both reached only through the LOAD-time gate. A request-scoped test that loads `Resident`
+   sees a flat ladder for reasons unrelated to this epic; every scenario here runs the cap through
+   `apply_residency_policy` first.
 
-4. **Which rungs a provider declares is a function of the `LoadSpec`, not of the request.**
-   `BoundedTransformerResidency` requires `LoadShape::DeferredMaterialization` (z-image, lens) or
-   `OffloadPolicy::Sequential` (krea). Both are reached only through the LOAD-time gate, so a
-   request-scoped test that loads `Resident` sees a flat ladder for reasons unrelated to epic
-   18093. The harness runs the cap through `apply_residency_policy` first for exactly this reason.
+4. **A structural exclusion inside `select_strategy` has no fallback behind it.** Estimate synthesis
+   runs only on the Legacy route, so anything that empties the Evidence route's candidate list after
+   admission has already chosen it becomes a refusal. §0 is one instance (load shape); the
+   rung-support case is a second, and it is *silent* — `select_strategy` skips an unimplemented rung
+   without recording an exclusion, so the request dies with a bare `Missing` and no log line naming a
+   cause. Both are now filtered before the selector, but the shape of the hazard remains: any future
+   structural predicate added downstream of admission needs a fallback, not just a verdict.
 
-5. **Moving only the manifest binding's `inferenceClosureDigest` does not make a lane current.**
+5. **`image_jobs/base.rs` and `mlx_fit_gate.rs` are both fingerprinted matrix sources.** Even a
+   visibility keyword in the former rotates `generatedFrom.sceneWorksRevision` and reds
+   `npm run check:memory-matrix`; the harness therefore mirrors that file's route list rather than
+   calling into it, with a text-coupling test. Budget for a matrix regeneration whenever a
+   fingerprinted source changes.
+
+6. **Moving only the manifest binding's `inferenceClosureDigest` does NOT make a lane current.**
    `EvidenceBundle::evidence_for` compares the binding's digest against the record's own stamp too,
    so a one-sided edit makes the record unfindable and the cell routes to `StaleIdentity` with no
-   measured candidate at all — observed directly during this validation. A real re-measurement
-   moves both halves together, which is why `docs/calibration-runbook.md` §7d insists on both. A
-   scratch closure table is the correct single-edit lever for a test.
+   measured candidate at all — observed directly here. A real re-measurement moves both halves
+   together, which is why `docs/calibration-runbook.md` §7d insists on both. A scratch closure table
+   is the correct single-edit lever for a test.
 
-6. **The q8 `bounded_attention` binding is not reachable through the production load path.**
-   `image_jobs::apply_measured_mlx_load_shape` forces `DeferredMaterialization` on every
-   `qwen_image` directory load, while that binding was captured `eager_materialization`; under the
-   production spec the candidate is excluded `FingerprintMismatch` and the cell falls to the
-   estimate ladder. Criteria 2 and 3 therefore run with `SC18101_MEASURED_EAGER=1`, which loads the
-   eager spec the binding was captured under. Worth a look on its own terms — see the follow-up
-   note on the story.
+---
 
-## Re-running
+# Re-running
 
 ```text
 OUT=~/SceneWorks/render-validation-sc18101
+QWEN="SC18101_C1_REPO=models--SceneWorks--qwen-image-mlx SC18101_C1_ENGINE=qwen_image SC18101_C1_TIER=q8"
 
-# criterion 1 — cap sweep first (unset SC18101_C1_CAP_GB prints the ladder and fails with it)
-SC18101_TAG=main SC18101_C1_REPO=models--SceneWorks--qwen-image-mlx SC18101_C1_ENGINE=qwen_image \
-SC18101_C1_TIER=q8 SC18101_C1_W=768 SC18101_C1_H=768 SC18101_C1_CAP_GB=32 SC18101_C1_STEPS=8 \
+# §0 regression probe — run in BOTH checkouts and diff $OUT/c0-outcome-{main,baseline}.log
+SC18101_TAG=main SC18101_C0_CAP_GB=96 \
+  cargo test -p sceneworks-worker --lib -- --ignored --nocapture c0_production_loadspec_probe
+
+# criterion 1 — omit SC18101_C1_CAP_GB to print the cap sweep and fail with it
+SC18101_TAG=main $QWEN SC18101_C1_W=768 SC18101_C1_H=768 SC18101_C1_CAP_GB=32 SC18101_C1_STEPS=8 \
   cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 \
     c1_unmeasured_cell_engages_a_deep_rung_and_renders
 
-# criterion 3 (stale, as shipped) and criterion 4 (refusal)
-SC18101_TAG=main SC18101_MEASURED_EAGER=1 SC18101_C3_ADMIT_CAP_GB=96 \
-SC18101_C1_REPO=models--SceneWorks--qwen-image-mlx SC18101_C1_ENGINE=qwen_image \
-SC18101_C1_TIER=q8 SC18101_C4_CAP_GB=24 \
+# criteria 3 (stale, as shipped) and 4 (refusal)
+SC18101_TAG=main SC18101_MEASURED_EAGER=1 SC18101_C3_ADMIT_CAP_GB=96 $QWEN SC18101_C4_CAP_GB=24 \
   cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 \
     c3_stale_lane_admits_at_the_widened_peak c4_oversized
 
-# criterion 2 — needs the scratch closure table in BOTH checkouts first:
+# criterion 2 and the fitted-curve arm — put the scratch closure table in BOTH checkouts first:
 #   config/inference-provider-closures.json providers["mlx:qwen_image"].digest = 54a7b45b03eb…
-# then run the same command in each and diff $OUT/c2-fingerprint-{main,baseline}.log
+# then run c2 in each and diff $OUT/c2-fingerprint-{main,baseline}.log
 SC18101_TAG=main SC18101_MEASURED_EAGER=1 SC18101_C2_CAP_GB=96 \
   cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 \
     c2_measured_current_cell_selection
+SC18101_TAG=main SC18101_C5_CAP_GB=32 \
+  cargo test -p sceneworks-worker --lib -- --ignored --nocapture --test-threads=1 c5_fitted_curve
+# …then revert the scratch table.
 ```

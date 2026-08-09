@@ -640,6 +640,12 @@ struct VerifiedGeometryAlternative {
     geometry: CalibrationGeometry,
     calibration_abi: u32,
     calibration_fingerprint: String,
+    /// The materialization shape the alternative was MEASURED under (sc-18101). Part of the
+    /// calibration identity (`MemoryCalibrationIdentity::load_shape`), so the identity demotion
+    /// must compare it here for the same reason it compares the abi and fingerprint: an
+    /// alternative measured under a shape this load does not use is advice the very next request
+    /// would not honour.
+    load_shape: gen_core::LoadShape,
     strategy: MemoryStrategy,
     engaged_composition: Vec<MemoryStrategy>,
 }
@@ -1812,6 +1818,7 @@ fn verified_lower_alternative(
                     geometry: binding.geometry,
                     calibration_abi: binding.query.abi,
                     calibration_fingerprint: binding.query.fingerprint.clone(),
+                    load_shape: crate::memory_strategy::load_shape_from_receipt(record.load_shape),
                     strategy,
                     engaged_composition: record
                         .strategy
@@ -1999,6 +2006,97 @@ fn evaluate_request_with_budget_using_bundle(
             lower_alternative: None,
         }
     };
+    // sc-18101: a candidate whose MATERIALIZATION SHAPE the loaded provider does not use is not a
+    // measurement of this load, and must be dropped BEFORE the selector — but dropping it must not
+    // take the route's usable siblings with it.
+    //
+    // `MemoryCalibrationIdentity` has three fields — `abi`, `fingerprint`, `load_shape` — and
+    // gen-core's `optimized_eligibility` rejects a candidate whose `key.load_shape` disagrees with
+    // either `contract.load_shape` or `identity.load_shape`, returning `FingerprintMismatch`. The
+    // demotion below compares only the first two, which left a hole with nothing behind it: a cell
+    // whose records were all captured under the other shape reached `AdmissionPath::Evidence`, lost
+    // every candidate inside `select_strategy`, and refused the request outright with "no
+    // structurally admissible MLX memory strategy" — because estimate synthesis runs only on the
+    // Legacy route.
+    //
+    // That hole shipped. `mlx:qwen_image` q8 1024² was captured `eager_materialization`, while
+    // `image_jobs::apply_measured_mlx_load_shape` forces `DeferredMaterialization` on every
+    // `qwen_image` directory load, so the flagship q8 route hard-refused its most common geometry on
+    // a 128 GiB machine. Measured on real weights at this commit and at the epic's base commit: the
+    // base commit ADMITTED (its `evidence_admission_route` closure conjunct, retired by sc-18096,
+    // pre-demoted the cell to Legacy long before eligibility ran), so this is a REGRESSION this epic
+    // introduced. See `docs/epic-18093-end-to-end-validation-sc-18101.md`.
+    //
+    // Why a per-candidate FILTER and not a whole-route demotion: a route legitimately carries
+    // bindings for several rungs captured under DIFFERENT shapes — `qwen_image` q8 ships a
+    // `bounded_attention` cell measured eager and a `bounded_transformer_residency` cell measured
+    // deferred. Demoting the whole route when any sibling mismatches would throw away the candidate
+    // that DOES match and silently downgrade a calibrated request to an estimate, which is its own
+    // regression. Filtering keeps every usable measurement and degrades only when nothing is left.
+    if admission.path == AdmissionPath::Evidence {
+        // A candidate is USABLE only if the selector could actually reach it: it must have been
+        // measured under the shape this load uses, and it must sit on a rung the loaded contract
+        // declares `Implemented`. Both are properties of the LOADED PROVIDER, not of the request,
+        // and both are checked downstream where the only outcome left is a refusal — the rung-support
+        // one silently, since `select_strategy` skips an unimplemented rung without even recording an
+        // exclusion, so the request dies with a bare `Missing`.
+        let usable = |candidate: &VerifiedAdmissionCandidate| {
+            let evidence = &candidate.evidence;
+            let shape_agrees = contract.calibration.as_ref().is_some_and(|identity| {
+                evidence.key.load_shape == contract.load_shape
+                    && evidence.key.load_shape == identity.load_shape
+            });
+            let rung_implemented = matches!(
+                contract
+                    .capability(evidence.key.strategy)
+                    .map(|capability| &capability.support),
+                Some(gen_core::MemoryStrategySupport::Implemented)
+            );
+            shape_agrees && rung_implemented
+        };
+        let retained = admission.evidence.iter().filter(|c| usable(c)).count();
+        if retained != admission.evidence.len() {
+            tracing::info!(
+                route = plan.engine_id,
+                backend = "mlx",
+                dropped = admission.evidence.len() - retained,
+                retained,
+                contract_load_shape = ?contract.load_shape,
+                "dropped measured candidates the loaded provider cannot serve (materialization \
+                 shape or rung support)"
+            );
+            admission.evidence.retain(usable);
+        }
+        if admission.evidence.is_empty() {
+            // Nothing measured survives. Degrade to the estimate ladder rather than refuse: a
+            // calibration identity that does not match the loaded provider is a reason to stop
+            // CLAIMING the measurement, not a reason to deny service. The estimate ladder is
+            // strictly more capable than the pre-epic resident-only freeze it replaces.
+            admission = AdmissionRoute {
+                path: AdmissionPath::Legacy,
+                fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
+                evidence: Vec::new(),
+                estimate_bases: Vec::new(),
+                evidence_revision: None,
+                process_limit_bytes: None,
+                lower_alternative: None,
+            };
+        }
+    }
+    // A named refusal alternative is advice the next request must be able to honour, so it is held
+    // to the same shape agreement — but it is only advice, so a mismatch drops the alternative
+    // rather than the route.
+    if admission
+        .lower_alternative
+        .as_ref()
+        .is_some_and(|alternative| {
+            contract.calibration.as_ref().map_or(true, |identity| {
+                alternative.load_shape != identity.load_shape
+            })
+        })
+    {
+        admission.lower_alternative = None;
+    }
     let carries_verified_claim =
         admission.path == AdmissionPath::Evidence || admission.lower_alternative.is_some();
     if carries_verified_claim
@@ -7147,6 +7245,125 @@ mod tests {
             wrong_provider.fallback_reason,
             Some(LegacyAdmissionReason::StaleIdentity),
             "the binding provider must match the actual engine route, not the catalog model id"
+        );
+    }
+
+    /// sc-18101 #0 REGRESSION GUARD: a load-shape mismatch must DEGRADE to the estimate ladder,
+    /// never refuse the request.
+    ///
+    /// `MemoryCalibrationIdentity` carries three fields, and gen-core's `optimized_eligibility`
+    /// rejects a candidate whose `key.load_shape` disagrees with the contract's — returning
+    /// `FingerprintMismatch`. The identity demotion above `evaluate_request_with_budget_using_bundle`
+    /// used to compare only `abi` and `fingerprint`, so a shape mismatch sailed past it into
+    /// `AdmissionPath::Evidence`, lost its only candidate inside `select_strategy`, and refused with
+    /// "no structurally admissible MLX memory strategy" — with no estimate ladder behind it, because
+    /// synthesis runs only on the Legacy route.
+    ///
+    /// That hole shipped: `mlx:qwen_image` q8 1024² was captured `eager_materialization` while
+    /// `image_jobs::apply_measured_mlx_load_shape` forces `DeferredMaterialization` on every
+    /// `qwen_image` directory load, so the flagship q8 route hard-refused its most common geometry on
+    /// a 128 GiB machine. Verified on real weights at this commit and at the epic's base commit
+    /// (`docs/epic-18093-end-to-end-validation-sc-18101.md`): pre-epic it was ADMITTED, post-epic
+    /// REFUSED, post-fix ADMITTED again at the same predicted peak.
+    ///
+    /// The fixture reproduces it minimally: the bundle's records are `eager`, the contract is moved
+    /// to `deferred` with its fingerprint and abi UNCHANGED, so `load_shape` is the only field that
+    /// disagrees. The mutation arm below puts the shape back and shows the same request reaches
+    /// `AdmissionPath::Evidence`, which is what makes this test discriminate rather than pass
+    /// vacuously.
+    #[test]
+    fn a_load_shape_mismatch_degrades_to_estimates_instead_of_refusing() {
+        use gen_core::MemoryCalibrationIdentity;
+
+        let bundle = fixture_bundle();
+        let plan = fixture_plan();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        let fingerprint = contract
+            .calibration
+            .as_ref()
+            .expect("fixture calibration")
+            .fingerprint
+            .clone();
+        // ONLY the materialization shape moves. Same provider, same artifact, same abi, same
+        // formula fingerprint — exactly the qwen_image production shape.
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.calibration = Some(MemoryCalibrationIdentity::new(
+            fingerprint,
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+
+        let admitted = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect(
+            "a load-shape mismatch must degrade to the estimate ladder, not refuse the request",
+        );
+        // Served from a synthesized estimate, not from a measurement: no verified record was
+        // selected, so there is no request-scoped process ceiling.
+        assert_eq!(
+            admitted.process_limit_bytes, None,
+            "a degraded cell must not claim a verified record's request-scoped ceiling"
+        );
+
+        // Mutation arm: restore the shape the records were captured under and the SAME request
+        // reaches calibrated admission. Without this the test would also pass if the gate refused
+        // everything for an unrelated reason.
+        let mut matched = fixture_generator();
+        matched
+            .contract
+            .as_mut()
+            .expect("fixture contract")
+            .load_shape = gen_core::LoadShape::EagerMaterialization;
+        let route = evidence_admission_route(
+            &bundle,
+            &plan,
+            &inputs,
+            "text_to_image",
+            fixture_budget(64.0),
+            FIXTURE_CLOSURE_DIGEST,
+        )
+        .expect("the matching-shape cell routes without error");
+        assert_eq!(
+            route.path,
+            AdmissionPath::Evidence,
+            "with the captured shape restored the cell must reach calibrated admission: {:?}",
+            route.fallback_reason
+        );
+        // …and the filter must not eat a candidate whose shape DOES agree. This is the arm that
+        // keeps the fix from being a blanket downgrade: `qwen_image` q8 ships one eager and one
+        // deferred binding on the same route, so a whole-route demotion would silently drop the
+        // matching measurement and serve an estimate instead.
+        let calibrated = evaluate_request_with_budget_using_bundle(
+            &matched,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("the matching-shape cell is admitted");
+        assert!(
+            calibrated.process_limit_bytes.is_some(),
+            "a shape-matching measured cell must still be served from its RECORD (which supplies \
+             the request-scoped ceiling), not degraded to an estimate"
         );
     }
 
