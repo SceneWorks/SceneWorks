@@ -7043,7 +7043,11 @@ mod candle_request_residency_tests {
 
 /// Whether a candle job may use Krea Turbo's request-scoped, quality-preserving memory ladder.
 /// Keep every exclusion explicit: these surfaces have distinct component graphs or denoise contracts.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
 fn krea_turbo_memory_route(
     engine_id: &str,
     has_convrot: bool,
@@ -7051,6 +7055,7 @@ fn krea_turbo_memory_route(
     has_img2img_reference: bool,
     has_edit_references: bool,
     has_edit_mask: bool,
+    has_hires_fix: bool,
     use_pid: bool,
 ) -> bool {
     engine_id == "krea_2_turbo"
@@ -7059,6 +7064,7 @@ fn krea_turbo_memory_route(
         && !has_img2img_reference
         && !has_edit_references
         && !has_edit_mask
+        && !has_hires_fix
         && !use_pid
 }
 
@@ -7233,10 +7239,11 @@ mod krea_turbo_memory_route_tests {
             false,
             false,
             false,
+            false,
             false
         ));
-        for excluded_surface in 0..6 {
-            let mut flags = [false; 6];
+        for excluded_surface in 0..7 {
+            let mut flags = [false; 7];
             flags[excluded_surface] = true;
             assert!(
                 !krea_turbo_memory_route(
@@ -7247,13 +7254,14 @@ mod krea_turbo_memory_route_tests {
                     flags[3],
                     flags[4],
                     flags[5],
+                    flags[6],
                 ),
                 "surface flag {excluded_surface} must retain its established route"
             );
         }
         for engine in ["krea_2_raw", "krea_2_turbo_edit", "krea_2_turbo_control"] {
             assert!(!krea_turbo_memory_route(
-                engine, false, false, false, false, false, false
+                engine, false, false, false, false, false, false, false
             ));
         }
     }
@@ -7922,9 +7930,11 @@ async fn generate_candle_stream(
     // capability downtier and the resident/sequential decision.
     let sequential_capable = crate::mlx_fit_gate::engine_supports_sequential(engine_id);
     // SC-15117: the deeper, request-scoped Krea Turbo ladder is intentionally limited to the stock
-    // ordinary txt2img route implemented by candle-gen-krea. Reference/edit/PiD/ConvRot surfaces keep
-    // their established paths. Adapter jobs have no calibrated evidence cells and therefore fail
-    // closed to resident-or-reject; evidence from ordinary text-to-image never transfers to them.
+    // ordinary single-pass txt2img route implemented by candle-gen-krea. Reference/edit/hires/PiD/
+    // ConvRot surfaces keep their established paths. Hires is deliberately excluded: its refinement
+    // is img2img, which the Krea request scope does not implement. Adapter jobs have no calibrated
+    // evidence cells and therefore fail closed to resident-or-reject; evidence from ordinary
+    // text-to-image never transfers to them.
     let krea_turbo_ladder = krea_turbo_memory_route(
         engine_id,
         convrot.is_some(),
@@ -7932,6 +7942,7 @@ async fn generate_candle_stream(
         img2img_reference.is_some(),
         !edit_refs.is_empty(),
         edit_mask.is_some(),
+        hires_fix.is_some(),
         use_pid,
     );
     let (krea_allow_streamed_blocks, krea_adapter_bytes) =

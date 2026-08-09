@@ -142,6 +142,114 @@ impl Generator for HiresProbeGenerator {
     }
 }
 
+/// A provider-facing Krea fixture that rejects any attempt to open an optimized request scope.
+/// Hires must stay on the established fallback because candle-gen-krea does not support the
+/// img2img refinement request under its memory-strategy scope.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct StrictKreaHiresFallbackGenerator {
+    probe: HiresProbeGenerator,
+    memory_scope_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl StrictKreaHiresFallbackGenerator {
+    fn new() -> Self {
+        let mut probe = HiresProbeGenerator::new();
+        probe.descriptor.id = "krea_2_turbo";
+        probe.descriptor.family = "krea_2";
+        probe.descriptor.backend = "candle";
+        Self {
+            probe,
+            memory_scope_attempts: Default::default(),
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Generator for StrictKreaHiresFallbackGenerator {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.probe.descriptor()
+    }
+
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::MemorySafetyDecision::Accept
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        self.memory_scope_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(gen_core::Error::Unsupported(
+            "Krea hires fallback must not open a memory-strategy request scope".to_owned(),
+        ))
+    }
+
+    fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        if req.memory.is_some() {
+            return Err(gen_core::Error::Unsupported(
+                "Krea hires fallback must not carry optimized request memory".to_owned(),
+            ));
+        }
+        self.probe.generate(req, on_progress)
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::MemoryRunContext {
+    gen_core::MemoryRunContext {
+        selection,
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: "test".to_owned(),
+        load_shape: gen_core::LoadShape::EagerMaterialization,
+        mode: gen_core::MemoryMode::TextToImage,
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width: 8,
+            height: 8,
+            batch: 1,
+            frames: 1,
+            reference_count: hires_fix_reference_count(),
+        },
+        overlay: None,
+        budget: gen_core::MemoryBudget {
+            total_bytes: 1 << 40,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1 << 20,
+        cache_state: gen_core::MemoryCacheState::Cold,
+        evidence_revision: "test".to_owned(),
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -221,6 +329,103 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
     );
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scope() {
+    let generator = StrictKreaHiresFallbackGenerator::new();
+    let cancel = CancelFlag::new();
+    let hires_fix = HiresFixPlan {
+        width: 8,
+        height: 8,
+        steps: 3,
+        guidance: None,
+        true_cfg: None,
+        provider_reference_strength: 0.3,
+    };
+    let optimized_context = hires_memory_context(gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+        parameters: gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            transformer_window_component: Some(gen_core::TransformerComponent::Dit),
+            ..Default::default()
+        },
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Q8),
+            component_precision_floors: &[],
+        },
+    });
+    let optimized_route = krea_turbo_memory_route(
+        "krea_2_turbo",
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+    );
+    let production_route = include_str!("base.rs")
+        .split_once("let krea_turbo_ladder = krea_turbo_memory_route(")
+        .expect("production Krea ladder route call")
+        .1
+        .split_once(");")
+        .expect("end of production Krea ladder route call")
+        .0;
+    assert!(
+        production_route.contains("hires_fix.is_some()"),
+        "the production route must pass the live hires decision into the exclusion predicate"
+    );
+    let context = optimized_route.then_some(&optimized_context);
+
+    let output = generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        context,
+        &PromptEnhance::default(),
+        Some(hires_fix),
+        gen_core::PreviewSink::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("Krea hires fallback completes without an optimized request scope");
+
+    assert!(
+        !optimized_route,
+        "hires must not mint a Krea ladder context"
+    );
+    assert_eq!((output.0, output.1), (8, 8));
+    assert!(output.2.iter().all(|pixel| *pixel == 2));
+    assert_eq!(generator.probe.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        generator
+            .memory_scope_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "neither fallback pass may call begin_memory_strategy_request"
+    );
+}
+
 /// An admitted memory geometry that a pass's own request does not match is not a bookkeeping slip:
 /// the backend request scopes (`mlx-gen`'s `MlxRequestScopeCore::configure_request` and its candle
 /// twin) re-derive width/height/`image_reference_count` from the LIVE request and refuse anything
@@ -242,41 +447,15 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     let generator = HiresProbeGenerator::new();
     let cancel = CancelFlag::new();
     // The admission the lane makes for a hires job: the FINAL pass's geometry.
-    let admitted = gen_core::MemoryRunContext {
-        selection: gen_core::MemorySelection {
-            strategy: gen_core::MemoryStrategy::Resident,
-            parameters: Default::default(),
-            tier: gen_core::MemoryNumericTier {
-                precision: gen_core::Precision::Bf16,
-                quant: None,
-                component_precision_floors: &[],
-            },
+    let admitted = hires_memory_context(gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
         },
-        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
-        calibration_fingerprint: "test".to_owned(),
-        load_shape: gen_core::LoadShape::EagerMaterialization,
-        mode: gen_core::MemoryMode::TextToImage,
-        has_reference: true,
-        use_pid: false,
-        has_phases: false,
-        geometry: gen_core::MemoryGeometry {
-            width: 8,
-            height: 8,
-            batch: 1,
-            frames: 1,
-            reference_count: lane_reference_count(true, 0, false),
-        },
-        overlay: None,
-        budget: gen_core::MemoryBudget {
-            total_bytes: 1 << 40,
-            committed_bytes: 0,
-            reclaimable_bytes: 0,
-            reserved_headroom_bytes: 0,
-        },
-        predicted_peak_bytes: 1 << 20,
-        cache_state: gen_core::MemoryCacheState::Cold,
-        evidence_revision: "test".to_owned(),
-    };
+    });
 
     generate_one_with_hires(
         &generator,
