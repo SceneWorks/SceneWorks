@@ -1233,9 +1233,10 @@ fn imported_image_lora_probe(model: &str, family: &str, with_lora: bool) -> Map<
 ///   worker ever claims it, so the job sits on "Waiting for an available GPU worker" forever.
 ///
 /// 🔴 Derived by asking the REAL gate — the same function the scheduler calls, with the same
-/// per-lane `adapters_supported` arguments the two routers pass (`mlx.rs` `true` / `candle.rs`
-/// `false`). Restating the per-family verdict as its own table here is precisely how the
-/// advertisement and the gate drift apart again, so it is computed, never copied.
+/// per-lane capability surfaces the two routers pass ([`MLX_IMPORTED_CAPS`] from `mlx.rs` /
+/// [`CANDLE_IMPORTED_CAPS`] from `candle.rs`). Restating the per-family verdict as its own table
+/// here is precisely how the advertisement and the gate drift apart again, so it is computed,
+/// never copied.
 pub fn imported_image_model_lora_advertisement(
     model: &str,
     family: &str,
