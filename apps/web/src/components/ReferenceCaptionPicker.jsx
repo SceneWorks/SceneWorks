@@ -12,11 +12,10 @@
 // parent supplies `onCaption(assetId)` (run the job + parse) and `onApply(result)` (apply
 // the result to its own state). C1: the image is captioning-only — never sent to generation.
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { AssetPickerField, ImageEditSourcePickerField } from "./AssetPicker.jsx";
-import { assetUrl } from "./assetMedia.jsx";
 import { ModelAvailabilityGate } from "./ModelAvailabilityGate.jsx";
-import { probeImageDimensions } from "../imageDimensions.js";
+import { useReferenceAspectSnap } from "../hooks/useReferenceAspectSnap.js";
 
 export default function ReferenceCaptionPicker({
   // Run the vision job for the picked asset and resolve to a result (the parent parses:
@@ -28,6 +27,10 @@ export default function ReferenceCaptionPicker({
   // sc-8109 seam: invoked with the uploaded image's natural (width, height) so the parent
   // can auto-preset the generation resolution to the nearest aspect.
   onReferenceImageLoaded,
+  // The parent's resolution-option set as a VALUE (sc-18255) — see useReferenceAspectSnap. Snapping
+  // is deduped per (reference, snapKey) pair so an asset-list refresh cannot re-snap over an Aspect
+  // the user has since chosen, while a real option-set change still re-snaps.
+  referenceSnapKey = "",
   referenceAssets = [],
   referenceCharacters = [],
   importAsset,
@@ -74,14 +77,16 @@ export default function ReferenceCaptionPicker({
 
   // Run the auto-preset from an effect on the SELECTED id rather than the picker's onChange: a freshly
   // imported/dragged reference lands in `referenceAssets` a render AFTER its id is set, so the
-  // onChange-time `find` missed it and the Aspect stayed at the 1:1 default (sc-8220). Keying on both
-  // the id and the list re-runs once the asset resolves, covering select / import / drag / character
-  // paths uniformly.
-  useEffect(() => {
-    if (!referenceAssetId) return undefined;
-    const asset = referenceAssets.find((item) => item.id === referenceAssetId);
-    return probeImageDimensions(asset && assetUrl(asset), onReferenceImageLoaded);
-  }, [onReferenceImageLoaded, referenceAssetId, referenceAssets]);
+  // onChange-time `find` missed it and the Aspect stayed at the 1:1 default (sc-8220). The hook keys
+  // on both the id and the list so it re-runs once the asset resolves — covering select / import /
+  // drag / character paths uniformly — while deduping per (reference, snapKey) pair so a plain
+  // asset-list refresh cannot re-snap over the user's own Aspect pick (sc-18255).
+  useReferenceAspectSnap({
+    referenceId: referenceAssetId,
+    assets: referenceAssets,
+    onReferenceImageLoaded,
+    snapKey: referenceSnapKey,
+  });
 
   async function handleCaption() {
     if (typeof onCaption !== "function" || !referenceAssetId || busy) return;

@@ -4397,14 +4397,78 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
     // `loraCompatibility.families = [family]` from the family token, which for a fine-tune is an
     // advertisement nothing can honour: the router's `mage-flow` arm, `mage_finetuned_available`
     // and `mlx_gen_mage::load_finetuned` all refuse adapters. Advertised, the API accepted the job
-    // and no worker could claim it — it queued forever with no error. Withdrawn, the same request
-    // is refused at submit by `validate_lora_specs_for_model` ("no declared LoRA families"), which
-    // is loud and terminal. Restoring the key without making a lane claim the job reopens the hang.
-    assert!(
-        entry.get("loraCompatibility").is_none(),
-        "a fine-tuned checkpoint must not advertise LoRA compatibility it cannot render: {:?}",
-        entry.get("loraCompatibility")
-    );
+    // and no worker could claim it — it queued forever with no error.
+    //
+    // 🔴 This originally asserted only that the manifest KEY was absent, and passed while the hang
+    // was still live: `families_from_value_chain` falls back to the top-level `family` (asserted
+    // present above), so the "no declared LoRA families" branch never fired and the strip was a
+    // no-op. Assert the WITHDRAWAL SHAPE the projection emits, and — below — that a submission
+    // carrying a LoRA is actually refused. Absence of a key proves nothing; the 400 does.
+    //
+    // macOS-only, and deliberately so. A Mage fine-tune is routable ONLY on the MLX lane
+    // (`mage-flow` is absent from `CANDLE_ROUTED_FAMILIES` — there is no candle Mage engine), so
+    // off-Mac the model renders nothing at all, LoRA or not: that is a whole-model routing gap, not
+    // an over-advertised adapter, and the projection correctly abstains rather than dressing it up
+    // in a LoRA-shaped message. Asserting the macOS shape unconditionally here is what turned the
+    // Linux parity lane red. The lane-parameterized coverage that exercises BOTH topologies on
+    // every platform — including the imported Krea 2 + candle case this file cannot reach — lives
+    // in `models::imported_lora_advertisement_tests`.
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            entry["loraCompatibility"]["families"],
+            json!([]),
+            "the withdrawal must be an EXPLICIT empty family list — removing the key alone falls \
+             back to `family` and silently re-advertises: {:?}",
+            entry.get("loraCompatibility")
+        );
+        assert_eq!(
+            entry["loraCompatibility"]["supported"],
+            json!(false),
+            "the web picker fails OPEN on an empty family list, so it needs this explicit signal"
+        );
+
+        // ...and the withdrawal is LOAD-BEARING, not decorative: a generation carrying a LoRA is
+        // refused at submit, terminally, instead of being accepted and queued forever.
+        //
+        // This is the assertion whose absence let the original no-op ship. The two failure modes
+        // are distinguishable by their message, and only one of them is this gate: "has no declared
+        // LoRA families" means the advertisement was withdrawn and the request died here; "LoRA not
+        // found" would mean the families check PASSED (the `family` fallback fired) and we only got
+        // as far as hydrating the adapter — which is exactly what the pre-fix code did.
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": model_id,
+                "prompt": "a fine-tune with an adapter it cannot load",
+                "loras": [{ "id": "any_adapter" }]
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a fine-tune + LoRA submission must be refused, not queued: {refused}"
+        );
+        let detail = refused["detail"].as_str().unwrap_or_default().to_owned();
+        assert!(
+            detail.contains("no declared LoRA families"),
+            "the refusal must come from the withdrawn advertisement; \"LoRA not found\" would mean \
+             the `family` fallback re-advertised it and the hang is still live. Got: {detail}"
+        );
+    } else {
+        // Off-Mac the projection must ABSTAIN, not invent a withdrawal. Pinned rather than left
+        // unasserted so this branch still fails if the abstention rule is ever loosened into
+        // "withdraw whenever no lane claims it" — which would silently relabel every unroutable
+        // imported model's whole-model gap as a LoRA problem.
+        assert!(
+            entry.get("loraCompatibility").is_none(),
+            "no candle Mage engine exists, so there is no adapter promise to withdraw: {:?}",
+            entry.get("loraCompatibility")
+        );
+    }
 
     // It is NOT a LoRA — registering it as one would offer it as an adapter the engine cannot load.
     let (status, loras) = request(
