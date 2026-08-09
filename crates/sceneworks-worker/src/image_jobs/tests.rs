@@ -5586,6 +5586,13 @@ fn flux2_edit_engine_id_maps_variants() {
     );
     // FLUX.2-dev edit (sc-5922): the dev model routes to the `flux2_dev_edit` variant.
     assert_eq!(flux2_edit_engine_id("flux2_dev"), Some("flux2_dev_edit"));
+    assert!(flux2_edit_uses_provider_memory_safety("flux2_dev_edit"));
+    assert!(!flux2_edit_uses_provider_memory_safety(
+        "flux2_klein_9b_edit"
+    ));
+    assert!(!flux2_edit_uses_provider_memory_safety(
+        "flux2_klein_9b_kv_edit"
+    ));
     assert_eq!(flux2_edit_engine_id("z_image_turbo"), None);
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
 }
