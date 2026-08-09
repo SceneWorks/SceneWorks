@@ -4031,7 +4031,25 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 /// "has no declared LoRA families". `supported: false` is the web's signal to fail CLOSED, because
 /// `loraMatchesModel` treats an empty family set as "cannot gate" and would otherwise stay
 /// permissive and keep offering every LoRA.
+/// Binds [`apply_imported_lora_advertisement_for_lanes`] to the lanes THIS build can run: macOS
+/// ships the in-process MLX worker and no candle engine; Windows/Linux/Docker ship candle and no
+/// MLX. Mirrors the worker's own `KREA_IMPORTED_SUPPORTS_ADAPTERS` cfg split, so the advertisement
+/// and the claim gate agree.
+///
+/// The lane split is a ONE-LINE binding here and a parameter below precisely so the behaviour is
+/// testable on both lanes from either platform: the reported bug (imported Krea 2 + LoRA) only
+/// exists on the candle lane, which a macOS dev box can never reach, and a `cfg!` buried inside the
+/// logic would have left it covered by nothing but the developer's own OS.
 fn apply_imported_lora_advertisement(object: &mut JsonObject) {
+    let mlx_lane = cfg!(target_os = "macos");
+    apply_imported_lora_advertisement_for_lanes(object, mlx_lane, !mlx_lane);
+}
+
+fn apply_imported_lora_advertisement_for_lanes(
+    object: &mut JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) {
     if object.get("type").and_then(Value::as_str) != Some("image") {
         return;
     }
@@ -4052,12 +4070,11 @@ fn apply_imported_lora_advertisement(object: &mut JsonObject) {
     else {
         return;
     };
-    // The lanes this deployment can actually run: macOS ships the in-process MLX worker and no
-    // candle engine; Windows/Linux/Docker ship candle and no MLX. Mirrors the worker's own
-    // `KREA_IMPORTED_SUPPORTS_ADAPTERS` cfg split, so the advertisement and the claim gate agree.
-    let mlx_lane = cfg!(target_os = "macos");
     let serves_loras = sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
-        &id, &family, mlx_lane, !mlx_lane,
+        &id,
+        &family,
+        mlx_lane_available,
+        candle_lane_available,
     );
     if serves_loras != Some(false) {
         return;
@@ -7606,5 +7623,111 @@ mod variant_delete_tests {
         assert!(!converted.exists());
         assert!(shared.exists());
         assert_eq!(removal.reclaimed_bytes, 300);
+    }
+}
+
+/// Lane-parameterized coverage for the imported-model LoRA advertisement withdrawal.
+///
+/// These drive `apply_imported_lora_advertisement_for_lanes` directly rather than through the
+/// platform-bound wrapper, so BOTH deployment topologies are exercised on every CI platform. That
+/// is the whole point: the reported bug (imported Krea 2 + LoRA queuing forever) exists only on the
+/// candle lane, which a macOS developer machine can never reach — an earlier revision of this
+/// change asserted the macOS shape unconditionally and went red on the Linux parity lane, covering
+/// the actual bug nowhere.
+#[cfg(test)]
+mod imported_lora_advertisement_tests {
+    use super::*;
+
+    fn entry(id: &str, family: &str) -> JsonObject {
+        json!({ "id": id, "type": "image", "family": family })
+            .as_object()
+            .expect("entry object")
+            .clone()
+    }
+
+    fn withdrawn(object: &JsonObject) -> bool {
+        object
+            .get("loraCompatibility")
+            .and_then(|value| value.get("families"))
+            .and_then(Value::as_array)
+            .is_some_and(|families| families.is_empty())
+            && object["loraCompatibility"]["supported"] == json!(false)
+    }
+
+    /// THE REPORTED BUG, on the lane it actually happens on. A candle host cannot load adapters
+    /// into an imported Krea 2 single-file checkpoint (sc-14135), so the advertisement must be
+    /// withdrawn there — and must survive untouched on macOS, where MLX genuinely serves it.
+    #[test]
+    fn imported_krea_2_withdraws_on_candle_and_is_untouched_on_mlx() {
+        let mut on_candle = entry("user_kreamania_variant5", "krea_2");
+        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
+        assert!(
+            withdrawn(&on_candle),
+            "a candle host must not advertise adapters it cannot load: {on_candle:?}"
+        );
+
+        let mut on_mlx = entry("user_kreamania_variant5", "krea_2");
+        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
+        assert!(
+            on_mlx.get("loraCompatibility").is_none(),
+            "MLX serves imported Krea 2 LoRAs — withdrawing there would break a working surface"
+        );
+    }
+
+    /// Mage-Flow refuses adapters on every backend, so the MLX lane withdraws. On candle it is not
+    /// in `CANDLE_ROUTED_FAMILIES` at all — the model renders nothing there, LoRA or not — so this
+    /// projection has no opinion and leaves the entry alone rather than papering over a whole-model
+    /// routing gap with a LoRA-shaped message.
+    #[test]
+    fn mage_flow_withdraws_on_mlx_and_abstains_where_the_model_is_unroutable() {
+        let mut on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
+        assert!(withdrawn(&on_mlx), "{on_mlx:?}");
+
+        let mut on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
+        assert!(
+            on_candle.get("loraCompatibility").is_none(),
+            "no candle Mage engine exists, so there is no adapter promise to withdraw"
+        );
+    }
+
+    /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
+    /// than family. Neither may be touched — this projection only ever removes a promise nothing
+    /// can keep.
+    #[test]
+    fn honest_advertisements_and_builtins_are_never_rewritten() {
+        for (mlx, candle) in [(true, false), (false, true)] {
+            let mut sdxl = entry("community_xl", "sdxl");
+            apply_imported_lora_advertisement_for_lanes(&mut sdxl, mlx, candle);
+            assert!(
+                sdxl.get("loraCompatibility").is_none(),
+                "both fused SDXL loaders accept UNet adapters"
+            );
+
+            let mut builtin = entry("krea_2_turbo", "krea_2");
+            apply_imported_lora_advertisement_for_lanes(&mut builtin, mlx, candle);
+            assert!(
+                builtin.get("loraCompatibility").is_none(),
+                "a builtin routes by id; its shipped manifest row must not be rewritten"
+            );
+        }
+    }
+
+    /// The withdrawal must not clobber sibling keys — `loraCompatibility.types` drives the
+    /// multi-phase surface, and only the families promise is being retracted.
+    #[test]
+    fn withdrawal_preserves_sibling_compatibility_keys() {
+        let mut object = entry("user_kreamania_variant5", "krea_2");
+        object.insert(
+            "loraCompatibility".to_owned(),
+            json!({ "families": ["krea-2"], "types": ["character", "style"] }),
+        );
+        apply_imported_lora_advertisement_for_lanes(&mut object, false, true);
+        assert!(withdrawn(&object));
+        assert_eq!(
+            object["loraCompatibility"]["types"],
+            json!(["character", "style"])
+        );
     }
 }
