@@ -896,6 +896,10 @@ impl EvidenceBundle {
 pub struct MlxAdmissionEnvelope {
     pub peak_bytes: u64,
     pub observed_non_reclaimable_wired_bytes: u64,
+    /// Physical unified memory on the capture host. The foreign reserve is a HOST-policy share of
+    /// this capacity, not model memory: carrying its absolute 128 GiB-host byte count onto a 48 GiB
+    /// host would reserve memory that does not exist there.
+    pub capture_host_bytes: u64,
     pub foreign_reserve_bytes: u64,
 }
 
@@ -911,6 +915,31 @@ impl MlxAdmissionEnvelope {
 
     pub fn fits_host_bytes(self, host_bytes: u64) -> bool {
         self.required_host_bytes() <= host_bytes
+    }
+
+    /// Foreign host-policy reserve normalized to `host_bytes`, rounded up so a smaller live host is
+    /// never given more process memory than the capture host's process-ceiling ratio permits.
+    ///
+    /// MLX still receives the resulting absolute process ceiling at runtime. This only translates
+    /// the capture host's reserve ratio; it does not weaken the allocator limit or reinterpret the
+    /// model peak.
+    pub fn foreign_reserve_for_host_bytes(self, host_bytes: u64) -> u64 {
+        if self.capture_host_bytes == 0 {
+            return u64::MAX;
+        }
+        let numerator = u128::from(self.foreign_reserve_bytes) * u128::from(host_bytes);
+        let denominator = u128::from(self.capture_host_bytes);
+        let scaled = numerator.saturating_add(denominator.saturating_sub(1)) / denominator;
+        u64::try_from(scaled).unwrap_or(u64::MAX)
+    }
+
+    pub fn required_host_bytes_for(self, host_bytes: u64) -> u64 {
+        self.peak_bytes
+            .saturating_add(self.foreign_reserve_for_host_bytes(host_bytes))
+    }
+
+    pub fn fits_scaled_host_bytes(self, host_bytes: u64) -> bool {
+        self.required_host_bytes_for(host_bytes) <= host_bytes
     }
 }
 
@@ -944,6 +973,7 @@ impl EvidenceRecord {
         Some(MlxAdmissionEnvelope {
             peak_bytes: predicted.overall.max(non_reclaimable_wired),
             observed_non_reclaimable_wired_bytes: non_reclaimable_wired,
+            capture_host_bytes: hardware.memory_bytes,
             foreign_reserve_bytes,
         })
     }
@@ -2307,6 +2337,7 @@ mod tests {
             .mlx_admission_envelope()
             .expect("MLX complete record");
         assert_eq!(small.foreign_reserve_bytes, 2 * gib);
+        assert_eq!(small.capture_host_bytes, 8 * gib);
         assert_eq!(small.observed_non_reclaimable_wired_bytes, 230);
         assert_eq!(small.peak_bytes, 230);
         let required = 2 * gib + 230;
@@ -2332,6 +2363,18 @@ mod tests {
             mid.observed_non_reclaimable_wired_bytes, 230,
             "observed telemetry is not overwritten by a predicted/envelope maximum"
         );
+
+        assert_eq!(
+            mid.foreign_reserve_for_host_bytes(8 * gib),
+            3 * gib,
+            "a 12/32 capture reserve is a 3/8 reserve on an 8 GiB live host"
+        );
+        assert_eq!(
+            mid.foreign_reserve_for_host_bytes(1),
+            1,
+            "capacity normalization rounds up rather than granting an extra process byte"
+        );
+        assert_eq!(mid.required_host_bytes_for(8 * gib), 3 * gib + 230);
     }
 
     fn exact_query() -> EvidenceQuery {

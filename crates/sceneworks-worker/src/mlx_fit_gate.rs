@@ -1255,10 +1255,12 @@ fn evidence_admission_route(
                     parity: MemoryParityContract::Exact,
                     parity_result: MemoryParityResult::Passed,
                 };
+                let foreign_reserve_bytes =
+                    envelope.foreign_reserve_for_host_bytes(budget.total_bytes);
                 evidence.push(VerifiedAdmissionCandidate {
                     evidence: memory_evidence,
-                    foreign_reserve_bytes: envelope.foreign_reserve_bytes,
-                    required_host_bytes: envelope.required_host_bytes(),
+                    foreign_reserve_bytes,
+                    required_host_bytes: envelope.peak_bytes.saturating_add(foreign_reserve_bytes),
                     record_id: record.id.clone(),
                     closure_digest: binding.query.inference_closure_digest.clone(),
                 });
@@ -1812,7 +1814,7 @@ fn verified_lower_alternative(
             let envelope = record.mlx_admission_envelope()?;
             let effective = budget.effective_bytes();
             let strategy = evidence_strategy(record.strategy.rung);
-            (envelope.required_host_bytes() <= budget.total_bytes
+            (envelope.fits_scaled_host_bytes(budget.total_bytes)
                 && envelope.peak_bytes <= effective)
                 .then_some(VerifiedGeometryAlternative {
                     geometry: binding.geometry,
@@ -3556,6 +3558,15 @@ fn weights_floor_load_admission(
     }
 }
 
+fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    let spec = spec.with_offload_policy(OffloadPolicy::Sequential);
+    if engine_id == "z_image_turbo" {
+        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+    } else {
+        spec
+    }
+}
+
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
 /// generator cache's cold-load path, before `crate::inference_runtime::load` allocates — never on a warm cache hit,
 /// so an already-resident model is never re-gated. Resolves the budget + on-disk component bytes,
@@ -3573,6 +3584,17 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
     if spec.offload_policy == OffloadPolicy::Sequential {
         return Ok(spec);
     }
+    // The pinned Qwen provider's deferred block stream is a Sequential load contract, not merely a
+    // request-time optimization. A direct deferred+Resident real-weight load fails before the
+    // request gate can run (sc-18237: the provider has no stream to reopen). Production deliberately
+    // shapes native Qwen as deferred, so bind that shape to its only executable residency policy
+    // here, before the fatal allocation/load boundary. The request selector remains free to choose
+    // any implemented rung within that loaded contract.
+    if matches!(engine_id, "qwen_image" | "qwen_image_edit")
+        && spec.load_shape == gen_core::LoadShape::DeferredMaterialization
+    {
+        return Ok(with_selected_sequential_shape(engine_id, spec));
+    }
     match decide_residency_for_spec(engine_id, &spec) {
         ResidencyOutcome::Resident => Ok(spec),
         ResidencyOutcome::Sequential => {
@@ -3583,7 +3605,12 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
                 total_gb = (total_bytes as f64 / BYTES_PER_GIB).round() as i64,
                 text_encoder_gb = (te_bytes as f64 / BYTES_PER_GIB).round() as i64,
             );
-            Ok(spec.with_offload_policy(OffloadPolicy::Sequential))
+            let spec = with_selected_sequential_shape(engine_id, spec);
+            // Z-Image's shipped rung-4 evidence was captured under an independent deferred loader
+            // shape, while its lower rungs are eager. Production reaches both honestly by coupling
+            // the deferred shape only to the cold-load branch that selected Sequential residency.
+            // Resident hosts retain the eager shape and its four lower-rung bindings.
+            Ok(spec)
         }
         ResidencyOutcome::Reject {
             needed_gb,
@@ -8108,6 +8135,43 @@ mod tests {
     }
 
     #[test]
+    fn capture_host_reserve_scales_to_48_gib_without_erasing_the_stale_margin() {
+        use sceneworks_core::memory_calibration::MlxAdmissionEnvelope;
+
+        let capture_host = gib_to_bytes(128.0);
+        let envelope = MlxAdmissionEnvelope {
+            peak_bytes: gib_to_bytes(16.41),
+            observed_non_reclaimable_wired_bytes: gib_to_bytes(15.0),
+            capture_host_bytes: capture_host,
+            foreign_reserve_bytes: gib_to_bytes(46.93),
+        };
+        let live_host = gib_to_bytes(48.0);
+        assert!(
+            envelope.required_host_bytes() > live_host,
+            "the old absolute 128 GiB-host reserve reproduces the false 48 GiB refusal"
+        );
+        let live_reserve = envelope.foreign_reserve_for_host_bytes(live_host);
+        let stale_peak = crate::memory_strategy::stale_widened_peak_bytes(
+            gen_core::MemoryBackend::Mlx,
+            envelope.peak_bytes,
+        );
+        assert!(
+            stale_peak.saturating_add(live_reserve) <= live_host,
+            "the stale widening remains charged after host-capacity normalization"
+        );
+        let process_limit = live_host.saturating_sub(live_reserve);
+        assert!(
+            stale_peak <= process_limit,
+            "the request remains below the absolute MLX process limit used for OOM containment"
+        );
+        assert_eq!(
+            live_reserve,
+            18_896_513_925,
+            "46.93 GiB reserved on 128 GiB scales, conservatively rounded up, to 17.59875 GiB on 48 GiB"
+        );
+    }
+
+    #[test]
     fn packaged_bundle_without_an_exact_record_is_a_normal_no_record_reason() {
         // The packaged evidence is current for schema v4 / ABI 3. An uncovered fixture therefore
         // degrades to the legacy path with the precise `NoRecord` reason, not bundle drift.
@@ -9750,6 +9814,37 @@ mod tests {
     #[test]
     fn engine_supports_sequential_is_false_for_an_unregistered_id() {
         assert!(!engine_supports_sequential("no_such_engine_xyz"));
+    }
+
+    #[test]
+    fn production_sequential_policy_materializes_each_provider_under_its_bound_shape() {
+        let eager = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")));
+        let z_image = with_selected_sequential_shape("z_image_turbo", eager.clone());
+        assert_eq!(z_image.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            z_image.load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+            "the shipped Z-Image rung-4 binding must be producible by the production cold-load route"
+        );
+
+        let qwen = eager
+            .clone()
+            .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+        let qwen = apply_residency_policy(qwen, "qwen_image")
+            .expect("production deferred Qwen has one executable load policy");
+        assert_eq!(qwen.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            qwen.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+
+        let krea = with_selected_sequential_shape("krea_2_turbo_control", eager);
+        assert_eq!(krea.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            krea.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "Krea's shipped bounded-decode bindings remain on its production eager route"
+        );
     }
 
     /// Candle's sc-12130 twin of the macOS registry sweep above. These are the generic generator ids that

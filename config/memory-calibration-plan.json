@@ -1542,7 +1542,7 @@
       "name": "mlx-qwen-q8-bounded-attention",
       "evidenceScope": "authoritative",
       "backend": "mlx",
-      "loadShape": "eager_materialization",
+      "loadShape": "deferred_materialization",
       "target": {
         "provider": "qwen_image",
         "modelId": "qwen_image",

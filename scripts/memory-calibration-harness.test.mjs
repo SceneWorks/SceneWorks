@@ -561,11 +561,11 @@ test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", a
   assert.ok(
     qwen.every(
       (item) => item.loadShape === (
-        item.strategy.rung === "bounded_transformer_residency"
+        item.strategy.rung === "bounded_transformer_residency" || item.target.tier === "q8"
           ? "deferred_materialization"
           : "eager_materialization"
       )),
-    "every Qwen plan case must retain its exact typed load shape",
+    "Qwen q8 captures must use the production deferred shape while historical uncaptured tiers retain their exact shape",
   );
   assert.deepEqual(
     qwen

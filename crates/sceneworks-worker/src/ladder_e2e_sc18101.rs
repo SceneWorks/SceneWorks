@@ -730,6 +730,12 @@ fn c0_production_loadspec_probe() {
         "the probe must use the PRODUCTION load shape; unset SC18101_MEASURED_EAGER"
     );
     let request_inputs = inputs(1024, 1024);
+    let load_policy = match std::env::var("SC18237_C0_LOAD_POLICY").as_deref() {
+        Ok("sequential") => gen_core::OffloadPolicy::Sequential,
+        Ok("resident") | Err(_) => gen_core::OffloadPolicy::Resident,
+        Ok(other) => panic!("SC18237_C0_LOAD_POLICY must be resident or sequential, got {other:?}"),
+    };
+    let spec = spec.with_offload_policy(load_policy);
     let generator =
         crate::inference_runtime::load(MEASURED_ENGINE, &spec).expect("load qwen_image");
     let cap_gb = crate::smoke_support::env_or("SC18101_C0_CAP_GB", "96");
@@ -741,7 +747,7 @@ fn c0_production_loadspec_probe() {
                     &plan,
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
-                    gen_core::OffloadPolicy::Resident,
+                    load_policy,
                     0,
                 )
             })
@@ -756,7 +762,9 @@ fn c0_production_loadspec_probe() {
         ),
         Err(error) => format!("REFUSED {error}\n"),
     };
-    eprintln!("[sc18101/c0] cap={cap_gb} GB load_shape=Deferred -> {outcome}");
+    eprintln!(
+        "[sc18101/c0] cap={cap_gb} GB load_shape=Deferred load_policy={load_policy:?} -> {outcome}"
+    );
     write_log("c0-outcome", &outcome);
     write_log(
         "c0-selection",
@@ -769,6 +777,7 @@ fn c0_production_loadspec_probe() {
         "artifactRevision": revision,
         "geometry": "1024x1024",
         "loadShape": "deferred_materialization (production)",
+        "loadPolicy": format!("{load_policy:?}"),
         "capGb": cap_gb,
         "bindingClosureDigest": binding_digest,
         "liveClosureDigest": live_qwen_closure_digest(),
