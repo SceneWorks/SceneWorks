@@ -44,31 +44,47 @@ npm run report:stale-lanes          # human table, ranked by impact
 npm run report:stale-lanes -- --json   # same data, machine-readable
 ```
 
-Verified output shape (run on `origin/main` at inference pin `40fa7583`):
+Verified output shape (run on the sc-18212 branch at inference pin `40fa7583`):
 
 ```
-9 declared lanes: 8 stale, 0 current, 1 unmeasured (declared but never captured).
+9 declared lanes: 8 stale, 0 current, 0 pending capture; 6 lanes (declared or planned) have no adapter arm, and 2 planned lanes were never declared.
 33 shipped calibration bindings and 65 evidence records are serving under a widened margin.
 
-#  LANE                         BINDINGS  RECORDS  MARGIN  ESTIMATE  IMPACT  MODELS
-1  mlx:qwen_image               9/9       41/41    5.00%   10.00%    0.450   qwen_image
-2  mlx:z_image_turbo            5/5       5/5      5.00%   10.00%    0.250   z_image_turbo
+#  LANE                         BINDINGS  RECORDS  MARGIN  ESTIMATE  IMPACT  CAPTURE  MODELS
+1  mlx:qwen_image               9/9       41/41    5.00%   10.00%    0.450   yes      qwen_image
+2  mlx:z_image_turbo            5/5       5/5      5.00%   10.00%    0.250   yes      z_image_turbo
 ...
-DECLARED BUT NEVER CAPTURED (not stale — no measurement to be stale): candle:z_image
+4  candle:flux1_dev             5/5       5/5      2.00%   4.00%     0.100   NO ARM   flux_dev
+...
+DECLARED/PLANNED BUT UNCAPTURABLE — no adapter arm can serve these; a capture host booked for
+one is wasted (docs/calibration-runbook.md §2c). This is missing-adapter work, not measurement work:
+  candle:z_image  declared=yes  plan=90 entries (90 authoritative)  evidence=no evidence  status=uncapturable
+  ...
 ```
 
 `IMPACT` is stale bindings × the margin the runtime is applying to them right now, so the top row is
 the lane where a capture buys the most. `BINDINGS` is the **shipped admission surface** (what the
 worker's fit gates consult today); `RECORDS` is corpus debt. Prefer bindings.
 
-🔴 **This report enumerates DECLARED lanes only, so it cannot tell you a lane does not exist.** A lane
-is keyed exactly as `config/inference-provider-closures.json` keys it
-(`scripts/stale-lane-report.mjs:23-28`); a lane absent from that file appears **nowhere in the output**
-— not in the stale table, and not under "declared but never captured", which lists only lanes that
-*are* declared. Measured while validating this runbook (sc-18104): `mlx:flux2_dev` produces zero rows
-even though FLUX.2 [dev] ships an MLX lane in `builtin.models.jsonc`. If you arrived here with a lane
-name from outside this report — a product decision, a story, "the most popular model's Mac lane" —
-**do not read its absence as "nothing to do"**. Go straight to §2 and check it explicitly.
+`CAPTURE` (sc-18212) is §2c answered mechanically: the report parses the two adapter binaries'
+provider-dispatch match arms (the same source of truth that decides whether `run()` can serve the
+provider — `scripts/stale-lane-report.mjs#adapterCapturableProviders`) and flags every declared or
+planned lane with no arm as **uncapturable**, in its own section, visibly distinct from "pending
+capture". `candle:z_image` — declared, 90 authoritative plan entries, no arm — used to print as
+"declared but never captured", which read as pending measurement work; it is an
+adapter-implementation task, and the report now says so. Planned-but-undeclared lanes
+(`candle:qwen_image_edit`, `candle:qwen_image`) are enumerated too. **§2c/§2d below remain the
+diagnosis**; the report is now an index into them, not a substitute for them.
+
+🔴 **This report enumerates DECLARED and PLANNED lanes only, so it still cannot tell you a lane does
+not exist.** A lane is keyed exactly as `config/inference-provider-closures.json` keys it
+(`scripts/stale-lane-report.mjs#SOURCE_PATHS`), with `config/memory-calibration-plan.json` supplying
+the planned-but-undeclared rows (sc-18212); a lane absent from **both** files appears **nowhere in
+the output**. Measured while validating this runbook (sc-18104): `mlx:flux2_dev` produces zero rows
+even though FLUX.2 [dev] ships an MLX lane in `builtin.models.jsonc` — still true after sc-18212,
+because no plan entry names it either. If you arrived here with a lane name from outside this report
+— a product decision, a story, "the most popular model's Mac lane" — **do not read its absence as
+"nothing to do"**. Go straight to §2 and check it explicitly.
 
 The gate inventory behind the report — what does and does not grade currency — lives in
 [calibration-invalidation-sc-17774.md](calibration-invalidation-sc-17774.md) ("What grades what",
@@ -125,7 +141,11 @@ ids they cover today:
 | `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` | `mlx.rs:2733-2740` (`run`) — `MLX five-rung calibration does not implement provider "<id>"`; `mlx.rs:1576-1586` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` |
 | `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
 
-Grep before you schedule:
+Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
+"DECLARED/PLANNED BUT UNCAPTURABLE" section are derived by parsing these dispatch matches
+(`scripts/stale-lane-report.mjs#adapterCapturableProviders` — anchored on the refusal phrase below,
+so a provider counts as capturable only if every dispatch gate admits it). The table above is the
+human copy; the report is the derived one. Grep before you schedule anyway:
 
 ```bash
 grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
