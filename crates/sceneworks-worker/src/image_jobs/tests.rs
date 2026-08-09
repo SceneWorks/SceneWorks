@@ -5595,11 +5595,14 @@ fn flux2_edit_engine_id_maps_variants() {
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_dev_edit_memory_context_preserves_multiref_boundaries_for_provider_safety() {
-    let contract = crate::inference_runtime::media()
-        .memory_strategy_contract(
-            "flux2_dev_edit",
-            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default())),
-        )
+    let registry = crate::inference_runtime::media();
+    let registration = registry
+        .memory_strategy_registrations()
+        .find(|registration| registration.provider_id == "flux2_dev_edit")
+        .expect("FLUX.2-dev edit provider memory registration");
+    let base_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(Default::default()));
+    let contract = registry
+        .memory_strategy_contract("flux2_dev_edit", &base_spec)
         .unwrap()
         .expect("FLUX.2-dev edit provider memory contract");
 
@@ -5625,12 +5628,24 @@ fn flux2_dev_edit_memory_context_preserves_multiref_boundaries_for_provider_safe
     .unwrap()
     .is_none());
     for quant in [Some(gen_core::Quant::Q4), Some(gen_core::Quant::Q8), None] {
+        let mut spec = base_spec.clone();
+        spec.quantize = quant;
+        let contract = registry
+            .memory_strategy_contract("flux2_dev_edit", &spec)
+            .unwrap()
+            .expect("tier-specific FLUX.2-dev edit provider memory contract");
         let context = flux2_dev_edit_memory_context(&contract, quant, 2, 1024, 1024, Some(128.0))
             .unwrap()
             .expect("multi-reference context");
         assert_eq!(context.selection.tier.quant, quant);
         assert_eq!(context.predicted_peak_bytes, 0);
-        assert_eq!(context.overlay.as_deref(), Some("references=2"));
+        assert_eq!(context.geometry.reference_count, 2);
+        assert_eq!(
+            (registration.safety_check)(&spec, &contract, &context),
+            gen_core::MemorySafetyDecision::Accept,
+            "the worker context must pass the pinned provider's real safety check for {quant:?}"
+        );
+        assert_eq!(context.overlay, None);
     }
 }
 
