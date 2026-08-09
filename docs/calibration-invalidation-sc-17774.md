@@ -174,7 +174,8 @@ that by default.
 
 The captured-half gate exists because grading only `config/inference-provider-closures.json` left the
 other side of every comparison — 65 record digests and 31 manifest bindings — checked by nothing. That
-was not hypothetical: a constant in `scripts/sc-15833-flux2-evidence.test.mjs` carried the comment
+was not hypothetical: a constant in `scripts/sc-15833-flux2-evidence.test.mjs` *(deleted in
+sc-18100 with its one-shot)* carried the comment
 "derive it with …" and had never been a real derivation, and it survived the whole of sc-17774
 unnoticed. A plain dry run reports drift and still exits 0, which is right for a pin-bump preview and
 useless as a gate, so `--verify` is a separate mode that fails on any drift and ignores `--restamp`.
@@ -205,15 +206,18 @@ reaches. The orphan check is what makes "every digest is graded" a fact: droppin
 checked by nothing, and the skipped-block check alone does not see either. Both are checked before
 drift, because "this digest is not covered" outranks "this covered digest moved".
 
-Two test-fixture constants were the same shape of hole and are now derived instead of transcribed:
+Two test-fixture constants were the same shape of hole and were re-derived instead of transcribed:
 `SUPERSEDED_KREA_CLOSURE_DIGEST` (`scripts/generate-memory-matrix.test.mjs`) and the sc-15833
-constant (`scripts/sc-15833-flux2-evidence.test.mjs`) are read out of the evidence bundle through
+constant (`scripts/sc-15833-flux2-evidence.test.mjs`) were read out of the evidence bundle through
 `recordsNeedingDigest` — the gate's own eligibility predicate — so they inherit the CI derivation
 rather than sitting beside it. A wrong value in either did not fail anything; it made the test assert
-the right verdict for the wrong reason, which is exactly how `820bf106…` hid. By contrast the two
-constants in `scripts/sc-15823-flux1-evidence.mjs` are deliberately left as they are: that script
-*feeds* the evidence bundle, so its values land in records the gate re-derives and a drift there
-already surfaces.
+the right verdict for the wrong reason, which is exactly how `820bf106…` hid. *(As of sc-18100 the
+sc-15833 evidence test no longer exists; the krea constant in
+`scripts/generate-memory-matrix.test.mjs` is the surviving instance of the pattern.)* By contrast the
+two constants in `scripts/sc-15823-flux1-evidence.mjs` were deliberately left as they were: that
+script *fed* the evidence bundle, so its values land in records the gate re-derives and a drift there
+already surfaced. *(That one-shot is also gone as of sc-18100; the records it wrote remain in the
+bundle and stay under `backfill-closure-digests.mjs --verify`.)*
 
 The CI re-derivation matters more than it looks. Without it the currency term is checked-in data
 that nothing grades — a hand-edited digest would pass. `SceneWorks/inference` is public, so the
