@@ -42,7 +42,18 @@ pub(crate) async fn create_lora_download_job(
     if lora.get("installState").and_then(Value::as_str) == Some("installed")
         && lora.get("updateAvailable").and_then(Value::as_bool) != Some(true)
     {
-        return Err(ApiError::bad_request("LoRA is already installed"));
+        // `installState` is probed live from the HF cache on every catalog read, but a
+        // client's rendered badge is a snapshot from its last fetch. Anything that fills
+        // the cache out-of-band — the on-demand pull at first generation, another client,
+        // a manual `hf download` — flips the server to "installed" while an open catalog
+        // view still reads "Not Installed". Tag the rejection so the client can tell this
+        // benign disagreement apart from a real failure and resync instead of surfacing a
+        // message that contradicts the badge it is showing.
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: "LoRA is already installed".to_owned(),
+            code: Some("lora_already_installed"),
+        });
     }
     let source = lora.get("source").and_then(Value::as_object);
     let provider = source
@@ -1394,7 +1405,34 @@ pub(crate) fn validate_lora_specs_for_model(
             // same canonical form before the membership test, else a krea_2 LoRA is falsely
             // rejected against a `krea-2`-normalized model surface (sc-8185).
             let detected_family = normalize_lora_family(&detected_family);
-            if !model_families
+            // The detected family is the LoRA file's *base architecture*, which is not always the
+            // model's own family token. A model whose weights ARE some base architecture loads that
+            // architecture's LoRAs — Krea Realtime is Wan 2.1 T2V 14B weight-for-weight, SCAIL-2 is
+            // Wan2.1-I2V-derived — and that one-directional relation is registered in
+            // `extra_compatible_lora_families`, deliberately kept OUT of the manifest's
+            // `loraCompatibility.families` so it does not leak into the other family-keyed gates.
+            // This test previously read the manifest list alone, so it was blind to that registry
+            // and rejected exactly the cross-architecture LoRAs the engines are built to load
+            // (sc-18200). Widen it to the model's full accepted set: its declared families plus
+            // whatever each of those may additionally load.
+            // Strictly ADDITIVE: keep `model_families` verbatim and append only the registry
+            // extras. Replacing the list instead would silently re-spell it — `model_families` is
+            // in `normalize_lora_family` space (which canonicalizes `krea-2` -> `krea_2`) while
+            // `accepted_lora_families` normalizes to model space (`krea-2`), so round-tripping the
+            // declared families through it turns a passing `krea_2` match into a rejection
+            // (sc-8185's regression). The extras come back through `normalize_lora_family` for the
+            // same reason, so both sides of the comparison stay in one canonical space.
+            let accepted_families = model_families
+                .iter()
+                .cloned()
+                .chain(
+                    model_families
+                        .iter()
+                        .flat_map(|family| accepted_lora_families(family))
+                        .map(|family| normalize_lora_family(&family)),
+                )
+                .collect::<Vec<_>>();
+            if !accepted_families
                 .iter()
                 .any(|model_family| model_family == &detected_family)
             {
@@ -2365,6 +2403,132 @@ mod base_model_gating_tests {
         });
         validate_lora_specs_for_model(&models, &[], "krea_2_turbo", &[lora], true, "LoRA")
             .expect("krea_2 detected family must pass against a krea_2 (→krea-2) model surface");
+    }
+
+    /// A lightx2v Wan2.1-I2V step-distill ("lightning") adapter, keyed exactly like the real
+    /// `Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors`: `diffusion_model.`
+    /// namespace, per-block `lora_down`/`lora_up` factors, full-rank `.diff_b` bias deltas, and the
+    /// I2V-only `k_img`/`v_img` cross-attention targets. It carries NO metadata blob, so detection
+    /// is purely key-based — the same path the real file takes.
+    fn write_wan_i2v_lightning_lora(dir: &std::path::Path) {
+        use std::io::Write;
+        let mut entries = Vec::new();
+        let mut offset = 0_usize;
+        let push = |name: String, len: usize, entries: &mut Vec<String>, offset: &mut usize| {
+            entries.push(format!(
+                r#""{name}":{{"dtype":"F32","shape":[1],"data_offsets":[{},{}]}}"#,
+                *offset,
+                *offset + len
+            ));
+            *offset += len;
+        };
+        for block in 0..2 {
+            for target in [
+                "self_attn.q",
+                "cross_attn.k_img",
+                "cross_attn.v_img",
+                "ffn.0",
+            ] {
+                for suffix in ["lora_down.weight", "lora_up.weight", "diff_b"] {
+                    push(
+                        format!("diffusion_model.blocks.{block}.{target}.{suffix}"),
+                        4,
+                        &mut entries,
+                        &mut offset,
+                    );
+                }
+            }
+        }
+        let header = format!("{{{}}}", entries.join(","));
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&vec![0u8; offset]);
+        std::fs::File::create(dir.join("wan_lightning.safetensors"))
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+
+    /// sc-18200: the bundled `scail2_lightning` speed toggle IS a lightx2v Wan2.1-I2V LoRA, applied
+    /// to SCAIL-2 cross-architecture on purpose. `detect_lora_family` therefore reports `wan-video`
+    /// — correctly — while the model surface declares `scail2`. The gate used to compare the
+    /// detected family against the manifest list ALONE, so it rejected the transplant the engine
+    /// exists to perform ("appears to be a wan-video LoRA, which is not compatible with model
+    /// scail2_14b"). It must consult the model's full accepted set (`extra_compatible_lora_families`).
+    #[test]
+    fn wan_lightning_lora_passes_detected_family_check_on_scail2() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wan_i2v_lightning_lora(tmp.path());
+        // The fixture is only meaningful if it really detects as wan-video — pin that, so a change
+        // in the detector turns into a clear failure here rather than a vacuous pass.
+        let header =
+            read_safetensors_header(&tmp.path().join("wan_lightning.safetensors")).unwrap();
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("wan-video"));
+
+        let models = vec![json!({
+            "id": "scail2_14b",
+            "family": "scail2",
+            "loraCompatibility": { "families": ["scail2"] }
+        })];
+        let lora = json!({
+            "id": "scail2_lightning",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["scail2"],
+        });
+        validate_lora_specs_for_model(&models, &[], "scail2_14b", &[lora], true, "LoRA")
+            .expect("a wan-video-detected lightning LoRA must be accepted on a scail2 model");
+    }
+
+    /// The same defect, second instance: Krea Realtime's DiT is Wan 2.1 T2V 14B weight-for-weight,
+    /// and its manifest deliberately keeps `wan-video` OUT of `loraCompatibility.families` so the
+    /// token does not leak into the other family-keyed gates — the relation lives in
+    /// `extra_compatible_lora_families` instead. That left this gate blind to it too.
+    #[test]
+    fn wan_lora_passes_detected_family_check_on_krea_realtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wan_i2v_lightning_lora(tmp.path());
+        let models = vec![json!({
+            "id": "krea_realtime_14b",
+            "family": "krea-realtime",
+            "loraCompatibility": { "families": ["krea-realtime"] }
+        })];
+        let lora = json!({
+            "id": "some_wan_motion_lora",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["krea-realtime"],
+        });
+        validate_lora_specs_for_model(&models, &[], "krea_realtime_14b", &[lora], true, "LoRA")
+            .expect("a wan-video LoRA must be accepted on krea-realtime");
+    }
+
+    /// The widening must stay narrow: a model with no extra-compatible relation still rejects a
+    /// foreign detected architecture. Without this, "accept the registry" could silently become
+    /// "accept anything" and the gate would stop catching genuinely wrong files.
+    #[test]
+    fn wan_lora_still_rejected_on_an_unrelated_model_family() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wan_i2v_lightning_lora(tmp.path());
+        let models = vec![json!({
+            "id": "z_image_turbo",
+            "family": "z-image",
+            "loraCompatibility": { "families": ["z-image"] }
+        })];
+        let lora = json!({
+            "id": "mislabelled",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["z-image"],
+        });
+        let error =
+            validate_lora_specs_for_model(&models, &[], "z_image_turbo", &[lora], true, "LoRA")
+                .expect_err("a wan-video LoRA must still be rejected on an unrelated family");
+        assert!(
+            error.detail.contains("wan-video"),
+            "unexpected rejection detail: {}",
+            error.detail
+        );
     }
 
     // sc-10214: the id (and thus the on-disk folder) is family-scoped so two variants of

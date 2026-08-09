@@ -2096,6 +2096,20 @@ fn extra_compatible_lora_families(normalized_family: &str) -> &'static [&'static
         "chroma" => &["flux"],
         "flux2-klein" | "flux2-dev" => &["flux2"],
         "krea-realtime" => &["wan-video"],
+        // SCAIL-2's DiT is Wan2.1-I2V-14B-derived and ships the raw I2V module names — the same
+        // `blocks.{i}.self_attn.{q,k,v,o}` / `ffn` / qk-norm targets — so a Wan2.1-I2V LoRA's tensor
+        // keys resolve against it. That is not incidental: the bundled `scail2_lightning` speed
+        // toggle IS a lightx2v Wan2.1-I2V step-distill LoRA, applied cross-architecture on purpose
+        // (the engine merges every compatible target and deliberately skips the one that differs,
+        // the in_dim-36 `patch_embedding` vs SCAIL-2's in_dim 20). Because the file is a genuine Wan
+        // LoRA, `detect_lora_family` reports `wan-video` — correctly — so without this entry the
+        // job-creation gate rejects the very transplant the engine exists to perform (sc-18200).
+        // Declared HERE rather than as `wan-video` in the model's own `loraCompatibility.families`
+        // for the same reason as krea-realtime above: family membership is read by every other
+        // family-keyed gate too (tier/repo resolution, adapter routing, training bases), and SCAIL-2
+        // is not a Wan model for any of those. One-directional as usual — a Wan LoRA loads on
+        // SCAIL-2; a SCAIL-2 LoRA is not thereby declared loadable on a Wan model.
+        "scail2" => &["wan-video"],
         _ => &[],
     }
 }
@@ -2229,7 +2243,34 @@ pub fn base_model_satisfies_gate(model_family: &str, model_id: &str, base: &str)
     extra_compatible_lora_families(&normalized_family).contains(&"wan-video")
         && is_wan_14b_class_id(model_id)
         && is_wan_14b_class_id(base)
-        && !is_wan_i2v_id(base)
+        && (extra_compatible_backbone_is_image_conditioned(&normalized_family)
+            || !is_wan_i2v_id(base))
+}
+
+/// Whether a model riding the `wan-video` extra-compatible arm has an **image-conditioned** (I2V)
+/// backbone, i.e. one that actually carries the `cross_attn.k_img`/`v_img` projections an I2V LoRA
+/// targets.
+///
+/// This exists because the I2V exclusion in [`base_model_satisfies_gate`] is not a property of Wan
+/// LoRAs — it is a property of the *host*. sc-15017 introduced it for Krea Realtime, whose DiT is Wan
+/// 2.1 **T2V** 14B: it has no `k_img`/`v_img` at any width, so an I2V-stamped LoRA cannot apply and
+/// the exclusion is right. Applying that same rule to every extra-compatible family inverts it for an
+/// image-conditioned host — SCAIL-2's DiT IS Wan2.1-**I2V**-14B-derived and does carry `k_img`/`v_img`
+/// (they are adaptable targets, and the bundled `scail2_lightning` adapter patches them), so an I2V
+/// base is the *exact* architectural match while a T2V base is the lossy one. Without this split,
+/// forward-porting sc-18200 to a tree containing sc-15017 would refuse precisely the right LoRAs on
+/// SCAIL-2 and admit the weaker ones (sc-18200 forward-port).
+///
+/// Both size classes still gate: `is_wan_14b_class_id` keeps the 5B TI2V base out either way, which
+/// is the split the base-model gate was written for.
+fn extra_compatible_backbone_is_image_conditioned(normalized_family: &str) -> bool {
+    match normalized_family {
+        // Wan2.1-I2V-14B-derived: 40 blocks × dim 5120 with the I2V cross-attention stack intact.
+        "scail2" => true,
+        // Wan 2.1 T2V 14B weight-for-weight — no image cross-attention at any width.
+        "krea-realtime" => false,
+        _ => false,
+    }
 }
 
 /// A LoRA id for error messages: `id` / `loraId` / `lora_<n>`.
@@ -4857,9 +4898,11 @@ mod tests {
             "the 5B TI2V base has 48 latent channels — admitting it would garble the render"
         );
         // A model with no extra-compatible entry gets no relaxation, even between two 14B ids.
+        // (This used to name `scail2`, which gained a `wan-video` entry in sc-18200 — so it now
+        // legitimately DOES relax, and is asserted separately below. `ltx-video` has no entry.)
         assert!(!base_model_satisfies_gate(
-            "scail2",
-            "scail2_14b",
+            "ltx-video",
+            "ltx_2_3_14b",
             "wan_2_2_t2v_14b"
         ));
         // 🔴 …and REFUSES an I2V base, even though it is the same 14B size class. Krea Realtime is a
@@ -4925,6 +4968,70 @@ mod tests {
             Some("wan_2_2"),
         )
         .is_ok());
+    }
+
+    /// sc-18200: SCAIL-2's DiT is Wan2.1-I2V-derived and ships the raw I2V module names, and the
+    /// bundled `scail2_lightning` toggle IS a lightx2v Wan2.1-I2V LoRA — so a Wan LoRA must load on
+    /// a SCAIL-2 model. Same shape as the krea-realtime entry above, and asserted the same way so
+    /// it DISCRIMINATES: dropping the registry entry leaves `[scail2]` (and the job-creation gate
+    /// then rejects the lightning LoRA outright), while declaring `wan-video` as SCAIL-2's own
+    /// family would make the FIRST element `wan-video`, which this pins against.
+    /// The base-model half, which only exists on this line (sc-15017). The `wan-video` registry entry
+    /// is read by `base_model_satisfies_gate` too, so sc-18200 gained a SECOND meaning when forward-
+    /// ported here — and the I2V axis sc-15017 wrote for Krea Realtime is INVERTED for SCAIL-2.
+    /// Krea Realtime is a T2V backbone with no `cross_attn.k_img`/`v_img`, so an I2V stamp must be
+    /// refused there. SCAIL-2 is Wan2.1-**I2V**-derived and carries those projections — the bundled
+    /// lightning adapter patches them — so an I2V base is its EXACT match. Ported naively, SCAIL-2
+    /// would have refused the right LoRAs and admitted the weaker ones, silently.
+    #[test]
+    fn scail2_base_model_gate_admits_i2v_unlike_the_t2v_backbone() {
+        // The exact architectural match: a Wan I2V 14B base on SCAIL-2.
+        assert!(
+            base_model_satisfies_gate("scail2", "scail2_14b", "wan_2_2_i2v_14b"),
+            "SCAIL-2 is I2V-derived and has k_img/v_img — an I2V base is its exact match"
+        );
+        // The same stamp stays refused on the T2V backbone, unchanged by this split.
+        assert!(
+            !base_model_satisfies_gate("krea-realtime", "krea_realtime_14b", "wan_2_2_i2v_14b"),
+            "Krea Realtime has no image cross-attention; sc-15017's exclusion still holds there"
+        );
+        // A T2V base is still admitted on SCAIL-2 (same 40×5120 block layout, minus the img stack).
+        assert!(base_model_satisfies_gate(
+            "scail2",
+            "scail2_14b",
+            "wan_2_2_t2v_14b"
+        ));
+        // The size class still gates on BOTH: the 5B TI2V base is refused either way.
+        assert!(
+            !base_model_satisfies_gate("scail2", "scail2_14b", "wan_2_2"),
+            "the 5B TI2V base is a different latent geometry — the relaxation is size-classed"
+        );
+    }
+
+    #[test]
+    fn scail2_accepts_wan_loras_one_directionally() {
+        assert_eq!(
+            accepted_lora_families("scail2"),
+            vec!["scail2".to_owned(), "wan-video".to_owned()]
+        );
+        // Not symmetric: a Wan model does not thereby accept a scail2 LoRA.
+        assert!(!accepted_lora_families("wan-video").contains(&"scail2".to_owned()));
+        // The pre-flight accepts a Wan-declared LoRA on a SCAIL-2 job.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "scail2_lightning", "family": "wan-video" })],
+            Some("scail2"),
+            "scail2",
+            Some("scail2_14b"),
+        )
+        .is_ok());
+        // ...and still refuses an unrelated architecture.
+        assert!(validate_lora_compatibility(
+            &[json!({ "id": "wrong", "family": "flux" })],
+            Some("scail2"),
+            "scail2",
+            Some("scail2_14b"),
+        )
+        .is_err());
     }
 
     #[test]
