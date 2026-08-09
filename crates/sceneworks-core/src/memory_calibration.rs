@@ -896,21 +896,87 @@ impl EvidenceBundle {
 pub struct MlxAdmissionEnvelope {
     pub peak_bytes: u64,
     pub observed_non_reclaimable_wired_bytes: u64,
+    /// Physical unified memory on the capture host. The foreign reserve is a HOST-policy share of
+    /// this capacity, not model memory: carrying its absolute 128 GiB-host byte count onto a 48 GiB
+    /// host would reserve memory that does not exist there.
+    pub capture_host_bytes: u64,
     pub foreign_reserve_bytes: u64,
 }
 
 impl MlxAdmissionEnvelope {
-    /// Smallest physical unified-memory size that can satisfy this exact cell.
+    /// Smallest physical unified-memory size that can satisfy this exact cell under the captured
+    /// host-reserve policy.
     ///
-    /// This is the shared runtime/UI bridge: the worker compares exact evidence against the same
-    /// additive requirement that a later web consumer may display. Saturation fails conservative
-    /// for corrupt or impossible producer values.
+    /// Below the capture host, runtime preserves the capture's foreign-reserve *ratio*. Solving
+    /// `peak + ceil(reserve * host / capture) <= host` gives
+    /// `ceil(peak * capture / (capture - reserve))`. At and above the capture host, runtime keeps
+    /// the captured reserve absolute instead of speculating that foreign demand grows forever.
+    ///
+    /// This is the shared runtime/UI bridge. Intermediate products use `u128`; corrupt,
+    /// impossible, or unrepresentable evidence fails conservatively.
     pub fn required_host_bytes(self) -> u64 {
-        self.peak_bytes.saturating_add(self.foreign_reserve_bytes)
+        self.required_host_bytes_for_peak(self.peak_bytes)
+    }
+
+    /// The static minimum host boundary for an alternate effective peak, such as a stale-widened
+    /// peak. This keeps the reserve policy identical while allowing the caller's evidence grading
+    /// policy to remain authoritative.
+    pub fn required_host_bytes_for_peak(self, peak_bytes: u64) -> u64 {
+        if self.capture_host_bytes == 0 {
+            return u64::MAX;
+        }
+
+        let absolute_requirement = peak_bytes.saturating_add(self.foreign_reserve_bytes);
+        if self.foreign_reserve_bytes >= self.capture_host_bytes {
+            return absolute_requirement;
+        }
+
+        let denominator = u128::from(self.capture_host_bytes - self.foreign_reserve_bytes);
+        let numerator = u128::from(peak_bytes) * u128::from(self.capture_host_bytes);
+        let proportional_requirement =
+            numerator.saturating_add(denominator.saturating_sub(1)) / denominator;
+        let proportional_requirement = u64::try_from(proportional_requirement).unwrap_or(u64::MAX);
+
+        if proportional_requirement <= self.capture_host_bytes {
+            proportional_requirement
+        } else {
+            absolute_requirement
+        }
     }
 
     pub fn fits_host_bytes(self, host_bytes: u64) -> bool {
         self.required_host_bytes() <= host_bytes
+    }
+
+    /// Foreign host-policy reserve normalized to `host_bytes`, rounded up so a smaller live host is
+    /// never given more process memory than the capture host's process-ceiling ratio permits.
+    ///
+    /// MLX still receives the resulting absolute process ceiling at runtime. This only translates
+    /// the capture host's reserve ratio; it does not weaken the allocator limit or reinterpret the
+    /// model peak.
+    pub fn foreign_reserve_for_host_bytes(self, host_bytes: u64) -> u64 {
+        if self.capture_host_bytes == 0 {
+            return u64::MAX;
+        }
+        // A measurement cannot prove that foreign demand grows on a larger machine. Preserve its
+        // captured absolute reserve there; normalization exists to avoid carrying an impossible
+        // large-host reserve onto a smaller host.
+        if host_bytes >= self.capture_host_bytes {
+            return self.foreign_reserve_bytes;
+        }
+        let numerator = u128::from(self.foreign_reserve_bytes) * u128::from(host_bytes);
+        let denominator = u128::from(self.capture_host_bytes);
+        let scaled = numerator.saturating_add(denominator.saturating_sub(1)) / denominator;
+        u64::try_from(scaled).unwrap_or(u64::MAX)
+    }
+
+    pub fn required_host_bytes_for(self, host_bytes: u64) -> u64 {
+        self.peak_bytes
+            .saturating_add(self.foreign_reserve_for_host_bytes(host_bytes))
+    }
+
+    pub fn fits_scaled_host_bytes(self, host_bytes: u64) -> bool {
+        self.required_host_bytes_for(host_bytes) <= host_bytes
     }
 }
 
@@ -944,6 +1010,7 @@ impl EvidenceRecord {
         Some(MlxAdmissionEnvelope {
             peak_bytes: predicted.overall.max(non_reclaimable_wired),
             observed_non_reclaimable_wired_bytes: non_reclaimable_wired,
+            capture_host_bytes: hardware.memory_bytes,
             foreign_reserve_bytes,
         })
     }
@@ -2121,9 +2188,9 @@ mod tests {
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable, SourceSessionKind,
-        StaleBundleReason, StaleEvidenceReason, StrategyRung, MEMORY_CALIBRATION_ABI,
-        PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
+        MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable,
+        SourceSessionKind, StaleBundleReason, StaleEvidenceReason, StrategyRung,
+        MEMORY_CALIBRATION_ABI, PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
 
     fn phase(value: u64) -> Value {
@@ -2307,9 +2374,10 @@ mod tests {
             .mlx_admission_envelope()
             .expect("MLX complete record");
         assert_eq!(small.foreign_reserve_bytes, 2 * gib);
+        assert_eq!(small.capture_host_bytes, 8 * gib);
         assert_eq!(small.observed_non_reclaimable_wired_bytes, 230);
         assert_eq!(small.peak_bytes, 230);
-        let required = 2 * gib + 230;
+        let required = 307;
         assert_eq!(small.required_host_bytes(), required);
         assert!(small.fits_host_bytes(required), "exact equality fits");
         assert!(
@@ -2332,6 +2400,60 @@ mod tests {
             mid.observed_non_reclaimable_wired_bytes, 230,
             "observed telemetry is not overwritten by a predicted/envelope maximum"
         );
+
+        assert_eq!(
+            mid.foreign_reserve_for_host_bytes(8 * gib),
+            3 * gib,
+            "a 12/32 capture reserve is a 3/8 reserve on an 8 GiB live host"
+        );
+        assert_eq!(
+            mid.foreign_reserve_for_host_bytes(1),
+            1,
+            "capacity normalization rounds up rather than granting an extra process byte"
+        );
+        assert_eq!(mid.required_host_bytes_for(8 * gib), 3 * gib + 230);
+        assert_eq!(
+            mid.required_host_bytes(),
+            368,
+            "ceil(230 * 32 GiB / (32 - 12) GiB) is the true static boundary"
+        );
+        assert_eq!(
+            mid.foreign_reserve_for_host_bytes(64 * gib),
+            12 * gib,
+            "capture evidence does not speculate that foreign demand grows on a larger host"
+        );
+
+        let qwen = MlxAdmissionEnvelope {
+            peak_bytes: 46_305_116_160,
+            observed_non_reclaimable_wired_bytes: 44_056_333_980,
+            capture_host_bytes: 137_438_953_472,
+            foreign_reserve_bytes: 50_394_282_940,
+        };
+        assert_eq!(qwen.required_host_bytes(), 73_113_341_306);
+        assert!(qwen.fits_scaled_host_bytes(73_113_341_306));
+        assert!(!qwen.fits_scaled_host_bytes(73_113_341_305));
+        assert_eq!(
+            qwen.required_host_bytes_for_peak(48_620_371_968),
+            76_769_008_371,
+            "a stale-widened peak gets its own proportional minimum rather than adding a live-host reserve"
+        );
+
+        let capture_branch = MlxAdmissionEnvelope {
+            peak_bytes: 7 * gib,
+            observed_non_reclaimable_wired_bytes: 7 * gib,
+            capture_host_bytes: 8 * gib,
+            foreign_reserve_bytes: 2 * gib,
+        };
+        assert_eq!(
+            capture_branch.required_host_bytes(),
+            9 * gib,
+            "when the proportional solution exceeds the capture host, the absolute-reserve branch owns the minimum"
+        );
+        let invalid_capture = MlxAdmissionEnvelope {
+            capture_host_bytes: 0,
+            ..capture_branch
+        };
+        assert_eq!(invalid_capture.required_host_bytes(), u64::MAX);
     }
 
     fn exact_query() -> EvidenceQuery {
@@ -2510,7 +2632,7 @@ mod tests {
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 50);
+        assert_eq!(complete_count, 52);
         let runtime_keys = bundle
             .records
             .iter()
@@ -2541,7 +2663,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            15
+            17
         );
     }
 
