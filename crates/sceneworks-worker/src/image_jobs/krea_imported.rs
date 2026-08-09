@@ -469,8 +469,16 @@ fn krea_imported_control_raw_settings(
 /// SIGKILL — so the request runs on the conservative estimate path instead. The estimate is honest
 /// about the real assembly: the spec points at the resolved DENSE `bf16` base tier (whose
 /// `transformer/` ships the same-shape dense weights the imported file carries) plus the overlay
-/// and adapter files. If a dense-tier control calibration is ever captured, binding it here is the
-/// follow-up that would let this lane serve measured numbers.
+/// and adapter files.
+///
+/// Note what it would actually take for this lane to serve promoted numbers, so the estimate path
+/// is not mistaken for a one-line gap: promoted evidence is ARTIFACT-bound, and an imported DiT is
+/// a user file with no pinned repository/revision/variant to bind to — so a dense-tier capture
+/// alone would not reach it. It would also need an explicit decision that a same-shape dense
+/// imported DiT may INHERIT a dense record measured on the builtin base (defensible — identical
+/// architecture and dtype means identical resident bytes, which is exactly the property the q4
+/// record lacks), plus something that proves the imported file really is that shape and dtype
+/// before the inheritance applies. That is an evidence-reuse policy change, not a binding.
 ///
 /// Independently of the estimate, the generator's own measured, architecture-keyed feasibility
 /// check (`control_geometry_fits`, sized off the arch config + branch block count + tiers) guards
