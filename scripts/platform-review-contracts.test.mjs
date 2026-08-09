@@ -165,7 +165,7 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   const hosted = workflow.slice(hostedStart, hostedEnd);
   assert.match(
     hosted,
-    /^\s+run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter$/m,
+    /^ {6}- name: Test the MLX memory adapter \(memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter$/m,
   );
 });
 
