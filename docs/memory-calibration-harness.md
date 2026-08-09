@@ -222,6 +222,10 @@ The MLX adapter requires:
 SCENEWORKS_QWEN_IMAGE_ROOT=/absolute/path/to/Qwen-Image-tier-snapshot
 SCENEWORKS_QWEN_IMAGE_REPOSITORY=SceneWorks/qwen-image-mlx
 SCENEWORKS_QWEN_IMAGE_REVISION=<resolved immutable artifact revision>
+SCENEWORKS_MEMORY_MODEL_BYTES=<bytes from hash-artifact-inventory.mjs>
+SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256=<inventory SHA-256 from that script>
+SCENEWORKS_MEMORY_CAPTURE_DIR=/absolute/path/outside/the/checkout/raw-receipts
+SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX=docs/calibration/<story-or-campaign>
 # Optional explicit byte override. Otherwise the adapter uses the configured
 # iogpu/kernel policy, then derives recommendedMaxWorkingSetSize from MLX's
 # untouched default memory limit using the worker's real-hardware-validated rule.
@@ -251,7 +255,8 @@ gh workflow run macos-mlx.yml --ref main \
   -f qwen_tier=bf16 \
   -f inference_revision=<exact-adapter-inference-pin> \
   -f qwen_repository=SceneWorks/qwen-image-mlx \
-  -f qwen_revision=<exact-artifact-revision>
+  -f qwen_revision=<exact-artifact-revision> \
+  -f qwen_source_path_prefix=docs/calibration/<story-or-campaign>
 ```
 
 The runner resolves only the fixed `SceneWorks/qwen-image-mlx` artifact. Without an override it
@@ -266,8 +271,14 @@ repository/exact-revision `/models--SceneWorks--qwen-image-mlx/snapshots/<exact-
 suffix; a stale override for another tier is ignored in favor of the canonical locations. The
 dispatch validates but never prints the resolved path, checks out the exact inference
 revision using `SCENEWORKS_INFERENCE_READ_TOKEN` when configured and the workflow's scoped token
-otherwise, builds the release adapter, runs the authoritative provider through the harness,
-schema-checks the raw bundle, and uploads it as a workflow artifact. The workflow
+otherwise, fingerprints the exact tier inventory, builds the release adapter, runs the
+authoritative provider through the harness, hashes every artifact byte, schema-checks the bundle, and
+uploads the evidence JSON together with a repository-relative receipt tree containing the exact
+request, raw provider response, and selected/reference RGB outputs. Every newly planned q4/bf16
+record carries `sourceProvenance: physical_mlx_v1`; JS and Rust bundle consumers require its claims
+to share one `physical_mlx` session bound to the record's exact inventory. Validate the downloaded
+artifact with `check --source-root <unpacked-raw-root>`, copy its `docs/calibration/...` tree into the
+checkout, and then ingest. Missing or altered receipt files fail both check and ingest. The workflow
 cannot prove in advance that the private runner has the requested snapshot; an absent exact
 directory fails before model load. GitHub only accepts `workflow_dispatch` input schemas from a
 workflow that exists on the default branch, so the first calibration run is intentionally

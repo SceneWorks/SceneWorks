@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e2081fbe647526b7a198efb4047ca89c30ec944e54ef4218d4a339f19b0523ba",
+    "sceneWorksRevision": "source-tree:cde0a9dd706a8274af45a9eee282dd030f5ab694a6b2c78634864e465f490c18",
     "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
     "sources": {
       "manifest": {
@@ -50,7 +50,7 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "6641cd5121e67dcc8b655b4af9bffc9cc5a9d89bbba8fee9ee4d288653bf93c1"
+        "sha256": "cf3a43ba7c4a3db6cadddb898cd0f39a5a6bd14e82af7102f0a89d479a18161f"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",

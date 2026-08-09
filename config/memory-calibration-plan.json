@@ -1247,6 +1247,7 @@
     {
       "name": "mlx-qwen-bf16-resident",
       "evidenceScope": "authoritative",
+      "sourceProvenance": "physical_mlx_v1",
       "backend": "mlx",
       "loadShape": "deferred_materialization",
       "target": {
@@ -1278,6 +1279,7 @@
     {
       "name": "mlx-qwen-bf16-staged-residency",
       "evidenceScope": "authoritative",
+      "sourceProvenance": "physical_mlx_v1",
       "backend": "mlx",
       "loadShape": "deferred_materialization",
       "target": {
@@ -1310,6 +1312,7 @@
     {
       "name": "mlx-qwen-bf16-bounded-decode",
       "evidenceScope": "authoritative",
+      "sourceProvenance": "physical_mlx_v1",
       "backend": "mlx",
       "loadShape": "deferred_materialization",
       "target": {
@@ -1387,6 +1390,7 @@
     {
       "name": "mlx-qwen-bf16-bounded-attention",
       "evidenceScope": "authoritative",
+      "sourceProvenance": "physical_mlx_v1",
       "backend": "mlx",
       "loadShape": "deferred_materialization",
       "target": {
@@ -1424,6 +1428,7 @@
     {
       "name": "mlx-qwen-bf16-bounded-transformer",
       "evidenceScope": "authoritative",
+      "sourceProvenance": "physical_mlx_v1",
       "backend": "mlx",
       "loadShape": "deferred_materialization",
       "target": {
@@ -1464,6 +1469,7 @@
     {
       "name": "mlx-qwen-q4-bounded-attention",
       "evidenceScope": "authoritative",
+      "sourceProvenance": "physical_mlx_v1",
       "backend": "mlx",
       "loadShape": "deferred_materialization",
       "target": {
@@ -1501,6 +1507,7 @@
     {
       "name": "mlx-qwen-q4-bounded-transformer",
       "evidenceScope": "authoritative",
+      "sourceProvenance": "physical_mlx_v1",
       "backend": "mlx",
       "loadShape": "deferred_materialization",
       "target": {

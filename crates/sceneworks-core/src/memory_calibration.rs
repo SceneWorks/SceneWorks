@@ -97,6 +97,7 @@ pub struct EvidenceRecord {
     pub loadability: Loadability,
     pub diagnostics: Option<Diagnostics>,
     pub derivation: Option<EvidenceDerivation>,
+    pub source_provenance: Option<SourceProvenance>,
     pub calibration_fingerprint: String,
     pub captured_at: String,
     pub harness_version: String,
@@ -144,9 +145,16 @@ pub enum SourceInputRole {
 #[serde(rename_all = "snake_case")]
 pub enum SourceSessionKind {
     PhysicalCuda,
+    PhysicalMlx,
     UnitTest,
     StaticAnalysis,
     Comparison,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceProvenance {
+    PhysicalMlxV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -782,6 +790,8 @@ pub enum StaleEvidenceReason {
     /// Separate from [`Self::InferenceClosure`] on purpose: "we could not tell" must never be
     /// reported as "the code changed", and neither may silently fall back to revision equality.
     MissingClosureDigest,
+    /// A current Qwen q4/bf16 record omitted the physical MLX receipt required by SC-18353.
+    PhysicalMlxProvenance,
     ArtifactRepository,
     ArtifactResolvedRevision,
     ArtifactVariant,
@@ -836,6 +846,14 @@ impl EvidenceBundle {
                 Some(StaleEvidenceReason::CalibrationFingerprint)
             } else if record.repositories.inference.closure_digest.is_none() {
                 Some(StaleEvidenceReason::MissingClosureDigest)
+            } else if record.backend == Backend::Mlx
+                && record.target.model_id == "qwen_image"
+                && matches!(record.target.tier.as_str(), "q4" | "bf16")
+                && record.repositories.inference.closure_digest.as_deref()
+                    == Some(query.calibration.inference_closure_digest.as_str())
+                && record.source_provenance != Some(SourceProvenance::PhysicalMlxV1)
+            {
+                Some(StaleEvidenceReason::PhysicalMlxProvenance)
             } else if record.repositories.inference.closure_digest.as_deref()
                 != Some(query.calibration.inference_closure_digest.as_str())
             {
@@ -1051,9 +1069,8 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
     }
     require_nonempty(&session.command, "sourceSession.command")?;
     require_nonempty(&session.source_path, "sourceSession.sourcePath")?;
-    if !session.source_path.starts_with("docs/calibration/")
+    if !is_normalized_calibration_path(&session.source_path)
         || !session.source_path.ends_with(".log")
-        || session.source_path.contains("..")
     {
         return Err(format!("{} has an invalid sourcePath", session.id));
     }
@@ -1135,6 +1152,14 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
     }
     for output in &session.outputs {
         require_nonempty(&output.path, "sourceSession.outputs.path")?;
+        if session.kind == SourceSessionKind::PhysicalMlx
+            && !is_normalized_calibration_path(&output.path)
+        {
+            return Err(format!(
+                "{} physical MLX output has an invalid repository path",
+                session.id
+            ));
+        }
         if !is_sha256(&output.sha256) {
             return Err(format!(
                 "{} output sha256 must be lowercase SHA-256",
@@ -1145,15 +1170,41 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
     Ok(())
 }
 
+fn is_normalized_calibration_path(value: &str) -> bool {
+    value.starts_with("docs/calibration/")
+        && value
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
 fn validate_derivation(
     record: &EvidenceRecord,
     sessions: &BTreeMap<&str, &SourceSession>,
     inventory_inputs: &BTreeMap<(SourceInputRole, String), &SourceInput>,
 ) -> Result<(), String> {
-    let requires_provenance = record.backend == Backend::Candle
+    let requires_z_image_provenance = record.backend == Backend::Candle
         && record.target.model_id == "z_image"
         && record.evidence_scope == EvidenceScope::Authoritative
         && record.status == RecordStatus::Complete;
+    let is_authoritative_qwen_mlx = record.backend == Backend::Mlx
+        && record.target.model_id == "qwen_image"
+        && record.evidence_scope == EvidenceScope::Authoritative
+        && record.status == RecordStatus::Complete;
+    if record.source_provenance.is_some() && !is_authoritative_qwen_mlx {
+        return Err(format!(
+            "{} sourceProvenance is valid only for complete authoritative Qwen MLX evidence",
+            record.id
+        ));
+    }
+    let requires_qwen_mlx_provenance = is_authoritative_qwen_mlx
+        && record.source_provenance == Some(SourceProvenance::PhysicalMlxV1);
+    let requires_provenance = requires_z_image_provenance || requires_qwen_mlx_provenance;
+    if requires_qwen_mlx_provenance && record.artifact.inventory_sha256.is_none() {
+        return Err(format!(
+            "{} authoritative Qwen MLX evidence requires an exact artifact inventory",
+            record.id
+        ));
+    }
     let Some(derivation) = &record.derivation else {
         return if requires_provenance {
             Err(format!("{} requires source-session derivation", record.id))
@@ -1170,6 +1221,7 @@ fn validate_derivation(
         (SourceClaim::Loadability, &derivation.loadability),
         (SourceClaim::Overlay, &derivation.overlay),
     ];
+    let mut derivation_session_ids = BTreeSet::new();
     for (claim, reference) in dimensions {
         if reference.source_session_ids.is_empty() {
             return Err(format!("{} has an empty derivation source list", record.id));
@@ -1179,6 +1231,7 @@ fn validate_derivation(
             return Err(format!("{} repeats a derivation source", record.id));
         }
         for id in &reference.source_session_ids {
+            derivation_session_ids.insert(id.as_str());
             let session = sessions
                 .get(id.as_str())
                 .ok_or_else(|| format!("{} references missing source session {id}", record.id))?;
@@ -1188,8 +1241,20 @@ fn validate_derivation(
                     record.id
                 ));
             }
+            if requires_qwen_mlx_provenance && session.kind != SourceSessionKind::PhysicalMlx {
+                return Err(format!(
+                    "{} authoritative Qwen MLX derivation requires a physical_mlx source session",
+                    record.id
+                ));
+            }
             if requires_provenance {
-                validate_source_inputs_against_record(record, session, claim, inventory_inputs)?;
+                validate_source_inputs_against_record(
+                    record,
+                    session,
+                    claim,
+                    inventory_inputs,
+                    requires_qwen_mlx_provenance,
+                )?;
             }
             if let Some(target) = &session.target {
                 if matches!(
@@ -1238,6 +1303,12 @@ fn validate_derivation(
             }
         }
     }
+    if requires_qwen_mlx_provenance && derivation_session_ids.len() != 1 {
+        return Err(format!(
+            "{} authoritative Qwen MLX claims must share one physical capture session",
+            record.id
+        ));
+    }
     if !matches!(
         derivation.memory.kind,
         DerivationKind::Direct | DerivationKind::ConservativeUpperBound
@@ -1261,6 +1332,7 @@ fn validate_source_inputs_against_record(
     session: &SourceSession,
     claim: SourceClaim,
     inventory_inputs: &BTreeMap<(SourceInputRole, String), &SourceInput>,
+    allow_physical_mlx_inventory: bool,
 ) -> Result<(), String> {
     let fingerprint = match &record.loadability.resolved_path_fingerprint {
         RequiredNullable::Value(value) => value.as_str(),
@@ -1268,16 +1340,17 @@ fn validate_source_inputs_against_record(
     };
     for input in &session.inputs {
         let inventory_key = (input.role, input.variant.clone());
-        let expected_input = inventory_inputs.get(&inventory_key).ok_or_else(|| {
-            format!(
+        if let Some(expected_input) = inventory_inputs.get(&inventory_key) {
+            if **expected_input != *input {
+                return Err(format!(
+                    "{} source session {} input differs from its exact inventory identity",
+                    record.id, session.id
+                ));
+            }
+        } else if !allow_physical_mlx_inventory || session.kind != SourceSessionKind::PhysicalMlx {
+            return Err(format!(
                 "{} source session {} has no canonical {:?}/{} inventory",
                 record.id, session.id, input.role, input.variant
-            )
-        })?;
-        if **expected_input != *input {
-            return Err(format!(
-                "{} source session {} input differs from its exact inventory identity",
-                record.id, session.id
             ));
         }
         if input.role == SourceInputRole::Base {
@@ -1296,6 +1369,14 @@ fn validate_source_inputs_against_record(
             if input.variant != expected_tier {
                 return Err(format!(
                     "{} source session {} base input has the wrong tier variant",
+                    record.id, session.id
+                ));
+            }
+            if allow_physical_mlx_inventory
+                && record.artifact.inventory_sha256.as_deref() != Some(input.sha256.as_str())
+            {
+                return Err(format!(
+                    "{} source session {} base input does not match the record artifact inventory",
                     record.id, session.id
                 ));
             }
@@ -2345,6 +2426,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn physical_mlx_source_sessions_load_and_bind_authoritative_qwen_inventory() {
+        let mut record = mlx_record(
+            128 * 1024 * 1024 * 1024,
+            120 * 1024 * 1024 * 1024,
+            96 * 1024 * 1024 * 1024,
+        );
+        record["target"]["modelId"] = json!("qwen_image");
+        record["target"]["provider"] = json!("qwen_image");
+        record["sourceProvenance"] = json!("physical_mlx_v1");
+        record["artifact"]["inventorySha256"] = json!("d".repeat(64));
+        record["loadability"]["resolvedPathFingerprint"] =
+            json!(format!("SceneWorks/fixture@{}:q4", "c".repeat(40)));
+        let session_id = format!("ims-{}", "1".repeat(20));
+        let direct = || json!({ "kind": "direct", "sourceSessionIds": [session_id.clone()] });
+        record["derivation"] = json!({
+            "memory": direct(),
+            "quality": direct(),
+            "negativeMutation": direct(),
+            "lifecycle": direct(),
+            "loadability": direct(),
+            "overlay": direct(),
+            "justification": "exact physical MLX capture",
+        });
+        let source_session = json!({
+            "id": session_id,
+            "kind": "physical_mlx",
+            "command": "memory-mlx-adapter",
+            "sourcePath": "docs/calibration/sc-test/fixture.log",
+            "capturedAt": "2026-08-01T12:00:00Z",
+            "repositories": record["repositories"].clone(),
+            "hardware": record["hardware"].clone(),
+            "target": {
+                "tier": "q4", "mode": "text_to_image", "overlay": "none",
+                "rung": "bounded_decode"
+            },
+            "stdoutSha256": "2".repeat(64),
+            "inputs": [{
+                "role": "base",
+                "path": "/fixture/q4",
+                "bytes": 1234,
+                "sha256": "d".repeat(64),
+                "repository": "SceneWorks/fixture",
+                "resolvedRevision": "c".repeat(40),
+                "variant": "q4"
+            }],
+            "outputs": [{
+                "path": "docs/calibration/sc-test/fixture.rgb",
+                "sha256": "3".repeat(64)
+            }],
+            "claims": ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
+            "result": "passed"
+        });
+        let document = json!({
+            "schemaVersion": 4,
+            "harnessVersion": "sceneworks-memory-v5",
+            "sourceSessions": [source_session],
+            "records": [record]
+        });
+        let loaded = match load_bundle(&document.to_string()).expect("physical MLX bundle parses") {
+            BundleLoad::Ready(bundle) => bundle,
+            BundleLoad::Stale(reason) => {
+                panic!("unexpected stale physical MLX fixture: {reason:?}")
+            }
+        };
+        assert_eq!(
+            loaded.source_sessions[0].kind,
+            SourceSessionKind::PhysicalMlx
+        );
+
+        let mut missing_derivation = document;
+        missing_derivation["records"][0]
+            .as_object_mut()
+            .expect("record object")
+            .remove("derivation");
+        assert!(matches!(
+            load_bundle(&missing_derivation.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+    }
+
     fn mlx_record(total: u64, memory_limit: u64, wired_limit: u64) -> Value {
         let mut record = complete_record();
         record["backend"] = json!("mlx");
@@ -3025,6 +3187,40 @@ mod tests {
         assert_eq!(
             bundle.evidence_for(&abi),
             EvidenceVerdict::Stale(StaleEvidenceReason::CalibrationAbi)
+        );
+    }
+
+    #[test]
+    fn current_qwen_q4_evidence_without_physical_mlx_provenance_is_stale() {
+        let mut record = mlx_record(
+            128 * 1024 * 1024 * 1024,
+            120 * 1024 * 1024 * 1024,
+            96 * 1024 * 1024 * 1024,
+        );
+        record["target"]["modelId"] = json!("qwen_image");
+        record["target"]["provider"] = json!("qwen_image");
+        record["target"]["tier"] = json!("q4");
+        record["loadability"]["resolvedPathFingerprint"] = json!("fixture@resolved:q4");
+        let bundle =
+            match load_bundle(&bundle(record)).expect("legacy Qwen receipt remains history") {
+                BundleLoad::Ready(bundle) => bundle,
+                BundleLoad::Stale(reason) => panic!("unexpected stale bundle envelope: {reason:?}"),
+            };
+        let mut query = exact_query();
+        query.backend = Backend::Mlx;
+        query.model_id = "qwen_image".to_owned();
+        query.provider = "qwen_image".to_owned();
+
+        assert_eq!(
+            bundle.evidence_for(&query),
+            EvidenceVerdict::Stale(StaleEvidenceReason::PhysicalMlxProvenance)
+        );
+
+        query.calibration.inference_closure_digest = "e".repeat(64);
+        assert_eq!(
+            bundle.evidence_for(&query),
+            EvidenceVerdict::Stale(StaleEvidenceReason::InferenceClosure),
+            "pre-provenance records remain ordinary history once their captured closure is stale"
         );
     }
 

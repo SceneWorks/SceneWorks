@@ -124,7 +124,7 @@
       }],
       "properties": {
         "id": { "type": "string", "pattern": "^ims-[0-9a-f]{20}$" },
-        "kind": { "enum": ["physical_cuda", "unit_test", "static_analysis", "comparison"] },
+        "kind": { "enum": ["physical_cuda", "physical_mlx", "unit_test", "static_analysis", "comparison"] },
         "command": { "type": "string", "minLength": 1 },
         "sourcePath": { "type": "string", "pattern": "^docs/calibration/[A-Za-z0-9._/-]+\\.log$" },
         "capturedAt": { "type": "string", "format": "date-time" },
@@ -409,6 +409,7 @@
           }
         },
         "derivation": { "$ref": "#/$defs/derivation" },
+        "sourceProvenance": { "enum": ["physical_mlx_v1"] },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
         "harnessVersion": { "const": "sceneworks-memory-v5" }

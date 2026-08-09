@@ -448,6 +448,15 @@ at, not a build pin.
 ignore rule changes is a multi-hour sweep discarded at the end, and the CI lanes themselves write to
 `$RUNNER_TEMP`. Use a path outside the tree and the question does not arise.
 
+For physical MLX capture, the raw-log directory must also stay outside the checkout. Run
+`scripts/hash-artifact-inventory.mjs --root <exact-tier-root> --github-env <env-file>` once before
+the campaign, export the two inventory values it reports, and set
+`SCENEWORKS_MEMORY_CAPTURE_DIR` plus `SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX`. The adapter persists the
+selected and reference RGB bytes under `<capture-dir>/<source-prefix>`; the harness adds one
+`physical_mlx` source session per fresh case and writes the exact request and provider response beside
+them. The temporary directory therefore mirrors the repository-relative tree. The inventory command
+streams and hashes every artifact byte, including Hugging Face symlink targets.
+
 ### 6a. Locally on the host
 
 > Provenance: the adapter builds and `harness run` were **not** executed while writing this runbook —
@@ -474,6 +483,8 @@ node scripts/memory-calibration-harness.mjs run \
   --provider-command '["/abs/path/to/target/release/memory-<backend>-adapter"]' \
   --sceneworks-repo /abs/path/to/SceneWorks \
   --inference-repo /abs/path/to/inference \
+  --raw-log-dir /abs/path/OUTSIDE/the/repo/raw-receipts \
+  --source-path-prefix docs/calibration/<story-or-campaign> \
   --resume docs/generated/memory-calibration-evidence.json \
   --output /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
 ```
@@ -516,14 +527,20 @@ gh workflow run macos-mlx.yml --ref main \
   -f qwen_tier=bf16 \
   -f inference_revision=<exact adapter INFERENCE_PIN> \
   -f qwen_repository=SceneWorks/qwen-image-mlx \
-  -f qwen_revision=<exact 40-hex artifact revision>
+  -f qwen_revision=<exact 40-hex artifact revision> \
+  -f qwen_source_path_prefix=docs/calibration/<story-or-campaign>
 ```
 
 Validates the identities, resolves (without printing) the snapshot root, checks out inference at the
 exact revision into `.calibration/inference`, builds the release adapter, runs the harness with
 `--fresh-per-case` on fixture `qwen-image-<tier>-seed<15511|16353>-step2` (seed 15511 for `bf16`,
 16353 for the packed tiers — macos-mlx.yml:809-813), schema-checks the bundle and uploads it as
-`memory-mlx-evidence-<tier>-<run_id>`.
+`memory-mlx-evidence-<tier>-<run_id>`. That artifact contains the bundle plus the immutable raw log
+and selected/reference outputs in their repository-relative tree. Validate a downloaded artifact
+with `memory-calibration-harness.mjs check --input <bundle> --source-root <unpacked-raw-root>`, then
+copy its `docs/calibration/...` tree into the checkout before ingest. Both `check` and `ingest` verify
+the provider log, exact request, and selected/reference output bytes for every `physical_mlx` session;
+a missing or altered file fails closed.
 
 **`mlx:z_image_turbo`** — `run_five_rung_reference` on the **same** workflow (macos-mlx.yml:150-163,
 832-868):

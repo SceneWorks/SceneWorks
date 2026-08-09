@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   HARNESS_VERSION, RUNG_REUSE_TOLERANCE, assessProviderReuse, atomicWrite, canonicalJson,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
-  runProviderPlan, validateBundle, validateRecord,
+  runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import { calibrationBinding } from "./generate-memory-matrix.mjs";
 
@@ -480,6 +480,56 @@ test("currency follows the provider's own compile closure, never the inference p
   );
 });
 
+test("current Qwen q4 and bf16 evidence cannot omit physical MLX provenance", async () => {
+  for (const tier of ["q4", "bf16"]) {
+    const record = qwenPositiveComplete();
+    record.target.tier = tier;
+    record.artifact.variant = tier;
+    record.logicalCaseId = logicalCaseId(record);
+    record.id = recordId(record);
+    const provider = `${record.backend}:${record.target.provider}`;
+    const live = record.repositories.inference.closureDigest;
+    const revisions = { inferenceClosureDigests: { [provider]: live } };
+
+    assert.throws(
+      () => evidenceSemantics(record, revisions),
+      /current authoritative Qwen MLX .* requires sourceProvenance=physical_mlx_v1/,
+    );
+    await assert.rejects(
+      validateSourceSessionFiles(
+        { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] },
+        null,
+        revisions.inferenceClosureDigests,
+      ),
+      /current authoritative Qwen MLX .* requires sourceProvenance=physical_mlx_v1/,
+    );
+
+    assert.equal(
+      evidenceSemantics(record, {
+        inferenceClosureDigests: { [provider]: "f".repeat(64) },
+      }),
+      "historical",
+      "pre-provenance captures remain valid history",
+    );
+  }
+
+  const q8 = qwenPositiveComplete();
+  q8.target.tier = "q8";
+  q8.artifact.variant = "q8";
+  q8.logicalCaseId = logicalCaseId(q8);
+  q8.id = recordId(q8);
+  const q8Provider = `${q8.backend}:${q8.target.provider}`;
+  assert.equal(
+    evidenceSemantics(q8, {
+      inferenceClosureDigests: {
+        [q8Provider]: q8.repositories.inference.closureDigest,
+      },
+    }),
+    "current",
+    "the retained q8 campaign is outside the q4/bf16 recapture requirement",
+  );
+});
+
 test("a record with no closure digest fails loudly instead of falling back to pin equality", () => {
   // The fallback would be invisible in a green run and would silently restore the old policy.
   const record = complete({ evidenceScope: "authoritative" });
@@ -564,6 +614,13 @@ test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", a
       (item) => item.loadShape === "deferred_materialization"
     ),
     "every Qwen capture case must use the production deferred shape",
+  );
+  assert.ok(
+    qwen.every((item) =>
+      item.target.tier === "q8"
+        ? item.sourceProvenance === undefined
+        : item.sourceProvenance === "physical_mlx_v1"),
+    "new q4/bf16 captures must require physical MLX provenance without rewriting retained q8 evidence",
   );
   assert.deepEqual(
     qwen
@@ -718,14 +775,22 @@ test("provider execution requires one backend-specific hardware probe", async ()
   );
 });
 
-test("one exact Qwen completion suppresses only its own ladder case", async () => {
+test("a legacy Qwen completion cannot suppress a provenance-required recapture", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const record = qwenPositiveComplete();
   validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
+  const provenanceRequired = structuredClone(record);
+  provenanceRequired.sourceProvenance = "physical_mlx_v1";
+  provenanceRequired.logicalCaseId = logicalCaseId(provenanceRequired);
+  provenanceRequired.id = recordId(provenanceRequired);
+  assert.throws(
+    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [provenanceRequired] }),
+    /exact artifact inventory|missing source-session derivation/,
+  );
   const qwenRemaining = expandPlan(config, [record]).filter(
     (item) => item.target.provider === "qwen_image" && item.backend === "mlx",
   );
-  assert.equal(qwenRemaining.length, 14);
+  assert.equal(qwenRemaining.length, 15);
   assert.equal(
     qwenRemaining.some(
       (item) =>
@@ -733,7 +798,7 @@ test("one exact Qwen completion suppresses only its own ladder case", async () =
         item.strategy.parameters.decodeTileEdge === 512 &&
         item.strategy.parameters.decodeOverlap === 64,
     ),
-    false,
+    true,
   );
   assert.ok(qwenRemaining.some((item) => item.strategy.rung === "bounded_attention"));
   assert.ok(qwenRemaining.some((item) => item.strategy.rung === "bounded_transformer_residency"));
@@ -981,6 +1046,154 @@ test("executable runner handles fragmented responses across provider processes",
   assert.equal(expandPlan(config, result.records).length, clean ? 0 : 2);
   assert.equal(result.records[0].hardware.deviceId, "fixture:0");
   assert.match(result.records[0].repositories.sceneWorks.revision, /^[0-9a-f]{40}$/);
+});
+
+function physicalMlxConfig() {
+  const target = {
+    ...complete().target,
+    provider: "fixture_mlx",
+    modelId: "fixture_mlx",
+  };
+  return {
+    providers: [{
+      evidenceScope: "fixture",
+      backend: "mlx",
+      loadShape: "eager_materialization",
+      target,
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "bounded_decode"],
+      calibrationFingerprint: "fixture-formula-v2",
+      fixture: "physical-mlx-fixture",
+      cases: [{
+        parameters: { decodeTileEdge: 512, decodeOverlap: 128 },
+        expectedResult: "passed",
+      }],
+    }],
+  };
+}
+
+test("physical MLX capture binds raw provider stdout, exact inventory, and persisted outputs", async () => {
+  const config = physicalMlxConfig();
+  const cleanRepo = await cleanFixtureRepo();
+  const rawLogDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-receipts-"));
+  const sourcePathPrefix = "docs/calibration/sc-test";
+  const result = await runProviderPlan({
+    closureDigestFor: stubClosureDigest,
+    config,
+    providerCommand: [
+      process.execPath,
+      fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+      rawLogDir,
+      sourcePathPrefix,
+    ],
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
+    rawLogDir,
+    sourcePathPrefix,
+  });
+  assert.equal(result.records.length, 1);
+  assert.equal(result.sourceSessions.length, 1);
+  const record = result.records[0];
+  const session = result.sourceSessions[0];
+  assert.equal(session.kind, "physical_mlx");
+  assert.deepEqual(session.inputs, [{
+    role: "base",
+    path: "/fixture/q4",
+    bytes: 1234,
+    sha256: "d".repeat(64),
+    repository: "SceneWorks/fixture",
+    resolvedRevision: "c".repeat(40),
+    variant: "q4",
+  }]);
+  for (const claim of ["memory", "quality", "negativeMutation", "lifecycle", "loadability", "overlay"]) {
+    assert.deepEqual(record.derivation[claim].sourceSessionIds, [session.id]);
+  }
+  const raw = await readFile(path.join(rawLogDir, session.sourcePath));
+  assert.equal(createHash("sha256").update(raw).digest("hex"), session.stdoutSha256);
+  assert.equal(session.outputs.length, 3);
+  for (const output of session.outputs) {
+    const local = path.join(rawLogDir, output.path);
+    assert.equal(createHash("sha256").update(await readFile(local)).digest("hex"), output.sha256);
+  }
+  assert.equal(validateBundle(result), result);
+  assert.equal(await validateSourceSessionFiles(result, rawLogDir), result);
+
+  const authoritative = structuredClone(result);
+  const authoritativeRecord = authoritative.records[0];
+  authoritativeRecord.evidenceScope = "authoritative";
+  authoritativeRecord.sourceProvenance = "physical_mlx_v1";
+  authoritativeRecord.target.modelId = "qwen_image";
+  authoritativeRecord.target.provider = "qwen_image";
+  authoritativeRecord.loadability.resolvedPathFingerprint = `SceneWorks/fixture@${"c".repeat(40)}:q4`;
+  authoritativeRecord.logicalCaseId = logicalCaseId(authoritativeRecord);
+  authoritativeRecord.id = recordId(authoritativeRecord);
+  assert.equal(validateBundle(authoritative), authoritative);
+
+  const missingDerivation = structuredClone(authoritative);
+  delete missingDerivation.records[0].derivation;
+  assert.throws(() => validateBundle(missingDerivation), /missing source-session derivation/);
+  const wrongInventory = structuredClone(authoritative);
+  wrongInventory.records[0].artifact.inventorySha256 = "0".repeat(64);
+  wrongInventory.records[0].id = recordId(wrongInventory.records[0]);
+  assert.throws(() => validateBundle(wrongInventory), /does not match the record artifact inventory/);
+
+  const missingOutput = structuredClone(result);
+  missingOutput.sourceSessions[0].outputs[1].path = `${sourcePathPrefix}/missing.rgb`;
+  await assert.rejects(
+    validateSourceSessionFiles(missingOutput, rawLogDir),
+    /missing immutable source receipt/,
+  );
+});
+
+test("physical MLX receipts reject traversal prefixes and outputs outside the raw directory", async () => {
+  const config = physicalMlxConfig();
+  const cleanRepo = await cleanFixtureRepo();
+  const rawLogDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-receipts-"));
+  const outsideDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-outside-"));
+  const fixtureCommand = [
+    process.execPath,
+    fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+    rawLogDir,
+  ];
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config,
+      providerCommand: [...fixtureCommand, "docs/calibration/../escape"],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      rawLogDir,
+      sourcePathPrefix: "docs/calibration/../escape",
+    }),
+    /source path prefix must be a normalized path under docs\/calibration/,
+  );
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config,
+      providerCommand: [...fixtureCommand, "docs/calibration/sc-test", outsideDir],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      rawLogDir,
+      sourcePathPrefix: "docs/calibration/sc-test",
+    }),
+    /physical MLX local output must stay under the raw log directory/,
+  );
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config,
+      providerCommand: [
+        process.execPath,
+        fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+      ],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      rawLogDir,
+      sourcePathPrefix: "docs/calibration/sc-test",
+    }),
+    /configured raw-log provenance requires provider sourceCapture/,
+  );
 });
 
 test("runner batches one target's five rungs into one attested model load", async () => {
@@ -1593,21 +1806,14 @@ test("the promoted evidence bundle carries the current harnessVersion", async ()
 // their recorded hashes. The bundle's whole point is that a record is traceable to immutable captured
 // output, so the gate belongs to the bundle, not to one campaign's script. Generalised: a missing or
 // edited log now fails for every campaign, and no per-campaign census has to be hand-maintained.
-test("every committed source session binds an immutable log whose bytes match its recorded hash", async () => {
+test("every committed source session binds immutable files whose bytes match their recorded hashes", async () => {
   const root = new URL("../", import.meta.url);
   const bundle = JSON.parse(
     await readFile(new URL("docs/generated/memory-calibration-evidence.json", root)),
   );
   const sessions = bundle.sourceSessions ?? [];
   assert.ok(sessions.length > 0, "the shipped bundle must carry source sessions to bind");
-  for (const session of sessions) {
-    const bytes = await readFile(new URL(session.sourcePath, root));
-    assert.equal(
-      createHash("sha256").update(bytes).digest("hex"),
-      session.stdoutSha256,
-      `${session.sourcePath} no longer hashes to the stdoutSha256 recorded for ${session.id}`,
-    );
-  }
+  assert.equal(await validateSourceSessionFiles(bundle), bundle);
 });
 
 // -----------------------------------------------------------------------------------------------

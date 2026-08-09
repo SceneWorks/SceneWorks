@@ -147,6 +147,11 @@ on:
         description: "Exact 40-hex Qwen artifact revision"
         required: false
         type: string
+      qwen_source_path_prefix:
+        description: "Repository path that will receive immutable Qwen logs and outputs"
+        required: false
+        type: string
+        default: "docs/calibration/sc-18353"
       provision_z_image_snapshot:
         description: "Provision the exact public Z-Image q4 snapshot before capture"
         required: false
@@ -794,6 +799,12 @@ jobs:
             exit 1
           fi
           printf 'SCENEWORKS_Z_IMAGE_ROOT=%s\n' "$Z_IMAGE_ROOT" >> "$GITHUB_ENV"
+      - name: Fingerprint the exact Qwen artifact inventory
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
+        run: |
+          node scripts/hash-artifact-inventory.mjs \
+            --root "$SCENEWORKS_QWEN_IMAGE_ROOT" \
+            --github-env "$GITHUB_ENV"
       - name: Check out the exact inference calibration source
         if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference) }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -808,6 +819,8 @@ jobs:
         env:
           SCENEWORKS_QWEN_IMAGE_REPOSITORY: ${{ inputs.qwen_repository }}
           SCENEWORKS_QWEN_IMAGE_REVISION: ${{ inputs.qwen_revision }}
+          SCENEWORKS_MEMORY_CAPTURE_DIR: ${{ runner.temp }}/memory-mlx-raw
+          SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX: ${{ inputs.qwen_source_path_prefix }}
           QWEN_TIER: ${{ inputs.qwen_tier }}
         run: |
           printf '.calibration/\n' >> .git/info/exclude
@@ -826,15 +839,20 @@ jobs:
             --provider-command "[\"$CARGO_TARGET_DIR/release/memory-mlx-adapter\"]" \
             --sceneworks-repo "$GITHUB_WORKSPACE" \
             --inference-repo "$GITHUB_WORKSPACE/.calibration/inference" \
+            --raw-log-dir "$SCENEWORKS_MEMORY_CAPTURE_DIR" \
+            --source-path-prefix "$SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX" \
             --output "$RUNNER_TEMP/memory-mlx-evidence.json"
           node scripts/memory-calibration-harness.mjs check \
-            --input "$RUNNER_TEMP/memory-mlx-evidence.json"
+            --input "$RUNNER_TEMP/memory-mlx-evidence.json" \
+            --source-root "$SCENEWORKS_MEMORY_CAPTURE_DIR"
       - name: Upload raw schema-checked MLX calibration evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: memory-mlx-evidence-${{ inputs.qwen_tier }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/memory-mlx-evidence.json
+          path: |
+            ${{ runner.temp }}/memory-mlx-evidence.json
+            ${{ runner.temp }}/memory-mlx-raw
           if-no-files-found: error
       - name: Build and run the authoritative MLX five-rung reference
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}

@@ -370,6 +370,15 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   assert.match(workflow, /QWEN_SEED=16353/);
   assert.match(workflow, /--fixture "qwen-image-\$\{QWEN_TIER\}-seed\$\{QWEN_SEED\}-step2"/);
   assert.match(workflow, /--fresh-per-case/);
+  assert.match(workflow, /hash-artifact-inventory\.mjs/);
+  assert.match(workflow, /--raw-log-dir "\$SCENEWORKS_MEMORY_CAPTURE_DIR"/);
+  assert.match(workflow, /--source-path-prefix "\$SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX"/);
+  assert.match(workflow, /--source-root "\$SCENEWORKS_MEMORY_CAPTURE_DIR"/);
+  assert.match(workflow, /\$\{\{ runner\.temp \}\}\/memory-mlx-raw/);
+  assert.match(
+    workflow,
+    /qwen_source_path_prefix:\s+description:[^\n]+\s+required: false\s+type: string\s+default: "docs\/calibration\/sc-18353"/,
+  );
   assert.match(
     workflow,
     /memory-calibration-harness\.mjs check/,

@@ -560,18 +560,13 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
-  // sc-16915 re-collected bf16 alongside the q8/q4 rung pairs, so the exact set grew from the four
-  // rung-4 cells to seven. Pinned as the SET, not a count: a binding that quietly stops resolving to
-  // a record fails here rather than shrinking a number nobody reads. `bounded_decode` is bf16-only —
-  // the q8 and q4 opt-ins declare the attention and transformer-residency rungs and nothing else.
+  // SC-18353 makes the q4/bf16 campaign non-promotable until its production-deferred physical MLX
+  // receipts exist. This synthetic currency fixture therefore moves only q8, the retained campaign
+  // outside that recapture scope. Pinned as the SET, not a count: neither re-stamping legacy q4/bf16
+  // evidence nor losing one of the two q8 bindings may read as green.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
     ],
@@ -579,24 +574,14 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
-  // bf16 carries one apiece — including `bounded_decode`, whose cell binds the production point
-  // 512/64. sc-16915 swept seven tile edges, but the other six are records at different parameter
-  // points and attach to no cell; the sweep widens the published range, it does not multiply the
-  // bound cell's evidence.
-  //
-  // q4 carries two in this fixture. q8 carries three because `qwenRung4OnCurrentPin` re-stamps the
-  // superseded records and also includes SC-18237's new production-deferred pair, all of which share
-  // the provider fingerprint. Exact counts keep that provenance visible.
+  // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
+  // and also includes SC-18237's production-deferred pair. Exact counts keep that provenance visible
+  // while q4/bf16 remain excluded until physical MLX capture creates new identities.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 2,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 2,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
     },
@@ -2294,7 +2279,7 @@ const KREA_CONTROL_CELL =
 /// the moment sc-16962 moved it to `d4802320` — the fail-closed rule working as designed, and the
 /// reason the two families are re-stamped separately: the geometry tests below depend on ONLY the
 /// Krea cell moving relative to the shipped matrix, and [`qwenRung4OnCurrentPin`] must move exactly
-/// the four rung-4 cells rather than every Qwen record in the bundle.
+/// the two retained q8 cells rather than every Qwen record in the bundle.
 async function currentEvidenceFixture({
   keepGeometries = null,
   select = (record) => record.target.provider === "krea_2_turbo_control",
@@ -2462,18 +2447,19 @@ async function currentManifestCalibrationFixture({
   return JSON.stringify(parsed);
 }
 
-/// Qwen records using the shared rung-4 fingerprint, re-stamped onto the current inference pin.
+/// Retained Qwen q8 records using the shared rung-4 fingerprint, re-stamped current.
 ///
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
 /// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
 /// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
-/// `-deferred` load-shape variants. Re-stamping the whole provider instead would promote nine cells
-/// and quietly widen the very claim these tests exist to keep exact.
+/// `-deferred` load-shape variants. SC-18353 deliberately excludes q4/bf16 here: changing only their
+/// closure digest must never stand in for the required physical MLX recapture.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
 const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({
     select: (record) =>
       record.target.provider === "qwen_image" &&
+      record.target.tier === "q8" &&
       record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT,
   });
 
@@ -2518,8 +2504,8 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(promotedQwen),
-    7,
-    "the exact current Qwen cells must promote only the rungs their bindings name",
+    2,
+    "only the retained q8 campaign may be synthetically restamped current",
   );
   assert.equal(
     verifiedQwen(shipped),
@@ -2576,8 +2562,8 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(pinOnlyQwen),
-    7,
-    "a pin move that leaves Qwen's compile closure alone must NOT demote its measurements",
+    2,
+    "a pin move that leaves Qwen's compile closure alone must NOT demote its retained q8 measurements",
   );
 
   const otherProviderMoved = await buildMatrix({
@@ -2593,8 +2579,8 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(otherProviderMoved),
-    7,
-    "another model's code path moving must never demote Qwen — the defect sc-17774 removed",
+    2,
+    "another model's code path moving must never demote retained Qwen q8 evidence",
   );
 
   const staleQwen = await buildMatrix({
