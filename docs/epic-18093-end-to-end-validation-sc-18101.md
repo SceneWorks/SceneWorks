@@ -110,31 +110,91 @@ Running the full production chain (cap → `apply_residency_policy` → contract
 | **48** | **ADMITS** `Resident` (load policy `Sequential`), 45.57 GiB | **REFUSES** — `needs at least 63.34 GiB at its smallest verified MLX host boundary` |
 | 44 and below | refuses (`no safely verified MLX memory strategy (Missing)`) | refuses |
 
-So at a 48 GB cap the production chain does diverge. The cause is not the estimate margin: under
-`Sequential` the provider declares rung 4 `Implemented`, so the deferred rung-4 record now passes
-both legs of the filter, reaches the Evidence budget pre-check, and is refused because its **captured
-host boundary is 63.34 GiB** against a 46 GiB budget.
+So at a 48 GB cap the production chain does diverge. The cause is not the estimate margin.
 
-**This one is left alone deliberately.** It is the epic working as designed, not the §0 hole:
+### What the 63.34 GiB actually is — and it is not "this work needs 63 GiB"
 
-* §0 refused on `FingerprintMismatch` — a STRUCTURAL verdict carrying no information about whether
-  the request fits. Refusing on it is the gate failing to do its job, and there was no fallback.
-* This refuses because a measurement says the request needs 63.34 GiB and the machine has 46. That
-  is the gate doing exactly its job, with better information than the 45.57 GiB estimate the
-  pre-epic commit admitted on. On a lane where allocator overshoot terminates the process, the
-  pre-epic admit was the unsafe answer.
+`MlxAdmissionEnvelope::required_host_bytes` is `peak_bytes + foreign_reserve_bytes`
+(`crates/sceneworks-core/src/memory_calibration.rs:908-910`), and `foreign_reserve_bytes` is derived
+entirely from the **capture host's** counters (`:920-923`, computed at `:939`):
+`memoryBytes − min(mlxMemoryLimitBytes, wiredLimitBytes)`. For this corpus that is
 
-An earlier attempt at this validation did try to degrade this case to the estimate ladder too. It
-was reverted: it broke
-`a_moved_provider_closure_admits_the_stale_ladder_behind_the_widened_margin`, whose whole point is
-that the widened stale peak GATES — and it would have made `MLX_STALE_MEASURED_MARGIN`
-non-binding on the MLX Evidence path, destroying the very property criterion 3 brackets. A stale
-peak's *widening* is a signal; a stale peak's *refusal* is still a gate, and sc-18095/18096 chose
-that deliberately.
+```
+137,438,953,472 − 87,044,670,532 = 50,394,282,940 B = 46.93 GiB
+```
 
-It remains a user-visible narrowing — a 48 GB Mac that could render this cell before now cannot —
-so it is called out here rather than buried, and it is worth a product decision on whether a
-measured "does not fit" should be able to veto a cheaper unmeasured rung. Tracked with sc-18237.
+and it is **identical on all 50 MLX records** — the corpus has exactly one distinct hardware tuple,
+because everything was captured on this same 128 GiB M5 Max. It is never rescaled to the live host.
+
+So the refusal decomposes as:
+
+| term | value | what it is |
+|---|---:|---|
+| widened request peak (rung 4, ×1.05 stale) | **16.41 GiB** | what this render actually costs |
+| capture-host foreign reserve | **46.93 GiB** | what the 128 GiB *capture machine* had outside the MLX process |
+| `required_host_bytes` | **63.34 GiB** | the sum the gate compares against the live host |
+
+The rule being enforced is therefore: **a measurement is only usable on a host at least as large as
+the one it was captured on.** The refusal means "this measurement was taken on a bigger machine",
+NOT "your machine is too small for this work" — the work itself is 16.41 GiB. Getting this wrong
+would send the follow-up product call down entirely the wrong path, so it is stated here explicitly.
+
+The same decomposition explains criterion 3's bisected boundary exactly: 45.28125 (widened
+`BoundedAttention` peak) + 46.933 = **92.2146**, which is the boundary to four decimal places.
+
+### Why this is still left alone
+
+**This is not the §0 hole, and the distinction is not the size of the number:**
+
+* §0 refused on `FingerprintMismatch` — a STRUCTURAL verdict carrying no information about the
+  request at all, with no fallback behind it. That is the gate failing to do its job.
+* This refuses under a deliberate conservative rule: *do not extrapolate a measurement downward
+  across host sizes*. That rule is defensible on its own terms even though its input is a capture
+  artefact rather than a property of the request.
+
+**The gate PREDATES this epic.** `required_host_bytes`, `fits_host_bytes` and the "smallest verified
+MLX host boundary" refusal are all present at `de756026`, with their own tests
+(`de756026:crates/sceneworks-core/src/memory_calibration.rs:2313-2316`). What sc-18096 changed is
+that retiring the closure conjunct made the gate **reachable on stale lanes**, which is where every
+shipped MLX lane now sits. That is the honest statement of what this epic did: it did not introduce
+the rule, it exposed it.
+
+**The safety argument rests on the actual margin, not on 63.34.** Pre-epic admitted this request at a
+45.57 GiB estimate against **46.00 GiB** available — 0.43 GiB of headroom, about **1 %** — on a path
+where an allocator overshoot calls `exit(-1)` and takes the worker with it. Shipping a refusal in
+place of a 1 %-margin admit is defensible; shipping it because "the measurement says 63 GiB" would
+not have been, because the measurement says no such thing.
+
+### Verified blast radius: one cap step
+
+From the committed sweeps on both commits, not extrapolated:
+
+| cap (GB) | `de756026` | this branch | same? |
+|---:|---|---|---|
+| 128 → 56 | `Resident`, 45.57 GiB | `Resident`, 45.57 GiB | identical |
+| **48** | **ADMITS** `Resident`, 45.57 GiB | **REFUSES** (host boundary) | **diverges** |
+| 44 and below | refuses | refuses | both refuse |
+
+It is **one cap step**, not "everything under 64 GiB". The reason ≥ 56 GB is untouched is structural,
+not luck: the load-time gate keeps `OffloadPolicy::Resident` there, so rung 4 is not `Implemented`,
+so the rung-support leg of the §0 filter drops the only surviving measured candidate and the route
+degrades to the estimate ladder — which is exactly the path the pre-epic commit took as well.
+
+### The obvious fix is provably wrong
+
+An earlier attempt at this validation degraded "measured candidates survive but none fit" to the
+estimate ladder. It was written and **reverted**, and the arithmetic shows why it could not be right:
+the Legacy floor it would fall to is 50.13 GiB with **no foreign-reserve charge at all**, so it
+admits above 50.13 — and the 92.21 GiB boundary criterion 3 brackets would then never refuse
+anything. `MLX_STALE_MEASURED_MARGIN` would gate nothing on the Evidence path, destroying the very
+property criterion 3 exists to prove. It also broke
+`a_moved_provider_closure_admits_the_stale_ladder_behind_the_widened_margin`, correctly.
+
+A real fix is a design change to a pre-existing gate — rescale the captured foreign reserve to the
+live host, or make the host-boundary check a demotion rather than a terminal refusal — and belongs
+with the product call, not here. Tracked on **sc-18237**.
+
+It remains a user-visible narrowing: a 48 GB Mac that could render this cell before now cannot.
 
 ### The fix
 
@@ -406,6 +466,11 @@ captured under (`SC18101_MEASURED_EAGER=1`), not on the deferred spec production
 stale-measured path is exercised on a real shipped binding and real weights, but not on a
 configuration `qwen_image` reaches in production today. Closing that is sc-18237.
 
+Note also that the boundary this brackets — 92.2146 GB — is itself `45.28125 + 46.933`, i.e. the
+widened peak plus the CAPTURE host's foreign reserve, not a property of the live machine. The
+bracket still proves the margin gates (the 2.16 GiB it moves the boundary by is the margin, and only
+the margin), but the absolute number is a capture artefact. See §0's decomposition.
+
 The pre-epic contrast is the proof the widening is doing work rather than decorating a decision that
 would have happened anyway: on `de756026` this same cell produces no measured candidate at all.
 
@@ -483,13 +548,24 @@ the sixteen `SOURCE_PATHS` the matrix fingerprints, so the §0 fix rotates
    cause. Both are now filtered before the selector, but the shape of the hazard remains: any future
    structural predicate added downstream of admission needs a fallback, not just a verdict.
 
-5. **`image_jobs/base.rs` and `mlx_fit_gate.rs` are both fingerprinted matrix sources.** Even a
+5. **A measured cell is only usable on a host at least as large as the one it was captured on.**
+   `required_host_bytes` charges the record's `foreign_reserve_bytes`, and that term is derived
+   purely from the CAPTURE host — `memoryBytes − min(mlxMemoryLimitBytes, wiredLimitBytes)`, 46.93
+   GiB for every record in this corpus because every record came off the same 128 GiB M5 Max — and
+   is never rescaled to the live machine. So a refusal quoting a large "smallest verified MLX host
+   boundary" is usually reporting the capture machine's size, not the request's cost: at the 48 GB
+   step the request's own widened peak is 16.41 GiB of the 63.34 GiB quoted. The rule is a
+   deliberate refusal to extrapolate downward across host sizes, it predates this epic, and
+   sc-18096 made it reachable on stale lanes — which is now every shipped MLX lane. Anyone reading
+   one of these refusals should decompose it before concluding a machine is too small.
+
+6. **`image_jobs/base.rs` and `mlx_fit_gate.rs` are both fingerprinted matrix sources.** Even a
    visibility keyword in the former rotates `generatedFrom.sceneWorksRevision` and reds
    `npm run check:memory-matrix`; the harness therefore mirrors that file's route list rather than
    calling into it, with a text-coupling test. Budget for a matrix regeneration whenever a
    fingerprinted source changes.
 
-6. **Moving only the manifest binding's `inferenceClosureDigest` does NOT make a lane current.**
+7. **Moving only the manifest binding's `inferenceClosureDigest` does NOT make a lane current.**
    `EvidenceBundle::evidence_for` compares the binding's digest against the record's own stamp too,
    so a one-sided edit makes the record unfindable and the cell routes to `StaleIdentity` with no
    measured candidate at all — observed directly here. A real re-measurement moves both halves
