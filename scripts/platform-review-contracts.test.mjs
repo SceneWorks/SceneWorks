@@ -158,9 +158,14 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
 // run in NO CI lane, and reverting those fixes merges green.
 test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   const workflow = await source(".github/workflows/macos-mlx.yml");
+  const hostedStart = workflow.indexOf("  macos-checks:");
+  const hostedEnd = workflow.indexOf("  nax-worker:");
+  assert.ok(hostedStart >= 0, "macos-checks job not found");
+  assert.ok(hostedEnd > hostedStart, "nax-worker must follow macos-checks");
+  const hosted = workflow.slice(hostedStart, hostedEnd);
   assert.match(
-    workflow,
-    /cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter/,
+    hosted,
+    /^\s+run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter$/m,
   );
 });
 

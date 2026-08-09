@@ -2817,7 +2817,7 @@ mod z_image_reuse_tests {
     /// the new check cannot be satisfied by refusing everything.
     #[test]
     fn the_batch_action_still_accepts_the_z_image_provider() {
-        let batch = foreign_five_rung_batch(Z_IMAGE_PROVIDER);
+        let batch = foreign_five_rung_batch("z_image_turbo");
         let planned =
             validate_z_image_batch(&batch).expect("the Z-Image batch must still validate");
         assert_eq!(planned.len(), 5);
