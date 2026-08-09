@@ -36,7 +36,7 @@ use gen_core::{
     MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
     MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract,
     MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
-    OffloadPolicy, TransformerComponent, WeightsSource,
+    OffloadPolicy, PerComponentBytes, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -85,7 +85,37 @@ impl MlxRequestPlan {
         manifest: Option<&JsonObject<String, Value>>,
         resolved_artifact: Option<ResolvedArtifactProvenance>,
     ) -> Self {
-        let (asset_bytes, _, headroom) = spec_component_bytes(engine_id, spec);
+        let media = crate::inference_runtime::media();
+        let provider_footprint = media.footprint(engine_id, spec).ok().flatten();
+        let activation_anchor_bytes = media.activation_memory_bytes_1024(engine_id).ok().flatten();
+        Self::for_spec_and_manifest_with_provider_facts(
+            engine_id,
+            model_id,
+            spec,
+            manifest,
+            resolved_artifact,
+            provider_footprint,
+            activation_anchor_bytes,
+        )
+    }
+
+    /// The platform-neutral core of [`Self::for_spec_and_manifest`]. Production supplies both facts
+    /// from the active provider registry; tests may inject the same provider-owned facts when the
+    /// host deliberately links no MLX catalog (the default Linux workspace build). Keeping the
+    /// filesystem accounting and plan construction here prevents an audit from replacing the live
+    /// path with hand-written `asset + headroom` arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    fn for_spec_and_manifest_with_provider_facts(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+        resolved_artifact: Option<ResolvedArtifactProvenance>,
+        provider_footprint: Option<PerComponentBytes>,
+        activation_anchor_bytes: Option<u64>,
+    ) -> Self {
+        let (asset_bytes, _, headroom) =
+            spec_component_bytes_with_provider_footprint(engine_id, spec, provider_footprint);
         let folded_control_bytes = spec.control.as_ref().map_or(0, weights_source_bytes);
         let folded_adapter_bytes = adapter_source_bytes_for_gate(engine_id, spec);
         let declared_floors = declared_component_floors(engine_id);
@@ -138,10 +168,7 @@ impl MlxRequestPlan {
         let fixed_reserve_bytes = gib_to_bytes(
             (OS_APP_RESERVE_GB - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
         );
-        let activation_anchor_bytes = crate::inference_runtime::media()
-            .activation_memory_bytes_1024(engine_id)
-            .ok()
-            .flatten()
+        let activation_anchor_bytes = activation_anchor_bytes
             .unwrap_or_else(|| gib_to_bytes((headroom.total_gb - headroom.os_reserve_gb).max(0.0)));
         Self {
             engine_id,
@@ -3662,6 +3689,17 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, Headroom
         .footprint(engine_id, spec)
         .ok()
         .flatten();
+    spec_component_bytes_with_provider_footprint(engine_id, spec, footprint)
+}
+
+/// Provider-injected core of [`spec_component_bytes`]. The live path obtains `footprint` from the
+/// active registry; keeping the arithmetic independent of registry composition lets platform-neutral
+/// tests exercise the exact Lens materialization and overlay accounting used on macOS.
+fn spec_component_bytes_with_provider_footprint(
+    engine_id: &str,
+    spec: &LoadSpec,
+    footprint: Option<PerComponentBytes>,
+) -> (u64, u64, HeadroomAllowance) {
     let footprint_te = footprint.map(|fp| fp.text_encoder);
     let mut headroom = HeadroomAllowance::GENERIC;
     let (mut total_bytes, te_bytes) = match &spec.weights {
@@ -7929,94 +7967,170 @@ mod tests {
         );
     }
 
-    /// sc-18251 resident-only audit: drive the shipped asset sizes through the same post-load
-    /// cache-credit, legacy-reserve, and estimate-margin path production uses.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct ResidentOnlyAuditRoute {
+        manifest_id: &'static str,
+        provider_id: &'static str,
+        /// A real filesystem-backed control branch used to make the conditional Chroma/FLUX
+        /// contracts resident-only. Zero means the shipped clean route is already resident-only.
+        control_bytes: u64,
+        /// Provider-owned 1024² activation anchor exported by the pinned MLX catalog. `None` means
+        /// the production consumer fallback applies.
+        activation_anchor_bytes: Option<u64>,
+        /// Clean shipped tiers whose loaded provider contract is resident-only. An empty slice means
+        /// every inference tier in the manifest is audited (the control overlay closes optimized
+        /// legs for conditional routes).
+        resident_only_tiers: &'static [&'static str],
+    }
+
+    // Exact LFS object sizes for the pinned control branches used by the shipped FLUX.1/FLUX.2
+    // strict-control routes. The audit materializes sparse files with these logical lengths, so the
+    // production `weights_source_bytes` seam prices a real non-zero overlay without downloading it.
+    const FLUX1_CONTROL_BYTES: u64 = 4_281_779_224;
+    const FLUX2_CONTROL_BYTES: u64 = 8_232_506_680;
+    // The pinned Lens bf16 turnkeys share this exact three-shard MXFP4 encoder on disk. The provider
+    // publishes a 30.07 GiB load-exact footprint because MLX materializes those experts as bf16.
+    const LENS_BF16_TEXT_ENCODER_DISK_BYTES: u64 = 4_845_744_456 + 4_774_186_632 + 4_154_656_824;
+    const LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES: u64 = (30.07 * BYTES_PER_GIB).ceil() as u64;
+
+    fn resident_only_audit_routes() -> [ResidentOnlyAuditRoute; 14] {
+        [
+            ResidentOnlyAuditRoute {
+                manifest_id: "chroma1_base",
+                provider_id: "chroma1_base",
+                control_bytes: FLUX1_CONTROL_BYTES,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "chroma1_flash",
+                provider_id: "chroma1_flash",
+                control_bytes: FLUX1_CONTROL_BYTES,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "chroma1_hd",
+                provider_id: "chroma1_hd",
+                control_bytes: FLUX1_CONTROL_BYTES,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "sd3_5_large",
+                provider_id: "sd3_5_large",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "sd3_5_large_turbo",
+                provider_id: "sd3_5_large_turbo",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "sd3_5_medium",
+                provider_id: "sd3_5_medium",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "flux_schnell",
+                provider_id: "flux1_schnell",
+                control_bytes: FLUX1_CONTROL_BYTES,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "flux_dev",
+                provider_id: "flux1_dev",
+                control_bytes: FLUX1_CONTROL_BYTES,
+                activation_anchor_bytes: Some(15_096_810_046),
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "flux2_klein_9b",
+                provider_id: "flux2_klein_9b",
+                control_bytes: FLUX2_CONTROL_BYTES,
+                activation_anchor_bytes: Some(15_107_547_464),
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "flux2_klein_9b",
+                provider_id: "flux2_klein_9b_edit",
+                control_bytes: FLUX2_CONTROL_BYTES,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "flux2_klein_9b_kv",
+                provider_id: "flux2_klein_9b_kv_edit",
+                control_bytes: FLUX2_CONTROL_BYTES,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "flux2_klein_9b_true_v2",
+                provider_id: "flux2_klein_9b",
+                control_bytes: FLUX2_CONTROL_BYTES,
+                activation_anchor_bytes: Some(15_107_547_464),
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "lens",
+                provider_id: "lens",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                // Base Lens q4 is the one exact measured clean tier; q8/bf16 are unmeasured.
+                resident_only_tiers: &["q8", "bf16"],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "lens_turbo",
+                provider_id: "lens_turbo",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                // Turbo q4/q8 are unmeasured. Its bf16 optimized contract requires Sequential;
+                // a resident load therefore also collapses to Resident-only.
+                resident_only_tiers: &["q4", "q8", "bf16"],
+            },
+        ]
+    }
+
+    fn set_sparse_len(path: &Path, bytes: u64) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("sparse fixture parent");
+        }
+        std::fs::File::create(path)
+            .and_then(|file| file.set_len(bytes))
+            .expect("sparse fixture size");
+    }
+
+    /// sc-18251 resident-only audit: drive shipped asset sizes, real control-overlay bytes, and
+    /// provider-owned Lens/activation facts through the production request-plan and selector cores.
     ///
-    /// The first version of this audit compared `weights + headroom` with the host's full physical
-    /// capacity. That skipped two load-bearing production facts: `live_request_budget` removes the
-    /// 2 GiB legacy foreign-resident reserve, and the request gate credits the loaded provider's
-    /// resident assets before grading the incremental estimate. The estimate margin therefore
-    /// widens the remaining headroom, not a second copy of the already-loaded weights. Keeping the
-    /// audit executable prevents either accounting rule from drifting back into prose.
+    /// The active registry is deliberately absent in the default Linux workspace. The injected facts
+    /// are the exact values exported by the pinned provider sources; macOS production obtains the same
+    /// values before delegating to `for_spec_and_manifest_with_provider_facts`. This keeps the test
+    /// platform-neutral without replacing filesystem accounting or request selection with a second
+    /// implementation.
     #[test]
     fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path() {
         use gen_core::{Capabilities, Modality, ModelDescriptor, Precision, Quant};
-
-        #[derive(Clone, Copy)]
-        struct AuditRoute {
-            manifest_id: &'static str,
-            provider_id: &'static str,
-        }
-
-        // These are every shipped image-provider family whose loaded contract can collapse to
-        // Resident-only at the pinned inference revision. Multiple provider ids over one artifact
-        // are listed separately when their provider-owned activation anchors differ.
-        let routes = [
-            AuditRoute {
-                manifest_id: "chroma1_base",
-                provider_id: "chroma1_base",
-            },
-            AuditRoute {
-                manifest_id: "chroma1_flash",
-                provider_id: "chroma1_flash",
-            },
-            AuditRoute {
-                manifest_id: "chroma1_hd",
-                provider_id: "chroma1_hd",
-            },
-            AuditRoute {
-                manifest_id: "sd3_5_large",
-                provider_id: "sd3_5_large",
-            },
-            AuditRoute {
-                manifest_id: "sd3_5_large_turbo",
-                provider_id: "sd3_5_large_turbo",
-            },
-            AuditRoute {
-                manifest_id: "sd3_5_medium",
-                provider_id: "sd3_5_medium",
-            },
-            AuditRoute {
-                manifest_id: "flux_schnell",
-                provider_id: "flux1_schnell",
-            },
-            AuditRoute {
-                manifest_id: "flux_dev",
-                provider_id: "flux1_dev",
-            },
-            AuditRoute {
-                manifest_id: "flux2_klein_9b",
-                provider_id: "flux2_klein_9b",
-            },
-            AuditRoute {
-                manifest_id: "flux2_klein_9b",
-                provider_id: "flux2_klein_9b_edit",
-            },
-            AuditRoute {
-                manifest_id: "flux2_klein_9b_kv",
-                provider_id: "flux2_klein_9b_kv_edit",
-            },
-            AuditRoute {
-                manifest_id: "flux2_klein_9b_true_v2",
-                provider_id: "flux2_klein_9b",
-            },
-        ];
 
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             include_str!("../../../config/manifests/builtin.models.jsonc"),
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
-        let media = crate::inference_runtime::media();
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
-        let remaining_fixed_reserve_bytes = gib_to_bytes(
-            (OS_APP_RESERVE_GB - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
-        );
-        let generic_activation_bytes = gib_to_bytes(HEADROOM_GB - OS_APP_RESERVE_GB);
         let hosts = [48_u64, 64, 96, 128];
         let mut flips = Vec::new();
+        let mut audited_cells = Vec::new();
 
-        for route in routes {
+        for route in resident_only_audit_routes() {
             let model = models
                 .iter()
                 .find(|model| model["id"] == route.manifest_id)
@@ -8024,19 +8138,8 @@ mod tests {
             let downloads = model["downloads"]
                 .as_array()
                 .unwrap_or_else(|| panic!("{} downloads", route.manifest_id));
-            let activation_bytes = media
-                .activation_memory_bytes_1024(route.provider_id)
-                .expect("registered provider route")
-                .unwrap_or(generic_activation_bytes);
-            let raw_incremental_peak =
-                remaining_fixed_reserve_bytes.saturating_add(activation_bytes);
-            let widened_incremental_peak = (raw_incremental_peak as f64
-                * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN))
-                .ceil()
-                .clamp(0.0, u64::MAX as f64) as u64;
-
             for download in downloads {
-                let asset_bytes = download["estimatedSizeBytes"]
+                let base_asset_bytes = download["estimatedSizeBytes"]
                     .as_u64()
                     .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
                     .unwrap_or_else(|| {
@@ -8046,6 +8149,13 @@ mod tests {
                         )
                     });
                 let tier = download["variant"].as_str().unwrap_or("bf16");
+                if tier == "training"
+                    || (!route.resident_only_tiers.is_empty()
+                        && !route.resident_only_tiers.contains(&tier))
+                {
+                    continue;
+                }
+                audited_cells.push((route.manifest_id, route.provider_id, tier));
                 let numeric_tier = MemoryNumericTier {
                     precision: Precision::Bf16,
                     quant: match tier {
@@ -8056,6 +8166,88 @@ mod tests {
                     },
                     component_precision_floors: &[],
                 };
+                let fixture = tempfile::tempdir().expect("audit fixture root");
+                let weights = fixture.path().join("weights");
+                let mut provider_footprint = None;
+                if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
+                    assert!(
+                        base_asset_bytes >= LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+                        "Lens bf16 asset must contain its source encoder"
+                    );
+                    set_sparse_len(
+                        &weights.join("text_encoder/model.safetensors"),
+                        LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+                    );
+                    set_sparse_len(
+                        &weights.join("transformer/model.safetensors"),
+                        base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+                    );
+                    std::fs::write(
+                        weights.join("text_encoder/config.json"),
+                        r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
+                    )
+                    .expect("Lens MXFP4 marker");
+                    provider_footprint = Some(PerComponentBytes {
+                        text_encoder: LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES,
+                        ..Default::default()
+                    });
+                } else {
+                    set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
+                }
+                let mut spec = LoadSpec::new(WeightsSource::Dir(weights));
+                spec = match tier {
+                    "q4" => spec.with_quant(Quant::Q4),
+                    "q8" => spec.with_quant(Quant::Q8),
+                    "bf16" => spec,
+                    other => panic!("unsupported audited tier {other}"),
+                };
+                if route.control_bytes > 0 {
+                    let control = fixture.path().join("control.safetensors");
+                    set_sparse_len(&control, route.control_bytes);
+                    spec = spec.with_control(WeightsSource::File(control));
+                }
+                let plan = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
+                    route.provider_id,
+                    route.manifest_id,
+                    &spec,
+                    None,
+                    None,
+                    provider_footprint,
+                    route.activation_anchor_bytes,
+                );
+                let lens_expansion =
+                    if matches!(route.provider_id, "lens" | "lens_turbo") && tier == "bf16" {
+                        LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES - LENS_BF16_TEXT_ENCODER_DISK_BYTES
+                    } else {
+                        0
+                    };
+                assert_eq!(
+                    plan.folded_control_bytes, route.control_bytes,
+                    "{} ({}) {tier}: deleting production control-source accounting must make this \
+                     audit red",
+                    route.manifest_id, route.provider_id
+                );
+                assert_eq!(
+                    plan.asset_bytes,
+                    base_asset_bytes + route.control_bytes + lens_expansion,
+                    "{} ({}) {tier}: production assets must include the real control branch and \
+                     Lens materialization delta",
+                    route.manifest_id,
+                    route.provider_id
+                );
+                let geometry = MemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                };
+                let raw_incremental_peak = plan.generic_headroom_bytes(geometry);
+                let widened_incremental_peak = (raw_incremental_peak as f64
+                    * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN))
+                    .ceil()
+                    .clamp(0.0, u64::MAX as f64)
+                    as u64;
 
                 for host_gib in hosts {
                     let host_bytes = gib_to_bytes(host_gib as f64);
@@ -8063,7 +8255,7 @@ mod tests {
                     // committed provider assets remain on the available side, while the modeled
                     // peak receives the matching provider-resident cache credit.
                     let available_incremental = host_bytes
-                        .saturating_sub(asset_bytes)
+                        .saturating_sub(plan.asset_bytes)
                         .saturating_sub(legacy_reserve_bytes);
                     let admitted_before_margin = raw_incremental_peak <= available_incremental;
                     let admitted_now = widened_incremental_peak <= available_incremental;
@@ -8073,7 +8265,7 @@ mod tests {
                             route.provider_id,
                             tier,
                             host_gib,
-                            asset_bytes,
+                            plan.asset_bytes,
                             raw_incremental_peak,
                             widened_incremental_peak,
                         ));
@@ -8091,8 +8283,8 @@ mod tests {
                             cache_eviction: true,
                         },
                     );
-                    contract.asset_facts.base_bytes = asset_bytes;
-                    contract.asset_facts.transformer_bytes = asset_bytes;
+                    contract.asset_facts.base_bytes = plan.asset_bytes;
+                    contract.asset_facts.transformer_bytes = plan.asset_bytes;
                     assert!(
                         contract.conformance_errors().is_empty(),
                         "audit contract must stay conformant: {:?}",
@@ -8110,17 +8302,8 @@ mod tests {
                         },
                         contract: Some(contract),
                     };
-                    let plan = MlxRequestPlan {
-                        engine_id: route.provider_id,
-                        model_id: route.manifest_id.to_owned(),
-                        tier: numeric_tier,
-                        asset_bytes,
-                        folded_control_bytes: 0,
-                        folded_adapter_bytes: 0,
-                        activation_headroom_bytes: raw_incremental_peak,
-                        fixed_reserve_bytes: remaining_fixed_reserve_bytes,
-                        calibration: MlxCalibrationConfig::Absent,
-                    };
+                    assert_eq!(plan.tier.precision, numeric_tier.precision);
+                    assert_eq!(plan.tier.quant, numeric_tier.quant);
                     let evaluated = evaluate_request_with_budget(
                         &generator,
                         &plan,
@@ -8129,11 +8312,11 @@ mod tests {
                         OffloadPolicy::Resident,
                         MemoryBudget {
                             total_bytes: host_bytes,
-                            committed_bytes: asset_bytes,
+                            committed_bytes: plan.asset_bytes,
                             reclaimable_bytes: 0,
                             reserved_headroom_bytes: legacy_reserve_bytes,
                         },
-                        asset_bytes.saturating_add(raw_incremental_peak),
+                        plan.generic_total_peak_bytes(geometry),
                         0,
                         &[],
                     );
@@ -8150,11 +8333,34 @@ mod tests {
         }
 
         assert_eq!(
+            audited_cells.len(),
+            39,
+            "the audit must retain 34 Chroma/SD3/FLUX tier-routes plus the five clean unmeasured \
+             Lens/Lens-Turbo tiers"
+        );
+        for expected in [
+            ("lens", "lens", "q8"),
+            ("lens", "lens", "bf16"),
+            ("lens_turbo", "lens_turbo", "q4"),
+            ("lens_turbo", "lens_turbo", "q8"),
+            ("lens_turbo", "lens_turbo", "bf16"),
+        ] {
+            assert!(
+                audited_cells.contains(&expected),
+                "removing a shipped resident-only Lens tier must make the completeness check red: \
+                 {expected:?}"
+            );
+        }
+
+        assert_eq!(
             flips
                 .iter()
                 .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
                 .collect::<Vec<_>>(),
             vec![
+                ("chroma1_base", "chroma1_base", "bf16", 48),
+                ("chroma1_flash", "chroma1_flash", "bf16", 48),
+                ("chroma1_hd", "chroma1_hd", "bf16", 48),
                 ("sd3_5_large", "sd3_5_large", "q8", 48),
                 (
                     "sd3_5_large_turbo",
@@ -8168,72 +8374,71 @@ mod tests {
         );
     }
 
-    /// Pin the source side of the resident-only audit against the loaded provider registry. The
-    /// deliberately eager, overlaid, non-Sequential spec disables every conditional optimized leg
-    /// for Chroma/FLUX/FLUX.2-Klein; SD3 Turbo/Medium are resident-only independently, while Large
-    /// also fails closed without its exact calibrated artifact. This is the configuration class the
-    /// host-band table above audits, rather than a hand-authored approximation of provider support.
+    /// Platform-neutral source binding for the audit inventory. The shipped manifest is the
+    /// executable export of the pinned provider contracts and artifact matrix; checking every route
+    /// and tier here catches a newly shipped family/tier without depending on the macOS-only runtime
+    /// catalog. The budget test separately makes control and Lens accounting mutation-sensitive.
     #[test]
-    fn shipped_conditional_mlx_contracts_really_have_a_resident_only_load() {
-        use gen_core::{MemoryStrategySupport, Quant};
-
-        let spec = LoadSpec::new(WeightsSource::Dir(
-            "/nonexistent/sc-18251-resident-only-audit".into(),
+    fn shipped_resident_only_audit_inventory_matches_the_manifest() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
         ))
-        .with_quant(Quant::Q8)
-        .with_control(WeightsSource::File(
-            "/nonexistent/sc-18251-control.safetensors".into(),
-        ));
-        for provider_id in [
-            "chroma1_base",
-            "chroma1_flash",
-            "chroma1_hd",
-            "sd3_5_large",
-            "sd3_5_large_turbo",
-            "sd3_5_medium",
-            "flux1_schnell",
-            "flux1_dev",
-            "flux2_klein_9b",
-            "flux2_klein_9b_edit",
-            "flux2_klein_9b_kv_edit",
-        ] {
-            let contract = crate::inference_runtime::media()
-                .memory_strategy_contract(provider_id, &spec)
-                .unwrap_or_else(|error| panic!("{provider_id} contract lookup failed: {error}"))
-                .unwrap_or_else(|| {
-                    // This is the exact fallback `evaluate_request_with_budget_using_bundle` uses
-                    // for a registered generator that has not adopted MemoryProviderContract yet.
-                    MemoryProviderContract::compatibility_default(
-                        provider_id,
-                        MemoryBackendRealization::MlxMetal {
-                            bounded_wired_residency: true,
-                            lazy_or_mmap_materialization: true,
-                            explicit_evaluation_and_synchronization: true,
-                            cache_eviction: true,
-                        },
-                    )
-                });
-            assert_eq!(
-                contract
-                    .capability(MemoryStrategy::Resident)
-                    .expect("resident capability")
-                    .support,
-                MemoryStrategySupport::Implemented,
-                "{provider_id} must retain its resident baseline"
-            );
-            assert!(
-                MemoryStrategy::ALL
-                    .into_iter()
-                    .filter(|strategy| strategy.is_optimized())
-                    .all(|strategy| !matches!(
-                        contract
-                            .capability(strategy)
-                            .map(|capability| &capability.support),
-                        Some(MemoryStrategySupport::Implemented)
-                    )),
-                "{provider_id} audit spec must collapse to Resident-only: {:?}",
-                contract.strategies
-            );
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let routes = resident_only_audit_routes();
+        assert_eq!(
+            routes.len(),
+            14,
+            "all shipped resident-only-capable families"
+        );
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| (route.manifest_id, route.provider_id))
+                .collect::<Vec<_>>(),
+            vec![
+                ("chroma1_base", "chroma1_base"),
+                ("chroma1_flash", "chroma1_flash"),
+                ("chroma1_hd", "chroma1_hd"),
+                ("sd3_5_large", "sd3_5_large"),
+                ("sd3_5_large_turbo", "sd3_5_large_turbo"),
+                ("sd3_5_medium", "sd3_5_medium"),
+                ("flux_schnell", "flux1_schnell"),
+                ("flux_dev", "flux1_dev"),
+                ("flux2_klein_9b", "flux2_klein_9b"),
+                ("flux2_klein_9b", "flux2_klein_9b_edit"),
+                ("flux2_klein_9b_kv", "flux2_klein_9b_kv_edit"),
+                ("flux2_klein_9b_true_v2", "flux2_klein_9b"),
+                ("lens", "lens"),
+                ("lens_turbo", "lens_turbo"),
+            ]
+        );
+        for route in routes {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == route.manifest_id)
+                .unwrap_or_else(|| panic!("shipped {} manifest entry", route.manifest_id));
+            let inference_tiers = model["downloads"]
+                .as_array()
+                .expect("downloads")
+                .iter()
+                .filter_map(|download| download["variant"].as_str())
+                .filter(|tier| *tier != "training")
+                .collect::<Vec<_>>();
+            for tier in route.resident_only_tiers {
+                assert!(
+                    inference_tiers.contains(tier),
+                    "{} resident-only tier {tier} must still ship",
+                    route.manifest_id
+                );
+            }
+            if route.manifest_id.starts_with("chroma") || route.provider_id.starts_with("flux") {
+                assert!(
+                    route.control_bytes > 0,
+                    "{} conditional resident-only route must price its control overlay",
+                    route.provider_id
+                );
+            }
         }
     }
 
