@@ -299,7 +299,10 @@ fn flux2_dev_edit_memory_context(
             frames: 1,
             reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
         },
-        overlay: Some(format!("references={reference_count}")),
+        // Multi-reference is request geometry, not a distinct overlay identity. Encoding the count
+        // here would violate the provider's opaque identity-axis contract; the provider reads the
+        // exact count from `geometry.reference_count`.
+        overlay: None,
         budget: gen_core::MemoryBudget {
             total_bytes: bytes(total_gb),
             committed_bytes: 0,
