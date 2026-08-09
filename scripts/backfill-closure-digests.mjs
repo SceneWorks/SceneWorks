@@ -104,6 +104,28 @@ function maskLine(line) {
 }
 
 /**
+ * Every `"inferenceClosureDigest": "<64hex>"` occurrence outside a `//` comment tail, as
+ * `{ line, column }` (both zero-based), scanned per occurrence rather than per line.
+ *
+ * This is THE definition of "a digest the manifest carries": the orphan scan in `stampManifest`
+ * consumes it, and it is exported (sc-18208) so `stale-lane-report.test.mjs` can derive its
+ * population-coverage count from the gate's own predicate. The test used to re-count with a
+ * resembling regex over the raw body, which also matched digest shapes QUOTED IN COMMENTS — clean
+ * today, but one doc comment quoting the shape away from false-redding a required check.
+ */
+export function digestOccurrences(lines) {
+  const occurrences = [];
+  lines.forEach((line, index) => {
+    const limit = commentColumn(line);
+    for (const match of line.matchAll(new RegExp(DIGEST_KEY, "g"))) {
+      if (match.index >= limit) break;
+      occurrences.push({ line: index, column: match.index });
+    }
+  });
+  return occurrences;
+}
+
+/**
  * Refuse to touch a manifest containing `/* … *\/` block comments.
  *
  * Everything here is line-scoped, so a comment spanning lines would be read as code: its braces
@@ -352,16 +374,12 @@ export function stampManifest(body, digestFor) {
   // covers everything" being enforced and being asserted. Scanned per occurrence rather than per
   // line, for the same reason `claimed` is keyed by column.
   const orphans = [];
-  lines.forEach((line, index) => {
-    const limit = commentColumn(line);
-    for (const match of line.matchAll(new RegExp(DIGEST_KEY, "g"))) {
-      if (match.index >= limit) break;
-      if (claimed.has(`${index}:${match.index}`)) continue;
-      orphans.push(
-        `line ${index + 1}: an inferenceClosureDigest no inferenceRevision/provider pair reaches`,
-      );
-    }
-  });
+  for (const { line, column } of digestOccurrences(lines)) {
+    if (claimed.has(`${line}:${column}`)) continue;
+    orphans.push(
+      `line ${line + 1}: an inferenceClosureDigest no inferenceRevision/provider pair reaches`,
+    );
+  }
 
   return { body: lines.join("\n"), stamped, skipped, orphans, located };
 }
