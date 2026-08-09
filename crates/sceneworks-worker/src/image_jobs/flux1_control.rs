@@ -35,7 +35,7 @@ const FLUX1_CONTROL_ADAPTER_LABEL: &str = "mlx_flux";
 /// entry is the structural hint carrier for every kind (pose renders a skeleton; canny/depth pair the
 /// pose with `advanced.controlMode` + an input image — the pose set still drives the per-image loop).
 fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model == "flux_dev"
+    mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX1_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
