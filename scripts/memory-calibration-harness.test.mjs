@@ -178,6 +178,7 @@ function qwenPositiveComplete() {
       mode: "text_to_image", overlay: "none",
       geometry: { width: 1024, height: 1024, batch: 1, frames: 1 },
     },
+    loadShape: "deferred_materialization",
     fixture: "qwen-image-bf16-seed15511-step2",
     strategy: {
       rung: "bounded_decode",
@@ -560,12 +561,9 @@ test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", a
   );
   assert.ok(
     qwen.every(
-      (item) => item.loadShape === (
-        item.strategy.rung === "bounded_transformer_residency"
-          ? "deferred_materialization"
-          : "eager_materialization"
-      )),
-    "every Qwen plan case must retain its exact typed load shape",
+      (item) => item.loadShape === "deferred_materialization"
+    ),
+    "every Qwen capture case must use the production deferred shape",
   );
   assert.deepEqual(
     qwen

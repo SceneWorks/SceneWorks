@@ -36,7 +36,7 @@ use gen_core::{
     MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
     MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract,
     MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
-    OffloadPolicy, TransformerComponent, WeightsSource,
+    OffloadPolicy, PerComponentBytes, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -85,7 +85,37 @@ impl MlxRequestPlan {
         manifest: Option<&JsonObject<String, Value>>,
         resolved_artifact: Option<ResolvedArtifactProvenance>,
     ) -> Self {
-        let (asset_bytes, _, headroom) = spec_component_bytes(engine_id, spec);
+        let media = crate::inference_runtime::media();
+        let provider_footprint = media.footprint(engine_id, spec).ok().flatten();
+        let activation_anchor_bytes = media.activation_memory_bytes_1024(engine_id).ok().flatten();
+        Self::for_spec_and_manifest_with_provider_facts(
+            engine_id,
+            model_id,
+            spec,
+            manifest,
+            resolved_artifact,
+            provider_footprint,
+            activation_anchor_bytes,
+        )
+    }
+
+    /// The platform-neutral core of [`Self::for_spec_and_manifest`]. Production supplies both facts
+    /// from the active provider registry; tests may inject the same provider-owned facts when the
+    /// host deliberately links no MLX catalog (the default Linux workspace build). Keeping the
+    /// filesystem accounting and plan construction here prevents an audit from replacing the live
+    /// path with hand-written `asset + headroom` arithmetic.
+    #[allow(clippy::too_many_arguments)]
+    fn for_spec_and_manifest_with_provider_facts(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+        resolved_artifact: Option<ResolvedArtifactProvenance>,
+        provider_footprint: Option<PerComponentBytes>,
+        activation_anchor_bytes: Option<u64>,
+    ) -> Self {
+        let (asset_bytes, _, headroom) =
+            spec_component_bytes_with_provider_footprint(engine_id, spec, provider_footprint);
         let folded_control_bytes = spec.control.as_ref().map_or(0, weights_source_bytes);
         let folded_adapter_bytes = adapter_source_bytes_for_gate(engine_id, spec);
         let declared_floors = declared_component_floors(engine_id);
@@ -138,10 +168,7 @@ impl MlxRequestPlan {
         let fixed_reserve_bytes = gib_to_bytes(
             (OS_APP_RESERVE_GB - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
         );
-        let activation_anchor_bytes = crate::inference_runtime::media()
-            .activation_memory_bytes_1024(engine_id)
-            .ok()
-            .flatten()
+        let activation_anchor_bytes = activation_anchor_bytes
             .unwrap_or_else(|| gib_to_bytes((headroom.total_gb - headroom.os_reserve_gb).max(0.0)));
         Self {
             engine_id,
@@ -628,8 +655,13 @@ type ClosureDigestLookup<'a> = &'a dyn Fn(&str, &str) -> Option<String>;
 #[derive(Clone, Debug)]
 struct VerifiedAdmissionCandidate {
     evidence: MemoryEvidence,
+    /// Reserve enforced on this live host and passed to MLX as an absolute process ceiling.
     foreign_reserve_bytes: u64,
-    required_host_bytes: u64,
+    /// Actionable static host boundaries under the captured reserve policy. The stale value uses
+    /// the selector's canonical widened peak rather than treating a current-host reserve sum as a
+    /// portable recommendation.
+    minimum_host_bytes: u64,
+    stale_minimum_host_bytes: u64,
     record_id: String,
     /// The provider closure digest this candidate's binding was measured under (sc-17774).
     closure_digest: String,
@@ -1255,10 +1287,18 @@ fn evidence_admission_route(
                     parity: MemoryParityContract::Exact,
                     parity_result: MemoryParityResult::Passed,
                 };
+                let foreign_reserve_bytes =
+                    envelope.foreign_reserve_for_host_bytes(budget.total_bytes);
+                let stale_peak_bytes = crate::memory_strategy::stale_widened_peak_bytes(
+                    gen_core::MemoryBackend::Mlx,
+                    envelope.peak_bytes,
+                );
                 evidence.push(VerifiedAdmissionCandidate {
                     evidence: memory_evidence,
-                    foreign_reserve_bytes: envelope.foreign_reserve_bytes,
-                    required_host_bytes: envelope.required_host_bytes(),
+                    foreign_reserve_bytes,
+                    minimum_host_bytes: envelope.required_host_bytes(),
+                    stale_minimum_host_bytes: envelope
+                        .required_host_bytes_for_peak(stale_peak_bytes),
                     record_id: record.id.clone(),
                     closure_digest: binding.query.inference_closure_digest.clone(),
                 });
@@ -1617,6 +1657,14 @@ fn synthesize_estimate_ladder(
         //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
         //    demotion never fires without a verified claim on the route). A contract with no
         //    calibration identity gets no fitted candidates at all — fail closed.
+        //
+        //    The load-shape conjunct compares CONTRACT shape only — deliberately, and unlike the
+        //    Evidence-path filter's measured-candidate leg, which also compares `identity
+        //    .load_shape` (sc-18251). An estimate-basis candidate is graded downstream by the
+        //    estimate wrap of `optimized_eligibility`, which short-circuits at the conformance
+        //    gate's `Unverified` BEFORE the identity load-shape comparison ever runs, so the
+        //    identity's shape is never consulted for an estimate. Adding the conjunct here would
+        //    be stricter than the gate this filter anticipates.
         let fitted = bases
             .iter()
             .filter(|basis| {
@@ -1812,7 +1860,7 @@ fn verified_lower_alternative(
             let envelope = record.mlx_admission_envelope()?;
             let effective = budget.effective_bytes();
             let strategy = evidence_strategy(record.strategy.rung);
-            (envelope.required_host_bytes() <= budget.total_bytes
+            (envelope.fits_scaled_host_bytes(budget.total_bytes)
                 && envelope.peak_bytes <= effective)
                 .then_some(VerifiedGeometryAlternative {
                     geometry: binding.geometry,
@@ -2037,14 +2085,27 @@ fn evaluate_request_with_budget_using_bundle(
     // deferred. Demoting the whole route when any sibling mismatches would throw away the candidate
     // that DOES match and silently downgrade a calibrated request to an estimate, which is its own
     // regression. Filtering keeps every usable measurement and degrades only when nothing is left.
+    //
+    // sc-18251: the same hole class existed on the two structural legs the sc-18101 filter did not
+    // mirror. A promoted binding whose captured `engaged_composition` disagrees with the live
+    // contract's (an engagement edge grew or was excluded since capture), or whose parameters no
+    // longer pass the live `contract.validate_selection` (a declared range narrowed), still entered
+    // `AdmissionPath::Evidence`, lost every candidate inside `select_strategy`
+    // (`CompositionMismatch` / `Invalid`), and hard-refused via `Selection::Unverified` — where
+    // pre-epic code degraded to legacy first (the retired `StaleIdentity` closure pre-demotion
+    // caught every drifted binding before eligibility ran). The filter now mirrors those legs too,
+    // so composition drift and parameter-range narrowing degrade to the estimate ladder exactly
+    // like a shape mismatch.
     if admission.path == AdmissionPath::Evidence {
         // A candidate is USABLE only if the selector could actually reach it: it must have been
-        // measured under a shape the downstream eligibility gate will accept for its rung, and it
-        // must sit on a rung the loaded contract declares `Implemented`. Both are properties of the
-        // LOADED PROVIDER, not of the request, and both are checked downstream where the only
-        // outcome left is a refusal — the rung-support one silently, since `select_strategy` skips
-        // an unimplemented rung without even recording an exclusion, so the request dies with a bare
-        // `Missing`.
+        // measured under a shape the downstream eligibility gate will accept for its rung, its
+        // captured engaged composition must still be the loaded contract's canonical set for that
+        // rung, and the selection it authorizes must still pass the loaded contract's own
+        // `validate_selection`. All three are properties of the LOADED PROVIDER, not of the
+        // request, and all three are checked downstream where the only outcome left is a refusal
+        // (`FingerprintMismatch`, `CompositionMismatch`, and `Invalid` respectively — and an
+        // unimplemented rung silently, since `select_strategy` skips it without even recording an
+        // exclusion, so that request dies with a bare `Missing`).
         //
         // The shape test MIRRORS `optimized_eligibility` rather than tightening it. That gate
         // short-circuits `Ok(())` for `MemoryStrategy::Resident` before it ever compares load
@@ -2055,18 +2116,51 @@ fn evaluate_request_with_budget_using_bundle(
         // bf16 carries a resident binding captured eager against a production deferred load.
         let usable = |candidate: &VerifiedAdmissionCandidate| {
             let evidence = &candidate.evidence;
+            // The two conjuncts mirror `optimized_eligibility`'s pair literally, but they are NOT
+            // independently observable (sc-18251 review): gen-core's `conformance_errors` requires
+            // `calibration.load_shape == contract.load_shape`, and `select_strategy` refuses every
+            // candidate on a non-conformant contract with `Unverified(Invalid)` before grading a
+            // single one — so on any contract where the pair could split, the request refuses no
+            // matter what this filter does. The pair is effectively one comparison; both spellings
+            // are kept so the filter stays a literal mirror of the gate. The premise is pinned by
+            // `gen_core_forbids_a_contract_identity_load_shape_split`: if a pin bump ever legalizes
+            // the split, that test reds and the identity conjunct needs its own fixture arm.
             let shape_agrees = !evidence.key.strategy.is_optimized()
                 || contract.calibration.as_ref().is_some_and(|identity| {
                     evidence.key.load_shape == contract.load_shape
                         && evidence.key.load_shape == identity.load_shape
                 });
-            let rung_implemented = matches!(
-                contract
-                    .capability(evidence.key.strategy)
-                    .map(|capability| &capability.support),
-                Some(gen_core::MemoryStrategySupport::Implemented)
-            );
-            shape_agrees && rung_implemented
+            // sc-18251: COMPOSITION. `optimized_eligibility`'s structural prefix rejects a
+            // candidate whose captured `engaged_composition` is not the loaded contract's canonical
+            // set for its rung (`CompositionMismatch`) — and unlike the shape leg above there is NO
+            // Resident exemption to mirror: both of the gate's composition checks run BEFORE its
+            // `is_optimized` short-circuit, pinned against the pinned gen-core by
+            // `gen_core_rejects_a_resident_cell_whose_composition_disagrees`. The gate's
+            // canonical-form check (`Invalid` for an empty or unsorted captured set) needs no
+            // separate conjunct: `contract.engaged_composition` walks `MemoryStrategy::ALL` in
+            // order, so equality forces the captured set into canonical form — except when both
+            // sides are empty, which requires the selected rung itself to be non-`Implemented`,
+            // and `selection_valid` below drops exactly that candidate.
+            let composition_agrees = evidence.key.engaged_composition
+                == contract.engaged_composition(evidence.key.strategy);
+            // sc-18251: SELECTION. `select_strategy` runs every candidate through the loaded
+            // contract's own `validate_selection` (`memory_strategy::candidate_exclusion`),
+            // excluding with `Invalid` a candidate whose rung the provider no longer declares
+            // `Implemented`, whose prerequisite edges the live contract no longer satisfies, or
+            // whose captured parameters fall outside the provider's live declared ranges — a
+            // narrowed range strands the old measurement. The downstream check applies to every
+            // rung, Resident included, so no exemption is mirrored here either. Consulting the
+            // gate's own predicate (rather than a resembling re-implementation) also subsumes the
+            // previous standalone `Implemented` conjunct: `validate_selection` fails for an
+            // undeclared or non-`Implemented` rung before it looks at parameters.
+            let selection_valid = contract
+                .validate_selection(&MemorySelection {
+                    strategy: evidence.key.strategy,
+                    parameters: evidence.key.parameters,
+                    tier: evidence.key.tier,
+                })
+                .is_ok();
+            shape_agrees && composition_agrees && selection_valid
         };
         let retained = admission.evidence.iter().filter(|c| usable(c)).count();
         if retained != admission.evidence.len() {
@@ -2077,7 +2171,7 @@ fn evaluate_request_with_budget_using_bundle(
                 retained,
                 contract_load_shape = ?contract.load_shape,
                 "dropped measured candidates the loaded provider cannot serve (materialization \
-                 shape or rung support)"
+                 shape, engaged composition, or selection validity)"
             );
             admission.evidence.retain(usable);
         }
@@ -2297,16 +2391,14 @@ fn evaluate_request_with_budget_using_bundle(
                 .evidence
                 .iter()
                 .map(|candidate| {
-                    // Same stale-aware grading as the pre-check above, so the refusal quotes the
-                    // requirement that was actually enforced.
+                    // Same stale-aware grading as the pre-check above, expressed as the smallest
+                    // host that satisfies the reserve policy. The current-host enforced sum is a
+                    // useful diagnostic but not a portable minimum: the reserve changes when the
+                    // host capacity changes.
                     if candidate.closure_digest == live_closure_digest {
-                        candidate.required_host_bytes
+                        candidate.minimum_host_bytes
                     } else {
-                        crate::memory_strategy::stale_widened_peak_bytes(
-                            gen_core::MemoryBackend::Mlx,
-                            candidate.evidence.predicted_peak_bytes,
-                        )
-                        .saturating_add(candidate.foreign_reserve_bytes)
+                        candidate.stale_minimum_host_bytes
                     }
                 })
                 .min()
@@ -3556,6 +3648,15 @@ fn weights_floor_load_admission(
     }
 }
 
+fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    let spec = spec.with_offload_policy(OffloadPolicy::Sequential);
+    if engine_id == "z_image_turbo" {
+        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+    } else {
+        spec
+    }
+}
+
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
 /// generator cache's cold-load path, before `crate::inference_runtime::load` allocates — never on a warm cache hit,
 /// so an already-resident model is never re-gated. Resolves the budget + on-disk component bytes,
@@ -3583,7 +3684,12 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
                 total_gb = (total_bytes as f64 / BYTES_PER_GIB).round() as i64,
                 text_encoder_gb = (te_bytes as f64 / BYTES_PER_GIB).round() as i64,
             );
-            Ok(spec.with_offload_policy(OffloadPolicy::Sequential))
+            let spec = with_selected_sequential_shape(engine_id, spec);
+            // Z-Image's shipped rung-4 evidence was captured under an independent deferred loader
+            // shape, while its lower rungs are eager. Production reaches both honestly by coupling
+            // the deferred shape only to the cold-load branch that selected Sequential residency.
+            // Resident hosts retain the eager shape and its four lower-rung bindings.
+            Ok(spec)
         }
         ResidencyOutcome::Reject {
             needed_gb,
@@ -3608,6 +3714,17 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, Headroom
         .footprint(engine_id, spec)
         .ok()
         .flatten();
+    spec_component_bytes_with_provider_footprint(engine_id, spec, footprint)
+}
+
+/// Provider-injected core of [`spec_component_bytes`]. The live path obtains `footprint` from the
+/// active registry; keeping the arithmetic independent of registry composition lets platform-neutral
+/// tests exercise the exact Lens materialization and overlay accounting used on macOS.
+fn spec_component_bytes_with_provider_footprint(
+    engine_id: &str,
+    spec: &LoadSpec,
+    footprint: Option<PerComponentBytes>,
+) -> (u64, u64, HeadroomAllowance) {
     let footprint_te = footprint.map(|fp| fp.text_encoder);
     let mut headroom = HeadroomAllowance::GENERIC;
     let (mut total_bytes, te_bytes) = match &spec.weights {
@@ -3942,29 +4059,14 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
-    /// SC-16915 recaptured these measurements, so this test pins the opposite of what it originally
-    /// did: it asserted the bindings were historical, with the note "must remain historical until
-    /// they are recaptured on the new runtime". They have been, and every shipped Qwen binding is
-    /// current.
-    ///
-    /// sc-17774 retargets "current" from the inference pin to `mlx:qwen_image`'s own compile-closure
-    /// digest. Grading the pin made this red on EVERY bump, including a documentation-only commit or
-    /// a commit to a model Qwen shares no code with; grading the closure makes it red only when the
-    /// code these measurements describe actually moved, which is a true statement that the ladder
-    /// needs recapturing. `inference_revision` survives on the binding as capture provenance and is
-    /// deliberately not compared.
-    ///
-    /// The rest of the assertion is unweakened. It still requires the full five-rung bf16 ladder —
-    /// checked as a rung SET on the bf16 subset rather than as a total count, so adding the q8/q4
-    /// tiers cannot mask a dropped bf16 rung the way a bare `bindings.len()` would.
-    ///
-    /// What this test grades is the SHAPE of the shipped opt-in — one captured closure, the full
-    /// per-tier ladder — not its currency. Currency is a comparison against the live table and it
-    /// belongs where the consequence is observable, which is the two admission-route tests below.
-    /// Grading it here as well made this red whenever a shared `mlx-gen` crate moved, which says
-    /// nothing about whether the ladder is complete.
+    /// sc-18237: every shipped Qwen binding must describe a load shape the production route can
+    /// execute. Native Qwen is deliberately deferred under both Resident and Sequential policies;
+    /// q8 was re-captured under that exact materialization contract, while the old eager BF16/Q4
+    /// records remain historical corpus entries only.
+    /// This is deliberately mutation-sensitive: adding any eager binding, or reintroducing an
+    /// uncaptured tier, makes the production-shape assertion red.
     #[test]
-    fn shipped_qwen_manifest_carries_every_tier_ladder_at_one_captured_closure() {
+    fn shipped_qwen_bindings_are_producible_by_the_production_deferred_route() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3978,24 +4080,18 @@ mod tests {
             .expect("Qwen calibration bindings are valid")
             .expect("Qwen declares exact MLX calibration bindings");
 
-        assert_eq!(
-            bindings.len(),
-            9,
-            "bf16 five-rung ladder plus q8 and q4 pairs"
-        );
+        assert_eq!(bindings.len(), 2, "the recaptured q8 pair only");
         assert!(
             !live_mlx_closure_digest("qwen_image").is_empty(),
             "qwen_image must be declared in config/inference-provider-closures.json; an undeclared \
              lane resolves to the fail-closed empty expectation, which would make every currency \
              comparison in this module discriminating for the wrong reason"
         );
-        // Read from the manifest, so this is "every binding agrees with every other" rather than a
-        // hex literal that has to be re-typed on each re-capture. `shipped_mlx_declared_closure_digest`
-        // already refuses a split opt-in, so a single stale row cannot hide inside a current ladder.
         let declared = shipped_mlx_declared_closure_digest("qwen_image");
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
                 && binding.provider == "qwen_image"
+                && binding.tier == "q8"
                 && binding.mode == "text_to_image"
                 && binding.overlay == "none"
                 && binding.geometry
@@ -4007,17 +4103,9 @@ mod tests {
                     }
                 && binding.query.inference_closure_digest == declared
         }));
-        // The load shape is a receipt axis, not a naming convention: rung 4 goes deferred and every
-        // other rung is eager, on every tier. A bundle where one shape covers all rows is the tell
-        // that the axis was derived from a fingerprint suffix instead of measured.
-        assert!(bindings.iter().all(|binding| {
-            binding.query.load_shape
-                == if binding.rung == StrategyRung::BoundedTransformerResidency {
-                    LoadShapeKey::DeferredMaterialization
-                } else {
-                    LoadShapeKey::EagerMaterialization
-                }
-        }));
+        assert!(bindings
+            .iter()
+            .all(|binding| { binding.query.load_shape == LoadShapeKey::DeferredMaterialization }));
 
         let rungs_for = |tier: &str| {
             let mut rungs = bindings
@@ -4029,23 +4117,64 @@ mod tests {
             rungs
         };
         assert_eq!(
-            rungs_for("bf16"),
-            [
-                "BoundedAttention",
-                "BoundedDecode",
-                "BoundedTransformerResidency",
-                "Resident",
-                "StagedResidency",
-            ]
+            rungs_for("q8"),
+            ["BoundedAttention", "BoundedTransformerResidency"]
         );
-        // `mlx.quantize` for qwen_image is 4, so the default install lands on q4. Before sc-16915
-        // the shipped opt-in was bf16-only and that install always reached the legacy estimator.
-        for tier in ["q8", "q4"] {
-            assert_eq!(
-                rungs_for(tier),
-                ["BoundedAttention", "BoundedTransformerResidency"],
-                "{tier} carries the two rungs the plan declares"
-            );
+        assert!(rungs_for("bf16").is_empty());
+        assert!(rungs_for("q4").is_empty());
+    }
+
+    #[test]
+    fn every_shipped_audited_mlx_binding_has_a_producible_production_load_shape() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin model manifest parses");
+        let models = manifest["models"].as_array().expect("models array");
+
+        let eager = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")));
+        let qwen_shape = apply_residency_policy(
+            eager
+                .clone()
+                .with_load_shape(gen_core::LoadShape::DeferredMaterialization),
+            "qwen_image",
+        )
+        .expect("production Qwen load policy")
+        .load_shape;
+        let z_resident_shape = eager.load_shape;
+        let z_sequential_shape =
+            with_selected_sequential_shape("z_image_turbo", eager.clone()).load_shape;
+        let krea_shape = eager.load_shape;
+
+        for model_id in ["qwen_image", "z_image_turbo", "krea_2_turbo"] {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("shipped {model_id} manifest entry"));
+            let bindings = MlxCalibrationBinding::from_manifest(model)
+                .unwrap_or_else(|error| panic!("{model_id} bindings parse: {error}"))
+                .unwrap_or_else(|| panic!("{model_id} declares audited MLX bindings"));
+            for binding in bindings {
+                let actual =
+                    crate::memory_strategy::load_shape_from_receipt(binding.query.load_shape);
+                let expected = match (binding.provider.as_str(), binding.rung) {
+                    ("qwen_image", _) => qwen_shape,
+                    ("z_image_turbo", StrategyRung::BoundedTransformerResidency) => {
+                        z_sequential_shape
+                    }
+                    ("z_image_turbo", _) => z_resident_shape,
+                    ("krea_2_turbo_control", _) => krea_shape,
+                    (provider, rung) => {
+                        panic!("audited model exposed unexpected binding {provider}:{rung:?}")
+                    }
+                };
+                assert_eq!(
+                    actual, expected,
+                    "{model_id} {:?} binding names a shape no production cold-load branch produces",
+                    binding.rung
+                );
+            }
         }
     }
 
@@ -4055,14 +4184,9 @@ mod tests {
     /// two real artefacts have drifted apart — which is exactly the state this story had to repair.
     /// This one reads both real files and nothing else.
     ///
-    /// Driven over EVERY shipped tier, not just bf16. `packaged_admission_route` filters candidates
-    /// by `binding.tier == plan_tier_key(plan.tier)`, so a bf16-only spec never even considers the
-    /// q8/q4 bindings — asserting `path == Evidence` on bf16 alone would leave 8 of the 9 qwen
-    /// bindings free to lose their backing record with the test still green. `mlx.quantize` for
-    /// qwen_image is 4, so q4 is the tier a default install actually reaches.
-    ///
-    /// The count assertion is what makes a dropped record fail: `path == Evidence` only needs the
-    /// candidate list to be non-empty, so one surviving rung would mask the loss of every other.
+    /// The manifest now ships only the q8 pair re-captured under the production deferred route.
+    /// BF16/Q4 continue through the estimate ladder until production-shaped measurements exist.
+    /// The count assertion makes a dropped q8 record fail rather than hiding behind its sibling.
     ///
     /// sc-17774 split this into the two questions it had been conflating. AGREEMENT — do the two
     /// shipped artefacts describe the same measurements — is graded at the closure they were both
@@ -4093,11 +4217,10 @@ mod tests {
         let declared = shipped_mlx_declared_closure_digest("qwen_image");
         let live = live_mlx_closure_digest("qwen_image");
 
-        for (tier, quant, expected_rungs) in [
-            ("bf16", None, 5_usize),
-            ("q8", Some(gen_core::Quant::Q8), 2),
-            ("q4", Some(gen_core::Quant::Q4), 2),
-        ] {
+        let tier = "q8";
+        let quant = Some(gen_core::Quant::Q8);
+        let expected_rungs = 2_usize;
+        {
             // Take the request identity from the opt-in itself rather than restating it, so the
             // test cannot drift from the manifest it is checking.
             let binding = calibrations
@@ -4216,18 +4339,18 @@ mod tests {
         // Mutation check for the axis this story exists to restore. Asserting only the route above
         // is a FALSE GREEN for `loadShape`: the route matches whichever binding fits the request,
         // so corrupting one cell's shape just selects a different cell and still reaches Evidence.
-        // Flip EVERY declared shape and the whole opt-in must stop matching — the receipts say
-        // which cells were measured eager and which deferred, and the two are not interchangeable.
+        // Flip EVERY declared shape and the whole opt-in must stop matching — these q8 receipts say
+        // deferred, and an eager claim is not interchangeable.
         //
         // Driven at `declared`, not at the live closure. Once the two diverge the live route is
         // ALREADY `Legacy`/`StaleIdentity` for currency reasons, so a mutation graded there proves
         // nothing about the load-shape axis — the assertion would pass with the mutation reverted.
-        let bf16 = calibrations
+        let q8 = calibrations
             .iter()
-            .find(|item| item.get("tier").and_then(Value::as_str) == Some("bf16"))
-            .expect("bf16 binding");
+            .find(|item| item.get("tier").and_then(Value::as_str) == Some("q8"))
+            .expect("q8 binding");
         let text = |key: &str| {
-            bf16.get(key)
+            q8.get(key)
                 .and_then(Value::as_str)
                 .unwrap_or_else(|| panic!("binding is missing {key}"))
                 .to_owned()
@@ -4249,8 +4372,9 @@ mod tests {
             });
         }
         let spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
-            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/bf16",
-        )));
+            "/cache/models--SceneWorks--qwen-image-mlx/snapshots/x/q8",
+        )))
+        .with_quant(gen_core::Quant::Q8);
         let mut inputs = fixture_inputs(1024, 1024);
         inputs.overlay = None;
         let mutated_route = packaged_admission_route(
@@ -4266,7 +4390,7 @@ mod tests {
                         variant: text("artifactVariant"),
                         fingerprint: text("resolvedPathFingerprint"),
                     },
-                    fixed_artifact_tier: Some("bf16".to_owned()),
+                    fixed_artifact_tier: Some("q8".to_owned()),
                 }),
             ),
             &inputs,
@@ -5828,7 +5952,7 @@ mod tests {
         let mut exact_896 = inputs.clone();
         exact_896.width = 896;
         exact_896.height = 896;
-        let message = evaluate_request_with_budget_using_bundle(
+        let exact = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &exact_896,
@@ -5841,11 +5965,14 @@ mod tests {
             Some(&packaged_bundle()),
             Some(&packaged_krea_closure_lookup),
         )
-        .expect_err("the exact 896 cell exceeds 83 GiB including its captured foreign reserve")
-        .to_string();
-        assert!(
-            message.contains("current verified alternative: 768x768"),
-            "a packaged exact-cell refusal must retain its fitting lower record: {message}"
+        .expect("the exact 896 cell fits once its 128 GiB-host reserve is normalized to 83 GiB");
+        assert_eq!(
+            exact.context.selection.strategy,
+            MemoryStrategy::BoundedDecode
+        );
+        assert_eq!(
+            exact.context.evidence_revision, "imc-2cd840a85ce33b4f22a9",
+            "host normalization must admit the exact verified cell, not silently demote to estimates"
         );
 
         // A loaded provider whose calibration identity DRIFTED from the packaged records must not
@@ -7108,9 +7235,12 @@ mod tests {
             Some(&fixture_closure_lookup),
         )
         .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
-        assert!(unfit
-            .to_string()
-            .contains("smallest verified MLX host boundary"));
+        let unfit = unfit.to_string();
+        assert!(unfit.contains("smallest verified MLX host boundary"));
+        assert!(
+            unfit.contains("needs at least 8.00 GiB"),
+            "the refusal must quote the static proportional boundary, not the 7.25 GiB reserve sum evaluated only at this 6 GiB host: {unfit}"
+        );
     }
 
     #[test]
@@ -7491,15 +7621,20 @@ mod tests {
             "the exempted resident cell must be served from its RECORD, not an estimate"
         );
 
-        // Fourth arm: the RUNG-SUPPORT leg, which is the other half of `usable` and is load-bearing
-        // in production — on the real `qwen_image` q8 cell the probe records `dropped=2 retained=0`,
-        // and the second drop is this one, not the shape one.
+        // Fourth arm: RUNG SUPPORT, load-bearing in production — on the real `qwen_image` q8 cell
+        // the probe records `dropped=2 retained=0`, and the second drop is this one, not the shape
+        // one. Since sc-18251 the `Implemented` requirement is enforced through the
+        // `validate_selection` conjunct of `usable` (which fails for an undeclared or
+        // non-`Implemented` rung before it looks at parameters); the composition conjunct also
+        // drops this cell (a `Missing` rung is absent from its own live composition), so this arm
+        // pins the OUTCOME — degrade, not a bare-`Missing` refusal — while each conjunct's own
+        // isolating fixture lives in the sc-18251 tests below.
         //
         // Bind ONLY the deferred rung-4 cell and select under the DEFERRED contract, whose
         // `BoundedTransformerResidency` support is `Missing`. The shape now AGREES, so only the
-        // rung check can drop it. It must: otherwise the candidate reaches `select_strategy`, which
-        // skips an unimplemented rung WITHOUT recording an exclusion, leaving every rung empty and
-        // refusing with a bare `Missing` and no log line naming a cause.
+        // new conjuncts can drop it. They must: otherwise the candidate reaches `select_strategy`,
+        // which skips an unimplemented rung WITHOUT recording an exclusion, leaving every rung
+        // empty and refusing with a bare `Missing` and no log line naming a cause.
         let mut rung_plan = plan.clone();
         let MlxCalibrationConfig::Valid(rung_calibration) = &mut rung_plan.calibration else {
             panic!("the fixture plan opts in to calibration");
@@ -7641,6 +7776,1635 @@ mod tests {
         assert_eq!(
             identity.load_shape,
             gen_core::LoadShape::EagerMaterialization
+        );
+    }
+
+    /// sc-18251 leg 1: COMPOSITION DRIFT must degrade to the estimate ladder, never refuse — and
+    /// the filter must stay per-candidate, sparing a sibling whose composition still agrees.
+    ///
+    /// The live provider grows a realization prerequisite that engages rung 1 in every rung-2
+    /// request, so the live composition for `BoundedDecode` becomes
+    /// `[Resident, StagedResidency, BoundedDecode]` while the record was captured under
+    /// `[resident, bounded_decode]`. Same shape, same abi, same fingerprint, and the captured
+    /// parameters still pass `validate_selection` (rung 1 owns no parameters, and the new edge is
+    /// satisfied by its own engagement) — the preconditions below pin that, so of the filter's
+    /// three legs ONLY the composition one can drop this candidate. That is what makes the
+    /// mutation "composition conjunct deleted" observable: the candidate then reaches
+    /// `select_strategy`, is excluded with `CompositionMismatch`, and the route refuses with "no
+    /// structurally admissible MLX memory strategy" instead of degrading — the exact pre-sc-18251
+    /// hole, which the retired `StaleIdentity` closure pre-demotion used to mask by demoting every
+    /// drifted binding to Legacy before eligibility ran.
+    #[test]
+    fn a_composition_drift_degrades_to_estimates_and_spares_agreeing_siblings() {
+        use gen_core::{MemoryPrerequisiteScope, MemoryStrategyPrerequisite};
+
+        let bundle = fixture_bundle();
+        let plan = fixture_plan();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.additional_prerequisites.push((
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the drifted contract must stay structurally conformant, or the selector refuses \
+             everything for an unrelated reason and the arm passes vacuously"
+        );
+        // The captured composition no longer matches the live one…
+        let captured = fixture_binding("q4", "packed-q4");
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedDecode),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode
+            ],
+            "precondition: the realization edge moved the live rung-2 composition"
+        );
+        // …while the OTHER two legs still pass, so only the composition conjunct can drop it.
+        let captured_selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: captured.selection_parameters,
+            tier: plan.tier,
+        };
+        assert!(
+            contract.validate_selection(&captured_selection).is_ok(),
+            "precondition: the captured parameters remain valid under the drifted contract, \
+             isolating the composition leg"
+        );
+
+        let degraded = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("a composition drift must degrade to the estimate ladder, not refuse the request");
+        assert_eq!(
+            degraded.process_limit_bytes, None,
+            "a degraded cell must not claim a verified record's request-scoped ceiling"
+        );
+
+        // Per-candidate arm: alongside the drifted rung-2 binding, bind the bundle's resident cell
+        // (whose composition `[resident]` is untouched by the rung-2 edge). The survivor must be
+        // served from its RECORD — `evidence.clear()` in place of `retain(usable)` empties the
+        // route and this becomes an estimate with no process ceiling.
+        let mut sibling_plan = plan.clone();
+        let MlxCalibrationConfig::Valid(calibration) = &mut sibling_plan.calibration else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        let mut resident_binding =
+            fixture_binding_for("q4", "packed-q4", StrategyRung::Resident, JsonObject::new());
+        // The bundle's resident record was captured deferred; the binding must declare the shape
+        // its RECORD was captured under, and the Resident shape exemption keeps it usable.
+        resident_binding.query.load_shape =
+            sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        calibration.bindings.push(resident_binding);
+
+        let spared = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &sibling_plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("the agreeing resident sibling is admitted");
+        assert_eq!(
+            spared.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the resident cell whose composition still agrees must survive the filter"
+        );
+        assert!(
+            spared.process_limit_bytes.is_some(),
+            "the spared sibling must be served from its RECORD, not an estimate"
+        );
+    }
+
+    /// sc-18251 leg 2: PARAMETER-RANGE NARROWING must degrade to the estimate ladder, never
+    /// refuse — and the filter must stay per-candidate.
+    ///
+    /// The live provider narrows its declared `decode_tile_edges` from `[512]` to `[256]`, so the
+    /// record captured at 512 no longer passes `contract.validate_selection`. Shape and
+    /// composition still agree (narrowing a range changes neither), pinned below — so only the
+    /// selection-validity conjunct can drop this candidate, which is what makes the mutation
+    /// "selection conjunct deleted" observable: the candidate then reaches `select_strategy`, is
+    /// excluded with `Invalid` by the same `validate_selection` call downstream, and the route
+    /// refuses instead of degrading.
+    #[test]
+    fn a_narrowed_parameter_range_degrades_to_estimates_and_spares_valid_siblings() {
+        let bundle = fixture_bundle();
+        let plan = fixture_plan();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        let bounded_decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        bounded_decode.parameters.decode_tile_edges = vec![256];
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the narrowed contract must stay structurally conformant"
+        );
+        let captured = fixture_binding("q4", "packed-q4");
+        let captured_selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: captured.selection_parameters,
+            tier: plan.tier,
+        };
+        assert!(
+            contract.validate_selection(&captured_selection).is_err(),
+            "precondition: the captured tile edge fell outside the narrowed range"
+        );
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedDecode),
+            vec![MemoryStrategy::Resident, MemoryStrategy::BoundedDecode],
+            "precondition: narrowing a parameter range does not move the composition, isolating \
+             the selection leg"
+        );
+
+        let degraded = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect(
+            "a parameter-range narrowing must degrade to the estimate ladder, not refuse the \
+             request",
+        );
+        assert_eq!(
+            degraded.process_limit_bytes, None,
+            "a degraded cell must not claim a verified record's request-scoped ceiling"
+        );
+
+        // Per-candidate arm: the resident sibling owns no parameters, so no narrowing can strand
+        // it; it must survive and be served from its record.
+        let mut sibling_plan = plan.clone();
+        let MlxCalibrationConfig::Valid(calibration) = &mut sibling_plan.calibration else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        let mut resident_binding =
+            fixture_binding_for("q4", "packed-q4", StrategyRung::Resident, JsonObject::new());
+        resident_binding.query.load_shape =
+            sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        calibration.bindings.push(resident_binding);
+
+        let spared = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &sibling_plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("the still-valid resident sibling is admitted");
+        assert_eq!(
+            spared.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the resident cell whose parameters remain valid must survive the filter"
+        );
+        assert!(
+            spared.process_limit_bytes.is_some(),
+            "the spared sibling must be served from its RECORD, not an estimate"
+        );
+    }
+
+    // Exact LFS object sizes for the two control checkpoints the production FLUX router can actually
+    // select. The audit creates sparse files with these logical lengths so the production
+    // `weights_source_bytes` seam prices the real overlay without downloading it.
+    #[cfg(target_os = "macos")]
+    const FLUX1_CONTROL_BYTES: u64 = 4_281_779_224;
+    #[cfg(target_os = "macos")]
+    const FLUX2_CONTROL_BYTES: u64 = 8_232_506_680;
+    // The pinned Lens bf16 turnkeys share this exact three-shard MXFP4 encoder on disk. The provider
+    // footprint query, not a copied resident-byte constant, supplies its load-exact expansion.
+    #[cfg(target_os = "macos")]
+    const LENS_BF16_TEXT_ENCODER_DISK_BYTES: u64 = 4_845_744_456 + 4_774_186_632 + 4_154_656_824;
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum ResidentOnlyAuditSurface {
+        Base,
+        Edit,
+        StrictControl,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SourceBoundAuditSurface {
+        manifest_id: String,
+        surface: ResidentOnlyAuditSurface,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct SourceBoundAuditCell {
+        manifest_id: String,
+        provider_id: &'static str,
+        tier: String,
+        surface: ResidentOnlyAuditSurface,
+        base_asset_bytes: u64,
+        control_bytes: u64,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SourceBoundShippedTier {
+        tier: String,
+        base_asset_bytes: u64,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum SourceBoundManifestDisposition {
+        GenericSelector,
+        PulidIdentityExcluded,
+        MageSplitComponentsExcluded,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct SourceBoundManifestClassification {
+        manifest_id: String,
+        family: String,
+        disposition: SourceBoundManifestDisposition,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct SourceBoundExcludedCell {
+        manifest_id: String,
+        family: String,
+        provider_id: &'static str,
+        tier: String,
+        base_asset_bytes: u64,
+        disposition: SourceBoundManifestDisposition,
+    }
+
+    /// Story-scoped product families for the Resident-only estimate-band audit. Individual
+    /// manifest entries and tiers are deliberately not enumerated: the shipped manifest and
+    /// production routers expand this family scope into the exact candidate inventory.
+    #[cfg(target_os = "macos")]
+    const RESIDENT_ONLY_AUDIT_FAMILIES: &[&str] = &[
+        "boogu",
+        "chroma",
+        "flux",
+        "flux2-dev",
+        "flux2-klein",
+        "ideogram",
+        "lens",
+        "sd3",
+    ];
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_manifest_classifications(
+        models: &[Value],
+    ) -> Result<Vec<SourceBoundManifestClassification>, String> {
+        use SourceBoundManifestDisposition::{
+            GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
+        };
+
+        let mut classifications = Vec::new();
+        let mut unique = std::collections::BTreeSet::new();
+        for model in models {
+            if model["type"] != "image" || !model["mlx"].is_object() {
+                continue;
+            }
+            let manifest_id = model["id"]
+                .as_str()
+                .ok_or_else(|| "shipped MLX image entry has no string id".to_owned())?;
+            let family = model["family"].as_str().ok_or_else(|| {
+                format!("shipped MLX image entry {manifest_id} has no string family")
+            })?;
+            let resolved = crate::engines::mlx_model(manifest_id);
+            let is_pulid = crate::image_jobs::is_pulid_flux_model(manifest_id);
+            let routed_as_mage = resolved
+                .as_ref()
+                .is_some_and(|model| model.adapter_label() == "mlx_mage");
+            let in_mage_family = family == "mage-flow";
+            let in_audit_family = RESIDENT_ONLY_AUDIT_FAMILIES.contains(&family);
+            if !in_audit_family && !is_pulid && !in_mage_family && !routed_as_mage {
+                continue;
+            }
+            if !unique.insert(manifest_id) {
+                return Err(format!(
+                    "shipped manifest declares duplicate classified MLX image id {manifest_id}"
+                ));
+            }
+            if source_bound_shipped_tiers(model)?.is_empty() {
+                return Err(format!(
+                    "production MLX image route {manifest_id} has no auditable shipped q4/q8/bf16 tier"
+                ));
+            }
+            let disposition = if is_pulid {
+                if family != "flux" || resolved.is_some() {
+                    return Err(format!(
+                        "{manifest_id} PuLID bespoke classification drifted: expected family=flux and no MODEL_TABLE row"
+                    ));
+                }
+                PulidIdentityExcluded
+            } else if in_mage_family || routed_as_mage {
+                if !in_mage_family || !routed_as_mage {
+                    return Err(format!(
+                        "{manifest_id} Mage split-component classification drifted: expected family=mage-flow and a production mlx_mage route"
+                    ));
+                }
+                MageSplitComponentsExcluded
+            } else if in_audit_family {
+                if resolved.is_none() {
+                    return Err(format!(
+                        "{manifest_id} is in an audited family but has neither a production MODEL_TABLE route nor an explicit bespoke exclusion"
+                    ));
+                }
+                GenericSelector
+            } else {
+                return Err(format!(
+                    "{manifest_id} reached the source classifier without a disposition"
+                ));
+            };
+            classifications.push(SourceBoundManifestClassification {
+                manifest_id: manifest_id.to_owned(),
+                family: family.to_owned(),
+                disposition,
+            });
+        }
+        if classifications.is_empty() {
+            return Err("shipped manifest exposes no classified MLX image routes".to_owned());
+        }
+        Ok(classifications)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_generic_manifest_ids(
+        classifications: &[SourceBoundManifestClassification],
+    ) -> impl Iterator<Item = &str> {
+        classifications.iter().filter_map(|classification| {
+            (classification.disposition == SourceBoundManifestDisposition::GenericSelector)
+                .then_some(classification.manifest_id.as_str())
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_surfaces_from_manifest_ids<'a>(
+        manifest_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<SourceBoundAuditSurface>, String> {
+        use ResidentOnlyAuditSurface::{Base, Edit, StrictControl};
+
+        let mut declared = std::collections::BTreeSet::new();
+        let mut surfaces = Vec::new();
+        for manifest_id in manifest_ids {
+            if !declared.insert(manifest_id) {
+                return Err(format!(
+                    "duplicate source-bound audit manifest declaration {manifest_id}"
+                ));
+            }
+            if crate::engines::mlx_model(manifest_id).is_none() {
+                return Err(format!(
+                    "{manifest_id} no longer resolves through production MODEL_TABLE and the pinned registry"
+                ));
+            }
+            surfaces.push(SourceBoundAuditSurface {
+                manifest_id: manifest_id.to_owned(),
+                surface: Base,
+            });
+            if let Some(edit_engine_id) = crate::image_jobs::flux2_edit_engine_id(manifest_id) {
+                if !crate::image_jobs::flux2_edit_uses_provider_memory_safety(edit_engine_id) {
+                    surfaces.push(SourceBoundAuditSurface {
+                        manifest_id: manifest_id.to_owned(),
+                        surface: Edit,
+                    });
+                }
+            }
+            if crate::image_jobs::mlx_flux_strict_control_engine_id(manifest_id).is_some() {
+                surfaces.push(SourceBoundAuditSurface {
+                    manifest_id: manifest_id.to_owned(),
+                    surface: StrictControl,
+                });
+            }
+        }
+        Ok(surfaces)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_surfaces(
+        models: &[Value],
+    ) -> Result<Vec<SourceBoundAuditSurface>, String> {
+        let classifications = source_bound_manifest_classifications(models)?;
+        source_bound_audit_surfaces_from_manifest_ids(source_bound_generic_manifest_ids(
+            &classifications,
+        ))
+    }
+
+    fn set_sparse_len(path: &Path, bytes: u64) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("sparse fixture parent");
+        }
+        std::fs::File::create(path)
+            .and_then(|file| file.set_len(bytes))
+            .expect("sparse fixture size");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_sparse_valid_safetensor(path: &Path, bytes: u64) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut data_bytes = bytes
+            .checked_sub(128)
+            .ok_or_else(|| format!("{bytes} bytes is too small for a safetensors fixture"))?;
+        let header = loop {
+            let mut header = format!(
+                r#"{{"weight":{{"dtype":"U8","shape":[{data_bytes}],"data_offsets":[0,{data_bytes}]}}}}"#
+            );
+            while (8 + header.len()) % 8 != 0 {
+                header.push(' ');
+            }
+            let next_data_bytes = bytes
+                .checked_sub(8 + header.len() as u64)
+                .ok_or_else(|| format!("{bytes} bytes is too small for its safetensors header"))?;
+            if next_data_bytes == data_bytes {
+                break header;
+            }
+            data_bytes = next_data_bytes;
+        };
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .and_then(|()| file.write_all(header.as_bytes()))
+            .and_then(|()| file.set_len(bytes))
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_shipped_tiers(model: &Value) -> Result<Vec<SourceBoundShippedTier>, String> {
+        let downloads = model["downloads"].as_array().ok_or_else(|| {
+            format!(
+                "{} has no shipped downloads",
+                model["id"].as_str().unwrap_or("<unknown>")
+            )
+        })?;
+        fn supports_macos(download: &Value) -> bool {
+            download["platforms"].as_array().is_none_or(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform.as_str() == Some("macos"))
+            })
+        }
+        fn supported_variant(download: &Value) -> Option<&str> {
+            download["variant"]
+                .as_str()
+                .and_then(|variant| matches!(variant, "q4" | "q8" | "bf16").then_some(variant))
+        }
+        let has_explicit_tiers = downloads
+            .iter()
+            .any(|download| supports_macos(download) && supported_variant(download).is_some());
+        let inferred_tier = match model["mlx"]["quantize"].as_u64() {
+            Some(4) => "q4",
+            Some(8) => "q8",
+            None | Some(0) => "bf16",
+            Some(other) => {
+                return Err(format!(
+                    "{} has unsupported shipped mlx.quantize tier {other}",
+                    model["id"].as_str().unwrap_or("<unknown>")
+                ));
+            }
+        };
+        let mut tiers = std::collections::BTreeMap::<String, u64>::new();
+        for download in downloads {
+            if !supports_macos(download) {
+                continue;
+            }
+            let tier = if has_explicit_tiers {
+                let Some(tier) = supported_variant(download) else {
+                    continue;
+                };
+                tier
+            } else if download["variant"].as_str() == Some("training") {
+                continue;
+            } else {
+                inferred_tier
+            };
+            let bytes = download["estimatedSizeBytes"]
+                .as_u64()
+                .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
+                .ok_or_else(|| {
+                    format!(
+                        "{} {tier} needs an auditable shipped byte size",
+                        model["id"].as_str().unwrap_or("<unknown>")
+                    )
+                })?;
+            let total = tiers.entry(tier.to_owned()).or_default();
+            *total = total.checked_add(bytes).ok_or_else(|| {
+                format!(
+                    "{} {tier} shipped byte total overflows u64",
+                    model["id"].as_str().unwrap_or("<unknown>")
+                )
+            })?;
+        }
+        Ok(tiers
+            .into_iter()
+            .map(|(tier, base_asset_bytes)| SourceBoundShippedTier {
+                tier,
+                base_asset_bytes,
+            })
+            .collect())
+    }
+
+    /// Expand every explicitly excluded manifest entry into the same route/tier accounting shape
+    /// as the generic-selector audit. These are exclusions from the generic sparse-`LoadSpec`
+    /// fixture, not exclusions from source-truth accounting: every shipped tier remains pinned.
+    #[cfg(target_os = "macos")]
+    fn source_bound_excluded_inventory_from_classifications(
+        models: &[Value],
+        classifications: &[SourceBoundManifestClassification],
+    ) -> Result<Vec<SourceBoundExcludedCell>, String> {
+        use SourceBoundManifestDisposition::{
+            GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
+        };
+
+        let mut cells = std::collections::BTreeSet::new();
+        for classification in classifications {
+            if classification.disposition == GenericSelector {
+                continue;
+            }
+            let model = models
+                .iter()
+                .find(|model| model["id"] == classification.manifest_id)
+                .ok_or_else(|| {
+                    format!(
+                        "missing explicitly excluded {} manifest entry",
+                        classification.manifest_id
+                    )
+                })?;
+            let provider_id = match classification.disposition {
+                PulidIdentityExcluded => {
+                    if !crate::image_jobs::is_pulid_flux_model(&classification.manifest_id)
+                        || classification.family != "flux"
+                        || crate::engines::mlx_model(&classification.manifest_id).is_some()
+                    {
+                        return Err(format!(
+                            "{} no longer matches the PuLID identity-path exclusion",
+                            classification.manifest_id
+                        ));
+                    }
+                    "pulid_flux"
+                }
+                MageSplitComponentsExcluded => {
+                    let resolved = crate::engines::mlx_model(&classification.manifest_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "{} no longer resolves through the production Mage route",
+                                classification.manifest_id
+                            )
+                        })?;
+                    if classification.family != "mage-flow"
+                        || resolved.adapter_label() != "mlx_mage"
+                    {
+                        return Err(format!(
+                            "{} no longer matches the Mage split-component exclusion",
+                            classification.manifest_id
+                        ));
+                    }
+                    resolved.engine_id()
+                }
+                GenericSelector => unreachable!("generic entries were skipped above"),
+            };
+            if crate::inference_runtime::media_descriptor(provider_id).is_none() {
+                return Err(format!(
+                    "explicitly excluded provider {provider_id} is absent from the pinned registry"
+                ));
+            }
+            for shipped in source_bound_shipped_tiers(model)? {
+                let cell = SourceBoundExcludedCell {
+                    manifest_id: classification.manifest_id.clone(),
+                    family: classification.family.clone(),
+                    provider_id,
+                    tier: shipped.tier,
+                    base_asset_bytes: shipped.base_asset_bytes,
+                    disposition: classification.disposition,
+                };
+                if !cells.insert(cell.clone()) {
+                    return Err(format!(
+                        "source-bound excluded inventory resolves a duplicate cell {cell:?}"
+                    ));
+                }
+            }
+        }
+        Ok(cells.into_iter().collect())
+    }
+
+    /// Revalidate each exclusion against current production routing and current manifest tier
+    /// accounting. Exact equality with the source-derived inventory below prevents a caller from
+    /// silently dropping an excluded model or tier before this classifier runs.
+    #[cfg(target_os = "macos")]
+    fn source_bound_classified_excluded_inventory(
+        models: &[Value],
+        source_inventory: &[SourceBoundExcludedCell],
+    ) -> Result<Vec<SourceBoundExcludedCell>, String> {
+        let classifications = source_bound_manifest_classifications(models)?;
+        let canonical =
+            source_bound_excluded_inventory_from_classifications(models, &classifications)?
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+        let mut classified = Vec::new();
+        for candidate in source_inventory {
+            if !canonical.contains(candidate) {
+                return Err(format!(
+                    "source-bound exclusion no longer matches production source/routing/accounting: {candidate:?}"
+                ));
+            }
+            classified.push(candidate.clone());
+        }
+        Ok(classified)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn require_exact_source_bound_excluded_inventory(
+        expected: &[SourceBoundExcludedCell],
+        actual: &[SourceBoundExcludedCell],
+    ) -> Result<(), String> {
+        let expected = expected
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual = actual
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if expected == actual {
+            return Ok(());
+        }
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+        Err(format!(
+            "source-bound excluded inventory mismatch; missing={missing:?}; unexpected={unexpected:?}"
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_provider(
+        surface: &SourceBoundAuditSurface,
+    ) -> Result<&'static str, String> {
+        match surface.surface {
+            ResidentOnlyAuditSurface::Base => crate::engines::mlx_model(&surface.manifest_id)
+                .map(|resolved| resolved.engine_id())
+                .ok_or_else(|| {
+                    format!(
+                        "{} no longer resolves through production MODEL_TABLE and the pinned registry",
+                        surface.manifest_id
+                    )
+                }),
+            ResidentOnlyAuditSurface::Edit => {
+                crate::image_jobs::flux2_edit_engine_id(&surface.manifest_id).ok_or_else(|| {
+                    format!(
+                        "{} has no production FLUX.2 edit route",
+                        surface.manifest_id
+                    )
+                })
+            }
+            ResidentOnlyAuditSurface::StrictControl => {
+                crate::image_jobs::mlx_flux_strict_control_engine_id(&surface.manifest_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "{} has no production FLUX strict-control route",
+                            surface.manifest_id
+                        )
+                    })
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_control_bytes(
+        surface: &SourceBoundAuditSurface,
+        provider_id: &str,
+    ) -> Result<u64, String> {
+        if surface.surface != ResidentOnlyAuditSurface::StrictControl {
+            return Ok(0);
+        }
+        match provider_id {
+            "flux1_dev_control" => Ok(FLUX1_CONTROL_BYTES),
+            "flux2_dev_control" => Ok(FLUX2_CONTROL_BYTES),
+            other => Err(format!(
+                "production strict-control provider {other} has no audited control checkpoint size"
+            )),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn audit_load_spec(
+        provider_id: &str,
+        tier: &str,
+        base_asset_bytes: u64,
+        control_bytes: u64,
+    ) -> Result<(tempfile::TempDir, LoadSpec), String> {
+        use gen_core::Quant;
+
+        let fixture = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let weights = fixture.path().join("weights");
+        if provider_id == "lens" && tier == "q4" {
+            // The production worker opts this one route into the load-exact deferred contract.
+            // Build the same component/config shape its registry contract inspects; a flat sparse
+            // file would make the lookup fall back and falsely classify measured Lens q4 as
+            // Resident-only.
+            let text_encoder_bytes = base_asset_bytes / 3;
+            let transformer_bytes = base_asset_bytes / 3;
+            let vae_bytes = base_asset_bytes - text_encoder_bytes - transformer_bytes;
+            for (component, bytes) in [
+                ("text_encoder", text_encoder_bytes),
+                ("transformer", transformer_bytes),
+                ("vae", vae_bytes),
+            ] {
+                set_sparse_valid_safetensor(
+                    &weights.join(component).join("model.safetensors"),
+                    bytes,
+                )?;
+            }
+            for component in ["text_encoder", "transformer"] {
+                std::fs::write(
+                    weights.join(component).join("config.json"),
+                    r#"{"quantization":{"bits":4,"group_size":64}}"#,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        } else if matches!(provider_id, "lens" | "lens_turbo") && tier == "bf16" {
+            if base_asset_bytes < LENS_BF16_TEXT_ENCODER_DISK_BYTES {
+                return Err(format!(
+                    "Lens bf16 asset {base_asset_bytes} is smaller than its source encoder"
+                ));
+            }
+            set_sparse_len(
+                &weights.join("text_encoder/model.safetensors"),
+                LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+            );
+            set_sparse_len(
+                &weights.join("transformer/model.safetensors"),
+                base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
+            );
+            std::fs::write(
+                weights.join("text_encoder/config.json"),
+                r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
+            )
+            .map_err(|error| error.to_string())?;
+        } else {
+            set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
+        }
+        let spec = match tier {
+            "q4" => LoadSpec::new(WeightsSource::Dir(weights)).with_quant(Quant::Q4),
+            "q8" => LoadSpec::new(WeightsSource::Dir(weights)).with_quant(Quant::Q8),
+            "bf16" => LoadSpec::new(WeightsSource::Dir(weights)),
+            other => return Err(format!("unsupported audited tier {other}")),
+        };
+        let spec = if control_bytes == 0 {
+            spec
+        } else {
+            let control = fixture.path().join("control.safetensors");
+            set_sparse_len(&control, control_bytes);
+            spec.with_control(WeightsSource::File(control))
+        };
+        Ok((
+            fixture,
+            crate::image_jobs::apply_measured_mlx_load_shape(provider_id, spec),
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_contract(
+        provider_id: &'static str,
+        spec: &LoadSpec,
+    ) -> Result<(MemoryProviderContract, bool), String> {
+        crate::inference_runtime::media()
+            .memory_strategy_contract(provider_id, spec)
+            .map_err(|error| error.to_string())
+            .map(|contract| {
+                contract.map_or_else(
+                    || {
+                        (
+                            MemoryProviderContract::compatibility_default(
+                                provider_id,
+                                MemoryBackendRealization::MlxMetal {
+                                    bounded_wired_residency: true,
+                                    lazy_or_mmap_materialization: true,
+                                    explicit_evaluation_and_synchronization: true,
+                                    cache_eviction: true,
+                                },
+                            ),
+                            false,
+                        )
+                    },
+                    |contract| (contract, true),
+                )
+            })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn implemented_optimized_strategies(contract: &MemoryProviderContract) -> Vec<MemoryStrategy> {
+        MemoryStrategy::ALL
+            .into_iter()
+            .filter(|strategy| strategy.is_optimized())
+            .filter(|strategy| {
+                matches!(
+                    contract
+                        .capability(*strategy)
+                        .map(|capability| &capability.support),
+                    Some(gen_core::MemoryStrategySupport::Implemented)
+                )
+            })
+            .collect()
+    }
+
+    /// The shipped manifest is the product-side binding of provider capability to a concrete tier.
+    /// Provider contract construction may inspect the on-disk component tree, which this audit
+    /// represents with sparse total-size files; use the manifest's explicit tier declaration to
+    /// prevent that deliberately minimal filesystem fixture from turning an optimized clean route
+    /// (Chroma/FLUX/Klein) into a fake Resident-only cell.
+    #[cfg(target_os = "macos")]
+    fn manifest_declares_optimized_tier(model: &Value, tier: &str) -> bool {
+        model["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .is_some_and(|implementations| {
+                implementations.iter().any(|implementation| {
+                    implementation["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|item| item.as_str() == Some(tier)))
+                })
+            })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_inventory_from_surfaces(
+        models: &[Value],
+        source_surfaces: &[SourceBoundAuditSurface],
+    ) -> Result<Vec<SourceBoundAuditCell>, String> {
+        let mut surfaces = std::collections::BTreeSet::new();
+        let mut cells = std::collections::BTreeSet::new();
+        let mut cell_keys = std::collections::BTreeSet::new();
+        for expected in source_surfaces {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == expected.manifest_id)
+                .ok_or_else(|| {
+                    format!("missing shipped {} manifest entry", expected.manifest_id)
+                })?;
+            if model["type"] != "image" {
+                return Err(format!(
+                    "{} is no longer a shipped image model",
+                    expected.manifest_id
+                ));
+            }
+            let provider_id = source_bound_audit_provider(expected)?;
+            let control_bytes = source_bound_control_bytes(expected, provider_id)?;
+            if !surfaces.insert((expected.manifest_id.clone(), expected.surface, provider_id)) {
+                return Err(format!(
+                    "source-bound resident-only inventory resolves a duplicate {:?} route {} ({provider_id})",
+                    expected.surface, expected.manifest_id
+                ));
+            }
+            if crate::inference_runtime::media_descriptor(provider_id).is_none() {
+                return Err(format!(
+                    "source-bound resident-only provider {provider_id} is absent from the pinned registry"
+                ));
+            }
+            for shipped in source_bound_shipped_tiers(model)? {
+                let tier = shipped.tier.as_str();
+                let base_asset_bytes = shipped.base_asset_bytes;
+                let key = (
+                    expected.manifest_id.to_owned(),
+                    provider_id,
+                    tier.to_owned(),
+                    expected.surface,
+                );
+                if !cell_keys.insert(key) {
+                    return Err(format!(
+                        "source-bound resident-only inventory resolves a duplicate cell {} ({provider_id}) {tier} {:?}",
+                        expected.manifest_id, expected.surface
+                    ));
+                }
+                cells.insert(SourceBoundAuditCell {
+                    manifest_id: expected.manifest_id.to_owned(),
+                    provider_id,
+                    tier: tier.to_owned(),
+                    surface: expected.surface,
+                    base_asset_bytes,
+                    control_bytes,
+                });
+            }
+        }
+        Ok(cells.into_iter().collect())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn require_exact_source_bound_inventory(
+        expected: &[SourceBoundAuditCell],
+        actual: &[SourceBoundAuditCell],
+    ) -> Result<(), String> {
+        let expected = expected
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual = actual
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if expected == actual {
+            return Ok(());
+        }
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+        Err(format!(
+            "source-bound audit inventory mismatch; missing={missing:?}; unexpected={unexpected:?}"
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_resident_only_cells_from_inventory(
+        models: &[Value],
+        source_inventory: &[SourceBoundAuditCell],
+    ) -> Result<(Vec<SourceBoundAuditCell>, Vec<SourceBoundAuditCell>), String> {
+        let mut classified = Vec::new();
+        let mut cells = Vec::new();
+        for candidate in source_inventory {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == candidate.manifest_id)
+                .ok_or_else(|| {
+                    format!("missing shipped {} manifest entry", candidate.manifest_id)
+                })?;
+            if candidate.surface != ResidentOnlyAuditSurface::StrictControl
+                && manifest_declares_optimized_tier(model, &candidate.tier)
+            {
+                classified.push(candidate.clone());
+                continue;
+            }
+            let (_fixture, spec) = audit_load_spec(
+                candidate.provider_id,
+                &candidate.tier,
+                candidate.base_asset_bytes,
+                candidate.control_bytes,
+            )?;
+            let (contract, _) =
+                source_bound_contract(candidate.provider_id, &spec).map_err(|error| {
+                    format!(
+                        "{} ({}) {} {:?} contract lookup failed: {error}",
+                        candidate.manifest_id,
+                        candidate.provider_id,
+                        candidate.tier,
+                        candidate.surface
+                    )
+                })?;
+            if implemented_optimized_strategies(&contract).is_empty() {
+                cells.push(candidate.clone());
+            }
+            classified.push(candidate.clone());
+        }
+        Ok((classified, cells))
+    }
+
+    /// sc-18251 resident-only audit: derive every reachable candidate through the production base,
+    /// edit, and FLUX strict-control routers, retain only tiers whose pinned loaded-provider contract
+    /// is actually Resident-only, then drive those exact cells through the production request plan and
+    /// selector. A base provider never receives an invented control checkpoint.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let classifications =
+            source_bound_manifest_classifications(models).expect("source-bound classifications");
+        assert_eq!(
+            classifications.len(),
+            26,
+            "the source-derived generic-plus-excluded model inventory changed"
+        );
+        let generic_manifest_ids =
+            source_bound_generic_manifest_ids(&classifications).collect::<Vec<_>>();
+        assert_eq!(
+            generic_manifest_ids.len(),
+            19,
+            "the generic-selector model inventory changed"
+        );
+        let surfaces = source_bound_audit_surfaces_from_manifest_ids(generic_manifest_ids)
+            .expect("source-bound audit surfaces");
+        let source_inventory = source_bound_audit_inventory_from_surfaces(models, &surfaces)
+            .expect("source-bound candidate inventory");
+        assert_eq!(
+            source_inventory.len(),
+            62,
+            "the source-derived candidate inventory changed; update the recorded audit result"
+        );
+        let excluded_inventory =
+            source_bound_excluded_inventory_from_classifications(models, &classifications)
+                .expect("source-bound excluded inventory");
+        let pulid_excluded = excluded_inventory
+            .iter()
+            .filter(|cell| {
+                cell.disposition == SourceBoundManifestDisposition::PulidIdentityExcluded
+            })
+            .count();
+        let mage_excluded = excluded_inventory
+            .iter()
+            .filter(|cell| {
+                cell.disposition == SourceBoundManifestDisposition::MageSplitComponentsExcluded
+            })
+            .count();
+        assert_eq!(pulid_excluded, 3, "PuLID must account for q4/q8/bf16");
+        assert_eq!(
+            mage_excluded, 18,
+            "the six Mage variants must each account for q4/q8/bf16"
+        );
+        assert_eq!(
+            source_inventory.len() + pulid_excluded,
+            65,
+            "every route/tier cell in the eight-family story scope must be classified"
+        );
+        let classified_excluded =
+            source_bound_classified_excluded_inventory(models, &excluded_inventory)
+                .expect("classified source-bound exclusions");
+        require_exact_source_bound_excluded_inventory(&excluded_inventory, &classified_excluded)
+            .expect("the executable audit must classify the exact excluded inventory");
+        let (classified_inventory, cells) =
+            source_bound_resident_only_cells_from_inventory(models, &source_inventory)
+                .expect("source-bound resident-only inventory");
+        require_exact_source_bound_inventory(&source_inventory, &classified_inventory).expect(
+            "the executable audit must classify the exact source-bound candidate inventory",
+        );
+        assert_eq!(
+            cells.len(),
+            35,
+            "the source-derived Resident-only inventory changed; update the recorded audit result"
+        );
+        let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
+        let hosts = [48_u64, 64, 96, 128];
+        let mut flips = Vec::new();
+        let mut audited_cells = std::collections::BTreeSet::new();
+
+        for cell in &cells {
+            assert!(
+                audited_cells.insert((
+                    cell.manifest_id.clone(),
+                    cell.provider_id,
+                    cell.tier.clone(),
+                    cell.surface,
+                )),
+                "the executable audit must reject duplicate route-tier cells: {cell:?}"
+            );
+            let (_fixture, spec) = audit_load_spec(
+                cell.provider_id,
+                &cell.tier,
+                cell.base_asset_bytes,
+                cell.control_bytes,
+            )
+            .expect("source-bound audit spec");
+            let media = crate::inference_runtime::media();
+            let provider_footprint = media
+                .footprint(cell.provider_id, &spec)
+                .expect("source-bound provider footprint");
+            let activation_anchor_bytes = media
+                .activation_memory_bytes_1024(cell.provider_id)
+                .expect("source-bound activation query");
+            let plan = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
+                cell.provider_id,
+                &cell.manifest_id,
+                &spec,
+                None,
+                None,
+                provider_footprint,
+                activation_anchor_bytes,
+            );
+            assert_eq!(
+                plan.folded_control_bytes, cell.control_bytes,
+                "{} ({}) {}: deleting production control-source accounting must make this \
+                     audit red",
+                cell.manifest_id, cell.provider_id, cell.tier
+            );
+            assert!(
+                plan.asset_bytes >= cell.base_asset_bytes + cell.control_bytes,
+                "{} ({}) {}: provider materialization cannot erase shipped base/control bytes",
+                cell.manifest_id,
+                cell.provider_id,
+                cell.tier
+            );
+            let geometry = MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
+            let raw_incremental_peak = plan.generic_headroom_bytes(geometry);
+            let widened_incremental_peak = (raw_incremental_peak as f64
+                * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN))
+                .ceil()
+                .clamp(0.0, u64::MAX as f64) as u64;
+            // These are precisely the cells for which no optimized product contract applies. Model
+            // their legacy Resident fallback with the same compatibility contract production uses
+            // when a provider has no applicable adopted cell, and bind its aggregate base fact to
+            // the source-derived load plan so post-load cache credit is exact.
+            let mut contract = MemoryProviderContract::compatibility_default(
+                cell.provider_id,
+                MemoryBackendRealization::MlxMetal {
+                    bounded_wired_residency: true,
+                    lazy_or_mmap_materialization: true,
+                    explicit_evaluation_and_synchronization: true,
+                    cache_eviction: true,
+                },
+            );
+            contract.asset_facts.base_bytes = plan.asset_bytes;
+            contract.asset_facts.transformer_bytes = plan.asset_bytes;
+            assert!(
+                contract.conformance_errors().is_empty(),
+                "audit contract must stay conformant for {cell:?}: {:?}",
+                contract.conformance_errors()
+            );
+            let generator = RequestGenerator {
+                descriptor: crate::inference_runtime::media_descriptor(cell.provider_id)
+                    .expect("source-bound provider descriptor"),
+                contract: Some(contract),
+            };
+            let legacy_total_peak = plan.generic_total_peak_bytes(geometry);
+
+            for host_gib in hosts {
+                let host_bytes = gib_to_bytes(host_gib as f64);
+                // This is exactly the live legacy budget after the generator has loaded:
+                // committed provider assets remain on the available side, while the modeled
+                // peak receives the matching provider-resident cache credit.
+                let available_incremental = host_bytes
+                    .saturating_sub(plan.asset_bytes)
+                    .saturating_sub(legacy_reserve_bytes);
+                let admitted_before_margin = raw_incremental_peak <= available_incremental;
+                let admitted_now = widened_incremental_peak <= available_incremental;
+                if admitted_before_margin && !admitted_now {
+                    flips.push((
+                        cell.manifest_id.as_str(),
+                        cell.provider_id,
+                        cell.tier.as_str(),
+                        host_gib,
+                        plan.asset_bytes,
+                        raw_incremental_peak,
+                        widened_incremental_peak,
+                    ));
+                }
+
+                // Exercise the production selector seam too; the arithmetic above names the
+                // historical no-margin counterfactual, while this call proves the current side
+                // uses cache credit + reserve + EstimateFloor margin together.
+                let evaluated = evaluate_request_with_budget(
+                    &generator,
+                    &plan,
+                    &fixture_inputs(1024, 1024),
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Resident,
+                    MemoryBudget {
+                        total_bytes: host_bytes,
+                        committed_bytes: plan.asset_bytes,
+                        reclaimable_bytes: 0,
+                        reserved_headroom_bytes: legacy_reserve_bytes,
+                    },
+                    legacy_total_peak,
+                    0,
+                    &[],
+                );
+                assert_eq!(
+                    evaluated.is_ok(),
+                    admitted_now,
+                    "production-path result drifted for {} ({}) {} on {host_gib} GiB: \
+                         {evaluated:?}",
+                    cell.manifest_id,
+                    cell.provider_id,
+                    cell.tier
+                );
+            }
+        }
+
+        assert_eq!(
+            audited_cells.len(),
+            cells.len(),
+            "the executable budget walk must cover every unique source-derived cell exactly"
+        );
+
+        assert_eq!(
+            flips
+                .iter()
+                .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sd3_5_large", "sd3_5_large", "q8", 48),
+                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48,),
+            ],
+            "the source-bound resident-only audit changed; update the recorded result, \
+             not only this expectation: {flips:?}"
+        );
+    }
+
+    /// Mutation proof for the source-truth failure found in the prior audit: no control checkpoint
+    /// may be injected into Chroma, FLUX.1 Schnell, or FLUX.2 Klein, while the two real Dev routes
+    /// must resolve to their dedicated control providers and remain covered.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resident_only_audit_rejects_impossible_control_routes_and_keeps_real_ones() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        for fake in [
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd",
+            "flux_schnell",
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ] {
+            let injected = SourceBoundAuditSurface {
+                manifest_id: fake.to_owned(),
+                surface: ResidentOnlyAuditSurface::StrictControl,
+            };
+            let error = source_bound_audit_inventory_from_surfaces(models, &[injected])
+                .expect_err("an impossible strict-control route must fail closed");
+            assert!(
+                error.contains("has no production FLUX strict-control route"),
+                "{fake} must fail at the production control router, got: {error}"
+            );
+        }
+
+        let surfaces = source_bound_audit_surfaces(models).expect("production source surfaces");
+        let source_inventory = source_bound_audit_inventory_from_surfaces(models, &surfaces)
+            .expect("production source inventory");
+        let (_, cells) = source_bound_resident_only_cells_from_inventory(models, &source_inventory)
+            .expect("production resident-only cells");
+        assert!(
+            !cells.iter().any(|cell| {
+                cell.manifest_id == "lens"
+                    && cell.tier == "q4"
+                    && cell.surface == ResidentOnlyAuditSurface::Base
+            }),
+            "base Lens q4 must remain on its production measured deferred-materialization contract"
+        );
+        assert!(
+            !cells
+                .iter()
+                .any(|cell| cell.provider_id == "flux2_dev_edit"),
+            "FLUX.2 Dev edit must remain on its provider-owned request-safety path"
+        );
+        assert!(cells.iter().any(|cell| {
+            cell.manifest_id == "flux_dev"
+                && cell.provider_id == "flux1_dev_control"
+                && cell.surface == ResidentOnlyAuditSurface::StrictControl
+                && cell.control_bytes == FLUX1_CONTROL_BYTES
+        }));
+        assert!(cells.iter().any(|cell| {
+            cell.manifest_id == "flux2_dev"
+                && cell.provider_id == "flux2_dev_control"
+                && cell.surface == ResidentOnlyAuditSurface::StrictControl
+                && cell.control_bytes == FLUX2_CONTROL_BYTES
+        }));
+        assert!(cells.iter().all(|cell| {
+            cell.control_bytes == 0
+                || matches!(cell.provider_id, "flux1_dev_control" | "flux2_dev_control")
+        }));
+    }
+
+    /// Completeness mutation for the loophole found after the production-router rewrite. A
+    /// zero-cell route is still part of the candidate inventory: replacing FLUX.1 Schnell with an
+    /// already-declared Chroma entry must fail before deduplication, and simply deleting Schnell
+    /// must fail exact source-inventory equality even though the 35 Resident-only cells and two
+    /// flips are unchanged.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resident_only_audit_inventory_rejects_duplicate_and_zero_cell_drop_mutations() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let classifications =
+            source_bound_manifest_classifications(models).expect("source classifications");
+        let manifest_ids = source_bound_generic_manifest_ids(&classifications).collect::<Vec<_>>();
+        let expected_surfaces =
+            source_bound_audit_surfaces_from_manifest_ids(manifest_ids.iter().copied())
+                .expect("source surfaces");
+        let expected_inventory =
+            source_bound_audit_inventory_from_surfaces(models, &expected_surfaces)
+                .expect("source inventory");
+        let (_, expected_resident) =
+            source_bound_resident_only_cells_from_inventory(models, &expected_inventory)
+                .expect("source Resident-only inventory");
+        assert!(
+            expected_inventory
+                .iter()
+                .any(|cell| cell.manifest_id == "flux_schnell"),
+            "the mutation requires FLUX.1 Schnell in the full source inventory"
+        );
+        assert!(
+            expected_resident
+                .iter()
+                .all(|cell| cell.manifest_id != "flux_schnell"),
+            "the mutation requires FLUX.1 Schnell to be a representative zero-cell route"
+        );
+
+        let mut duplicate_replacement = manifest_ids.clone();
+        let schnell = duplicate_replacement
+            .iter()
+            .position(|manifest_id| *manifest_id == "flux_schnell")
+            .expect("FLUX.1 Schnell source declaration");
+        duplicate_replacement[schnell] = "chroma1_base";
+        let duplicate_error =
+            source_bound_audit_surfaces_from_manifest_ids(duplicate_replacement.iter().copied())
+                .expect_err("a duplicate replacement must fail before set conversion");
+        assert!(
+            duplicate_error
+                .contains("duplicate source-bound audit manifest declaration chroma1_base"),
+            "duplicate replacement failed for the wrong reason: {duplicate_error}"
+        );
+
+        let dropped_ids = manifest_ids
+            .iter()
+            .copied()
+            .filter(|manifest_id| *manifest_id != "flux_schnell")
+            .collect::<Vec<_>>();
+        let dropped_surfaces =
+            source_bound_audit_surfaces_from_manifest_ids(dropped_ids.iter().copied())
+                .expect("dropped source surfaces still resolve");
+        let dropped_inventory =
+            source_bound_audit_inventory_from_surfaces(models, &dropped_surfaces)
+                .expect("dropped source inventory still resolves");
+        let (_, dropped_resident) =
+            source_bound_resident_only_cells_from_inventory(models, &dropped_inventory)
+                .expect("dropped Resident-only inventory still resolves");
+        assert_eq!(
+            dropped_resident, expected_resident,
+            "precondition: dropping a zero-cell route preserves the old Resident-only summary"
+        );
+        let drop_error =
+            require_exact_source_bound_inventory(&expected_inventory, &dropped_inventory)
+                .expect_err("exact source equality must reject a dropped zero-cell route");
+        assert!(
+            drop_error.contains("flux_schnell"),
+            "zero-cell drop must name its missing source route: {drop_error}"
+        );
+    }
+
+    /// Explicit-exclusion mutation proof. PuLID is inside the eight-family story scope but takes
+    /// the identity-conditioned route outside MODEL_TABLE; Mage is outside that family scope but
+    /// must remain named because its split component tree cannot be represented by the generic
+    /// single-root sparse fixture. Neither exclusion may disappear or drift families silently.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resident_only_audit_exclusions_reject_pulid_and_mage_scope_mutations() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let classifications =
+            source_bound_manifest_classifications(models).expect("source classifications");
+        let expected =
+            source_bound_excluded_inventory_from_classifications(models, &classifications)
+                .expect("source excluded inventory");
+
+        let missing_pulid = classifications
+            .iter()
+            .filter(|item| item.manifest_id != "pulid_flux_dev")
+            .cloned()
+            .collect::<Vec<_>>();
+        let actual = source_bound_excluded_inventory_from_classifications(models, &missing_pulid)
+            .expect("the mutated exclusion list still resolves");
+        let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
+            .expect_err("removing PuLID classification must fail exact equality");
+        assert!(error.contains("pulid_flux_dev"), "wrong failure: {error}");
+
+        let reclassified_pulid = classifications
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                if item.manifest_id == "pulid_flux_dev" {
+                    item.disposition = SourceBoundManifestDisposition::GenericSelector;
+                }
+                item
+            })
+            .collect::<Vec<_>>();
+        let actual =
+            source_bound_excluded_inventory_from_classifications(models, &reclassified_pulid)
+                .expect("the mutated disposition list still resolves");
+        let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
+            .expect_err("changing PuLID classification must fail exact equality");
+        assert!(error.contains("pulid_flux_dev"), "wrong failure: {error}");
+
+        let missing_mage = classifications
+            .iter()
+            .filter(|item| {
+                item.disposition != SourceBoundManifestDisposition::MageSplitComponentsExcluded
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let actual = source_bound_excluded_inventory_from_classifications(models, &missing_mage)
+            .expect("the mutated exclusion list still resolves");
+        let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
+            .expect_err("removing Mage scope must fail exact equality");
+        assert!(error.contains("mage_flow"), "wrong failure: {error}");
+
+        let mut pulid_family_drift = models.clone();
+        pulid_family_drift
+            .iter_mut()
+            .find(|model| model["id"] == "pulid_flux_dev")
+            .expect("PuLID manifest entry")["family"] = Value::String("not-flux".to_owned());
+        let error = source_bound_manifest_classifications(&pulid_family_drift)
+            .expect_err("PuLID family drift must fail classification");
+        assert!(error.contains("PuLID bespoke classification drifted"));
+
+        let mut mage_family_drift = models.clone();
+        mage_family_drift
+            .iter_mut()
+            .find(|model| model["id"] == "mage_flow")
+            .expect("Mage manifest entry")["family"] = Value::String("flux".to_owned());
+        let error = source_bound_manifest_classifications(&mage_family_drift)
+            .expect_err("Mage family drift must fail classification");
+        assert!(error.contains("Mage split-component classification drifted"));
+    }
+
+    /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core
+    /// rather than restated.
+    ///
+    /// The shape leg of the `usable` filter exempts `MemoryStrategy::Resident` because
+    /// `optimized_eligibility` short-circuits `Ok(())` for a non-optimized selection before it
+    /// compares load shapes. The composition leg deliberately does NOT mirror that exemption,
+    /// because both of the gate's composition checks — canonical form (`Invalid`) and contract
+    /// agreement (`CompositionMismatch`) — run BEFORE the short-circuit, so gen-core rejects a
+    /// resident cell on either. If a pin bump ever moves those checks behind the Resident
+    /// short-circuit, this test reds and the filter's legs must be re-derived.
+    #[test]
+    fn gen_core_rejects_a_resident_cell_whose_composition_disagrees() {
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+
+        let (selection, mut resident) = resident_evidence(
+            contract,
+            fixture_plan().tier,
+            "text_to_image",
+            None,
+            request_geometry(&fixture_inputs(1024, 1024)),
+            gib_to_bytes(4.0),
+            Some("fixture-formula-v2"),
+        );
+        resident.conformance = gen_core::MemoryConformanceState::Verified;
+        resident.dimensions = gen_core::MemoryEvidenceDimensions::VERIFIED;
+        assert!(
+            !selection.strategy.is_optimized(),
+            "the premise is about the non-optimized rung"
+        );
+        assert_eq!(
+            resident.optimized_eligibility(contract),
+            Ok(()),
+            "precondition: the resident cell is eligible before the composition is disturbed"
+        );
+
+        // Canonical but disagreeing: the gate's contract-agreement check must reject even a
+        // RESIDENT cell, which is why the filter's composition leg carries no Resident exemption.
+        resident.key.engaged_composition =
+            vec![MemoryStrategy::Resident, MemoryStrategy::BoundedDecode];
+        assert_eq!(
+            resident.optimized_eligibility(contract),
+            Err(gen_core::MemoryEvidenceVerdict::CompositionMismatch),
+            "gen-core rejects a RESIDENT cell whose composition disagrees; the filter's \
+             no-exemption composition leg is built on this"
+        );
+
+        // The canonical-form prefix also runs before the Resident short-circuit.
+        resident.key.engaged_composition = Vec::new();
+        assert_eq!(
+            resident.optimized_eligibility(contract),
+            Err(gen_core::MemoryEvidenceVerdict::Invalid),
+            "gen-core rejects a RESIDENT cell whose composition is non-canonical"
+        );
+    }
+
+    /// sc-18251 (review addendum): why the shape leg's `identity.load_shape` conjunct has no
+    /// isolating fixture of its own — the contract↔identity split it would need is impossible by
+    /// construction, and THAT premise is what this test pins against the pinned gen-core.
+    ///
+    /// Every fixture moves `contract.load_shape` and `identity.load_shape` together, so deleting
+    /// either single conjunct of
+    /// `key.load_shape == contract.load_shape && key.load_shape == identity.load_shape` cannot be
+    /// distinguished by those fixtures alone. An isolating arm was written and it demonstrated the
+    /// impossibility empirically: gen-core's `conformance_errors` requires
+    /// `calibration.load_shape == contract.load_shape`, and `select_strategy` refuses EVERY
+    /// candidate on a non-conformant contract with `Unverified(Invalid)` before grading a single
+    /// one, so a split contract refuses the request no matter which conjunct the filter carries.
+    /// The pair is effectively one comparison, kept in both spellings only to mirror
+    /// `optimized_eligibility` literally.
+    ///
+    /// If a pin bump ever legalizes the split, this test reds — and the identity conjunct then
+    /// needs its own fixture arm, because it will have become independently load-bearing.
+    #[test]
+    fn gen_core_forbids_a_contract_identity_load_shape_split() {
+        use gen_core::MemoryCalibrationIdentity;
+
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "precondition: the agreeing fixture contract is conformant"
+        );
+        let fingerprint = contract
+            .calibration
+            .as_ref()
+            .expect("fixture calibration")
+            .fingerprint
+            .clone();
+
+        // Identity moves, contract stays.
+        let mut identity_split = contract.clone();
+        identity_split.calibration = Some(MemoryCalibrationIdentity::new(
+            fingerprint.clone(),
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+        assert!(
+            identity_split
+                .conformance_errors()
+                .iter()
+                .any(|error| error.contains("load shape")),
+            "gen-core must reject a contract whose calibration identity shape disagrees with its \
+             live load shape; the filter's fused shape conjuncts are built on this"
+        );
+
+        // Contract moves, identity stays.
+        let mut contract_split = contract.clone();
+        contract_split.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        assert!(
+            contract_split
+                .conformance_errors()
+                .iter()
+                .any(|error| error.contains("load shape")),
+            "the split must be rejected in both directions"
+        );
+
+        // And a non-conformant contract never grades candidates at all — the refusal outruns the
+        // filter, which is why no fixture can observe the identity conjunct alone.
+        let selection = crate::memory_strategy::select_strategy(
+            crate::memory_strategy::RequestScope {
+                resolved_route: "fixture_provider",
+                backend: "mlx",
+                tier: fixture_plan().tier,
+                mode: "text_to_image",
+                overlay: None,
+                geometry: request_geometry(&fixture_inputs(1024, 1024)),
+                expected_closure_digest: FIXTURE_CLOSURE_DIGEST,
+            },
+            &identity_split,
+            Some(crate::memory_strategy::Budget {
+                available_gb: 64.0,
+                reclaimable_gb: 0.0,
+                total_gb: 64.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &[],
+        );
+        assert_eq!(
+            selection,
+            crate::memory_strategy::Selection::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::Invalid
+            },
+            "a split contract refuses everything before any candidate is graded"
         );
     }
 
@@ -8104,6 +9868,50 @@ mod tests {
             evaluation.process_limit_bytes,
             Some(gib_to_bytes(8.0)),
             "request ceiling comes from the selected candidate's 2 GiB reserve"
+        );
+    }
+
+    #[test]
+    fn capture_host_reserve_scales_to_48_gib_without_erasing_the_stale_margin() {
+        use sceneworks_core::memory_calibration::MlxAdmissionEnvelope;
+
+        let capture_host = gib_to_bytes(128.0);
+        let envelope = MlxAdmissionEnvelope {
+            peak_bytes: gib_to_bytes(16.41),
+            observed_non_reclaimable_wired_bytes: gib_to_bytes(15.0),
+            capture_host_bytes: capture_host,
+            foreign_reserve_bytes: gib_to_bytes(46.93),
+        };
+        let live_host = gib_to_bytes(48.0);
+        assert!(
+            envelope
+                .peak_bytes
+                .saturating_add(envelope.foreign_reserve_bytes)
+                > live_host,
+            "the old absolute 128 GiB-host reserve reproduces the false 48 GiB refusal"
+        );
+        assert!(
+            envelope.required_host_bytes() <= live_host,
+            "the true static boundary must agree that this candidate can fit below 48 GiB"
+        );
+        let live_reserve = envelope.foreign_reserve_for_host_bytes(live_host);
+        let stale_peak = crate::memory_strategy::stale_widened_peak_bytes(
+            gen_core::MemoryBackend::Mlx,
+            envelope.peak_bytes,
+        );
+        assert!(
+            stale_peak.saturating_add(live_reserve) <= live_host,
+            "the stale widening remains charged after host-capacity normalization"
+        );
+        let process_limit = live_host.saturating_sub(live_reserve);
+        assert!(
+            stale_peak <= process_limit,
+            "the request remains below the absolute MLX process limit used for OOM containment"
+        );
+        assert_eq!(
+            live_reserve,
+            18_896_513_925,
+            "46.93 GiB reserved on 128 GiB scales, conservatively rounded up, to 17.59875 GiB on 48 GiB"
         );
     }
 
@@ -9750,6 +11558,43 @@ mod tests {
     #[test]
     fn engine_supports_sequential_is_false_for_an_unregistered_id() {
         assert!(!engine_supports_sequential("no_such_engine_xyz"));
+    }
+
+    #[test]
+    fn production_residency_policies_materialize_each_provider_under_its_bound_shape() {
+        let eager = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")));
+        let z_image = with_selected_sequential_shape("z_image_turbo", eager.clone());
+        assert_eq!(z_image.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            z_image.load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+            "the shipped Z-Image rung-4 binding must be producible by the production cold-load route"
+        );
+
+        let qwen_resident = eager
+            .clone()
+            .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+        let qwen_resident = apply_residency_policy(qwen_resident, "qwen_image")
+            .expect("production deferred Qwen resident route");
+        assert_eq!(qwen_resident.offload_policy, OffloadPolicy::Resident);
+        assert_eq!(
+            qwen_resident.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+        let qwen_sequential = with_selected_sequential_shape("qwen_image", qwen_resident.clone());
+        assert_eq!(qwen_sequential.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            qwen_sequential.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+
+        let krea = with_selected_sequential_shape("krea_2_turbo_control", eager);
+        assert_eq!(krea.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            krea.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "Krea's shipped bounded-decode bindings remain on its production eager route"
+        );
     }
 
     /// Candle's sc-12130 twin of the macOS registry sweep above. These are the generic generator ids that

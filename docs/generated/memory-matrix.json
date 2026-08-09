@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:bd5be1f83c7dbd5c405ecd4827978402d7df8e1c09bcb873394d7399c0d07c97",
-    "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
+    "sceneWorksRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+    "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "dd8e50a7932db0e64d079cf875e7a5c2b68c30a23e8b2265a7355727fd0e1f34"
+        "sha256": "2867f352b99ced908327e5c062bbecfc1965c07c5cb10f2bd794220fe89b1eb3"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -26,11 +26,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "4a4556976e9ec2e2993c4f3bc533a78d15fbfedeaa374fe474fe56da2b34afc5"
+        "sha256": "63e69a4f010faf0b21cd37bb9a4c97be4976fb545f7fd0bd702583c5d7262fed"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "e584ef8ef01283d827ed98c8788ae406943f8ee5c0d55ff44949bb6088375f1b"
+        "sha256": "05fd9583ddb45181a3d123831b5e7fdb8131ee8bad8e09052b8d41df940fc196"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -46,15 +46,15 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "acb6acab8ddd7bd4cd0af542570f4e0b4574d205fa40e94a956cdba9a32613ce"
+        "sha256": "6ff7d17aef64c93048fd6a6fb2c33cc2a088adcbae3ff51424473e1d64a11499"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "d48641b59668cab1ef6f9e98c648f5ffe7c46763b949726b950d76d2a13a7fa8"
+        "sha256": "a94630f6fbe9cbadf92d1ca139c8cb93863fd0cb58f8b84727757fee12786c61"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "7b95af845191d8e5e681389dfac29dbf6ad2f736c9f010979af01e43940170cd"
+        "sha256": "6e2835e013a10a32ecce1a17c31a1fa2a65f26c4f228495367c81bbcf5f006fd"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -62,7 +62,7 @@
       },
       "cargo": {
         "path": "Cargo.toml",
-        "sha256": "12133188abdb3d37d1b7d8e6991d3bc449937ac974d26ab3dde813cf428376aa"
+        "sha256": "5436ac9f706e4f9ef0ce6dbbd0bc5cf847386a94b65f901691988456a48f843b"
       }
     }
   },
@@ -139,12 +139,12 @@
     "mlxStagedStaticCoverage": 39,
     "mlxStagedStaticCoverageDenominator": 53,
     "fullModels": 0,
-    "calibrationRuns": 65,
+    "calibrationRuns": 67,
     "calibrationRunsByStatus": {
-      "complete": 50,
+      "complete": 52,
       "runtimeComplete": 15
     },
-    "currentCalibrationRuns": 0,
+    "currentCalibrationRuns": 2,
     "rung4Survey": {
       "story": 15969,
       "surveyedFamilyBackends": 40,
@@ -10165,8 +10165,9 @@
       "elided": 15,
       "implemented": 12,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 11,
+        "Missing": 6,
+        "Verified": 1
       },
       "implementedBy": {
         "tier": {
@@ -10223,8 +10224,9 @@
       "elided": 15,
       "implemented": 12,
       "states": {
-        "Implemented/unverified": 12,
-        "Missing": 6
+        "Implemented/unverified": 11,
+        "Missing": 6,
+        "Verified": 1
       },
       "implementedBy": {
         "tier": {
@@ -14874,7 +14876,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "864a40661cfbe29cb857affdafdd056d15e4396b8675dd453aa14d7d34e8e830",
+      "calibrationFingerprint": "be5631ce99176db878dfb89c4b46e55b78c536a5229aa0a7adbbcf42938e19d5",
       "owningFamilyStory": 15519,
       "owningModelStory": 15482,
       "evidence": {
@@ -14919,7 +14921,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b4ca936f819ceac9753d2b9ab56a2b8333f9c229c7c631d63f1ee9158db93d41",
+      "calibrationFingerprint": "e2d889aa0c31db3c6f9e6b969b6d3c6190fa6b9d01b1446c230576ab59ff6a44",
       "owningFamilyStory": 15519,
       "owningModelStory": 15482,
       "evidence": {
@@ -15007,7 +15009,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 32.18693432211876,
-            "requiredHostBytes": 86700178364,
+            "requiredHostBytes": 57325098039,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -15029,7 +15031,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 36.710619777441025,
-            "requiredHostBytes": 91800452028,
+            "requiredHostBytes": 65378161719,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -15085,7 +15087,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8fd2b4d1944da248b8c505d7c6fa6e1e506e15b386afb58c8977519254cb2637",
+      "calibrationFingerprint": "c8d8bf8084e036aaedf5e9847b83417598d700bfcb235c5c214a4d104e684ebc",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -15157,7 +15159,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7ee0f4ba46318a394c24be51bd6535afe4a4f78e06d319d193052e3ab4e91f61",
+      "calibrationFingerprint": "be9d93fdd3fa15a4dc98e533d7f0b2313a6c9a197217d692ebe4f1ebc61d3d77",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -15865,7 +15867,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "39ebf31fdd182eac4eeaefd12fea7ac6f7bd855ed2d0bdf93837b6741383e72f",
+      "calibrationFingerprint": "24b427831fc092e0b3b493cbe3618ca16c25e40ed0f802156c129dcb625e79c7",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -15937,7 +15939,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "456b6615d7d5b9e36a4cebc8e3266c70b34a206660fae7e30e8aa77a2471fb0d",
+      "calibrationFingerprint": "100cd13a17c5855cbfcf51efb4b354badf43001d7826dc9ef6ac7fccacd5e9ca",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -16680,7 +16682,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "fb930c5cdcb915769c333864c9e56cbb98c3366f8a1e82777aeaafb3ff5944f3",
+      "calibrationFingerprint": "be2f5dadd6d5ec74d0933702c65827a8ed08f53766aebc958833e72016cfa263",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -16752,7 +16754,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2be6f30e195dc3019809b0651d1ae24d046254d502a9095c773cb54496317c68",
+      "calibrationFingerprint": "2e99e1390b7c2213e2b15d8abb0284d5a6453756361621733ca367bf7453c5dc",
       "owningFamilyStory": 15829,
       "owningModelStory": 15913,
       "rung4Survey": {
@@ -17456,7 +17458,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8c6fe4cddfe1ed4ddeb820338b8775cfbc2ac9817db8fe4aef4b2442a33a9f5a",
+      "calibrationFingerprint": "a0241ed37b2a6265d82a1bc797f158f2eda4c57face226bf56f73126aca0d24b",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -17517,7 +17519,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ab90e4a185367cc2875296747f207f28631e8d4b745f38e53424453f3a5e02f9",
+      "calibrationFingerprint": "c83d04bebb15e2c0f833ed889ac5263ec8d7bffb20e56dd35dc125b315d3e37f",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -17578,7 +17580,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "fd88d1db2caa3ec1f5861aae025aad7459e2b875c4d6705f9dc28533ad08a2f1",
+      "calibrationFingerprint": "487de7d520421772b7d467057d9479969e7f24d7a503b43b32fb6915a78a9de0",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -17639,7 +17641,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d6322294365336a51a6e6116b0a2296210e4f012972c21a5d2c94e6eca1baaae",
+      "calibrationFingerprint": "e7187471637c66dcb77d2df8533ad560a242e4b75f743613c63112d541059ea6",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -17700,7 +17702,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c19a679fbb134a4899bfd5ef46968b155420208505dd2312e2a715ded05918e2",
+      "calibrationFingerprint": "6d38a2a68c488dcfbdf97ef6476323cb1c5e67f2f91fcd096a946e2c47302fc9",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -17761,7 +17763,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "cade3765b3ab89e9b38c3c8b4c36ac185b8b77c253b7420a55da37352a77ade3",
+      "calibrationFingerprint": "72af75453c53ebf5378567e220796d78900dfea95e60767e729548adc31822ef",
       "owningFamilyStory": 15813,
       "owningModelStory": 15850,
       "evidence": {
@@ -17822,7 +17824,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "658e7b3b0eefa3208147a141123a0e5afadf2510c1f6053618e5b94890487cd6",
+      "calibrationFingerprint": "e92c012cf7f34256f085722b9b4d2fa482321f2bd44ad95c48f0b8df1ebbf9e0",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -17883,7 +17885,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "d122eb10d08503cf8fccb84014f5f1dc193f85333f62e2965fd615398e4658ad",
+      "calibrationFingerprint": "52eb33e116fd2a139c684641d3f78232e858f08c500a08795a1a2ce6e6c3475e",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -17944,7 +17946,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8a5334f0c5c49862e8d48c6ef6e1f4045354cbc4ec0f49610e7af746ba895775",
+      "calibrationFingerprint": "d1ca82f90d15fb3b34627665317721a73353d90322d42d551b93e5e2a629d425",
       "owningFamilyStory": 15813,
       "owningModelStory": 15841,
       "evidence": {
@@ -18005,7 +18007,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e16c1fba62bc3dc36b11d19e76dadb0140e1b550b6a4cd54eb6126d8d86a283c",
+      "calibrationFingerprint": "9e25a0ced7c4244e4ade549292fa15e71df001b1079da33b55a8e11ca95bdcba",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -18066,7 +18068,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "96131e97672c7d56a7eaead16ef6628788c4fb825d7e20cb7f6e8a8bdce61a96",
+      "calibrationFingerprint": "25e95885775ff5e780d7d0411a6bd8ee64fea4ddc605b833bd1e1684a25abd37",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -18127,7 +18129,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f01749545eceadc26e026a3f01ce3d535194b5590e7ecae456869c76914a8999",
+      "calibrationFingerprint": "8d7be011ec143be77ee7787dc74a4c0e7a69597387312f75c3155a6abe7938d1",
       "owningFamilyStory": 15813,
       "owningModelStory": 15847,
       "evidence": {
@@ -18188,7 +18190,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b9303e1aa34a098ae0c93f6321e0df3bbcfbcd6bcae5c8fcba5ea3a6ff4e655c",
+      "calibrationFingerprint": "41252ead00448be16e1f9c2bdf579ddeb571bda5993d9201befe08514ffa8e30",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -18249,7 +18251,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ef1212c8532702c939fb4880964d8bbf5c66b96b127083a672a0ad2a3078d909",
+      "calibrationFingerprint": "0a13e9ab8259ae1902a2ec1486a62ac645b6fe0da823f23b200938346c4225ad",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -18310,7 +18312,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "264a8fe96a292b9e8c61b461a0232c5a1ca08fedf8fc50b5b71726044c5ca78f",
+      "calibrationFingerprint": "3b222b654a6fcfdb8d1274f09ebc11adf51b71952ab17d5b79c07c0122847265",
       "owningFamilyStory": 15813,
       "owningModelStory": 15844,
       "evidence": {
@@ -18371,7 +18373,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "bbedc60877143a57da6da7f6c6697a96f25f289d03147e7c04aedd2a28b64dc2",
+      "calibrationFingerprint": "97b4aa1ac67ee63273422a9c428d279bf296f8e59659899bbc142010d560ab5d",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -18432,7 +18434,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2137860726df2cd99a9de2b9babebd5972a85df58e9993522034e9a4e477996c",
+      "calibrationFingerprint": "e6aab3d4b815b165a67c7653b4b1b84bb17baf7600f61b4ffa3fe50304d99c9a",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -18493,7 +18495,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "08e31a5d117b672721e689c1d2d6933b157489cfac21221ef8cdeb65176a45a6",
+      "calibrationFingerprint": "051c7a9db32fac6c44c9b202c5b9b2de111004804196c85be61a938f4d17591c",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -18554,7 +18556,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3eb62a2dd7134a13dfd922fbfb2589643e57a8be9d64e71164890d669a8cda61",
+      "calibrationFingerprint": "63a9001f080da31bd6256d272fb2117abb432a65c000f5837f0205de7c8d1961",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -18615,7 +18617,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c75327093f1ba1061b240b53de4f2a1487f0fcc9c9eed0d3870e1dedbd3c0313",
+      "calibrationFingerprint": "c51f8b2dd6706afac765d6ad81aaae9e1fbe3cb034527475fa91895d8d3765b4",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -18676,7 +18678,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "32e35e2e6d8fd3c7967b532901130d62b389ec87a880fe16f0291bfc78dd3312",
+      "calibrationFingerprint": "a150d7d58d5e872363c155b2c13e15939c301dce87ebf9eaab3311637a00bf3d",
       "owningFamilyStory": 15813,
       "owningModelStory": 15856,
       "evidence": {
@@ -18737,7 +18739,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6585c983120b3741a96f6e658af93584ec5a701d787cb0b4afa10b84a667d5a2",
+      "calibrationFingerprint": "087c3d96acc0873ca0406ad55f222206d2bdac077a67a30990836a2c9a851938",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -18798,7 +18800,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "99e9f088b80a55c5aeff1aeb264cdb51ae8519b27d71fff9fbae281f631e42f9",
+      "calibrationFingerprint": "f55a2178989a1b67253c651fc04d2ca9135f739eff314ef0ba64d4bfd239cab5",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -18859,7 +18861,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "003fd1892fdfd050e785cb9b64ac018f60aeaad364d7886bbf360a494dafb9cb",
+      "calibrationFingerprint": "5b8a34d16ade369fa5102ee2cca7484a77f26a8985f243d6028d811a6f2c85f3",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -18920,7 +18922,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2a33b22e52e6595d23e2d5d0f07ab9f4d92de7714fbd1c748e84669dd0bd1d18",
+      "calibrationFingerprint": "45ce15114a4e87c4deae85494c65fe49de67e316b42664a890d5f8bc9e304fb0",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -18981,7 +18983,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "211a8652c33e902bc18523636d5576b0b32deb1fa6f100486022fd534d6dbe82",
+      "calibrationFingerprint": "74683840b42d7e7954af13e64e9388cbafddbe839b0e4db7dd1550386acdf847",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -19042,7 +19044,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4e8ae639c7ee810fb9dbe4f689b920ce2a8b795c60325759a35c6cd2f0e04fd1",
+      "calibrationFingerprint": "363c0b87cf9f6118d931c1da113d4347d064c1c4044b73fd3da94c56c2ef3f3c",
       "owningFamilyStory": 15813,
       "owningModelStory": 15853,
       "evidence": {
@@ -19101,7 +19103,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3ac8a47019a64b150186c774778d0939b09ed9f3236e7ab08e4c6d52d667c039",
+      "calibrationFingerprint": "e8a8c89afa03aae954d4f90517fc8c9a82274d4ead2168ba2dd33f2c83aeb890",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -19151,7 +19153,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e806d13dfbc5992c7a92e33e146c6c28447299951314dca6555797f939042f8e",
+      "calibrationFingerprint": "fe1e2fee45e0cf472df7338afce3b8b1eb5ea71063adc32ac11ee6197c46cd48",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -19196,7 +19198,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7efc9d507e45c24ef3f2606904d217165feb3205e324f4cac8431e9b005475dc",
+      "calibrationFingerprint": "a9a37f7f94a5e280f3a08f863b12c76ba23724d6fa8633fb8b6dd9cd35e707fa",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -19248,7 +19250,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "5b7772ada9abd00bff9c89566bfc80dc4693d2d5487e793532da21ee7047c6d4",
+      "calibrationFingerprint": "d5037146d950d2ef643700a5ec182ac8824e14e1ebc8adb017429a7fb277f25d",
       "owningFamilyStory": 15817,
       "owningModelStory": 15871,
       "evidence": {
@@ -19298,7 +19300,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "52b2f380dbd1e3fee9d6bd9f4c74d7c358cf098d3a4f619bff7677c9e7568936",
+      "calibrationFingerprint": "697bb9dad0fc3040c5c55e0a4fb7fe61b7a2e57dc85cb942174dedd5743fa649",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -19348,7 +19350,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "2124df8765264f7d3e0bd082759146422574fe797768dfae534b4cf394e3b09f",
+      "calibrationFingerprint": "7e2f44fdfc94062ff6695f0a4d1c048cbd21539d48bafd94c6bf66b7004dae32",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -19400,7 +19402,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ff94c6811a66692a73132e6ef3f56e6084a62ba4740eeb15cc466bc67ec4a4d6",
+      "calibrationFingerprint": "a44b88406166c8dbffd9a33e50e304b1816c0bed7734a44e49245e66e69f9cd5",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "rung4Survey": {
@@ -19452,7 +19454,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "61a5b09b17949b98feb9b2e21e923073ea4b095d602021e8bf3a3775c93cf1a3",
+      "calibrationFingerprint": "6dc0eecc6fca466ec004109813dccfd461ae5e07c30a75f5e313975ce65373d3",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -19504,7 +19506,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "375e9733000fa1d1fc2193bd8df3fc7b46c0a21d1ad506820ea89300ca3e422e",
+      "calibrationFingerprint": "f8ca14008c3e6794b2eb55e3e83b3738e53f2724f58d007c97ddd30b47e956c7",
       "owningFamilyStory": 15817,
       "owningModelStory": 15868,
       "evidence": {
@@ -19554,7 +19556,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "ea7f1c997bcac26de5b6ca44870c8e0c03009524b7c8bbc0a1b89b715147f6c1",
+      "calibrationFingerprint": "6641d2a75df387d771b52a0ae289276a30e63e9ffd995e432000b0cca12f1bdc",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -19604,7 +19606,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "bfee1895ad96aea0782518ede43824dbd3743d84a52eee6ae4abec974a97df43",
+      "calibrationFingerprint": "334b60f6f4e114629f447cbe5694a8bd0bcbb31f7ca38f5e66d55f3b51f56da3",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -19656,7 +19658,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c0436810d2a28e2d092de7f3d2aa8e2dae76271de9f53573d0ead66db67e51b9",
+      "calibrationFingerprint": "8d006627a2fd0e4b88d2283e4934a44490e86fef2479ae8c7129e77b4c0260c6",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "rung4Survey": {
@@ -19708,7 +19710,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "434f82611d3cdd9802ecce68d16bcf307d107cde3fee84772aab6b0f322f859e",
+      "calibrationFingerprint": "9ba3be6dfedfac50fef3ab89acd5388e187b7b18ed680f2ac9f19fb025d4e156",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -19760,7 +19762,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4feced325e15a9a502cd25b238f26ebf32750e13339ee684f8585fb584166586",
+      "calibrationFingerprint": "4e022e2697926670a7e615d95d02fa82adb11819300aafa25185ce8121217af9",
       "owningFamilyStory": 15817,
       "owningModelStory": 15865,
       "evidence": {
@@ -19854,7 +19856,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 60.107455875724554,
-            "requiredHostBytes": 118174235580,
+            "requiredHostBytes": 107020977853,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -19942,7 +19944,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 61.176070876419544,
-            "requiredHostBytes": 119382195132,
+            "requiredHostBytes": 108928282409,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20055,7 +20057,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 15.021208003163338,
-            "requiredHostBytes": 67372825532,
+            "requiredHostBytes": 26808225146,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20096,44 +20098,20 @@
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
-        "measuredGeometries": [
-          "1024x1024"
-        ],
+        "status": "unmeasured",
+        "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "calibrationFingerprint": "f567d32d7569ebccad56d02a5e1ebc7804b897fea1c9e20c848021bf63958669",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/mlx/calibrations"
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
           }
         ],
-        "historicalVerification": [
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-b02affc9b539043fa62a",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-05T03:42:40Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "recordStatus": "complete",
-            "engagedRungs": [
-              "resident"
-            ],
-            "observedPeakGb": 64.83777242898941,
-            "requiredHostBytes": 123542944700,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          }
-        ],
+        "historicalVerification": [],
         "currentEnvironmentVerification": [],
         "strategyParameterVerification": [],
         "structural": [],
@@ -20159,52 +20137,33 @@
           "720x1280"
         ]
       },
-      "strategyParameters": {},
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
       "engagedRungs": [
         "resident",
         "staged_residency"
       ],
       "state": "Implemented/unverified",
       "memoryCharacterization": {
-        "status": "point",
-        "measuredGeometries": [
-          "1024x1024"
-        ],
+        "status": "unmeasured",
+        "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+      "calibrationFingerprint": "36652bcc32b5e7a9eb7ed2716fa8c13b8d0926819b406a12a8914ba9fa5996c1",
       "owningFamilyStory": 15511,
       "owningModelStory": 15459,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "config/manifests/builtin.models.jsonc#models/qwen_image/mlx/calibrations"
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
           }
         ],
-        "historicalVerification": [
-          {
-            "source": "docs/generated/memory-calibration-evidence.json#imc-7bae9f46b5088edbc313",
-            "hardware": "Apple M5 Max",
-            "tier": "bf16",
-            "geometry": "1024x1024",
-            "capturedAt": "2026-08-05T03:38:13Z",
-            "harnessVersion": "sceneworks-memory-v5",
-            "recordStatus": "complete",
-            "engagedRungs": [
-              "resident",
-              "staged_residency"
-            ],
-            "observedPeakGb": 49.88144441694021,
-            "requiredHostBytes": 106698619836,
-            "parity": {
-              "contract": "tolerance",
-              "result": "passed",
-              "metric": "maximum_absolute_error",
-              "maximumError": 0,
-              "fixture": "qwen-image-bf16-seed15511-step2"
-            }
-          }
-        ],
+        "historicalVerification": [],
         "currentEnvironmentVerification": [],
         "strategyParameterVerification": [],
         "structural": [],
@@ -20289,7 +20248,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 31.591832783073187,
-            "requiredHostBytes": 86029089724,
+            "requiredHostBytes": 56265484396,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20312,7 +20271,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 31.559531833976507,
-            "requiredHostBytes": 86029089724,
+            "requiredHostBytes": 56265484396,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20425,7 +20384,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20450,7 +20409,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20512,7 +20471,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "state": "Implemented/unverified",
+      "state": "Verified",
       "memoryCharacterization": {
         "status": "point",
         "measuredGeometries": [
@@ -20526,7 +20485,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
           }
         ],
         "historicalVerification": [
@@ -20544,7 +20503,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 41.03065839037299,
-            "requiredHostBytes": 96699399100,
+            "requiredHostBytes": 73113341306,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20567,7 +20526,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 41.06346574053168,
-            "requiredHostBytes": 96699399100,
+            "requiredHostBytes": 73113341306,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20577,7 +20536,31 @@
             }
           }
         ],
-        "currentEnvironmentVerification": [],
+        "currentEnvironmentVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-56c1f11bd03822d9c241",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-09T14:05:51Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "observedPeakGb": 41.03065839037299,
+            "requiredHostBytes": 73113341306,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.11764705882352941,
+              "fixture": "qwen-image-q8-seed16353-step2"
+            }
+          }
+        ],
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "qwen_image:mlx:q8"
@@ -20639,7 +20622,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "state": "Implemented/unverified",
+      "state": "Verified",
       "memoryCharacterization": {
         "status": "point",
         "measuredGeometries": [
@@ -20660,7 +20643,7 @@
       "evidence": {
         "staticImplementation": [
           {
-            "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
           }
         ],
         "historicalVerification": [
@@ -20680,7 +20663,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20705,7 +20688,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20715,7 +20698,33 @@
             }
           }
         ],
-        "currentEnvironmentVerification": [],
+        "currentEnvironmentVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-a21d2ea9e2d95cf48e82",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-09T14:08:53Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "complete",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "observedPeakGb": 14.880537204444408,
+            "requiredHostBytes": 26490341053,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0.11764705882352941,
+              "fixture": "qwen-image-q8-seed16353-step2"
+            }
+          }
+        ],
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "qwen_image:mlx:q8"
@@ -20797,7 +20806,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 12.346250977367163,
-            "requiredHostBytes": 64352926652,
+            "requiredHostBytes": 22039963756,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20883,7 +20892,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 13.815413568168879,
-            "requiredHostBytes": 66030648252,
+            "requiredHostBytes": 24688997862,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20994,7 +21003,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 4.702020397409797,
-            "requiredHostBytes": 55695883196,
+            "requiredHostBytes": 8370947773,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -21063,7 +21072,7 @@
               "resident"
             ],
             "observedPeakGb": 17.663539942353964,
-            "requiredHostBytes": 70325615548,
+            "requiredHostBytes": 31470525171,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -21134,7 +21143,7 @@
               "staged_residency"
             ],
             "observedPeakGb": 4.739408511668444,
-            "requiredHostBytes": 55762992060,
+            "requiredHostBytes": 8476909137,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -21379,7 +21388,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "0d5e35199dd2836690abd93b8ceb6d77bf7b2cb3c29a2bc3a292ef478c1eef80",
+      "calibrationFingerprint": "42352f5f83b421b365a3099c1c590c235557b372949ce30ddc5ab216ead8b96b",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -21431,7 +21440,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "37f962c709d9a32a596879136a1f22f88278df14b5db404094917a2e600fb921",
+      "calibrationFingerprint": "21e869d74fd3e4255b53974760f66cb06d94ff24bd51c90443b5cfd55f5fd127",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -21676,7 +21685,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "8461ee1f6b76cc55e61e124639762b0ac0b7155f16f7f1f2c27772f76a51b1dc",
+      "calibrationFingerprint": "767e6ee0c6d6c99cdd8b46f823fdbdd38c51165cca8c897cbc1490fd635bc7b9",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -21728,7 +21737,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "4ee12f70fddd00b43ad4507730ea0cb922d5cbfd65a3d3774d28f8c46f24acf6",
+      "calibrationFingerprint": "60097110c581db6d49d9501dc0ada4700cd43ca2a72da00258f5a4d1485a5af4",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -21973,7 +21982,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "06ee532fde3a7bf326237f1535900c232c2188ac4d7534a09e3546b3f244b76e",
+      "calibrationFingerprint": "6680268692c106c277915d1fa4b27f32f89559f1aefa30c1fc17c678df2f9b97",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -22025,7 +22034,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "dd4b21ac86d7d6c322ea9566f7e65fd36efd56847dbcf1629e61bb4c005b4ec2",
+      "calibrationFingerprint": "5a90b3ac63e5f870df0e5dd3233b9320ce8febe02647bcf4ef1d7904ebecc706",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -22270,7 +22279,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6bed09b1bfa97510dccfc00767653475e02a6b08fd738167e0bd295ac17f6e2b",
+      "calibrationFingerprint": "8b66ec37aa795730c4a7504259b28b31292ddfd8a0bb596dc01b69dd5d54f4b1",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -22322,7 +22331,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "52ee694710a6ec37ea8f427f8f510dfcfd19ff6927791c5e252acfb043eb0ec5",
+      "calibrationFingerprint": "c6de5da169aa3397f825cfeb417249487f93ff330cceb0268c92b76a7cc034c9",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -22567,7 +22576,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "51ea7c52517a37fc844f7f026481d36af1dbd3e0bcbd93970a786e71045acdd5",
+      "calibrationFingerprint": "53833b85d8673058780216ca58aa57d0822f0071ac4e086405ce330f38383a7c",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -22619,7 +22628,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "f1a43ce58a7a9bd0f702e2507a4026287c4db270d5a3a4bd84710b2eb89e900d",
+      "calibrationFingerprint": "eb032e188eea068cddebd6ceb6019e1b49d75ae88155713d6dfeb762d509eb44",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -22864,7 +22873,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b6e5f66b60170d10e5abc7bd2f0e013bbef914dd1e7704206652607e73d05318",
+      "calibrationFingerprint": "7b43bd4cee52d1becf544f7977d2c7aa677e6aedeefdc54a6628238b0187a404",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -22916,7 +22925,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3549ed55dee11c1409f2051001fa04b84c4cf9ffc5603a8ed5f73d4674d72471",
+      "calibrationFingerprint": "e0afc541b0131db945e7e95adab5ce2588a4c4d7c2abfb83177a10a3f8d51619",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23161,7 +23170,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "853932d28cfda2e236c62f1bbacdc48303be64fff145ebd24a790ea78e73ec53",
+      "calibrationFingerprint": "e6d693160eb92ec5434dba156321d7d6908e816c03df7504ad233257a584ed50",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23213,7 +23222,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "fd53222e735c2787c3e91801d9e5f351e8ac90668806ed5844a1e2923d9645a8",
+      "calibrationFingerprint": "07274bc3e946108f2d10dfe3ab0d6755f9f2d44c11ed78bd5e442617e87cca9b",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23458,7 +23467,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "96d3ba045495730771a9355ac3805677bdbe92652d9bc8fef5d9981cc47e44e5",
+      "calibrationFingerprint": "7ab84e81b6308c11e4621538ab66155421e2d1f5650e03b8eb118022d9fba88b",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23510,7 +23519,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "15043c2066a0dfd814631642769424d1e103884f298bf6dd3e1f021d344fca75",
+      "calibrationFingerprint": "606021b20523fcd463b8b91c4ff125726b0a6b03c5b1c29a669b8d9993421f65",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23755,7 +23764,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3d1df0fe4dc67ff738cb6ea86b407fe5a1beb2e56aed773ec8ff7786d43b801e",
+      "calibrationFingerprint": "ee3e1c17487a0a4f6d95138e10560557c594b602d4e57160fe1552f685a283a0",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -23807,7 +23816,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "133eeed00217575026e596d88710e91731f171ba756c4fcaa0143b7688827883",
+      "calibrationFingerprint": "9f774f412cb101105d7aa077f805dd2be64dcb383034d5abdf1a7aa3729ce4b1",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24052,7 +24061,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "42d16d1260acb1a8db7312eafc9287ff433f1c87be7ac55742ffdde571103cdd",
+      "calibrationFingerprint": "52bae8d9d37ba8e4b15ca86badec2f4f04a451a4349e73ee73d16f84b7af2742",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24104,7 +24113,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "712fd269d79a4b1506a7a3a61c5271e536b1559b4f77689638ede0f5f10b2034",
+      "calibrationFingerprint": "c63d126f26bc300a8c7769c474794e701f4b509f59917688485426ff2c4a5cd9",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24349,7 +24358,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "eeb46134307e3cf30e95233ee35c767dbd741c2eb9b7be39ec5b72996db1207e",
+      "calibrationFingerprint": "9c8bb063741a2477d15767c766c51b01cb3567504c2bb9997fe472ccf4920929",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24401,7 +24410,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "c997bcecf52f5f5eb1b3f5af40f57ae7618015bb74bf9db169105de3b0d71669",
+      "calibrationFingerprint": "d5634d1a42bced4c24d36ca609f62013e97615b4103ce3ec6aeeb48a174dcb53",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24646,7 +24655,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "7ce16df3341b3c6469a6c932651088875a6019910c13c3e4dc66f5a239086934",
+      "calibrationFingerprint": "e8cfff50a53b1c3326f626095ca47c9a713ded4f14b558fb632b217f56775866",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24698,7 +24707,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "6d156aa5010110f315f97ddbcf9400b3f36742194585e5c89c70cd8aba6acd94",
+      "calibrationFingerprint": "e19ea2fd58ec60fc75ddb3a35b069416a37b019649e4a96e626aa47afeb23aff",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24943,7 +24952,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "a7276b8f6774c7a70cef399da02e255560f8f88d058ffab3d13fc1ba5daa68b1",
+      "calibrationFingerprint": "f8ee88910ba0ed86ef1e062ca3a3d84a415f24d387ec267dba421244a132a77f",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -24995,7 +25004,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "340d8885ddb1f3e95978c467db9ad8ca5afb77922c633184e2b8afc1790cd39b",
+      "calibrationFingerprint": "5ecdb0d3cc3352197f1d5d400915f267c864f45a89410b25532cc25eb7a43b38",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25240,7 +25249,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "e06ba638c57d9af9c1b3f29f95f2b5d7aed4a07703ef5e0ce7fab1d865d8df1b",
+      "calibrationFingerprint": "52b3d5b43e1c24cc6b079fcb4f29ceebb6ea578d7f1c41a6472d3fd422085ba0",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25292,7 +25301,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "056bff1ffff3f50b4f82bb3a96585a53b1e9148800cc633255f1d9056038dced",
+      "calibrationFingerprint": "3025b18cd56af1f416b91f964e4e9053ead6c4ba643cf7d9f50c8be9e1c62278",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25537,7 +25546,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "51ae1aad4560b2677242a151dec3fc5eadb9edb7081105a4567cd0d05e27bb64",
+      "calibrationFingerprint": "fe644bb598be76d6808c8dc42aa9778536d61648fd8975fa00fc3a766af37613",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25589,7 +25598,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9a3c4b409ecc02912fe042f0165d7758c6b4918748488d38ec7d9d1326c5d948",
+      "calibrationFingerprint": "e1273e392ae22bec272e9a593488a12375d4c1a4b46d2fb83915c948ba5c08ea",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25834,7 +25843,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "45c5573aa874a94cd37d686df85732b2fadaa02da0b5eae22b37f10c4b312a8e",
+      "calibrationFingerprint": "3aca891b841eb51036c9d96f593714666a55fc2753a5ebeadd9c82e7a6b1ae85",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -25886,7 +25895,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "abe349700c36712859e0f93cdc2558ae1b3375a22147f2fb3f84fdd7ca37d27c",
+      "calibrationFingerprint": "4075f5ea4e5f0e4bd8458f17859ceaa4fe623b41a3e447ef83f59e9b41ef3989",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26131,7 +26140,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "b9d3b102ae5eb6b3cdb9f0296317787dfa6b2dc29899f2ca45965669a75f5842",
+      "calibrationFingerprint": "8cd7de0b773e0fae22b466505d3d6968c3d0ea77e7103f39503648ba190cce4e",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26183,7 +26192,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "3d14696441fb9ba6868171de2da798771481f8f52267d6181f52b09c641f92ff",
+      "calibrationFingerprint": "f2fba7f3ee16496460ac6da8a48c2529736c895641bad4607676ba546115646d",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26428,7 +26437,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "9c057e7a42150f5d8002c3de80609828a99e0f959dbe284f308ca0b6a563aac8",
+      "calibrationFingerprint": "3145225815688e25fae789e6507dfd62d8a90608d8337dfe2823acf35c41353c",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26480,7 +26489,7 @@
         "measuredGeometries": [],
         "coveredPixelBound": null
       },
-      "calibrationFingerprint": "215568a902e168c65d6dc930b58cd46546ea2bdf7cc1a16472228abf7c32a5eb",
+      "calibrationFingerprint": "69ed481ef536f293f93033fbff342c83c53a6267fca2989e7d3e7eaf846f40c9",
       "owningFamilyStory": 15815,
       "owningModelStory": 16170,
       "evidence": {
@@ -26536,9 +26545,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26585,9 +26594,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26637,9 +26646,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26688,9 +26697,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325",
             "dirty": false,
-            "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-            "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325"
+            "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26738,9 +26747,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
             "dirty": false,
-            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26789,9 +26798,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26841,9 +26850,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26891,9 +26900,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26940,9 +26949,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "d355971eb9ecdf2fc80da02703c4de32c42223300636d8386296350551c2f1b8"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -26990,9 +26999,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27041,9 +27050,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27089,9 +27098,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27141,9 +27150,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
             "dirty": false,
-            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27192,9 +27201,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27203,6 +27212,56 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-516df6318c8f92cc63af"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "current",
+      "record": {
+        "id": "imc-56c1f11bd03822d9c241",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "bounded_attention",
+          "engagedRungs": [
+            "resident",
+            "bounded_decode",
+            "bounded_attention"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-09T14:05:51Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "dirty": false,
+            "revision": "40fa7583a01974617e2a7275052d6d446688c956"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:d7f313b635435309b547206faa6526e272735d41b47e6c903ec928cb29bd24fa",
+            "revision": "4a649d9c46e8b56b232422cb92550028108b44c9"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-56c1f11bd03822d9c241"
       }
     },
     {
@@ -27244,9 +27303,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27295,9 +27354,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27346,9 +27405,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27397,9 +27456,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325",
             "dirty": false,
-            "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a",
-            "closureDigest": "3064f6753543f0b26f0dbb2c41221a0ec04422fa7f21fda881a80d2017d2a325"
+            "revision": "96b13b6630132410a29ae1bcdf4d8738db7af28a"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27446,9 +27505,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27498,9 +27557,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27549,9 +27608,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27597,9 +27656,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27648,9 +27707,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27696,9 +27755,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "dirty": false,
-            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27748,9 +27807,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27800,9 +27859,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27852,9 +27911,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27904,9 +27963,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -27920,8 +27979,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:staged_residency",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -27953,9 +28014,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28002,9 +28063,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "dirty": false,
-            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28051,9 +28112,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "dirty": false,
-            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28103,9 +28164,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28153,9 +28214,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28205,9 +28266,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28257,9 +28318,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
             "dirty": false,
-            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28307,9 +28368,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59",
             "dirty": false,
-            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be",
-            "closureDigest": "3b59da7a8fca3c5fd42171678cbe9d169bf047d8d521030288f2c003e62fcc59"
+            "revision": "8ffa211aca4f71b37aa874c197360c9d7c1e89be"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28359,9 +28420,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28409,9 +28470,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28460,9 +28521,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "dirty": false,
-            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28510,9 +28571,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28562,9 +28623,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28614,9 +28675,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28625,6 +28686,58 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-9ebaf1d655dbf922e137"
+      }
+    },
+    {
+      "cellId": "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "current",
+      "record": {
+        "id": "imc-a21d2ea9e2d95cf48e82",
+        "status": "complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "qwen_image",
+          "overlay": "none",
+          "provider": "qwen_image",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "bounded_transformer_residency",
+          "engagedRungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+        "capturedAt": "2026-08-09T14:08:53Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "dirty": false,
+            "revision": "40fa7583a01974617e2a7275052d6d446688c956"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:d7f313b635435309b547206faa6526e272735d41b47e6c903ec928cb29bd24fa",
+            "revision": "4a649d9c46e8b56b232422cb92550028108b44c9"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-a21d2ea9e2d95cf48e82"
       }
     },
     {
@@ -28666,9 +28779,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28717,9 +28830,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "dirty": false,
-            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28733,8 +28846,10 @@
     {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:resident",
       "binding": {
-        "eligible": true,
-        "reasons": []
+        "eligible": false,
+        "reasons": [
+          "fingerprint-mismatch"
+        ]
       },
       "semantics": "historical",
       "record": {
@@ -28765,9 +28880,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28813,9 +28928,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "dirty": false,
-            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28863,9 +28978,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "dirty": false,
-            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28912,9 +29027,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -28961,9 +29076,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "dirty": false,
-            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29015,9 +29130,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29067,9 +29182,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29119,9 +29234,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29168,9 +29283,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29218,9 +29333,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29272,9 +29387,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29322,9 +29437,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "28e1ee17ae14150cf7d82c4179f13193d1e474d27bca1faeee85dab1b7ad5b5f"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29373,9 +29488,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad",
             "dirty": false,
-            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51",
-            "closureDigest": "3241b636113e3687dee4ffb6070ecc99e4ab48a66e343f303c3f7048a436cdad"
+            "revision": "5f973a73bf00307240afd81d2778ba9d89349e51"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29423,9 +29538,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc",
             "dirty": false,
-            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482",
-            "closureDigest": "5b9092c67e0f7954999491b3ff4ec5880da6c6c12411aa09d04eea5df663f1cc"
+            "revision": "d48023204cd3a4f3f8eb060f79803dccaddcb482"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29475,9 +29590,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29526,9 +29641,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29577,9 +29692,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374",
             "dirty": false,
-            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d",
-            "closureDigest": "54a7b45b03eb8301e6e85fd1d67558d007ebe5031eb491fe25e95b8f081f4374"
+            "revision": "fbb00d6b4147bd220fe324050534708c12fb022d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29629,9 +29744,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4",
             "dirty": false,
-            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d",
-            "closureDigest": "d5c3c9abd4e31920a0e0c0c0a5ad538f1fd10b860ed06d6910db8d3ab1b1d5e4"
+            "revision": "5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29681,9 +29796,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29732,9 +29847,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e",
             "dirty": false,
-            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb",
-            "closureDigest": "fc7f6cd8ff9543881609ca0c408685e197ddf8c2b6e8738a216799e26d0ac66e"
+            "revision": "1244b82ff81882cfdd4801f3a5d59355e77c67eb"
           },
           "sceneWorks": {
             "dirty": false,
@@ -29784,9 +29899,9 @@
         "harnessVersion": "sceneworks-memory-v5",
         "repositories": {
           "inference": {
+            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb",
             "dirty": false,
-            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7",
-            "closureDigest": "1b3162fefab861e5191839e2e033f8c39f97a0f20b192484c60e724da88823eb"
+            "revision": "7fbcb4a2e1513f3be945d9e980b412617c04e9e7"
           },
           "sceneWorks": {
             "dirty": false,

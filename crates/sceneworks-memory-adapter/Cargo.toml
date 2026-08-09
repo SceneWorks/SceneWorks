@@ -12,15 +12,15 @@ serde_json = "1.0"
 # SC-18218 development-only pin to inference PR #531. Repin these four MLX dependencies to the
 # merged inference revision before the first capture; keeping one revision avoids cross-revision
 # gen-core types inside the adapter binary.
-mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "b182e191ad9436ffac6c79f86960b5842573daab", optional = true }
-mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "b182e191ad9436ffac6c79f86960b5842573daab", optional = true }
-mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "b182e191ad9436ffac6c79f86960b5842573daab", optional = true }
+mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
+mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
+mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "932beb4e60db44d378ffa1fe648defea59b5cbd0", optional = true }
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "b182e191ad9436ffac6c79f86960b5842573daab", optional = true }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", features = ["cuda", "testkit"], optional = true }
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "40fa7583a01974617e2a7275052d6d446688c956", optional = true }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", features = ["cuda", "testkit"], optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 
 [features]
 default = []
