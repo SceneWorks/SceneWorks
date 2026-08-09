@@ -1,8 +1,8 @@
 /**
  * Semantic source bodies for generated-artifact provenance (sc-16268; extends sc-16129).
  *
- * `docs/generated/memory-matrix.*` and `docs/generated/calibration-cost-model.json` stamp a
- * `source-tree:<sha256>` fingerprint over the sources they are derived from. That fingerprint is a
+ * `docs/generated/memory-matrix.*` stamps a
+ * `source-tree:<sha256>` fingerprint over the sources it is derived from. That fingerprint is a
  * STALENESS TRIPWIRE — evidence captured under a different SceneWorks revision is not "current" — so
  * it deliberately covers the WHOLE source, not just the handful of values the generators parse out
  * of it. A change to `HEADROOM_GB`, which no generator parses but every memory number depends on,

@@ -148,6 +148,11 @@ export const EXTRA_COMPATIBLE_LORA_FAMILIES = {
   "flux2-klein": ["flux2"],
   "flux2-dev": ["flux2"],
   "krea-realtime": ["wan-video"],
+  // sc-18200: SCAIL-2's DiT is Wan2.1-I2V-14B-derived and ships the raw I2V module names, so Wan
+  // LoRAs resolve against it — the bundled `scail2_lightning` speed toggle IS a lightx2v Wan2.1-I2V
+  // adapter. Mirrored here for the same reason as the entries above: without it the picker would be
+  // stricter than the backend and hide a Wan LoRA the job-creation gate now accepts on SCAIL-2.
+  scail2: ["wan-video"],
 };
 
 // Every LoRA family `model` can load: the families it declares plus their

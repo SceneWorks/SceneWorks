@@ -281,6 +281,55 @@ test("complete status fails closed on scenario, quality, mutation, memory and lo
   }
 });
 
+// sc-18100: rehomed from `sc-15823-flux1-evidence.test.mjs`, which was the ONLY coverage of these
+// three `validateRuntimeComplete` rejection paths. They gate the SURVIVING harness, not the deleted
+// one-shot, so deleting that file without this test would have dropped the gates silently.
+test("runtime-complete fails closed on promoted lifecycle scenarios, overlay targets and extra cases", () => {
+  // A runtime-complete record attests only that the rung ran. Promoting an unexercised lifecycle
+  // scenario to `passed` is the overclaim the status exists to prevent.
+  for (const name of ["warm_repeat", "cancel", "error"]) {
+    const record = runtimeComplete();
+    record.scenarios.find((scenario) => scenario.name === name).result = "passed";
+    record.id = recordId(record);
+    assert.throws(() => validateRecord(record), new RegExp(`${name} must remain explicitly not_run`));
+  }
+
+  // Runtime-complete evidence is base-only: an overlay coordinate may never be attested this way.
+  const overlay = runtimeComplete();
+  overlay.target.overlay = "identity";
+  overlay.logicalCaseId = logicalCaseId(overlay);
+  overlay.id = recordId(overlay);
+  assert.throws(() => validateRecord(overlay), /base-only none overlay/);
+
+  // Exactly one passed case, and it must be the strategy's own parameters — a second case would
+  // silently widen the attested domain, a mismatched one would attest a different configuration.
+  const secondCase = runtimeComplete();
+  secondCase.sweep.cases.push({ parameters: { unexpected: 1 }, result: "passed" });
+  assert.throws(
+    () => validateRecord(secondCase),
+    /exactly one passed case matching its strategy parameters/,
+  );
+  assert.throws(
+    () => validateBundle({
+      schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [secondCase],
+    }),
+    /schema validation failed: .*sweep\.cases: array has too many items/,
+  );
+
+  const mismatch = runtimeComplete();
+  mismatch.sweep.cases[0].parameters = { unexpected: 1 };
+  assert.throws(
+    () => validateRecord(mismatch),
+    /exactly one passed case matching its strategy parameters/,
+  );
+  assert.throws(
+    () => validateBundle({
+      schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [mismatch],
+    }),
+    /exactly one passed case matching its strategy parameters/,
+  );
+});
+
 test("range axes derive exactly from passed cases and contain exact strategy parameters", () => {
   const unrun = complete();
   unrun.sweep.axes[0].testedValues.push(640);
@@ -1540,6 +1589,27 @@ test("the promoted evidence bundle carries the current harnessVersion", async ()
   );
   assert.equal(bundle.harnessVersion, HARNESS_VERSION);
   validateBundle(bundle);
+});
+
+// sc-18100: rehomed from `sc-15823-flux1-evidence.test.mjs`, which bound only ITS ten FLUX.1 logs to
+// their recorded hashes. The bundle's whole point is that a record is traceable to immutable captured
+// output, so the gate belongs to the bundle, not to one campaign's script. Generalised: a missing or
+// edited log now fails for every campaign, and no per-campaign census has to be hand-maintained.
+test("every committed source session binds an immutable log whose bytes match its recorded hash", async () => {
+  const root = new URL("../", import.meta.url);
+  const bundle = JSON.parse(
+    await readFile(new URL("docs/generated/memory-calibration-evidence.json", root)),
+  );
+  const sessions = bundle.sourceSessions ?? [];
+  assert.ok(sessions.length > 0, "the shipped bundle must carry source sessions to bind");
+  for (const session of sessions) {
+    const bytes = await readFile(new URL(session.sourcePath, root));
+    assert.equal(
+      createHash("sha256").update(bytes).digest("hex"),
+      session.stdoutSha256,
+      `${session.sourcePath} no longer hashes to the stdoutSha256 recorded for ${session.id}`,
+    );
+  }
 });
 
 // -----------------------------------------------------------------------------------------------
