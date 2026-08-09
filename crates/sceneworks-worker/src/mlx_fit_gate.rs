@@ -7993,7 +7993,7 @@ mod tests {
     const LENS_BF16_TEXT_ENCODER_DISK_BYTES: u64 = 4_845_744_456 + 4_774_186_632 + 4_154_656_824;
     const LENS_BF16_TEXT_ENCODER_RESIDENT_BYTES: u64 = (30.07 * BYTES_PER_GIB).ceil() as u64;
 
-    fn resident_only_audit_routes() -> [ResidentOnlyAuditRoute; 14] {
+    fn resident_only_audit_routes() -> [ResidentOnlyAuditRoute; 20] {
         [
             ResidentOnlyAuditRoute {
                 manifest_id: "chroma1_base",
@@ -8038,6 +8038,41 @@ mod tests {
                 resident_only_tiers: &[],
             },
             ResidentOnlyAuditRoute {
+                manifest_id: "boogu_image",
+                provider_id: "boogu_image",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "boogu_image_turbo",
+                provider_id: "boogu_image_turbo",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "boogu_image_edit",
+                provider_id: "boogu_image_edit",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "ideogram_4",
+                provider_id: "ideogram_4",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "ideogram_4_turbo",
+                provider_id: "ideogram_4_turbo",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
                 manifest_id: "flux_schnell",
                 provider_id: "flux1_schnell",
                 control_bytes: FLUX1_CONTROL_BYTES,
@@ -8049,6 +8084,13 @@ mod tests {
                 provider_id: "flux1_dev",
                 control_bytes: FLUX1_CONTROL_BYTES,
                 activation_anchor_bytes: Some(15_096_810_046),
+                resident_only_tiers: &[],
+            },
+            ResidentOnlyAuditRoute {
+                manifest_id: "flux2_dev",
+                provider_id: "flux2_dev",
+                control_bytes: 0,
+                activation_anchor_bytes: None,
                 resident_only_tiers: &[],
             },
             ResidentOnlyAuditRoute {
@@ -8108,6 +8150,18 @@ mod tests {
             .expect("sparse fixture size");
     }
 
+    fn shipped_download_tier<'a>(model: &'a Value, download: &'a Value) -> &'a str {
+        if let Some(variant) = download["variant"].as_str() {
+            return variant;
+        }
+        match model["mlx"]["quantize"].as_u64() {
+            Some(4) => "q4",
+            Some(8) => "q8",
+            None | Some(0) => "bf16",
+            Some(other) => panic!("unsupported shipped mlx.quantize tier {other}"),
+        }
+    }
+
     /// sc-18251 resident-only audit: drive shipped asset sizes, real control-overlay bytes, and
     /// provider-owned Lens/activation facts through the production request-plan and selector cores.
     ///
@@ -8148,7 +8202,23 @@ mod tests {
                             route.manifest_id
                         )
                     });
-                let tier = download["variant"].as_str().unwrap_or("bf16");
+                let tier = shipped_download_tier(model, download);
+                if download["variant"].is_null() {
+                    match model["mlx"]["quantize"].as_u64() {
+                        Some(bits @ (4 | 8)) => assert_eq!(
+                            tier,
+                            format!("q{bits}"),
+                            "{} unlabelled download must use its production mlx.quantize tier",
+                            route.manifest_id
+                        ),
+                        None | Some(0) => assert_eq!(
+                            tier, "bf16",
+                            "{} unlabelled dense download must remain bf16",
+                            route.manifest_id
+                        ),
+                        Some(other) => panic!("unsupported shipped mlx.quantize tier {other}"),
+                    }
+                }
                 if tier == "training"
                     || (!route.resident_only_tiers.is_empty()
                         && !route.resident_only_tiers.contains(&tier))
@@ -8334,9 +8404,8 @@ mod tests {
 
         assert_eq!(
             audited_cells.len(),
-            39,
-            "the audit must retain 34 Chroma/SD3/FLUX tier-routes plus the five clean unmeasured \
-             Lens/Lens-Turbo tiers"
+            51,
+            "the audit must retain every shipped resident-only tier-route"
         );
         for expected in [
             ("lens", "lens", "q8"),
@@ -8374,72 +8443,67 @@ mod tests {
         );
     }
 
-    /// Platform-neutral source binding for the audit inventory. The shipped manifest is the
-    /// executable export of the pinned provider contracts and artifact matrix; checking every route
-    /// and tier here catches a newly shipped family/tier without depending on the macOS-only runtime
-    /// catalog. The budget test separately makes control and Lens accounting mutation-sensitive.
+    /// Source-bound completeness gate for compatibility-default image providers. This joins the
+    /// shipped manifest to the worker's production model table and the pinned runtime registry; a
+    /// newly shipped image provider with no adopted memory contract is therefore discovered here
+    /// automatically and must be present in the resident-only budget audit above.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn shipped_resident_only_audit_inventory_matches_the_manifest() {
+    fn shipped_generic_image_routes_using_compatibility_default_are_audited() {
+        use std::collections::HashSet;
+
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             include_str!("../../../config/manifests/builtin.models.jsonc"),
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
         let routes = resident_only_audit_routes();
-        assert_eq!(
-            routes.len(),
-            14,
-            "all shipped resident-only-capable families"
-        );
-        assert_eq!(
-            routes
-                .iter()
-                .map(|route| (route.manifest_id, route.provider_id))
-                .collect::<Vec<_>>(),
-            vec![
-                ("chroma1_base", "chroma1_base"),
-                ("chroma1_flash", "chroma1_flash"),
-                ("chroma1_hd", "chroma1_hd"),
-                ("sd3_5_large", "sd3_5_large"),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo"),
-                ("sd3_5_medium", "sd3_5_medium"),
-                ("flux_schnell", "flux1_schnell"),
-                ("flux_dev", "flux1_dev"),
-                ("flux2_klein_9b", "flux2_klein_9b"),
-                ("flux2_klein_9b", "flux2_klein_9b_edit"),
-                ("flux2_klein_9b_kv", "flux2_klein_9b_kv_edit"),
-                ("flux2_klein_9b_true_v2", "flux2_klein_9b"),
-                ("lens", "lens"),
-                ("lens_turbo", "lens_turbo"),
-            ]
-        );
-        for route in routes {
-            let model = models
-                .iter()
-                .find(|model| model["id"] == route.manifest_id)
-                .unwrap_or_else(|| panic!("shipped {} manifest entry", route.manifest_id));
-            let inference_tiers = model["downloads"]
-                .as_array()
-                .expect("downloads")
-                .iter()
-                .filter_map(|download| download["variant"].as_str())
-                .filter(|tier| *tier != "training")
-                .collect::<Vec<_>>();
-            for tier in route.resident_only_tiers {
-                assert!(
-                    inference_tiers.contains(tier),
-                    "{} resident-only tier {tier} must still ship",
-                    route.manifest_id
-                );
+        let adopted = crate::inference_runtime::media()
+            .memory_strategy_registrations()
+            .map(|registration| registration.provider_id)
+            .collect::<HashSet<_>>();
+        let mut compatibility_default_routes = Vec::new();
+
+        for model in models.iter().filter(|model| model["type"] == "image") {
+            let Some(manifest_id) = model["id"].as_str() else {
+                continue;
+            };
+            let Some(resolved) = crate::engines::mlx_model(manifest_id) else {
+                continue;
+            };
+            let provider_id = resolved.engine_id();
+            if adopted.contains(provider_id) {
+                continue;
             }
-            if route.manifest_id.starts_with("chroma") || route.provider_id.starts_with("flux") {
-                assert!(
-                    route.control_bytes > 0,
-                    "{} conditional resident-only route must price its control overlay",
-                    route.provider_id
-                );
-            }
+            compatibility_default_routes.push((manifest_id, provider_id));
+            let route = routes
+                .iter()
+                .find(|route| route.manifest_id == manifest_id && route.provider_id == provider_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "shipped generic image route {manifest_id} ({provider_id}) uses the \
+                         production compatibility-default Resident-only contract but is missing \
+                         from the audit"
+                    )
+                });
+            assert!(
+                route.resident_only_tiers.is_empty(),
+                "compatibility-default route {manifest_id} ({provider_id}) is Resident-only for \
+                 every shipped inference tier"
+            );
+            assert_eq!(
+                crate::inference_runtime::media()
+                    .activation_memory_bytes_1024(provider_id)
+                    .expect("known shipped provider"),
+                route.activation_anchor_bytes,
+                "the audit must carry the production activation fact for {provider_id}"
+            );
         }
+
+        assert!(
+            !compatibility_default_routes.is_empty(),
+            "the registry/manifest join must discover compatibility-default image routes"
+        );
     }
 
     /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core

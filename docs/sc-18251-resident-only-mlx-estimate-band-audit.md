@@ -33,7 +33,8 @@ It uses the production seams rather than treating physical host capacity as the 
 4. `CandidateBasis::EstimateFloor` widens the remaining incremental estimate by
    `MLX_ESTIMATE_MARGIN` (0.10).
 
-For the ordinary unanchored 1024x1024 routes, the incremental raw estimate is 16 GiB: the remaining
+For the ordinary unanchored 1024x1024 routes, including the compatibility-default Boogu, Ideogram,
+and FLUX.2-dev providers, the incremental raw estimate is 16 GiB: the remaining
 2 GiB fixed OS/app allowance plus the generic 14 GiB activation transient. Thus a 48 GiB SD3 q8 load
 has roughly 16.9 GiB left after its assets and the legacy reserve: 16 GiB fit before the epic, while
 17.6 GiB does not. The Chroma bf16 rows have roughly 16.4 GiB left after adding the exact 3.988 GiB
@@ -51,23 +52,37 @@ inside the 10% band at the audited host sizes.
 
 The audit reads the shipped `estimatedSizeBytes`/`diskSizeBytes` values directly from
 `config/manifests/builtin.models.jsonc`, injects the exact provider-owned activation and Lens
-footprint facts exported by the pinned inference sources, and evaluates all 39 resident-only tier
+footprint facts exported by the pinned inference sources, and evaluates all 51 resident-only tier
 routes at 48/64/96/128 GiB. The injected seam is the platform-neutral core of the production request
 planner: macOS obtains the same facts from its registry, while the default Linux workspace (which
 intentionally has an empty media registry) runs the complete audit deterministically.
+
+The three Boogu downloads do not carry a `variant` field. Their production tier comes from each
+manifest model's `mlx.quantize: 8`, so the audit scores them as the shipped Q8 artifacts instead of
+silently treating them as bf16. Ideogram Turbo's manifest sizes already include its load-time Turbo
+LoRA where shipped, and those complete artifact sizes flow through the same filesystem-backed
+production planner core as every other route. The six compatibility-default providers have no
+provider activation anchor at the pinned inference revision, so they correctly use the generic
+14 GiB activation transient plus the fixed 2 GiB allowance.
 
 | Family / routes | Shipped asset range | Resident-only condition | Band result |
 | --- | ---: | --- | --- |
 | Chroma: `chroma1_base`, `chroma1_flash`, `chroma1_hd` | 18.07-29.59 GiB including the 3.988 GiB control branch | a control overlay disables conditional optimized legs | all three bf16 variants flip at 48 GiB |
 | SD3: `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` | 22.55-36.13 GiB | Turbo/Medium lack exact calibration; Large also fails closed when its exact artifact or clean/streamable conditions are absent | q8 Large and Large-Turbo flip at 48 GiB only |
+| Boogu: `boogu_image`, `boogu_image_turbo`, `boogu_image_edit` | 21.775 GiB | the pinned providers have no adopted memory contract and use the worker's Resident-only compatibility default | no flips |
+| Ideogram: `ideogram_4`, `ideogram_4_turbo` | 14.343-51.000 GiB | the pinned providers have no adopted memory contract and use the worker's Resident-only compatibility default | no flips |
 | FLUX.1: `flux1_schnell`, `flux1_dev` | 12.94-35.42 GiB including the 3.988 GiB control branch | a control overlay disables conditional optimized legs | no flips |
+| FLUX.2 dev: `flux2_dev` | 31.292-105.239 GiB | the base provider has no adopted memory contract and uses the worker's Resident-only compatibility default | no flips |
 | FLUX.2 Klein: base/edit/KV provider routes | 24.67-39.89 GiB including the 7.667 GiB control branch | a control overlay disables conditional optimized legs; a non-adopting registered route uses the worker's Resident-only compatibility contract | no flips |
 | Lens: clean Base q8/bf16 and Turbo q4/q8/bf16 | 20.33-45.79 GiB after bf16 materialization | entry/tier cross-products are unmeasured; Turbo bf16's optimized contract additionally requires Sequential | no flips |
 
-`shipped_resident_only_audit_inventory_matches_the_manifest` pins the route/tier inventory to the
-shipped manifest without consulting a platform-only registry. Video and utility providers without
-an image `MemoryProviderContract`, and the custom FLUX.2-dev edit safety path, are outside the generic
-selector seam rather than silently counted as passing rows.
+`shipped_generic_image_routes_using_compatibility_default_are_audited` is the source-bound
+completeness gate. On macOS it joins every shipped image manifest entry through the production
+`MODEL_TABLE` to the pinned runtime's memory-strategy registrations. Any newly shipped generic image
+provider without an adopted contract is discovered automatically and fails unless the budget audit
+covers it; the test also binds the route's activation fact to the production registry. The custom
+`flux2_dev_edit` safety path remains outside the generic selector seam, while the generic
+`flux2_dev` base provider is now explicitly included.
 
 ## Source values
 

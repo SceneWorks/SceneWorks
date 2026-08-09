@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:fa97ed33a7d520bf7640426dbcd56d4b0aa50b359c58e23723ea94b478161a3b",
+    "sceneWorksRevision": "source-tree:b86bc47a74cd78f209a32a89c7b157ffa712e6f5efb4f95b2d62abc68c60cb61",
     "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
     "sources": {
       "manifest": {
@@ -30,7 +30,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "f448ec0c446cc76fb6eb6e75de1e9f6b7fd1b89ec4fbb6888669173786a79871"
+        "sha256": "edb7c720adef8d522bac36c6635da0edde94fc86fbf5787769abb7245ca390fd"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
