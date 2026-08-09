@@ -801,8 +801,10 @@ pins used to appear in this table. The row above replaces them and is lane-agnos
 whenever the committed matrix summary disagrees with the bundle and closure ledger it is derived
 from, so it is the general form of "you have not run §8 yet".
 
-Two lessons in that table. First, `:2439` is the reviewer's canary for §7d: if you finish a capture
-and it is still green, **you skipped the binding half**. Second, the set is per-lane — enumerate
+Two lessons in that table. First, the `"current evidence cannot promote through a historical exact
+manifest binding"` assertion in `scripts/generate-memory-matrix.test.mjs` is the reviewer's canary
+for §7d (cited by name, not line number — the row has already been renumbered once): if you finish a
+capture and it is still green, **you skipped the binding half**. Second, the set is per-lane — enumerate
 yours by running the suites rather than trusting this list:
 
 ```bash
