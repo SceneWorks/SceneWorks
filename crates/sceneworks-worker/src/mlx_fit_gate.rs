@@ -7988,15 +7988,15 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     struct SourceBoundAuditSurface {
-        manifest_id: &'static str,
+        manifest_id: String,
         surface: ResidentOnlyAuditSurface,
     }
 
     #[cfg(target_os = "macos")]
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-    struct ResidentOnlyAuditCell {
+    struct SourceBoundAuditCell {
         manifest_id: String,
         provider_id: &'static str,
         tier: String,
@@ -8005,61 +8005,112 @@ mod tests {
         control_bytes: u64,
     }
 
-    /// Candidate manifests for the audit's established model families. Reachable routes are not
-    /// encoded here: base providers come from production `MODEL_TABLE`, edit providers from the
-    /// production FLUX.2 edit router, strict-control providers from the production FLUX router, and
-    /// the pinned contract decides which shipped tier is actually Resident-only.
     #[cfg(target_os = "macos")]
-    const RESIDENT_ONLY_AUDIT_MANIFESTS: &[&str] = &[
-        "chroma1_base",
-        "chroma1_flash",
-        "chroma1_hd",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "flux_schnell",
-        "flux_dev",
-        "flux2_dev",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_klein_9b_true_v2",
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct SourceBoundShippedTier {
+        tier: String,
+        base_asset_bytes: u64,
+    }
+
+    /// Story-scoped product families for the Resident-only estimate-band audit. Individual
+    /// manifest entries and tiers are deliberately not enumerated: the shipped manifest and
+    /// production routers expand this family scope into the exact candidate inventory.
+    #[cfg(target_os = "macos")]
+    const RESIDENT_ONLY_AUDIT_FAMILIES: &[&str] = &[
+        "boogu",
+        "chroma",
+        "flux",
+        "flux2-dev",
+        "flux2-klein",
+        "ideogram",
         "lens",
-        "lens_turbo",
+        "sd3",
     ];
 
     #[cfg(target_os = "macos")]
-    fn source_bound_audit_surfaces() -> Result<Vec<SourceBoundAuditSurface>, String> {
+    fn source_bound_audit_manifest_ids<'a>(models: &'a [Value]) -> Result<Vec<&'a str>, String> {
+        let mut manifest_ids = Vec::new();
+        let mut unique = std::collections::BTreeSet::new();
+        for model in models {
+            if model["type"] != "image" || !model["mlx"].is_object() {
+                continue;
+            }
+            let Some(family) = model["family"].as_str() else {
+                continue;
+            };
+            if !RESIDENT_ONLY_AUDIT_FAMILIES.contains(&family) {
+                continue;
+            }
+            let manifest_id = model["id"]
+                .as_str()
+                .ok_or_else(|| "shipped MLX image entry has no string id".to_owned())?;
+            if crate::engines::mlx_model(manifest_id).is_none() {
+                continue;
+            }
+            if !unique.insert(manifest_id) {
+                return Err(format!(
+                    "shipped manifest declares duplicate production MLX image id {manifest_id}"
+                ));
+            }
+            if source_bound_shipped_tiers(model)?.is_empty() {
+                return Err(format!(
+                    "production MLX image route {manifest_id} has no auditable shipped q4/q8/bf16 tier"
+                ));
+            }
+            manifest_ids.push(manifest_id);
+        }
+        if manifest_ids.is_empty() {
+            return Err("shipped manifest exposes no production MLX image routes".to_owned());
+        }
+        Ok(manifest_ids)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_surfaces_from_manifest_ids<'a>(
+        manifest_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Vec<SourceBoundAuditSurface>, String> {
         use ResidentOnlyAuditSurface::{Base, Edit, StrictControl};
 
-        let mut surfaces = std::collections::BTreeSet::new();
-        for &manifest_id in RESIDENT_ONLY_AUDIT_MANIFESTS {
+        let mut declared = std::collections::BTreeSet::new();
+        let mut surfaces = Vec::new();
+        for manifest_id in manifest_ids {
+            if !declared.insert(manifest_id) {
+                return Err(format!(
+                    "duplicate source-bound audit manifest declaration {manifest_id}"
+                ));
+            }
             if crate::engines::mlx_model(manifest_id).is_none() {
                 return Err(format!(
                     "{manifest_id} no longer resolves through production MODEL_TABLE and the pinned registry"
                 ));
             }
-            surfaces.insert((manifest_id, Base));
+            surfaces.push(SourceBoundAuditSurface {
+                manifest_id: manifest_id.to_owned(),
+                surface: Base,
+            });
             if let Some(edit_engine_id) = crate::image_jobs::flux2_edit_engine_id(manifest_id) {
                 if !crate::image_jobs::flux2_edit_uses_provider_memory_safety(edit_engine_id) {
-                    surfaces.insert((manifest_id, Edit));
+                    surfaces.push(SourceBoundAuditSurface {
+                        manifest_id: manifest_id.to_owned(),
+                        surface: Edit,
+                    });
                 }
             }
             if crate::image_jobs::mlx_flux_strict_control_engine_id(manifest_id).is_some() {
-                surfaces.insert((manifest_id, StrictControl));
+                surfaces.push(SourceBoundAuditSurface {
+                    manifest_id: manifest_id.to_owned(),
+                    surface: StrictControl,
+                });
             }
         }
-        Ok(surfaces
-            .into_iter()
-            .map(|(manifest_id, surface)| SourceBoundAuditSurface {
-                manifest_id,
-                surface,
-            })
-            .collect())
+        Ok(surfaces)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_audit_surfaces(
+        models: &[Value],
+    ) -> Result<Vec<SourceBoundAuditSurface>, String> {
+        source_bound_audit_surfaces_from_manifest_ids(source_bound_audit_manifest_ids(models)?)
     }
 
     fn set_sparse_len(path: &Path, bytes: u64) {
@@ -8102,49 +8153,87 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
-    fn shipped_download_tier<'a>(model: &'a Value, download: &'a Value) -> &'a str {
-        if let Some(variant) = download["variant"].as_str() {
-            return variant;
-        }
-        match model["mlx"]["quantize"].as_u64() {
-            Some(4) => "q4",
-            Some(8) => "q8",
-            None | Some(0) => "bf16",
-            Some(other) => panic!("unsupported shipped mlx.quantize tier {other}"),
-        }
-    }
-
     #[cfg(target_os = "macos")]
-    fn auditable_shipped_tiers(model: &Value) -> Result<Vec<&str>, String> {
+    fn source_bound_shipped_tiers(model: &Value) -> Result<Vec<SourceBoundShippedTier>, String> {
         let downloads = model["downloads"].as_array().ok_or_else(|| {
             format!(
                 "{} has no shipped downloads",
                 model["id"].as_str().unwrap_or("<unknown>")
             )
         })?;
-        let mut tiers = Vec::new();
-        for download in downloads {
-            let tier = shipped_download_tier(model, download);
-            if tier == "training" {
-                continue;
-            }
-            if tiers.contains(&tier) {
+        fn supports_macos(download: &Value) -> bool {
+            download["platforms"].as_array().is_none_or(|platforms| {
+                platforms
+                    .iter()
+                    .any(|platform| platform.as_str() == Some("macos"))
+            })
+        }
+        fn supported_variant(download: &Value) -> Option<&str> {
+            download["variant"]
+                .as_str()
+                .and_then(|variant| matches!(variant, "q4" | "q8" | "bf16").then_some(variant))
+        }
+        let has_explicit_tiers = downloads
+            .iter()
+            .any(|download| supports_macos(download) && supported_variant(download).is_some());
+        let inferred_tier = match model["mlx"]["quantize"].as_u64() {
+            Some(4) => "q4",
+            Some(8) => "q8",
+            None | Some(0) => "bf16",
+            Some(other) => {
                 return Err(format!(
-                    "{} carries duplicate shipped tier {tier}",
+                    "{} has unsupported shipped mlx.quantize tier {other}",
                     model["id"].as_str().unwrap_or("<unknown>")
                 ));
             }
-            tiers.push(tier);
+        };
+        let mut tiers = std::collections::BTreeMap::<String, u64>::new();
+        for download in downloads {
+            if !supports_macos(download) {
+                continue;
+            }
+            let tier = if has_explicit_tiers {
+                let Some(tier) = supported_variant(download) else {
+                    continue;
+                };
+                tier
+            } else if download["variant"].as_str() == Some("training") {
+                continue;
+            } else {
+                inferred_tier
+            };
+            let bytes = download["estimatedSizeBytes"]
+                .as_u64()
+                .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
+                .ok_or_else(|| {
+                    format!(
+                        "{} {tier} needs an auditable shipped byte size",
+                        model["id"].as_str().unwrap_or("<unknown>")
+                    )
+                })?;
+            let total = tiers.entry(tier.to_owned()).or_default();
+            *total = total.checked_add(bytes).ok_or_else(|| {
+                format!(
+                    "{} {tier} shipped byte total overflows u64",
+                    model["id"].as_str().unwrap_or("<unknown>")
+                )
+            })?;
         }
-        Ok(tiers)
+        Ok(tiers
+            .into_iter()
+            .map(|(tier, base_asset_bytes)| SourceBoundShippedTier {
+                tier,
+                base_asset_bytes,
+            })
+            .collect())
     }
 
     #[cfg(target_os = "macos")]
     fn source_bound_audit_provider(
-        surface: SourceBoundAuditSurface,
+        surface: &SourceBoundAuditSurface,
     ) -> Result<&'static str, String> {
         match surface.surface {
-            ResidentOnlyAuditSurface::Base => crate::engines::mlx_model(surface.manifest_id)
+            ResidentOnlyAuditSurface::Base => crate::engines::mlx_model(&surface.manifest_id)
                 .map(|resolved| resolved.engine_id())
                 .ok_or_else(|| {
                     format!(
@@ -8153,7 +8242,7 @@ mod tests {
                     )
                 }),
             ResidentOnlyAuditSurface::Edit => {
-                crate::image_jobs::flux2_edit_engine_id(surface.manifest_id).ok_or_else(|| {
+                crate::image_jobs::flux2_edit_engine_id(&surface.manifest_id).ok_or_else(|| {
                     format!(
                         "{} has no production FLUX.2 edit route",
                         surface.manifest_id
@@ -8161,7 +8250,7 @@ mod tests {
                 })
             }
             ResidentOnlyAuditSurface::StrictControl => {
-                crate::image_jobs::mlx_flux_strict_control_engine_id(surface.manifest_id)
+                crate::image_jobs::mlx_flux_strict_control_engine_id(&surface.manifest_id)
                     .ok_or_else(|| {
                         format!(
                             "{} has no production FLUX strict-control route",
@@ -8174,7 +8263,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn source_bound_control_bytes(
-        surface: SourceBoundAuditSurface,
+        surface: &SourceBoundAuditSurface,
         provider_id: &str,
     ) -> Result<u64, String> {
         if surface.surface != ResidentOnlyAuditSurface::StrictControl {
@@ -8330,14 +8419,14 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn source_bound_resident_only_cells_from_surfaces(
+    fn source_bound_audit_inventory_from_surfaces(
         models: &[Value],
         source_surfaces: &[SourceBoundAuditSurface],
-    ) -> Result<Vec<ResidentOnlyAuditCell>, String> {
+    ) -> Result<Vec<SourceBoundAuditCell>, String> {
         let mut surfaces = std::collections::BTreeSet::new();
         let mut cells = std::collections::BTreeSet::new();
         let mut cell_keys = std::collections::BTreeSet::new();
-        for &expected in source_surfaces {
+        for expected in source_surfaces {
             let model = models
                 .iter()
                 .find(|model| model["id"] == expected.manifest_id)
@@ -8352,7 +8441,7 @@ mod tests {
             }
             let provider_id = source_bound_audit_provider(expected)?;
             let control_bytes = source_bound_control_bytes(expected, provider_id)?;
-            if !surfaces.insert((expected.manifest_id, expected.surface, provider_id)) {
+            if !surfaces.insert((expected.manifest_id.clone(), expected.surface, provider_id)) {
                 return Err(format!(
                     "source-bound resident-only inventory resolves a duplicate {:?} route {} ({provider_id})",
                     expected.surface, expected.manifest_id
@@ -8363,32 +8452,9 @@ mod tests {
                     "source-bound resident-only provider {provider_id} is absent from the pinned registry"
                 ));
             }
-            let downloads = model["downloads"]
-                .as_array()
-                .ok_or_else(|| format!("{} has no shipped downloads", expected.manifest_id))?;
-            for tier in auditable_shipped_tiers(model)? {
-                let download = downloads
-                    .iter()
-                    .find(|download| shipped_download_tier(model, download) == tier)
-                    .ok_or_else(|| format!("{} is missing tier {tier}", expected.manifest_id))?;
-                let base_asset_bytes = download["estimatedSizeBytes"]
-                    .as_u64()
-                    .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
-                    .ok_or_else(|| {
-                        format!(
-                            "{} {tier} needs an auditable shipped byte size",
-                            expected.manifest_id
-                        )
-                    })?;
-                let (_fixture, spec) =
-                    audit_load_spec(provider_id, tier, base_asset_bytes, control_bytes)?;
-                let (contract, _) = source_bound_contract(provider_id, &spec)?;
-                if (expected.surface != ResidentOnlyAuditSurface::StrictControl
-                    && manifest_declares_optimized_tier(model, tier))
-                    || !implemented_optimized_strategies(&contract).is_empty()
-                {
-                    continue;
-                }
+            for shipped in source_bound_shipped_tiers(model)? {
+                let tier = shipped.tier.as_str();
+                let base_asset_bytes = shipped.base_asset_bytes;
                 let key = (
                     expected.manifest_id.to_owned(),
                     provider_id,
@@ -8401,7 +8467,7 @@ mod tests {
                         expected.manifest_id, expected.surface
                     ));
                 }
-                cells.insert(ResidentOnlyAuditCell {
+                cells.insert(SourceBoundAuditCell {
                     manifest_id: expected.manifest_id.to_owned(),
                     provider_id,
                     tier: tier.to_owned(),
@@ -8412,6 +8478,73 @@ mod tests {
             }
         }
         Ok(cells.into_iter().collect())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn require_exact_source_bound_inventory(
+        expected: &[SourceBoundAuditCell],
+        actual: &[SourceBoundAuditCell],
+    ) -> Result<(), String> {
+        let expected = expected
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let actual = actual
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if expected == actual {
+            return Ok(());
+        }
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+        Err(format!(
+            "source-bound audit inventory mismatch; missing={missing:?}; unexpected={unexpected:?}"
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn source_bound_resident_only_cells_from_inventory(
+        models: &[Value],
+        source_inventory: &[SourceBoundAuditCell],
+    ) -> Result<(Vec<SourceBoundAuditCell>, Vec<SourceBoundAuditCell>), String> {
+        let mut classified = Vec::new();
+        let mut cells = Vec::new();
+        for candidate in source_inventory {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == candidate.manifest_id)
+                .ok_or_else(|| {
+                    format!("missing shipped {} manifest entry", candidate.manifest_id)
+                })?;
+            if candidate.surface != ResidentOnlyAuditSurface::StrictControl
+                && manifest_declares_optimized_tier(model, &candidate.tier)
+            {
+                classified.push(candidate.clone());
+                continue;
+            }
+            let (_fixture, spec) = audit_load_spec(
+                candidate.provider_id,
+                &candidate.tier,
+                candidate.base_asset_bytes,
+                candidate.control_bytes,
+            )?;
+            let (contract, _) =
+                source_bound_contract(candidate.provider_id, &spec).map_err(|error| {
+                    format!(
+                        "{} ({}) {} {:?} contract lookup failed: {error}",
+                        candidate.manifest_id,
+                        candidate.provider_id,
+                        candidate.tier,
+                        candidate.surface
+                    )
+                })?;
+            if implemented_optimized_strategies(&contract).is_empty() {
+                cells.push(candidate.clone());
+            }
+            classified.push(candidate.clone());
+        }
+        Ok((classified, cells))
     }
 
     /// sc-18251 resident-only audit: derive every reachable candidate through the production base,
@@ -8426,9 +8559,20 @@ mod tests {
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
-        let surfaces = source_bound_audit_surfaces().expect("source-bound audit surfaces");
-        let cells = source_bound_resident_only_cells_from_surfaces(models, &surfaces)
-            .expect("source-bound resident-only inventory");
+        let surfaces = source_bound_audit_surfaces(models).expect("source-bound audit surfaces");
+        let source_inventory = source_bound_audit_inventory_from_surfaces(models, &surfaces)
+            .expect("source-bound candidate inventory");
+        assert_eq!(
+            source_inventory.len(),
+            62,
+            "the source-derived candidate inventory changed; update the recorded audit result"
+        );
+        let (classified_inventory, cells) =
+            source_bound_resident_only_cells_from_inventory(models, &source_inventory)
+                .expect("source-bound resident-only inventory");
+        require_exact_source_bound_inventory(&source_inventory, &classified_inventory).expect(
+            "the executable audit must classify the exact source-bound candidate inventory",
+        );
         assert_eq!(
             cells.len(),
             35,
@@ -8618,10 +8762,10 @@ mod tests {
             "flux2_klein_9b_true_v2",
         ] {
             let injected = SourceBoundAuditSurface {
-                manifest_id: fake,
+                manifest_id: fake.to_owned(),
                 surface: ResidentOnlyAuditSurface::StrictControl,
             };
-            let error = source_bound_resident_only_cells_from_surfaces(models, &[injected])
+            let error = source_bound_audit_inventory_from_surfaces(models, &[injected])
                 .expect_err("an impossible strict-control route must fail closed");
             assert!(
                 error.contains("has no production FLUX strict-control route"),
@@ -8629,8 +8773,10 @@ mod tests {
             );
         }
 
-        let surfaces = source_bound_audit_surfaces().expect("production source surfaces");
-        let cells = source_bound_resident_only_cells_from_surfaces(models, &surfaces)
+        let surfaces = source_bound_audit_surfaces(models).expect("production source surfaces");
+        let source_inventory = source_bound_audit_inventory_from_surfaces(models, &surfaces)
+            .expect("production source inventory");
+        let (_, cells) = source_bound_resident_only_cells_from_inventory(models, &source_inventory)
             .expect("production resident-only cells");
         assert!(
             !cells.iter().any(|cell| {
@@ -8662,6 +8808,84 @@ mod tests {
             cell.control_bytes == 0
                 || matches!(cell.provider_id, "flux1_dev_control" | "flux2_dev_control")
         }));
+    }
+
+    /// Completeness mutation for the loophole found after the production-router rewrite. A
+    /// zero-cell route is still part of the candidate inventory: replacing FLUX.1 Schnell with an
+    /// already-declared Chroma entry must fail before deduplication, and simply deleting Schnell
+    /// must fail exact source-inventory equality even though the 35 Resident-only cells and two
+    /// flips are unchanged.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resident_only_audit_inventory_rejects_duplicate_and_zero_cell_drop_mutations() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let manifest_ids = source_bound_audit_manifest_ids(models).expect("source manifest ids");
+        let expected_surfaces =
+            source_bound_audit_surfaces_from_manifest_ids(manifest_ids.iter().copied())
+                .expect("source surfaces");
+        let expected_inventory =
+            source_bound_audit_inventory_from_surfaces(models, &expected_surfaces)
+                .expect("source inventory");
+        let (_, expected_resident) =
+            source_bound_resident_only_cells_from_inventory(models, &expected_inventory)
+                .expect("source Resident-only inventory");
+        assert!(
+            expected_inventory
+                .iter()
+                .any(|cell| cell.manifest_id == "flux_schnell"),
+            "the mutation requires FLUX.1 Schnell in the full source inventory"
+        );
+        assert!(
+            expected_resident
+                .iter()
+                .all(|cell| cell.manifest_id != "flux_schnell"),
+            "the mutation requires FLUX.1 Schnell to be a representative zero-cell route"
+        );
+
+        let mut duplicate_replacement = manifest_ids.clone();
+        let schnell = duplicate_replacement
+            .iter()
+            .position(|manifest_id| *manifest_id == "flux_schnell")
+            .expect("FLUX.1 Schnell source declaration");
+        duplicate_replacement[schnell] = "chroma1_base";
+        let duplicate_error =
+            source_bound_audit_surfaces_from_manifest_ids(duplicate_replacement.iter().copied())
+                .expect_err("a duplicate replacement must fail before set conversion");
+        assert!(
+            duplicate_error
+                .contains("duplicate source-bound audit manifest declaration chroma1_base"),
+            "duplicate replacement failed for the wrong reason: {duplicate_error}"
+        );
+
+        let dropped_ids = manifest_ids
+            .iter()
+            .copied()
+            .filter(|manifest_id| *manifest_id != "flux_schnell")
+            .collect::<Vec<_>>();
+        let dropped_surfaces =
+            source_bound_audit_surfaces_from_manifest_ids(dropped_ids.iter().copied())
+                .expect("dropped source surfaces still resolve");
+        let dropped_inventory =
+            source_bound_audit_inventory_from_surfaces(models, &dropped_surfaces)
+                .expect("dropped source inventory still resolves");
+        let (_, dropped_resident) =
+            source_bound_resident_only_cells_from_inventory(models, &dropped_inventory)
+                .expect("dropped Resident-only inventory still resolves");
+        assert_eq!(
+            dropped_resident, expected_resident,
+            "precondition: dropping a zero-cell route preserves the old Resident-only summary"
+        );
+        let drop_error =
+            require_exact_source_bound_inventory(&expected_inventory, &dropped_inventory)
+                .expect_err("exact source equality must reject a dropped zero-cell route");
+        assert!(
+            drop_error.contains("flux_schnell"),
+            "zero-cell drop must name its missing source route: {drop_error}"
+        );
     }
 
     /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core

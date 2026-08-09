@@ -49,9 +49,15 @@ a base-provider contract.
 
 ## Source-bound inventory
 
-The audit derives 35 Resident-only route/tier cells from these sources:
+The audit derives 62 candidate route/tier cells from these sources and explicitly requires the
+executable classifier to cover that exact set. Provider/manifest contracts classify 35 of those
+cells as Resident-only, and the budget walk evaluates every one of the 35:
 
-- shipped image entries and tier sizes in `config/manifests/builtin.models.jsonc`;
+- every shipped MLX image entry in the story-scoped Boogu, Chroma, FLUX.1, FLUX.2 Dev, FLUX.2
+  Klein, Ideogram, Lens, and SD3 families, discovered from
+  `config/manifests/builtin.models.jsonc` rather than repeated as a model-id list;
+- every shipped macOS q4/q8/bf16 tier and its complete download-byte total, including multi-download
+  component layouts;
 - base providers from production `MODEL_TABLE` resolution;
 - edit providers from the production FLUX.2 edit router;
 - strict-control providers from the production FLUX control router used by both availability arms;
@@ -62,7 +68,7 @@ The audit derives 35 Resident-only route/tier cells from these sources:
 - the production measured-load-shape seam, which keeps base Lens q4 on its exact measured contract
   instead of misclassifying it as Resident-only.
 
-The resulting inventory is:
+The resulting Resident-only subset is:
 
 | Family / routes | Resident-only cells | Why they remain in the estimate audit | Band result |
 | --- | ---: | --- | --- |
@@ -90,6 +96,13 @@ test proves that:
 - no other provider receives nonzero control bytes;
 - base Lens q4 remains excluded by its measured contract; and
 - `flux2_dev_edit` remains excluded from the generic selector audit.
+
+`resident_only_audit_inventory_rejects_duplicate_and_zero_cell_drop_mutations` restores the
+independent completeness proof. Replacing `flux_schnell` with a second `chroma1_base` declaration
+must fail before any set conversion can hide the duplicate. Dropping `flux_schnell` entirely is the
+more subtle mutation: Schnell contributes zero Resident-only cells, so the old 35-cell subset and
+two-flip summary remain unchanged, but exact equality against the 62-cell manifest/router source
+inventory fails and names the missing route.
 
 ## Source values
 
