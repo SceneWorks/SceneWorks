@@ -22,6 +22,18 @@ limit 130,567,005,798 bytes, derived wired/process ceiling 87,044,670,532 bytes.
 completed at 14:05:51Z and 14:08:53Z. The full q8-only cache was used because this host has no bf16
 or q4 sibling artifact; the whole-snapshot verifier therefore cannot claim those absent tiers.
 
+The capture produced the two deterministic evidence records below, but its raw adapter stdout and
+render outputs were not preserved as durable source-session artifacts. The surviving q8 evidence
+fragments contain no `sourceSessions`, and neither the capture checkout nor the review archive
+contains a Qwen capture log from which the required `sourcePath`, `stdoutSha256`, and output hashes
+could be recovered. A source-session/derivation binding therefore cannot be added truthfully after
+the fact. The schema's source-session kinds also have no physical-MLX arm (`physical_cuda`,
+`unit_test`, `static_analysis`, and `comparison` are the current vocabulary), so labeling this
+physical capture as another kind would be false. A future source-bound MLX capture requires that
+schema extension plus a recapture that durably preserves the raw log and outputs. The structured
+record payloads are the only surviving receipts for these two runs; they must not be represented as
+independently source-log-bound evidence.
+
 ## Promoted records
 
 | Rung | Record | Load shape | Predicted peak | Observed allocator/wired peak | Active peak | Reclaimable peak |
@@ -42,7 +54,7 @@ and drives the request selector. These are the observed results:
 |---:|---|---|---|
 | 96 GiB | Resident | deferred | admitted `BoundedAttention`, record `imc-56c1f11bd03822d9c241` |
 | 48 GiB | Sequential | deferred | admitted `BoundedTransformerResidency`, record `imc-a21d2ea9e2d95cf48e82` |
-| 48 GiB | Resident | deferred | safely refused; smallest verified boundary is 60.73 GiB |
+| 48 GiB | Resident | deferred | safely refused; smallest verified boundary is 68.09 GiB |
 
 An MLX evidence record includes workload peak plus non-MLX foreign reserve. Copying the absolute
 46.93 GiB reserve from a 128 GiB capture host onto a 48 GiB target made the target impossible by
@@ -54,10 +66,23 @@ foreign reserve at 48 GiB
   = ceil(50,394,282,940 * 51,539,607,552 / 137,438,953,472)
   = 18,897,856,103 bytes
 
-q8 bounded-transformer boundary
+q8 bounded-transformer requirement enforced on this 48 GiB host
   = 16,777,216,000 + 18,897,856,103
   = 35,675,072,103 bytes (33.225 GiB)
 ```
+
+That current-host sum is a diagnostic, not a portable minimum: changing host capacity also changes
+the proportional reserve. For peak `P`, capture capacity `C`, and captured reserve `R`, the static
+minimum below the capture host solves
+`P + ceil(R * H / C) <= H`, so `H = ceil(P * C / (C - R))`. The exact production q8 boundaries are:
+
+| Rung | Static minimum host |
+|---|---:|
+| Bounded attention | 73,113,341,306 bytes (68.0921 GiB) |
+| Bounded transformer residency | 26,490,341,053 bytes (24.6711 GiB) |
+
+At or above the capture host, the reserve remains the captured absolute byte count. If the
+proportional solution would exceed the capture host, the static minimum is therefore `P + R`.
 
 Stale evidence still widens the measured workload peak, and `apply_request_gpu_memory_limit` still
 sets the absolute MLX soft limit before the fatal allocation boundary. This is a host-normalization

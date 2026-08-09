@@ -999,11 +999,11 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
     // walk the budget down to the admit/refuse boundary and check the boundary itself carries the
     // margin.
     //
-    // The quantity that gates on this path is not the peak alone: the Evidence route charges each
-    // candidate's CAPTURED FOREIGN RESERVE on top, and the selection event reports that sum as
-    // `needed_gb`. The refusal just below the boundary quotes the same sum ("needs at least N GiB at
-    // its smallest verified MLX host boundary"). So the proof is: that requirement must exceed the
-    // one a zero-margin gate would have computed by exactly `widened - raw`.
+    // The quantity that gates on this path is not the peak alone: the Evidence route preserves the
+    // capture host's foreign-reserve ratio below that host. The refusal quotes the STATIC minimum
+    // satisfying `peak + ceil(reserve * host / capture) <= host`, not the reserve sum evaluated at
+    // the current cap. So the proof compares the widened and unwidened static boundaries derived
+    // from the same captured envelope.
     let admits = |cap_gb: f64| evaluate(cap_gb).0.is_ok();
     let (mut refuses_at, mut admits_at) = (0.0_f64, admit_cap);
     assert!(
@@ -1033,14 +1033,35 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
     let raw_gib = gib(raw_peak_bytes);
     let widened_gib = gib(widened_peak_bytes);
     let margin_gib = widened_gib - raw_gib;
-    // What the SAME refusal would have quoted with the margin zeroed: the enforced requirement less
-    // the widening. If the margin were not applied to the admission boundary these two would be
-    // equal; they differ by 2.16 GiB on this cell, far outside the bisection's resolution.
-    let unwidened_gib = enforced_gib - margin_gib;
+    let bundle = match sceneworks_core::memory_calibration::load_packaged_bundle()
+        .expect("packaged evidence must parse")
+    {
+        sceneworks_core::memory_calibration::BundleLoad::Ready(bundle) => bundle,
+        sceneworks_core::memory_calibration::BundleLoad::Stale(reason) => {
+            panic!("packaged evidence unexpectedly stale: {reason:?}")
+        }
+    };
+    let envelope = bundle
+        .records
+        .iter()
+        .filter(|record| record.target.provider == MEASURED_ENGINE)
+        .filter(|record| {
+            record.repositories.inference.closure_digest.as_deref() == Some(binding_digest.as_str())
+        })
+        .filter_map(|record| record.mlx_admission_envelope())
+        .find(|envelope| envelope.peak_bytes == raw_peak_bytes)
+        .expect("the selected stale record must retain its packaged MLX envelope");
+    let enforced_boundary_bytes = envelope.required_host_bytes_for_peak(widened_peak_bytes);
+    let unwidened_boundary_bytes = envelope.required_host_bytes_for_peak(raw_peak_bytes);
+    let unwidened_gib = gib(unwidened_boundary_bytes);
     assert!(
-        margin_gib > 0.0 && (enforced_gib - unwidened_gib - margin_gib).abs() < 1e-6,
-        "the enforced requirement must carry the stale widening: enforced {enforced_gib:.4} GiB, \
-         unwidened would be {unwidened_gib:.4} GiB (margin {margin_gib:.4} GiB)"
+        margin_gib > 0.0
+            && enforced_boundary_bytes > unwidened_boundary_bytes
+            && (enforced_gib - gib(enforced_boundary_bytes)).abs() < 0.011,
+        "the enforced static boundary must carry the stale widening: enforced {enforced_gib:.4} \
+         GiB, exact widened boundary {:.4} GiB, unwidened would be {unwidened_gib:.4} GiB \
+         (peak margin {margin_gib:.4} GiB)",
+        gib(enforced_boundary_bytes),
     );
     // And the boundary really is where that requirement bites: the admitting cap is above it and
     // the refusing cap below, to within the bisection's resolution.
@@ -1048,9 +1069,10 @@ fn c3_stale_lane_admits_at_the_widened_peak() {
         boundary_gb > refuses_at && boundary_gb - refuses_at < 1e-3,
         "the bisection must have converged: admits at {boundary_gb}, refuses at {refuses_at}"
     );
-    // The mutation this brackets against: with STALE_MARGIN zeroed the enforced requirement drops
-    // to `unwidened_gib`, so every cap in [unwidened, enforced) would flip from refuse to admit.
-    // That window is non-empty precisely because the margin is applied.
+    // The mutation this brackets against: with STALE_MARGIN zeroed the static boundary drops to
+    // `unwidened_gib`, so every cap in [unwidened, enforced) would flip from refuse to admit. The
+    // difference is not numerically equal to the peak margin because reserve normalization is
+    // proportional; it is derived from the same envelope instead of being re-added by hand.
     assert!(
         enforced_gib > unwidened_gib,
         "a zeroed stale margin would admit the whole [{unwidened_gib:.2}, {enforced_gib:.2}) GiB window"

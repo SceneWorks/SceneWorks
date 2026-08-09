@@ -628,8 +628,13 @@ type ClosureDigestLookup<'a> = &'a dyn Fn(&str, &str) -> Option<String>;
 #[derive(Clone, Debug)]
 struct VerifiedAdmissionCandidate {
     evidence: MemoryEvidence,
+    /// Reserve enforced on this live host and passed to MLX as an absolute process ceiling.
     foreign_reserve_bytes: u64,
-    required_host_bytes: u64,
+    /// Actionable static host boundaries under the captured reserve policy. The stale value uses
+    /// the selector's canonical widened peak rather than treating a current-host reserve sum as a
+    /// portable recommendation.
+    minimum_host_bytes: u64,
+    stale_minimum_host_bytes: u64,
     record_id: String,
     /// The provider closure digest this candidate's binding was measured under (sc-17774).
     closure_digest: String,
@@ -1257,10 +1262,16 @@ fn evidence_admission_route(
                 };
                 let foreign_reserve_bytes =
                     envelope.foreign_reserve_for_host_bytes(budget.total_bytes);
+                let stale_peak_bytes = crate::memory_strategy::stale_widened_peak_bytes(
+                    gen_core::MemoryBackend::Mlx,
+                    envelope.peak_bytes,
+                );
                 evidence.push(VerifiedAdmissionCandidate {
                     evidence: memory_evidence,
                     foreign_reserve_bytes,
-                    required_host_bytes: envelope.peak_bytes.saturating_add(foreign_reserve_bytes),
+                    minimum_host_bytes: envelope.required_host_bytes(),
+                    stale_minimum_host_bytes: envelope
+                        .required_host_bytes_for_peak(stale_peak_bytes),
                     record_id: record.id.clone(),
                     closure_digest: binding.query.inference_closure_digest.clone(),
                 });
@@ -2299,16 +2310,14 @@ fn evaluate_request_with_budget_using_bundle(
                 .evidence
                 .iter()
                 .map(|candidate| {
-                    // Same stale-aware grading as the pre-check above, so the refusal quotes the
-                    // requirement that was actually enforced.
+                    // Same stale-aware grading as the pre-check above, expressed as the smallest
+                    // host that satisfies the reserve policy. The current-host enforced sum is a
+                    // useful diagnostic but not a portable minimum: the reserve changes when the
+                    // host capacity changes.
                     if candidate.closure_digest == live_closure_digest {
-                        candidate.required_host_bytes
+                        candidate.minimum_host_bytes
                     } else {
-                        crate::memory_strategy::stale_widened_peak_bytes(
-                            gen_core::MemoryBackend::Mlx,
-                            candidate.evidence.predicted_peak_bytes,
-                        )
-                        .saturating_add(candidate.foreign_reserve_bytes)
+                        candidate.stale_minimum_host_bytes
                     }
                 })
                 .min()
@@ -7134,9 +7143,12 @@ mod tests {
             Some(&fixture_closure_lookup),
         )
         .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
-        assert!(unfit
-            .to_string()
-            .contains("smallest verified MLX host boundary"));
+        let unfit = unfit.to_string();
+        assert!(unfit.contains("smallest verified MLX host boundary"));
+        assert!(
+            unfit.contains("needs at least 8.00 GiB"),
+            "the refusal must quote the static proportional boundary, not the 7.25 GiB reserve sum evaluated only at this 6 GiB host: {unfit}"
+        );
     }
 
     #[test]
@@ -8146,8 +8158,15 @@ mod tests {
         };
         let live_host = gib_to_bytes(48.0);
         assert!(
-            envelope.required_host_bytes() > live_host,
+            envelope
+                .peak_bytes
+                .saturating_add(envelope.foreign_reserve_bytes)
+                > live_host,
             "the old absolute 128 GiB-host reserve reproduces the false 48 GiB refusal"
+        );
+        assert!(
+            envelope.required_host_bytes() <= live_host,
+            "the true static boundary must agree that this candidate can fit below 48 GiB"
         );
         let live_reserve = envelope.foreign_reserve_for_host_bytes(live_host);
         let stale_peak = crate::memory_strategy::stale_widened_peak_bytes(

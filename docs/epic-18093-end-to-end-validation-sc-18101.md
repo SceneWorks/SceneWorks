@@ -190,11 +190,10 @@ anything. `MLX_STALE_MEASURED_MARGIN` would gate nothing on the Evidence path, d
 property criterion 3 exists to prove. It also broke
 `a_moved_provider_closure_admits_the_stale_ladder_behind_the_widened_margin`, correctly.
 
-A real fix is a design change to a pre-existing gate — rescale the captured foreign reserve to the
-live host, or make the host-boundary check a demotion rather than a terminal refusal — and belongs
-with the product call, not here. Tracked on **sc-18237**.
-
-It remains a user-visible narrowing: a 48 GB Mac that could render this cell before now cannot.
+SC-18237 subsequently made that design change in the pre-existing gate: it rescales the captured
+foreign reserve to the live host while preserving the measured peak, stale margin, and absolute MLX
+process ceiling. The user-visible 48 GB narrowing described by this historical SC-18101 run is no
+longer the production behavior.
 
 ### The fix
 
@@ -458,16 +457,18 @@ boundary itself is checked:
 | What a zero-margin gate would have required | **90.05 GiB** |
 | Window a zeroed margin would wrongly admit | **[90.05, 92.21) GiB** |
 
-The gating quantity on this path is not the peak alone: the Evidence route charges each candidate's
-captured foreign reserve on top, and both the selection event's `needed_gb` and the refusal quote
-that sum. The margin is visible in it — the enforced requirement exceeds the unwidened one by exactly
-`widened − raw` = 2.16 GiB, three orders of magnitude above the bisection's resolution.
+In this historical SC-18101 capture, the Evidence route charged each candidate's captured absolute
+foreign reserve on top of the peak, and both the selection event's `needed_gb` and the refusal quoted
+that sum. The margin was visible in it: the enforced requirement exceeded the unwidened one by
+exactly `widened − raw` = 2.16 GiB, three orders of magnitude above the bisection's resolution.
+SC-18237 later replaced that absolute smaller-host charge with proportional normalization and a
+static solved boundary; the stale peak remains widened, but the boundary delta is no longer simply
+the peak delta.
 
-**Production-conditions status:** this bracket is measured on the eager `LoadSpec` the binding was
-captured under (`SC18101_MEASURED_EAGER=1`), not on the deferred spec production uses for
-`qwen_image`. Under the production spec this cell degrades to the estimate ladder (§0), so the
-stale-measured path is exercised on a real shipped binding and real weights, but not on a
-configuration `qwen_image` reaches in production today. Closing that is sc-18237.
+**Historical production-conditions status:** this SC-18101 bracket was measured on the eager
+`LoadSpec` the old binding was captured under (`SC18101_MEASURED_EAGER=1`), not on the deferred spec
+production uses for `qwen_image`. SC-18237 subsequently replaced that unreachable binding with the
+production-deferred q8 records and verified the live 96 GiB Resident / 48 GiB Sequential routes.
 
 Note also that the boundary this brackets — 92.2146 GB — is itself `45.28125 + 46.933`, i.e. the
 widened peak plus the CAPTURE host's foreign reserve, not a property of the live machine. The

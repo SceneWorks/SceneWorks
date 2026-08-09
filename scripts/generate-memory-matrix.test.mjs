@@ -726,7 +726,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   );
 });
 
-test("MLX generated evidence derives the same exact additive host requirement as runtime", () => {
+test("MLX generated evidence derives the same exact static host boundary as runtime", () => {
   const record = {
     backend: "mlx",
     hardware: {
@@ -742,8 +742,47 @@ test("MLX generated evidence derives the same exact additive host requirement as
       },
     },
   };
-  assert.equal(mlxRequiredHostBytes(record), 7 * 1024 ** 3);
+  assert.equal(
+    mlxRequiredHostBytes(record),
+    7_158_278_827,
+    "ceil(5 GiB * 8 GiB / (8 - 2) GiB) is the true proportional minimum",
+  );
+  assert.equal(
+    mlxRequiredHostBytes({
+      ...record,
+      hardware: {
+        memoryBytes: 137_438_953_472,
+        mlxMemoryLimitBytes: 130_567_005_798,
+        wiredLimitBytes: 87_044_670_532,
+      },
+      predictedPeakBytes: { overall: 46_305_116_160 },
+      observedMemory: {
+        overall: {
+          wiredBytes: 44_056_333_980,
+          reclaimableBytes: 3_852_363_372,
+        },
+      },
+    }),
+    73_113_341_306,
+    "the 48 GiB host-specific sum (60.725 GiB) must not be published as a portable minimum",
+  );
+  assert.equal(
+    mlxRequiredHostBytes({
+      ...record,
+      predictedPeakBytes: { overall: 7 * 1024 ** 3 },
+    }),
+    9 * 1024 ** 3,
+    "a proportional solution above the capture host uses the larger-host absolute reserve",
+  );
   assert.equal(mlxRequiredHostBytes({ ...record, backend: "candle" }), null);
+  assert.equal(
+    mlxRequiredHostBytes({
+      ...record,
+      hardware: { ...record.hardware, memoryBytes: 0 },
+    }),
+    null,
+    "an invalid zero-byte capture host fails closed instead of dividing by zero",
+  );
   assert.equal(
     mlxRequiredHostBytes({
       ...record,

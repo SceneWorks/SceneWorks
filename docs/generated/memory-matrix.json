@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7c553bbe8b139c4f0654e5e30c1ec57a13ec5af35e0b4d4af57a5783de2a32e2",
+    "sceneWorksRevision": "source-tree:48731f23654a112192763d67f7eed1a35aa6c58a35e1868c137e9c2e2e44914b",
     "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
     "sources": {
       "manifest": {
@@ -30,7 +30,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "5cc48b93001979daaeb3bd846248e9b3d7f6eff91d2ffc87ad26eed92b1dd97e"
+        "sha256": "27c8d0d8c94c7c75a6f85898dc8d2f7e9a56c9040db9a270e5264ba0afc67455"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -14881,7 +14881,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 32.18693432211876,
-            "requiredHostBytes": 86700178364,
+            "requiredHostBytes": 57325098039,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -14903,7 +14903,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 36.710619777441025,
-            "requiredHostBytes": 91800452028,
+            "requiredHostBytes": 65378161719,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -19728,7 +19728,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 60.107455875724554,
-            "requiredHostBytes": 118174235580,
+            "requiredHostBytes": 107020977853,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -19816,7 +19816,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 61.176070876419544,
-            "requiredHostBytes": 119382195132,
+            "requiredHostBytes": 108928282409,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -19929,7 +19929,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 15.021208003163338,
-            "requiredHostBytes": 67372825532,
+            "requiredHostBytes": 26808225146,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20120,7 +20120,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 31.591832783073187,
-            "requiredHostBytes": 86029089724,
+            "requiredHostBytes": 56265484396,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20143,7 +20143,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 31.559531833976507,
-            "requiredHostBytes": 86029089724,
+            "requiredHostBytes": 56265484396,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20256,7 +20256,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20281,7 +20281,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20375,7 +20375,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 41.03065839037299,
-            "requiredHostBytes": 96699399100,
+            "requiredHostBytes": 73113341306,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20398,7 +20398,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 41.06346574053168,
-            "requiredHostBytes": 96699399100,
+            "requiredHostBytes": 73113341306,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20423,7 +20423,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 41.03065839037299,
-            "requiredHostBytes": 96699399100,
+            "requiredHostBytes": 73113341306,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20535,7 +20535,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20560,7 +20560,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20587,7 +20587,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 14.880537204444408,
-            "requiredHostBytes": 67171498940,
+            "requiredHostBytes": 26490341053,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20678,7 +20678,7 @@
               "bounded_attention"
             ],
             "observedPeakGb": 12.346250977367163,
-            "requiredHostBytes": 64352926652,
+            "requiredHostBytes": 22039963756,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20764,7 +20764,7 @@
               "bounded_decode"
             ],
             "observedPeakGb": 13.815413568168879,
-            "requiredHostBytes": 66030648252,
+            "requiredHostBytes": 24688997862,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20875,7 +20875,7 @@
               "bounded_transformer_residency"
             ],
             "observedPeakGb": 4.702020397409797,
-            "requiredHostBytes": 55695883196,
+            "requiredHostBytes": 8370947773,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -20944,7 +20944,7 @@
               "resident"
             ],
             "observedPeakGb": 17.663539942353964,
-            "requiredHostBytes": 70325615548,
+            "requiredHostBytes": 31470525171,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
@@ -21015,7 +21015,7 @@
               "staged_residency"
             ],
             "observedPeakGb": 4.739408511668444,
-            "requiredHostBytes": 55762992060,
+            "requiredHostBytes": 8476909137,
             "parity": {
               "contract": "tolerance",
               "result": "passed",
