@@ -271,20 +271,9 @@ function regenerateMemoryMatrix() {
   });
 }
 
-// `docs/generated/calibration-cost-model.{json,md}` is derived from the memory matrix regenerated
-// immediately above — it stamps `generatedFrom.inferenceRevision` and re-derives its counts from the
-// matrix cells — so the matrix regen makes it stale by construction. `npm run check` (via
-// `check:rust-derived-docs` -> `check:calibration-cost-model --check`) then fails with "generated
-// calibration cost model is stale", one step further down the SAME generated-artifact cascade this
-// script exists to keep in one commit. It was missing here: sc-16962's bump regenerated the matrix,
-// reported success, and left the cost model behind for `npm run check` to catch minutes later.
-function regenerateCalibrationCostModel() {
-  console.log("$ node scripts/calibration-cost-model.mjs");
-  execFileSync("node", ["scripts/calibration-cost-model.mjs"], {
-    cwd: repoRoot,
-    stdio: "inherit",
-  });
-}
+// sc-18100 deleted `scripts/calibration-cost-model.mjs` and its two committed artifacts, which used
+// to be regenerated here as the second step of the matrix cascade. The memory matrix now has no
+// generated consumer, so the regen above is the whole of that cascade.
 
 // `config/engine-capabilities/capabilities.<backend>.json` is keyed to the pin exactly like the
 // licence audit above: each file stamps `generatedFrom.inferenceRevision`, and it is a dump of
@@ -299,7 +288,7 @@ function regenerateCalibrationCostModel() {
 // the exact invocation. Fail-closed on purpose: the pins are already written by now, so the bump is
 // genuinely incomplete until the dumps are refreshed and the stage-2 artifacts regenerated.
 //
-// Downstream cascade, same shape as memory-matrix -> calibration-cost-model: re-dumping a facts file
+// Downstream cascade, same shape as the memory-matrix regen above: re-dumping a facts file
 // makes `config/manifests/builtin.preview-support.jsonc` + `apps/web/src/data/previewSupport.json`
 // stale, and `apps/web/src/data/previewSupportCatalog.test.js` (web vitest, every PR) fails until
 // `npm run gen:preview-support` is re-run.
@@ -864,8 +853,6 @@ function main() {
   cargoUpdate(sha);
   verifyNoSkew();
   regenerateMemoryMatrix();
-  // Downstream of the matrix, so it must follow it — see the note on the function.
-  regenerateCalibrationCostModel();
   verifyLicenseAudit();
   // Beside the licence re-scan for the same reason: both are pin-keyed artifacts that need an input
   // this script cannot synthesize (a local inference clone / a lane that links engines), so both

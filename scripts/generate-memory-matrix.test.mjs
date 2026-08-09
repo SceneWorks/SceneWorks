@@ -2321,8 +2321,8 @@ const SUPERSEDED_KREA_REVISION = "96b13b6630132410a29ae1bcdf4d8738db7af28a";
 /// It used to be a hardcoded 64-hex constant under a "derive it with `inference-closure-digest.mjs`"
 /// comment, which nothing re-derived. A wrong value there does not fail — it makes every test built
 /// on this fixture assert "historical evidence does not promote" for the wrong reason, because ANY
-/// digest that is not the live one demotes. That is exactly how `820bf106…` hid in
-/// `sc-15833-flux2-evidence.test.mjs` through the whole of sc-17774.
+/// digest that is not the live one demotes. That is exactly how `820bf106…` hid in the sc-15833
+/// FLUX.2 evidence one-shot's test through the whole of sc-17774 (deleted in sc-18100).
 ///
 /// Reading it from the bundle inherits a real gate: `backfill-closure-digests.mjs --verify` in
 /// `check.yml` re-derives every record digest from inference source at the revision it names, so a
@@ -2931,6 +2931,83 @@ test("the elision is counted, never silent (sc-18099)", async () => {
         .map((cell) => cell.modelId),
     ).size,
   );
+});
+
+// sc-18100: rehomed from `calibration-cost-model.test.mjs`, the only place that ever re-derived the
+// published headline counts from raw inputs. The generator computes `currentCalibrationRuns` by
+// summing `cell.evidence.currentEnvironmentVerification`; this recomputes it straight from the
+// evidence bundle and the closure ledger, so a promotion bug in that path cannot agree with itself.
+// The sc-17774 rule under test: a record authorizes the live runtime only while its provider's
+// compile closure is unchanged — the pin is not the term.
+test("the published summary re-derives from the evidence bundle and the closure ledger (sc-17774)", async () => {
+  const root = new URL("../", import.meta.url);
+  const matrix = JSON.parse(await readFile(new URL("docs/generated/memory-matrix.json", root)));
+  const evidence = JSON.parse(
+    await readFile(new URL("docs/generated/memory-calibration-evidence.json", root)),
+  );
+  const closures = JSON.parse(
+    await readFile(new URL("config/inference-provider-closures.json", root)),
+  );
+
+  const tally = { complete: 0, runtimeComplete: 0 };
+  for (const record of evidence.records) {
+    if (record.status === "complete") tally.complete += 1;
+    if (record.status === "runtime_complete") tally.runtimeComplete += 1;
+  }
+  assert.deepEqual(matrix.summary.calibrationRunsByStatus, tally);
+  assert.equal(matrix.summary.calibrationRuns, tally.complete + tally.runtimeComplete);
+
+  // `binding.eligible` is the generator's own coordinate match; everything else here is recomputed.
+  const eligibleByRecord = new Map(
+    matrix.calibrationRuns.map(({ binding, record }) => [record.id, binding.eligible]),
+  );
+  const currentRuns = (providers) => evidence.records.filter((record) => {
+    if (!["complete", "runtime_complete"].includes(record.status)) return false;
+    if (["fixture", "candidate"].includes(record.evidenceScope)) return false;
+    if (!eligibleByRecord.get(record.id)) return false;
+    const lane = `${record.backend}:${record.target.provider}`;
+    return record.repositories.inference.closureDigest === providers[lane]?.digest;
+  }).length;
+
+  assert.equal(matrix.summary.currentCalibrationRuns, currentRuns(closures.providers));
+
+  // The equality above is only as good as the recomputation being a live derivation. Today the
+  // corpus is fully fail-closed (every eligible record sits at a superseded closure, so both sides
+  // are 0) and a hardwired `0` would satisfy it. Prove sensitivity in BOTH directions against two
+  // synthetic ledgers, so the proof holds whatever the real corpus currently says.
+  //
+  // Deliberately NOT compared against `matrix.summary.currentCalibrationRuns`: refreshing every lane
+  // to the live closure is the stated end state of epic 18093, and at that point the as-captured
+  // ledger and the live ledger agree. A strict `>` against the live count would red on that entirely
+  // correct state — the same "fails on correct change" defect that disqualified the census literals
+  // this test replaced.
+  const eligibleRecords = evidence.records.filter((record) =>
+    ["complete", "runtime_complete"].includes(record.status) &&
+    !["fixture", "candidate"].includes(record.evidenceScope) &&
+    eligibleByRecord.get(record.id),
+  );
+  assert.ok(eligibleRecords.length > 0, "the corpus must hold eligible records to prove anything");
+
+  // Admits: a ledger stamped with the records' own captured digests makes eligible records current.
+  // Not an equality against `eligibleRecords.length` — the ledger is keyed by LANE, and a lane whose
+  // records were captured at more than one closure collapses to whichever digest is written last, so
+  // some eligible records legitimately stay non-current here (31 of 35 today). The claim that has to
+  // hold is that the count is driven off zero at all.
+  const asCaptured = Object.fromEntries(eligibleRecords.map((record) => [
+    `${record.backend}:${record.target.provider}`,
+    { digest: record.repositories.inference.closureDigest },
+  ]));
+  assert.ok(
+    currentRuns(asCaptured) > 0,
+    "a ledger matching the captured digests must make eligible records current",
+  );
+
+  // Refuses: a ledger where no digest can match makes nothing current. Together with the admitting
+  // case this pins the comparison itself, not the count it happens to produce today.
+  const allSuperseded = Object.fromEntries(
+    Object.keys(closures.providers).map((lane) => [lane, { digest: "0".repeat(64) }]),
+  );
+  assert.equal(currentRuns(allSuperseded), 0);
 });
 
 test("the published document is closed: no reference outlives its row (sc-18099)", async () => {

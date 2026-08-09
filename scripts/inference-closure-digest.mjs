@@ -551,8 +551,9 @@ export function digestsAtRevision({ repo, revision, providers, readBodies, runGi
  * Exported because the stale-lane report (sc-18098) needs the same pin this module derives against,
  * and a second private copy of the pattern is how the two would silently disagree. It deliberately
  * lives here rather than in `generate-memory-matrix.mjs`, which holds the third copy: that file is a
- * hashed source of `docs/generated/calibration-cost-model.json`, so exporting its private helper
- * would rotate a 1 MB generated artifact for a keyword.
+ * hashed source of `docs/generated/memory-matrix.*`, so exporting its private helper would rotate a
+ * generated artifact for a keyword. (Until sc-18100 it also rotated the 1 MB calibration cost model,
+ * which is now deleted; the matrix fingerprint is the remaining reason.)
  */
 export function inferencePinFromCargo(cargo) {
   const pinned = cargo.match(

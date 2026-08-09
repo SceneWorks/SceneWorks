@@ -114,18 +114,32 @@ The inference repository provides `control_vram_probe`, `sequential_vram_probe`,
 suite. SceneWorks validates the historical sources and writes the fail-closed current bundle with:
 
 ```powershell
-node scripts/sc-16170-certification.mjs --write
-node scripts/sc-16170-certification.mjs
 node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json
 node scripts/generate-memory-matrix.mjs
-node scripts/calibration-cost-model.mjs
 ```
 
-The check command reconstructs all 90 historical cases from every committed transcript and inventory
-log, recomputes each transcript's exact-byte hash and every inventory digest, and verifies that the
-checked-in evidence and manifests contain no untyped SC-16170 promotion. Consequently the current matrix
-does not report these Z-Image/Candle cells as Verified. Their raw measurements remain available for audit,
-while runtime admission fails closed until schema-v4 measurements replace them.
+> **sc-18100.** The first two steps used to be `node scripts/sc-16170-certification.mjs --write` and a
+> bare re-run of the same script; a fifth step regenerated the calibration cost model. Those scripts,
+> together with `sc-16170-artifact-inventory.ps1` and `sc-16170-compare-images.py`, were one-shots and
+> are deleted.
+>
+> 🔴 **SC-16170 has no automated verifier, and this section must not be read as claiming one.**
+> `scripts/memory-calibration-harness.test.mjs`
+> (`"every committed source session binds an immutable log whose bytes match its recorded hash"`)
+> re-hashes every log the committed bundle actually cites — today the 7 sc-15833, 10 sc-15823-refresh
+> and 6 sc-15839-pulid capture logs. It does **not** cover SC-16170: the bundle carries **zero**
+> `docs/calibration/sc-16170/` source sessions and no record citing this campaign, while
+> `docs/calibration/sc-16170/` still holds **97 committed transcript and inventory logs that nothing
+> hashes**. Inventory digests are unverified for every campaign — no surviving test recomputes them.
+> Those 97 logs are retained as raw audit material with neither a producer nor a comparator. Anyone
+> extending this certification must re-establish verification rather than assume it.
+
+The deleted certification script reconstructed all 90 historical cases from every committed transcript
+and inventory log, recomputed each transcript's exact-byte hash and every inventory digest, and
+verified that the checked-in evidence and manifests contained no untyped SC-16170 promotion. That
+conclusion is what the rest of this document records; it is no longer re-checked on any run. The
+current matrix does not report these Z-Image/Candle cells as Verified. Their raw measurements remain
+available for audit, while runtime admission fails closed until schema-v4 measurements replace them.
 
 The base and LoRA cells bind the packed-sidecar contract
 `z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2`; strict-control cells bind

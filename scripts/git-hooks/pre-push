@@ -8,7 +8,7 @@
 # Only runs when the pushed commits touch Rust. Skip with SKIP_NEITHER_CHECK=1 / SKIP_CANDLE_CHECK=1
 # or `git push --no-verify`. See CONTRIBUTING.md ("The base.rs / candle cfg rule").
 #
-# sc-16268: `docs/generated/{memory-matrix,calibration-cost-model,tier-integrity}.*` are DERIVED
+# sc-16268: `docs/generated/{memory-matrix,tier-integrity}.*` are DERIVED
 # from those same Rust sources — plus the model manifest and the calibration plan — so a push that
 # touches any of them also runs `check:rust-derived-docs`. It gets its own trigger rather than
 # riding on `rust_changed`: a manifest-only push can land a stale artifact too, and it must not drag
@@ -56,7 +56,7 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   # it; it adds no gate and demands no measurement. `platform-review-contracts.test.mjs` derives the
   # coverage from SOURCE_PATHS so the next added source cannot go missing the same way.
   if printf '%s\n' "$changed" | grep -Eq \
-    '^(config/manifests/builtin\.models\.jsonc|config/(memory-calibration-plan|tier-integrity)\.jsonc?|config/(inference-provider-closures|rung4-applicability-survey)\.json|scripts/(generate-memory-matrix|calibration-cost-model|check-tier-integrity|memory-calibration-harness)\.mjs|scripts/lib/(source-revision|jsonc)\.mjs|docs/generated/(memory-matrix\.json|memory-calibration-evidence\.json))$'; then
+    '^(config/manifests/builtin\.models\.jsonc|config/(memory-calibration-plan|tier-integrity)\.jsonc?|config/(inference-provider-closures|rung4-applicability-survey)\.json|scripts/(generate-memory-matrix|check-tier-integrity|memory-calibration-harness)\.mjs|scripts/lib/(source-revision|jsonc)\.mjs|docs/generated/(memory-matrix\.json|memory-calibration-evidence\.json))$'; then
     derived_docs_changed=1
   fi
 done
@@ -72,7 +72,7 @@ if ! npm run --silent check:rust-derived-docs; then
   echo
   echo "A generated doc derived from the sources you are pushing is stale. Regenerate and commit it"
   echo "(this is the parity failure that would otherwise arrive ~15 minutes from now):"
-  echo "  npm run generate:memory-matrix && npm run generate:calibration-cost-model && npm run generate:tier-integrity"
+  echo "  npm run generate:memory-matrix && npm run generate:tier-integrity"
   exit 1
 fi
 

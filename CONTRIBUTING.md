@@ -90,14 +90,14 @@ That expands to `npm run check:rust-derived-docs`, `cargo fmt --all -- --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `cargo build`.
 Clippy warnings **fail** the build, so keep it clean.
 
-> **Why a node check leads the Rust gate (sc-16268).** `docs/generated/memory-matrix.*`,
-> `docs/generated/calibration-cost-model.json` and `docs/generated/tier-integrity.*` are
+> **Why a node check leads the Rust gate (sc-16268).** `docs/generated/memory-matrix.*` and
+> `docs/generated/tier-integrity.*` are
 > DERIVED from Rust sources (`engines.rs`, `mlx_fit_gate.rs`, `memory_strategy.rs`,
 > `vram_gate.rs`, `image_jobs/instantid.rs`, the memory adapters, `Cargo.toml`), so a
 > Rust-only change can make them stale. Those checks used to live only in `npm run check`,
 > which meant the gate contributors are told to run went green while CI's `parity` lane went
 > red. They run in under a second each; when one fails, regenerate with
-> `npm run generate:memory-matrix`, `npm run generate:calibration-cost-model` or
+> `npm run generate:memory-matrix` or
 > `npm run generate:tier-integrity` and commit the result. The same check is also the first
 > thing the pre-push hook runs for a Rust-touching push.
 
