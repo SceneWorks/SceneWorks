@@ -7929,6 +7929,314 @@ mod tests {
         );
     }
 
+    /// sc-18251 resident-only audit: drive the shipped asset sizes through the same post-load
+    /// cache-credit, legacy-reserve, and estimate-margin path production uses.
+    ///
+    /// The first version of this audit compared `weights + headroom` with the host's full physical
+    /// capacity. That skipped two load-bearing production facts: `live_request_budget` removes the
+    /// 2 GiB legacy foreign-resident reserve, and the request gate credits the loaded provider's
+    /// resident assets before grading the incremental estimate. The estimate margin therefore
+    /// widens the remaining headroom, not a second copy of the already-loaded weights. Keeping the
+    /// audit executable prevents either accounting rule from drifting back into prose.
+    #[test]
+    fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path() {
+        use gen_core::{Capabilities, Modality, ModelDescriptor, Precision, Quant};
+
+        #[derive(Clone, Copy)]
+        struct AuditRoute {
+            manifest_id: &'static str,
+            provider_id: &'static str,
+        }
+
+        // These are every shipped image-provider family whose loaded contract can collapse to
+        // Resident-only at the pinned inference revision. Multiple provider ids over one artifact
+        // are listed separately when their provider-owned activation anchors differ.
+        let routes = [
+            AuditRoute {
+                manifest_id: "chroma1_base",
+                provider_id: "chroma1_base",
+            },
+            AuditRoute {
+                manifest_id: "chroma1_flash",
+                provider_id: "chroma1_flash",
+            },
+            AuditRoute {
+                manifest_id: "chroma1_hd",
+                provider_id: "chroma1_hd",
+            },
+            AuditRoute {
+                manifest_id: "sd3_5_large",
+                provider_id: "sd3_5_large",
+            },
+            AuditRoute {
+                manifest_id: "sd3_5_large_turbo",
+                provider_id: "sd3_5_large_turbo",
+            },
+            AuditRoute {
+                manifest_id: "sd3_5_medium",
+                provider_id: "sd3_5_medium",
+            },
+            AuditRoute {
+                manifest_id: "flux_schnell",
+                provider_id: "flux1_schnell",
+            },
+            AuditRoute {
+                manifest_id: "flux_dev",
+                provider_id: "flux1_dev",
+            },
+            AuditRoute {
+                manifest_id: "flux2_klein_9b",
+                provider_id: "flux2_klein_9b",
+            },
+            AuditRoute {
+                manifest_id: "flux2_klein_9b",
+                provider_id: "flux2_klein_9b_edit",
+            },
+            AuditRoute {
+                manifest_id: "flux2_klein_9b_kv",
+                provider_id: "flux2_klein_9b_kv_edit",
+            },
+            AuditRoute {
+                manifest_id: "flux2_klein_9b_true_v2",
+                provider_id: "flux2_klein_9b",
+            },
+        ];
+
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        let media = crate::inference_runtime::media();
+        let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
+        let remaining_fixed_reserve_bytes = gib_to_bytes(
+            (OS_APP_RESERVE_GB - crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB).max(0.0),
+        );
+        let generic_activation_bytes = gib_to_bytes(HEADROOM_GB - OS_APP_RESERVE_GB);
+        let hosts = [48_u64, 64, 96, 128];
+        let mut flips = Vec::new();
+
+        for route in routes {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == route.manifest_id)
+                .unwrap_or_else(|| panic!("shipped {} manifest entry", route.manifest_id));
+            let downloads = model["downloads"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} downloads", route.manifest_id));
+            let activation_bytes = media
+                .activation_memory_bytes_1024(route.provider_id)
+                .expect("registered provider route")
+                .unwrap_or(generic_activation_bytes);
+            let raw_incremental_peak =
+                remaining_fixed_reserve_bytes.saturating_add(activation_bytes);
+            let widened_incremental_peak = (raw_incremental_peak as f64
+                * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN))
+                .ceil()
+                .clamp(0.0, u64::MAX as f64) as u64;
+
+            for download in downloads {
+                let asset_bytes = download["estimatedSizeBytes"]
+                    .as_u64()
+                    .or_else(|| download["footprint"]["diskSizeBytes"].as_u64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} download needs an auditable shipped byte size",
+                            route.manifest_id
+                        )
+                    });
+                let tier = download["variant"].as_str().unwrap_or("bf16");
+                let numeric_tier = MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: match tier {
+                        "q4" => Some(Quant::Q4),
+                        "q8" => Some(Quant::Q8),
+                        "bf16" => None,
+                        other => panic!("unsupported audited tier {other}"),
+                    },
+                    component_precision_floors: &[],
+                };
+
+                for host_gib in hosts {
+                    let host_bytes = gib_to_bytes(host_gib as f64);
+                    // This is exactly the live legacy budget after the generator has loaded:
+                    // committed provider assets remain on the available side, while the modeled
+                    // peak receives the matching provider-resident cache credit.
+                    let available_incremental = host_bytes
+                        .saturating_sub(asset_bytes)
+                        .saturating_sub(legacy_reserve_bytes);
+                    let admitted_before_margin = raw_incremental_peak <= available_incremental;
+                    let admitted_now = widened_incremental_peak <= available_incremental;
+                    if admitted_before_margin && !admitted_now {
+                        flips.push((
+                            route.manifest_id,
+                            route.provider_id,
+                            tier,
+                            host_gib,
+                            asset_bytes,
+                            raw_incremental_peak,
+                            widened_incremental_peak,
+                        ));
+                    }
+
+                    // Exercise the production selector seam too; the arithmetic above names the
+                    // historical no-margin counterfactual, while this call proves the current side
+                    // uses cache credit + reserve + EstimateFloor margin together.
+                    let mut contract = MemoryProviderContract::compatibility_default(
+                        route.provider_id,
+                        MemoryBackendRealization::MlxMetal {
+                            bounded_wired_residency: true,
+                            lazy_or_mmap_materialization: true,
+                            explicit_evaluation_and_synchronization: true,
+                            cache_eviction: true,
+                        },
+                    );
+                    contract.asset_facts.base_bytes = asset_bytes;
+                    contract.asset_facts.transformer_bytes = asset_bytes;
+                    assert!(
+                        contract.conformance_errors().is_empty(),
+                        "audit contract must stay conformant: {:?}",
+                        contract.conformance_errors()
+                    );
+                    let generator = RequestGenerator {
+                        descriptor: ModelDescriptor {
+                            id: route.provider_id,
+                            family: "sc-18251-audit",
+                            backend: "mlx",
+                            modality: Modality::Image,
+                            capabilities: Capabilities::default(),
+                            required_components: &[],
+                            control_kinds: None,
+                        },
+                        contract: Some(contract),
+                    };
+                    let plan = MlxRequestPlan {
+                        engine_id: route.provider_id,
+                        model_id: route.manifest_id.to_owned(),
+                        tier: numeric_tier,
+                        asset_bytes,
+                        folded_control_bytes: 0,
+                        folded_adapter_bytes: 0,
+                        activation_headroom_bytes: raw_incremental_peak,
+                        fixed_reserve_bytes: remaining_fixed_reserve_bytes,
+                        calibration: MlxCalibrationConfig::Absent,
+                    };
+                    let evaluated = evaluate_request_with_budget(
+                        &generator,
+                        &plan,
+                        &fixture_inputs(1024, 1024),
+                        MemoryCacheState::Cold,
+                        OffloadPolicy::Resident,
+                        MemoryBudget {
+                            total_bytes: host_bytes,
+                            committed_bytes: asset_bytes,
+                            reclaimable_bytes: 0,
+                            reserved_headroom_bytes: legacy_reserve_bytes,
+                        },
+                        asset_bytes.saturating_add(raw_incremental_peak),
+                        0,
+                        &[],
+                    );
+                    assert_eq!(
+                        evaluated.is_ok(),
+                        admitted_now,
+                        "production-path result drifted for {} ({}) {tier} on {host_gib} GiB: \
+                         {evaluated:?}",
+                        route.manifest_id,
+                        route.provider_id
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            flips
+                .iter()
+                .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sd3_5_large", "sd3_5_large", "q8", 48),
+                (
+                    "sd3_5_large_turbo",
+                    "sd3_5_large_turbo",
+                    "q8",
+                    48,
+                ),
+            ],
+            "the complete shipped resident-only-capable audit changed; update the recorded result, \
+             not only this expectation: {flips:?}"
+        );
+    }
+
+    /// Pin the source side of the resident-only audit against the loaded provider registry. The
+    /// deliberately eager, overlaid, non-Sequential spec disables every conditional optimized leg
+    /// for Chroma/FLUX/FLUX.2-Klein; SD3 Turbo/Medium are resident-only independently, while Large
+    /// also fails closed without its exact calibrated artifact. This is the configuration class the
+    /// host-band table above audits, rather than a hand-authored approximation of provider support.
+    #[test]
+    fn shipped_conditional_mlx_contracts_really_have_a_resident_only_load() {
+        use gen_core::{MemoryStrategySupport, Quant};
+
+        let spec = LoadSpec::new(WeightsSource::Dir(
+            "/nonexistent/sc-18251-resident-only-audit".into(),
+        ))
+        .with_quant(Quant::Q8)
+        .with_control(WeightsSource::File(
+            "/nonexistent/sc-18251-control.safetensors".into(),
+        ));
+        for provider_id in [
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "flux1_schnell",
+            "flux1_dev",
+            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
+        ] {
+            let contract = crate::inference_runtime::media()
+                .memory_strategy_contract(provider_id, &spec)
+                .unwrap_or_else(|error| panic!("{provider_id} contract lookup failed: {error}"))
+                .unwrap_or_else(|| {
+                    // This is the exact fallback `evaluate_request_with_budget_using_bundle` uses
+                    // for a registered generator that has not adopted MemoryProviderContract yet.
+                    MemoryProviderContract::compatibility_default(
+                        provider_id,
+                        MemoryBackendRealization::MlxMetal {
+                            bounded_wired_residency: true,
+                            lazy_or_mmap_materialization: true,
+                            explicit_evaluation_and_synchronization: true,
+                            cache_eviction: true,
+                        },
+                    )
+                });
+            assert_eq!(
+                contract
+                    .capability(MemoryStrategy::Resident)
+                    .expect("resident capability")
+                    .support,
+                MemoryStrategySupport::Implemented,
+                "{provider_id} must retain its resident baseline"
+            );
+            assert!(
+                MemoryStrategy::ALL
+                    .into_iter()
+                    .filter(|strategy| strategy.is_optimized())
+                    .all(|strategy| !matches!(
+                        contract
+                            .capability(strategy)
+                            .map(|capability| &capability.support),
+                        Some(MemoryStrategySupport::Implemented)
+                    )),
+                "{provider_id} audit spec must collapse to Resident-only: {:?}",
+                contract.strategies
+            );
+        }
+    }
+
     /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core
     /// rather than restated.
     ///
