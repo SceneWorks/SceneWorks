@@ -576,8 +576,13 @@ fn fit_ladder_for_tier(
     // The control lane's mirror of the estimate ladder: manifest-row floors, never a promised
     // unmeasured saving. The resident floor is the measured `peakGbByTier` row (with adapters
     // already folded into `peak`); the staged floor is the measured `sequentialPeakGbByTier` row
-    // where present, else the resident floor; every deeper rung takes the staged floor UNREDUCED —
-    // selectable without promising an unmeasured saving. Where a rung's savings ARE measured, its
+    // where present, else the resident floor; every deeper rung whose engaged composition
+    // includes `StagedResidency` takes the staged floor UNREDUCED — selectable without promising
+    // an unmeasured saving. The staged row prices the staged WORKING SET, so a deep rung whose
+    // engaged composition EXCLUDES staging (sc-18253 — the `engagedRungs` mechanism permits it)
+    // runs whole-model resident and clamps to the resident floor instead, mirroring the MLX
+    // floor's `engaged.contains(&StagedResidency)` max-vs-sum split
+    // (`mlx_fit_gate::estimate_floor_weights_bytes`). Where a rung's savings ARE measured, its
     // measured candidate exists in `measured` above and supersedes the floor in the selector, so
     // the priced 1024² ladder is byte-for-byte unchanged.
     //
@@ -629,10 +634,16 @@ fn fit_ladder_for_tier(
             if contract.validate_selection(&selection).is_err() {
                 continue;
             }
-            let floor_gb = if strategy == MemoryStrategy::Resident {
-                resident_floor_gb
-            } else {
+            let engaged = contract.engaged_composition(strategy);
+            // sc-18253: the staged row is only a sound floor for a composition that actually
+            // engages staging; a rung excluding `StagedResidency` runs whole-model resident and
+            // clamps to the resident floor (see the header comment above).
+            let floor_gb = if strategy != MemoryStrategy::Resident
+                && engaged.contains(&MemoryStrategy::StagedResidency)
+            {
                 staged_floor_gb
+            } else {
+                resident_floor_gb
             };
             let predicted_peak_bytes = bytes(floor_gb);
             tracing::info!(
@@ -654,7 +665,7 @@ fn fit_ladder_for_tier(
                         overlay: Some(overlay.clone()),
                         geometry: request_geometry,
                         strategy,
-                        engaged_composition: contract.engaged_composition(strategy),
+                        engaged_composition: engaged,
                         parameters: selection.parameters,
                     },
                     conformance: MemoryConformanceState::ImplementedUnverified,
@@ -1597,6 +1608,107 @@ mod tests {
                 estimate_scoped: false,
             }
         );
+    }
+
+    /// sc-18253: the staged `sequentialPeakGbByTier` row prices the staged WORKING SET, so it is
+    /// only a sound floor for a composition that actually engages `StagedResidency`. The gen-core
+    /// engagement mechanism permits a contract to implement a deep rung while excluding staging
+    /// (the default composition when no staged prerequisite edge is declared); such a request runs
+    /// whole-model resident and its floor must clamp to the resident row — the mirror of the MLX
+    /// floor's `engaged.contains(&StagedResidency)` max-vs-sum split.
+    ///
+    /// The request runs at 512² — inside the measured envelope, so the floors are synthesized,
+    /// while every measured 1024² candidate is structurally out-of-envelope. That isolates the
+    /// FLOOR values in the outcome: admission below the resident row is possible only through a
+    /// floor. Both mutation directions are pinned: deleting the composition check re-admits the
+    /// staging-free arm on the staged row (red), and inverting it (always the resident floor)
+    /// strands the registered control arm's staged rung at the resident row (red).
+    #[test]
+    fn a_staging_free_deep_rung_floor_clamps_to_the_resident_row() {
+        let request_geometry = MemoryGeometry {
+            width: 512,
+            height: 512,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let peak = 40.0;
+        let sequential = 30.0;
+        let staged_floor = sequential - HEADROOM_GB;
+        let resident_floor = peak - HEADROOM_GB;
+        let margin = crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN;
+        // An effective budget between the WIDENED staged floor and the resident floor: a rung
+        // priced on the staged row admits here; one clamped to the resident row cannot. Recomputed
+        // from the policy margin, never a frozen literal.
+        let free = staged_floor * (1.0 + margin) + HEADROOM_GB + 0.5;
+        assert!(
+            free - HEADROOM_GB < resident_floor,
+            "the budget must stay below the resident floor to discriminate"
+        );
+        let run = |contract: &MemoryProviderContract| {
+            fit_ladder_for_tier(
+                Some(contract),
+                "q4",
+                request_geometry,
+                Some(peak),
+                Some(sequential),
+                Some(budget(free)),
+                None,
+                None,
+                true,
+                true,
+                0.0,
+                &live_test_closure_digest(),
+            )
+        };
+
+        // Control: the registered q4 contract binds its deep rungs to staging, so the staged
+        // working-set floor stands and the ladder admits sequential staging at 512². Clamping
+        // every floor to the resident row regardless of composition would flip this red.
+        let registered = registered_contract_for_tier("q4").expect("registered control contract");
+        assert_eq!(
+            run(&registered),
+            KreaControlFit::Fits {
+                offload_policy: OffloadPolicy::Sequential,
+                tile_vae_decode: false,
+                chunk_attention: false,
+                estimate_scoped: true,
+            },
+            "a staging-engaged composition keeps the staged working-set floor"
+        );
+
+        // The finding's contract shape: decode/attention implemented, staging not implemented and
+        // no staged prerequisite edges — every deep rung's engaged composition excludes
+        // `StagedResidency`, so the request runs whole-model resident. Before sc-18253 those
+        // rungs took the staged row and ADMITTED here behind only the estimate margin; the clamp
+        // makes the ladder refuse at the widened RESIDENT floor instead. Deleting the composition
+        // check flips this arm back to `Fits` and red.
+        let mut staging_free = registered.clone();
+        staging_free.additional_prerequisites.clear();
+        for capability in &mut staging_free.strategies {
+            if capability.strategy == MemoryStrategy::StagedResidency {
+                capability.support = gen_core::MemoryStrategySupport::Missing;
+            }
+        }
+        match run(&staging_free) {
+            KreaControlFit::TooBig {
+                needed_gb,
+                available_gb,
+            } => {
+                // The refusal quotes the widened resident clamp (byte-ceil wiggle tolerated),
+                // proving the deep-rung floors were re-priced rather than merely excluded.
+                let expected_needed = resident_floor * (1.0 + margin) + HEADROOM_GB;
+                assert!(
+                    (needed_gb - expected_needed).abs() < 1e-6,
+                    "the refusal must quote the widened RESIDENT clamp: got {needed_gb}, want \
+                     {expected_needed}"
+                );
+                assert!((available_gb - free).abs() < 1e-6);
+            }
+            other => panic!(
+                "a staging-free deep rung must not admit on the staged working-set row: {other:?}"
+            ),
+        }
     }
 
     #[test]
