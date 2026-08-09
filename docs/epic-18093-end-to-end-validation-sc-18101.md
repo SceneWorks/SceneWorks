@@ -82,8 +82,59 @@ it can run on both sides), same weights, same cap:
 | epic `main` | `Evidence`, `fallback_reason=None` | **REFUSED** `FingerprintMismatch` |
 | this branch (fixed) | `Legacy`, `fallback_reason=StaleIdentity` | **ADMITTED** `Resident`, `predicted_peak_bytes=48934269317` |
 
-`diff c0-outcome-main.log c0-outcome-baseline.log` is clean after the fix — byte-identical to the
-pre-epic outcome, including the predicted peak.
+`diff c0-outcome-main.log c0-outcome-baseline.log` is clean after the fix. That equality is of the
+OUTCOME — same route, same rung, same `predicted_peak_bytes` — and it is worth being precise about
+what it does *not* cover, because the earlier draft of this file overclaimed it as "byte-identical".
+
+**The admitted requirement moved: `needed_gb` 45.57 → 50.13 GiB.** Same peak, but the legacy
+resident floor is now graded behind the 10 % estimate margin, which pre-epic did not exist. So there
+is a band — `[45.57, 50.13)` GiB of effective budget — where pre-epic admitted and this branch
+refuses.
+
+That band is real, and reachable through the probe's path: `c0_production_loadspec_probe` passes
+`OffloadPolicy::Resident` directly, and at a 48 GB cap (46.00 GiB effective) the pre-epic commit
+ADMITS at 45.57 while this branch refuses with `needs 50.13 GiB but only 46.00 GiB is safely
+available`. Measured, not argued.
+
+Whether the *production* chain reaches it is a separate question, and the answer is more interesting
+than "no" — see the next section.
+
+### A second behaviour change at the same cap, which is NOT a regression
+
+Running the full production chain (cap → `apply_residency_policy` → contract → ladder) at
+`qwen_image` q8 **1024²** on both commits:
+
+| cap (GB) | `de756026` | this branch |
+|---:|---|---|
+| 56 and up | `Resident`, 45.57 GiB | `Resident`, 45.57 GiB |
+| **48** | **ADMITS** `Resident` (load policy `Sequential`), 45.57 GiB | **REFUSES** — `needs at least 63.34 GiB at its smallest verified MLX host boundary` |
+| 44 and below | refuses (`no safely verified MLX memory strategy (Missing)`) | refuses |
+
+So at a 48 GB cap the production chain does diverge. The cause is not the estimate margin: under
+`Sequential` the provider declares rung 4 `Implemented`, so the deferred rung-4 record now passes
+both legs of the filter, reaches the Evidence budget pre-check, and is refused because its **captured
+host boundary is 63.34 GiB** against a 46 GiB budget.
+
+**This one is left alone deliberately.** It is the epic working as designed, not the §0 hole:
+
+* §0 refused on `FingerprintMismatch` — a STRUCTURAL verdict carrying no information about whether
+  the request fits. Refusing on it is the gate failing to do its job, and there was no fallback.
+* This refuses because a measurement says the request needs 63.34 GiB and the machine has 46. That
+  is the gate doing exactly its job, with better information than the 45.57 GiB estimate the
+  pre-epic commit admitted on. On a lane where allocator overshoot terminates the process, the
+  pre-epic admit was the unsafe answer.
+
+An earlier attempt at this validation did try to degrade this case to the estimate ladder too. It
+was reverted: it broke
+`a_moved_provider_closure_admits_the_stale_ladder_behind_the_widened_margin`, whose whole point is
+that the widened stale peak GATES — and it would have made `MLX_STALE_MEASURED_MARGIN`
+non-binding on the MLX Evidence path, destroying the very property criterion 3 brackets. A stale
+peak's *widening* is a signal; a stale peak's *refusal* is still a gate, and sc-18095/18096 chose
+that deliberately.
+
+It remains a user-visible narrowing — a 48 GB Mac that could render this cell before now cannot —
+so it is called out here rather than buried, and it is worth a product decision on whether a
+measured "does not fit" should be able to veto a cheaper unmeasured rung. Tracked with sc-18237.
 
 ### The fix
 
@@ -110,8 +161,31 @@ Two design points are load-bearing:
    freeze it replaces.
 
 Guarded by `mlx_fit_gate::tests::a_load_shape_mismatch_degrades_to_estimates_instead_of_refusing`
-(not `#[ignore]`d). Mutation-checked: reverting the fix makes it fail with the exact production
-message above.
+(not `#[ignore]`d), with four arms — degrade, spare-the-sibling, the Resident exemption, and the
+rung-support leg — plus
+`mlx_fit_gate::tests::gen_core_accepts_a_resident_cell_whose_load_shape_disagrees`, which pins the
+exemption's premise against the pinned gen-core rather than restating it.
+
+**Every leg is mutation-checked**, and this mattered: the guard's first version could not tell the
+per-candidate filter from a whole-route demotion, because the fixture bundle held a single record
+and there was never a sibling to spare. Replacing `retain` with `clear` — the exact bug this fix
+had already hit once — left it green. The fixture now carries a second record on
+`bounded_transformer_residency` captured `deferred_materialization`, and the arms assert on the
+surviving SET. Current matrix:
+
+| mutation | result |
+|---|---|
+| `evidence.retain(usable)` → `evidence.clear()` (whole-route demotion) | **red** |
+| shape test disabled (`shape_agrees = true`) | **red** |
+| Resident exemption dropped (over-strict) | **red** |
+| rung-support conjunct dropped | **red** |
+
+The Resident exemption is a **mirror, not a tightening** — `optimized_eligibility` short-circuits
+`Ok(())` for a non-optimized selection before it compares load shapes, so a resident cell measured
+under the other shape is one the downstream gate ACCEPTS. Filtering it here would be stricter than
+the gate this filter exists to anticipate, and would silently discard a usable measurement —
+the same failure mode as the whole-route demotion. Reachable in the shipped corpus: `qwen_image`
+bf16 carries a resident binding captured eager against a production deferred load.
 
 ### What is still open
 

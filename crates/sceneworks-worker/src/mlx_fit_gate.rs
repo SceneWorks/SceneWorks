@@ -2011,9 +2011,13 @@ fn evaluate_request_with_budget_using_bundle(
     // take the route's usable siblings with it.
     //
     // `MemoryCalibrationIdentity` has three fields — `abi`, `fingerprint`, `load_shape` — and
-    // gen-core's `optimized_eligibility` rejects a candidate whose `key.load_shape` disagrees with
-    // either `contract.load_shape` or `identity.load_shape`, returning `FingerprintMismatch`. The
-    // demotion below compares only the first two, which left a hole with nothing behind it: a cell
+    // gen-core's `optimized_eligibility` rejects an OPTIMIZED candidate whose `key.load_shape`
+    // disagrees with either `contract.load_shape` or `identity.load_shape`, returning
+    // `FingerprintMismatch`. (`Resident` is exempt: `optimized_eligibility` returns `Ok(())` for it
+    // before the shape comparison, because a resident cell engages no optimized rung whose
+    // materialization the shape could change. The filter below mirrors that exemption exactly —
+    // see its own comment.) The demotion below compares only the first two, which left a hole with
+    // nothing behind it: a cell
     // whose records were all captured under the other shape reached `AdmissionPath::Evidence`, lost
     // every candidate inside `select_strategy`, and refused the request outright with "no
     // structurally admissible MLX memory strategy" — because estimate synthesis runs only on the
@@ -2035,17 +2039,27 @@ fn evaluate_request_with_budget_using_bundle(
     // regression. Filtering keeps every usable measurement and degrades only when nothing is left.
     if admission.path == AdmissionPath::Evidence {
         // A candidate is USABLE only if the selector could actually reach it: it must have been
-        // measured under the shape this load uses, and it must sit on a rung the loaded contract
-        // declares `Implemented`. Both are properties of the LOADED PROVIDER, not of the request,
-        // and both are checked downstream where the only outcome left is a refusal — the rung-support
-        // one silently, since `select_strategy` skips an unimplemented rung without even recording an
-        // exclusion, so the request dies with a bare `Missing`.
+        // measured under a shape the downstream eligibility gate will accept for its rung, and it
+        // must sit on a rung the loaded contract declares `Implemented`. Both are properties of the
+        // LOADED PROVIDER, not of the request, and both are checked downstream where the only
+        // outcome left is a refusal — the rung-support one silently, since `select_strategy` skips
+        // an unimplemented rung without even recording an exclusion, so the request dies with a bare
+        // `Missing`.
+        //
+        // The shape test MIRRORS `optimized_eligibility` rather than tightening it. That gate
+        // short-circuits `Ok(())` for `MemoryStrategy::Resident` before it ever compares load
+        // shapes, so a resident cell measured under the other shape is one the gate ACCEPTS.
+        // Dropping it here would make this filter stricter than the thing it exists to anticipate,
+        // and would silently discard a usable measurement — the same failure mode as the whole-route
+        // demotion this filter deliberately avoids. Reachable in the shipped corpus: `qwen_image`
+        // bf16 carries a resident binding captured eager against a production deferred load.
         let usable = |candidate: &VerifiedAdmissionCandidate| {
             let evidence = &candidate.evidence;
-            let shape_agrees = contract.calibration.as_ref().is_some_and(|identity| {
-                evidence.key.load_shape == contract.load_shape
-                    && evidence.key.load_shape == identity.load_shape
-            });
+            let shape_agrees = !evidence.key.strategy.is_optimized()
+                || contract.calibration.as_ref().is_some_and(|identity| {
+                    evidence.key.load_shape == contract.load_shape
+                        && evidence.key.load_shape == identity.load_shape
+                });
             let rung_implemented = matches!(
                 contract
                     .capability(evidence.key.strategy)
@@ -7342,13 +7356,58 @@ mod tests {
             "with the captured shape restored the cell must reach calibrated admission: {:?}",
             route.fallback_reason
         );
-        // …and the filter must not eat a candidate whose shape DOES agree. This is the arm that
-        // keeps the fix from being a blanket downgrade: `qwen_image` q8 ships one eager and one
-        // deferred binding on the same route, so a whole-route demotion would silently drop the
-        // matching measurement and serve an estimate instead.
+        // …and the filter must SPARE a candidate the loaded provider can serve while dropping its
+        // unusable sibling. This is the arm that separates the shipped per-candidate filter from a
+        // whole-route demotion, and it is the fix's central design decision: `qwen_image` q8 ships
+        // one eager and one deferred binding on the same route, so demoting the whole route would
+        // silently discard the matching measurement and serve an estimate instead. An earlier
+        // iteration of this fix did exactly that.
+        //
+        // Asserting `process_limit_bytes.is_some()` is NOT sufficient here and was the gap a review
+        // caught: with only one record in the bundle there is no sibling to spare, so
+        // `evidence.clear()` — a literal whole-route demotion — passed. The bundle now carries a
+        // second record on `bounded_transformer_residency` captured `deferred_materialization`, and
+        // the assertion is on the surviving SET.
+        let mut two_binding_plan = plan.clone();
+        let MlxCalibrationConfig::Valid(calibration) = &mut two_binding_plan.calibration else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        let mut sibling = fixture_binding_for(
+            "q4",
+            "packed-q4",
+            StrategyRung::BoundedTransformerResidency,
+            JsonObject::from_iter([
+                ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+                ("decodeOverlap".to_owned(), serde_json::json!(128)),
+                ("attentionChunkSize".to_owned(), serde_json::json!(65536)),
+                ("transformerWindowSize".to_owned(), serde_json::json!(1)),
+            ]),
+        );
+        // The binding must declare the shape its RECORD was captured under, exactly as the shipped
+        // `qwen_image` q8 pair does — `EvidenceBundle::evidence_for` matches on it.
+        sibling.query.load_shape =
+            sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        calibration.bindings.push(sibling);
+
+        let route = evidence_admission_route(
+            &bundle,
+            &two_binding_plan,
+            &inputs,
+            "text_to_image",
+            fixture_budget(64.0),
+            FIXTURE_CLOSURE_DIGEST,
+        )
+        .expect("both bindings route without error");
+        assert_eq!(
+            route.evidence.len(),
+            2,
+            "the fixture must present BOTH a shape-matching and a mismatching candidate, or this \
+             arm cannot tell a filter from a whole-route demotion"
+        );
+
         let calibrated = evaluate_request_with_budget_using_bundle(
             &matched,
-            &plan,
+            &two_binding_plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
@@ -7364,6 +7423,224 @@ mod tests {
             calibrated.process_limit_bytes.is_some(),
             "a shape-matching measured cell must still be served from its RECORD (which supplies \
              the request-scoped ceiling), not degraded to an estimate"
+        );
+        // The survivor is the shape-matching rung, and it survived ALONE: `clear()` in place of
+        // `retain()` empties this and degrades the route, which the selection below would then have
+        // served from an estimate with no `process_limit_bytes`.
+        assert_eq!(
+            calibrated.context.selection.strategy,
+            MemoryStrategy::BoundedDecode,
+            "the eager `bounded_decode` cell is the one this eager contract can serve; selecting \
+             anything else means the filter dropped it"
+        );
+        assert_eq!(
+            calibrated
+                .context
+                .selection
+                .parameters
+                .transformer_window_size,
+            None,
+            "the deferred rung-4 sibling must not have been selected"
+        );
+
+        // Third arm: the Resident EXEMPTION. `optimized_eligibility` short-circuits `Ok(())` for a
+        // non-optimized selection before it compares load shapes (pinned against gen-core by
+        // `gen_core_accepts_a_resident_cell_whose_load_shape_disagrees`), so a resident cell measured
+        // under the other shape is one the downstream gate ACCEPTS — and this filter must not be
+        // stricter than the gate it anticipates. Dropping the exemption would silently discard a
+        // usable measurement, which is the same failure mode as the whole-route demotion.
+        //
+        // The bundle carries a resident cell captured `deferred_materialization`; bind it alongside
+        // the eager `bounded_decode` cell and select under the EAGER contract. If the exemption
+        // holds, the resident record survives the filter and the selector takes it first (rung
+        // order), serving a RECORD — `process_limit_bytes` is `Some`. Without the exemption it is
+        // filtered out and `bounded_decode` is selected instead.
+        let mut resident_plan = plan.clone();
+        let MlxCalibrationConfig::Valid(resident_calibration) = &mut resident_plan.calibration
+        else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        let mut resident_binding =
+            fixture_binding_for("q4", "packed-q4", StrategyRung::Resident, JsonObject::new());
+        resident_binding.query.load_shape =
+            sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        resident_calibration.bindings.push(resident_binding);
+
+        let exempted = evaluate_request_with_budget_using_bundle(
+            &matched,
+            &resident_plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("the resident cell is admitted");
+        assert_eq!(
+            exempted.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "a RESIDENT cell whose load shape disagrees must survive the filter, because \
+             `optimized_eligibility` accepts it; filtering it would be stricter than the gate"
+        );
+        assert!(
+            exempted.process_limit_bytes.is_some(),
+            "the exempted resident cell must be served from its RECORD, not an estimate"
+        );
+
+        // Fourth arm: the RUNG-SUPPORT leg, which is the other half of `usable` and is load-bearing
+        // in production — on the real `qwen_image` q8 cell the probe records `dropped=2 retained=0`,
+        // and the second drop is this one, not the shape one.
+        //
+        // Bind ONLY the deferred rung-4 cell and select under the DEFERRED contract, whose
+        // `BoundedTransformerResidency` support is `Missing`. The shape now AGREES, so only the
+        // rung check can drop it. It must: otherwise the candidate reaches `select_strategy`, which
+        // skips an unimplemented rung WITHOUT recording an exclusion, leaving every rung empty and
+        // refusing with a bare `Missing` and no log line naming a cause.
+        let mut rung_plan = plan.clone();
+        let MlxCalibrationConfig::Valid(rung_calibration) = &mut rung_plan.calibration else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        let mut rung4_only = fixture_binding_for(
+            "q4",
+            "packed-q4",
+            StrategyRung::BoundedTransformerResidency,
+            JsonObject::from_iter([
+                ("decodeTileEdge".to_owned(), serde_json::json!(512)),
+                ("decodeOverlap".to_owned(), serde_json::json!(128)),
+                ("attentionChunkSize".to_owned(), serde_json::json!(65536)),
+                ("transformerWindowSize".to_owned(), serde_json::json!(1)),
+            ]),
+        );
+        rung4_only.query.load_shape =
+            sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        rung_calibration.bindings = vec![rung4_only];
+        assert_eq!(
+            generator
+                .contract
+                .as_ref()
+                .and_then(
+                    |contract| contract.capability(MemoryStrategy::BoundedTransformerResidency)
+                )
+                .map(|capability| &capability.support),
+            Some(&gen_core::MemoryStrategySupport::Missing),
+            "precondition: the fixture contract does not implement rung 4"
+        );
+        let unsupported_rung = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &rung_plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect(
+            "a measured cell on a rung the loaded contract does not implement must degrade to the \
+             estimate ladder, not refuse with a bare `Missing`",
+        );
+        assert_eq!(
+            unsupported_rung.process_limit_bytes, None,
+            "nothing measured survived, so the request is served from an estimate"
+        );
+    }
+
+    /// sc-18101: the PREMISE of the Resident exemption in the shape filter, pinned against
+    /// gen-core rather than restated.
+    ///
+    /// The filter above skips its load-shape test for `MemoryStrategy::Resident` because
+    /// `optimized_eligibility` does: that gate short-circuits `Ok(())` for a non-optimized
+    /// selection before it ever compares load shapes, so a resident cell measured under the other
+    /// shape is one the gate ACCEPTS. The filter exists to anticipate the gate, not to tighten it —
+    /// dropping such a cell would silently discard a usable measurement, which is the failure mode
+    /// the per-candidate filter exists to avoid.
+    ///
+    /// This test asserts the premise directly. If a pin bump ever makes gen-core reject a resident
+    /// cell on load shape, this reds and the exemption must be revisited — which is the only way a
+    /// mirrored predicate can be kept honest against a dependency it does not own.
+    #[test]
+    fn gen_core_accepts_a_resident_cell_whose_load_shape_disagrees() {
+        use gen_core::MemoryCalibrationIdentity;
+
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert_eq!(
+            contract.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "fixture precondition"
+        );
+
+        // A resident cell measured under the OTHER shape.
+        let (selection, mut resident) = resident_evidence(
+            contract,
+            fixture_plan().tier,
+            "text_to_image",
+            None,
+            request_geometry(&fixture_inputs(1024, 1024)),
+            gib_to_bytes(4.0),
+            Some("fixture-formula-v2"),
+        );
+        resident.key.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        resident.conformance = gen_core::MemoryConformanceState::Verified;
+        resident.dimensions = gen_core::MemoryEvidenceDimensions::VERIFIED;
+        assert!(
+            !selection.strategy.is_optimized(),
+            "the exemption is about the non-optimized rung"
+        );
+        assert_eq!(
+            resident.optimized_eligibility(contract),
+            Ok(()),
+            "gen-core must still accept a RESIDENT cell whose load shape disagrees; the filter's \
+             exemption is built on this"
+        );
+
+        // …and the same disagreement on an OPTIMIZED rung is what the gate rejects, which is what
+        // the filter anticipates. Without this arm the assertion above could pass vacuously. The
+        // optimized candidate is taken from the real admission route rather than hand-built, so it
+        // is structurally valid in every dimension EXCEPT the one under test.
+        let route = evidence_admission_route(
+            &fixture_bundle(),
+            &fixture_plan(),
+            &fixture_inputs(1024, 1024),
+            "text_to_image",
+            fixture_budget(64.0),
+            FIXTURE_CLOSURE_DIGEST,
+        )
+        .expect("the fixture route resolves");
+        let mut optimized = route
+            .evidence
+            .iter()
+            .map(|candidate| candidate.evidence.clone())
+            .find(|evidence| evidence.key.strategy.is_optimized())
+            .expect("the fixture bundle carries an optimized cell");
+        assert_eq!(
+            optimized.optimized_eligibility(contract),
+            Ok(()),
+            "precondition: the optimized cell is eligible BEFORE the shape is disturbed"
+        );
+        optimized.key.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        assert_eq!(
+            optimized.optimized_eligibility(contract),
+            Err(gen_core::MemoryEvidenceVerdict::FingerprintMismatch),
+            "an OPTIMIZED cell with the same shape disagreement must be rejected"
+        );
+
+        // Belt and braces: the identity really does carry the shape as a third field, which is the
+        // thing the worker demotion above compares only two of.
+        let identity = MemoryCalibrationIdentity::new(
+            "fixture-formula-v2",
+            gen_core::LoadShape::EagerMaterialization,
+        );
+        assert_eq!(
+            identity.load_shape,
+            gen_core::LoadShape::EagerMaterialization
         );
     }
 
