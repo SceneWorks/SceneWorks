@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
-import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
+import { AssetMedia } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { StudioLoraImportPanel } from "../components/StudioLoraImportPanel.jsx";
@@ -169,7 +169,7 @@ import {
   macModelFeatureBlock,
 } from "../macGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
-import { probeImageDimensions } from "../imageDimensions.js";
+import { resolutionUniverseKey, useReferenceAspectSnap } from "../hooks/useReferenceAspectSnap.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
@@ -1164,16 +1164,28 @@ export function ImageStudio() {
     },
     [resolutionOptions],
   );
-  // Auto-preset the Aspect from the picked img2img reference (sc-10195): matching the reference's
-  // aspect keeps the latent-init composition valid (a 4:5 reference rendered at 16:9 comes out
-  // wrong-shaped). Mirrors the describe picker's probe (sc-8109/8220) — keyed on the id AND the asset
-  // list so a freshly imported reference re-runs once it resolves. User Aspect override still wins.
-  useEffect(() => {
-    if (!img2imgReferenceAssetId) return;
-    const asset = editImageAssets.find((item) => item.id === img2imgReferenceAssetId);
-    const src = asset && assetUrl(asset);
-    return probeImageDimensions(src, onReferenceImageLoaded);
-  }, [img2imgReferenceAssetId, editImageAssets, onReferenceImageLoaded]);
+  // The snap key both this screen and the describe picker dedupe on — the model's DECLARED option
+  // universe, deliberately not the memory-gated `resolutionOptions` above. See
+  // resolutionUniverseKey for why the gated list is the wrong input and why a value, not an
+  // identity, is required.
+  const resolutionSnapKey = useMemo(
+    () => resolutionUniverseKey(selectedModel, DEFAULT_RESOLUTION_OPTIONS),
+    [selectedModel],
+  );
+  // Auto-preset the Aspect from the picked img2img reference (sc-10195), through the same guarded
+  // hook the describe picker uses. Gated on the SAME condition that renders the tile (below), because
+  // `img2imgReferenceAssetId` is never cleared on a model or mode change: without the gate, a
+  // reference armed on Krea would keep steering the Aspect on a model that has no img2img panel at
+  // all. This rides `enabled`, NOT an emptied id — an emptied id re-arms the snap, which would
+  // re-clobber the Aspect on a mode round-trip (Text → Edit → Text with the reference still armed).
+  const img2imgSnapEligible = supportsImg2img && mode === "text_to_image";
+  useReferenceAspectSnap({
+    referenceId: img2imgReferenceAssetId,
+    assets: editImageAssets,
+    onReferenceImageLoaded,
+    snapKey: resolutionSnapKey,
+    enabled: img2imgSnapEligible,
+  });
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
   // it picks the manifest's `mlx.limits` override on Mac/MLX and the `candle.limits`
@@ -2527,6 +2539,7 @@ export function ImageStudio() {
                 // sc-8109 seam: the reference-image picker calls this with the uploaded image's
                 // natural dimensions to auto-preset the resolution to the nearest aspect.
                 onReferenceImageLoaded={onReferenceImageLoaded}
+                referenceSnapKey={resolutionSnapKey}
                 // Reference-image → JSON caption (epic 8102, sc-8108). Gated to text-to-image ONLY:
                 // edit/character modes condition on their own source/identity image, so a fresh
                 // scene caption written from a different reference would conflict. The image is
@@ -2647,7 +2660,9 @@ export function ImageStudio() {
                 <div className="structured-reference">
                   <p className="structured-hint">
                     Pick an image to guide the render (image-to-image). A higher reference strength
-                    stays closer to it; lower lets the prompt take over.
+                    stays closer to it; lower lets the prompt take over. Any strength above 0 starts
+                    the denoise partway through the schedule, so progress counts only the remaining
+                    steps — a stronger reference runs fewer than the Steps you set.
                   </p>
                   <ImageEditSourcePickerField
                     assets={editImageAssets}
@@ -2743,6 +2758,7 @@ export function ImageStudio() {
                       onCaption={onImageDescribe}
                       onApply={(text) => setPromptFromUser(text)}
                       onReferenceImageLoaded={onReferenceImageLoaded}
+                      referenceSnapKey={resolutionSnapKey}
                       referenceAssets={editImageAssets}
                       referenceCharacters={characters}
                       importAsset={importAsset}
