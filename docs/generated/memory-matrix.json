@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+    "sceneWorksRevision": "source-tree:11763cd4f61886926fe044563f482fa56ddf58074a5e00bbe4fd1846749f2d9e",
     "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "2867f352b99ced908327e5c062bbecfc1965c07c5cb10f2bd794220fe89b1eb3"
+        "sha256": "11d27c312a0bab08cdf4bfe9e38413c18ff9b12a20a143539a63fe0dace53cfc"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -46,7 +46,7 @@
       },
       "calibrationEvidence": {
         "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "6ff7d17aef64c93048fd6a6fb2c33cc2a088adcbae3ff51424473e1d64a11499"
+        "sha256": "a7007385b096c7d036c406f23aaae58881f8df11853fe822be9c14bff274b34a"
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
@@ -139,12 +139,12 @@
     "mlxStagedStaticCoverage": 39,
     "mlxStagedStaticCoverageDenominator": 53,
     "fullModels": 0,
-    "calibrationRuns": 67,
+    "calibrationRuns": 71,
     "calibrationRunsByStatus": {
       "complete": 52,
-      "runtimeComplete": 15
+      "runtimeComplete": 19
     },
-    "currentCalibrationRuns": 2,
+    "currentCalibrationRuns": 6,
     "rung4Survey": {
       "story": 15969,
       "surveyedFamilyBackends": 40,
@@ -6599,7 +6599,8 @@
       "elided": 34,
       "implemented": 36,
       "states": {
-        "Implemented/unverified": 36
+        "Implemented/unverified": 34,
+        "Runtime verified": 2
       }
     },
     {
@@ -14870,23 +14871,69 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Implemented/unverified",
+      "state": "Runtime verified",
       "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
+        "status": "fitted",
+        "measuredGeometries": [
+          "1024x1024",
+          "768x768"
+        ],
+        "coveredPixelBound": 1048576
       },
-      "calibrationFingerprint": "be5631ce99176db878dfb89c4b46e55b78c536a5229aa0a7adbbcf42938e19d5",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
       "owningFamilyStory": 15519,
       "owningModelStory": 15482,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
           }
         ],
         "historicalVerification": [],
-        "currentEnvironmentVerification": [],
+        "currentEnvironmentVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-b6537074420d51413b38",
+            "hardware": "Apple M5 Max",
+            "tier": "q4",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-09T20:03:46Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 82.69884222373366,
+            "requiredHostBytes": 143675603900,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q4-1024-seed18218-step2"
+            }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-f3badcb841c8707fd971",
+            "hardware": "Apple M5 Max",
+            "tier": "q4",
+            "geometry": "768x768",
+            "capturedAt": "2026-08-09T20:01:20Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 58.65180033072829,
+            "requiredHostBytes": 104477905112,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q4-768-seed18218-step2"
+            }
+          }
+        ],
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "flux2_dev:mlx:q4"
@@ -14915,23 +14962,69 @@
       "engagedRungs": [
         "resident"
       ],
-      "state": "Implemented/unverified",
+      "state": "Runtime verified",
       "memoryCharacterization": {
-        "status": "unmeasured",
-        "measuredGeometries": [],
-        "coveredPixelBound": null
+        "status": "fitted",
+        "measuredGeometries": [
+          "1024x1024",
+          "768x768"
+        ],
+        "coveredPixelBound": 1048576
       },
-      "calibrationFingerprint": "e2d889aa0c31db3c6f9e6b969b6d3c6190fa6b9d01b1446c230576ab59ff6a44",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
       "owningFamilyStory": 15519,
       "owningModelStory": 15482,
       "evidence": {
         "staticImplementation": [
           {
-            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#evidence_admission_route"
           }
         ],
         "historicalVerification": [],
-        "currentEnvironmentVerification": [],
+        "currentEnvironmentVerification": [
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-747f54e1be89e30da943",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "768x768",
+            "capturedAt": "2026-08-09T20:05:18Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 81.63838785514235,
+            "requiredHostBytes": 142467644348,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q8-768-seed18218-step2"
+            }
+          },
+          {
+            "source": "docs/generated/memory-calibration-evidence.json#imc-9b235419ecbe0710da06",
+            "hardware": "Apple M5 Max",
+            "tier": "q8",
+            "geometry": "1024x1024",
+            "capturedAt": "2026-08-09T20:07:29Z",
+            "harnessVersion": "sceneworks-memory-v5",
+            "recordStatus": "runtime_complete",
+            "engagedRungs": [
+              "resident"
+            ],
+            "observedPeakGb": 105.28490179404616,
+            "requiredHostBytes": 169109863356,
+            "parity": {
+              "contract": "tolerance",
+              "result": "passed",
+              "metric": "maximum_absolute_error",
+              "maximumError": 0,
+              "fixture": "flux2-dev-mlx-q8-1024-seed18218-step2"
+            }
+          }
+        ],
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "flux2_dev:mlx:q8"
@@ -27821,6 +27914,54 @@
       }
     },
     {
+      "cellId": "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "current",
+      "record": {
+        "id": "imc-747f54e1be89e30da943",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 768,
+            "width": 768
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-09T20:05:18Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "dirty": false,
+            "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-747f54e1be89e30da943"
+      }
+    },
+    {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
       "binding": {
         "eligible": false,
@@ -28535,6 +28676,54 @@
       }
     },
     {
+      "cellId": "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "current",
+      "record": {
+        "id": "imc-9b235419ecbe0710da06",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q8"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-09T20:07:29Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "dirty": false,
+            "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-9b235419ecbe0710da06"
+      }
+    },
+    {
       "cellId": "qwen_image:qwen_image:mlx:bf16:text_to_image:none:resident",
       "binding": {
         "eligible": false,
@@ -28989,6 +29178,54 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-b62adbfca64f277414e1"
+      }
+    },
+    {
+      "cellId": "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "current",
+      "record": {
+        "id": "imc-b6537074420d51413b38",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 1024,
+            "width": 1024
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q4"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-09T20:03:46Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "dirty": false,
+            "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-b6537074420d51413b38"
       }
     },
     {
@@ -29703,6 +29940,54 @@
           }
         },
         "source": "docs/generated/memory-calibration-evidence.json#imc-eefb3988e2b6d56e7d70"
+      }
+    },
+    {
+      "cellId": "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "binding": {
+        "eligible": true,
+        "reasons": []
+      },
+      "semantics": "current",
+      "record": {
+        "id": "imc-f3badcb841c8707fd971",
+        "status": "runtime_complete",
+        "backend": "mlx",
+        "target": {
+          "geometry": {
+            "batch": 1,
+            "frames": 1,
+            "height": 768,
+            "width": 768
+          },
+          "mode": "text_to_image",
+          "modelId": "flux2_dev",
+          "overlay": "none",
+          "provider": "flux2_dev",
+          "tier": "q4"
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ]
+        },
+        "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+        "capturedAt": "2026-08-09T20:01:20Z",
+        "harnessVersion": "sceneworks-memory-v5",
+        "repositories": {
+          "inference": {
+            "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "dirty": false,
+            "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+          },
+          "sceneWorks": {
+            "dirty": false,
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+          }
+        },
+        "source": "docs/generated/memory-calibration-evidence.json#imc-f3badcb841c8707fd971"
       }
     },
     {

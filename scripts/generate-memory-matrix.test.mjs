@@ -2863,20 +2863,29 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
   }
 
   // The seventh arm, `currentEnvironmentVerification`, admits exactly the two SC-18237 Qwen q8
-  // coordinates at this pin. Two facts keep this assertion useful:
+  // coordinates plus the SC-18218 FLUX.2 q4/q8 Resident coordinates at this pin. Two facts keep
+  // this assertion useful:
   //
-  //   1. It is exact: bounded attention and bounded transformer residency were recaptured at the
-  //      current provider closure; no historical BF16/Q4 or other provider row may join them.
+  //   1. It is exact: Qwen bounded attention/transformer residency and FLUX.2 q4/q8 Resident were
+  //      captured at their current provider closures; no historical or sibling-rung row may join.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm being empty therefore cannot elide anything.
   //
-  // Asserted as an exact count so another recapture flips this test rather than silently passing, and the
-  // field's presence is asserted separately so a rename cannot make the arm quietly vanish.
-  assert.equal(
-    resolved.cells.filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0).length,
-    2,
-    "only the two SC-18237 Qwen q8 cells are measured at a current provider closure",
+  // Asserted as an exact set so another recapture flips this test rather than silently passing, and
+  // the field's presence is asserted separately so a rename cannot make the arm quietly vanish.
+  assert.deepEqual(
+    resolved.cells
+      .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
+      .map((cell) => cell.id)
+      .sort(),
+    [
+      "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
+    ],
+    "only the SC-18237 Qwen q8 and SC-18218 FLUX.2 Resident cells are current",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),

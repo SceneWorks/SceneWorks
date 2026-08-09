@@ -127,12 +127,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
+    evidence_by_id = {record["id"]: record for record in calibration["records"]}
     records_by_status = Counter(record["status"] for record in calibration["records"])
     # sc-16915 added seventeen Full-complete MLX records (qwen_image x15,
     # krea_2_turbo_control x2) measured at the current pin: complete 33 -> 50. The
-    # base-only runtime-complete FLUX population is untouched. SC-18237 adds the two
-    # production-deferred q8 records: complete 50 -> 52.
-    assert records_by_status == {"complete": 52, "runtime_complete": 15}
+    # base-only runtime-complete FLUX population was initially untouched. SC-18237 adds the two
+    # production-deferred q8 records: complete 50 -> 52. SC-18218 then adds four real-weight,
+    # Resident-only MLX FLUX.2 records (q4/q8 at 768/1024): runtime-complete 15 -> 19.
+    assert records_by_status == {"complete": 52, "runtime_complete": 19}
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -185,27 +187,98 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # family's promotion mask another's demotion.
     assert {run["semantics"] for run in full_runs} == {"current", "historical"}
     assert sum(1 for run in full_runs if run["semantics"] == "current") == 2
-    expected_flux2_runtime = {
+    expected_candle_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
         "imc-b62adbfca64f277414e1": "bounded_decode",
         "imc-bfb890dff959eaf09183": "staged_residency",
         "imc-f5c3d06f30ebf3723f13": "bounded_transformer_residency",
     }
-    flux2_runtime = [
+    expected_mlx_flux2_runtime = {
+        "imc-747f54e1be89e30da943": ("q8", 768),
+        "imc-9b235419ecbe0710da06": ("q8", 1024),
+        "imc-b6537074420d51413b38": ("q4", 1024),
+        "imc-f3badcb841c8707fd971": ("q4", 768),
+    }
+    candle_flux2_runtime = [
         run
         for run in runtime_complete_runs
         if run["record"]["target"]["modelId"] == "flux2_dev"
+        and run["record"]["backend"] == "candle"
     ]
     assert {
         run["record"]["id"]: run["record"]["strategy"]["rung"]
-        for run in flux2_runtime
-    } == expected_flux2_runtime
-    assert {run["semantics"] for run in flux2_runtime} == expected_flux2_semantics
+        for run in candle_flux2_runtime
+    } == expected_candle_flux2_runtime
+    assert {run["semantics"] for run in candle_flux2_runtime} == expected_flux2_semantics
     assert {
         run["record"]["repositories"]["inference"]["revision"]
-        for run in flux2_runtime
+        for run in candle_flux2_runtime
     } == {"5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"}
+
+    mlx_flux2_runtime = [
+        run
+        for run in runtime_complete_runs
+        if run["record"]["target"]["modelId"] == "flux2_dev"
+        and run["record"]["backend"] == "mlx"
+    ]
+    assert {
+        run["record"]["id"]: (
+            run["record"]["target"]["tier"],
+            run["record"]["target"]["geometry"]["width"],
+        )
+        for run in mlx_flux2_runtime
+    } == expected_mlx_flux2_runtime
+    assert all(run["semantics"] == "current" for run in mlx_flux2_runtime)
+    assert all(run["binding"]["eligible"] for run in mlx_flux2_runtime)
+    for run in mlx_flux2_runtime:
+        record = evidence_by_id[run["record"]["id"]]
+        tier, width = expected_mlx_flux2_runtime[record["id"]]
+        assert record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
+        assert record["status"] == "runtime_complete"
+        assert record["loadShape"] == "eager_materialization"
+        assert record["calibrationFingerprint"] == (
+            "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+        )
+        assert record["target"] == {
+            "provider": "flux2_dev",
+            "modelId": "flux2_dev",
+            "tier": tier,
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+                "width": width,
+                "height": width,
+                "batch": 1,
+                "frames": 1,
+            },
+        }
+        assert record["strategy"] == {
+            "rung": "resident",
+            "parameters": {},
+            "engagedRungs": ["resident"],
+        }
+        assert record["artifact"] == {
+            "repository": "SceneWorks/flux2-dev-mlx",
+            "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+            "variant": tier,
+        }
+        assert record["quality"]["result"] == "passed"
+        assert record["loadability"]["result"] == "passed"
+        assert record["observedMemory"]["overall"]["allocatorBytes"] <= record[
+            "predictedPeakBytes"
+        ]["overall"]
+        scenarios = {scenario["name"]: scenario for scenario in record["scenarios"]}
+        assert {
+            scenarios[name]["result"]
+            for name in ("exact_fit", "unknown_budget", "stale_evidence", "loadability")
+        } == {"passed"}
+        assert {scenarios[name]["result"] for name in ("warm_repeat", "cancel", "error")} == {
+            "not_run"
+        }
+        assert scenarios["overlay"]["result"] == "not_applicable"
+
+    flux2_runtime = candle_flux2_runtime + mlx_flux2_runtime
 
     historical_flux1_runtime = [
         run
@@ -233,40 +306,36 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert len(runtime_complete_runs) == len(flux2_runtime) + len(
         historical_flux1_runtime
     )
-    # Inside the audited window the runtime-complete population is mixed (FLUX.2 current, FLUX.1
-    # historical); outside it every record is historical. `eligible` is unaffected either way —
-    # ageing past the window re-dates a record, it does not reject it.
-    assert {run["semantics"] for run in runtime_complete_runs} == (
-        {"current", "historical"} if within_audited_window else {"historical"}
-    )
+    # The new MLX FLUX.2 records are current at the live pin while the older FLUX.1 records remain
+    # historical. The Candle FLUX.2 window independently becomes current only at its audited pin.
+    assert {run["semantics"] for run in runtime_complete_runs} == {"current", "historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    # Two independent sources of "current", kept separate and both DERIVED from the live pin rather
-    # than hardcoded, so a pin bump makes each fall away on its own instead of making this wrong:
+    # Three independent sources of "current", kept separate so one lane cannot mask another:
     #
-    #   - records measured AT the live pin (sc-16915's MLX re-collection);
+    #   - records measured AT the live pin (SC-18218's four MLX FLUX.2 rows);
+    #   - records whose captured provider closure still matches the live provider closure
+    #     (SC-18237's two Qwen q8 rows);
     #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
-    #
-    # Before sc-16915 the first set was empty, so this read `set()` outside the window.
     measured_at_live_pin = {
         record["id"]
         for record in calibration["records"]
         if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
     }
-    # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of the
-    # provider's compile closure. The two coincided while nothing had moved; they no longer do. All
-    # three MLX closures moved in this pin's window because two commits touched the shared
-    # `crates/media/mlx-gen` crate, a first-party dependency of every MLX provider's closure.
-    #
-    # SC-18237 recaptured exactly the two production-deferred Qwen q8 records at this pin. Krea and
-    # the older Qwen tiers remain historical. Exact ids make an accidental extra promotion visible.
+    # This set is derived from the PIN only to inventory what SC-18218 captured. SC-17774 correctly
+    # uses the provider compile closure for currency, so the older Qwen rows below can remain current
+    # even though their repository revision is no longer the live pin.
+    # SC-18218 captured exactly the four Resident-only MLX FLUX.2 q4/q8 geometry cells at this pin.
+    # Exact ids make an accidental extra promotion visible.
     assert measured_at_live_pin == {
-        "imc-56c1f11bd03822d9c241",
-        "imc-a21d2ea9e2d95cf48e82",
+        "imc-747f54e1be89e30da943",
+        "imc-9b235419ecbe0710da06",
+        "imc-b6537074420d51413b38",
+        "imc-f3badcb841c8707fd971",
     }
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
     # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
@@ -288,12 +357,25 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
-    # Zero because this live-pin recapture contains bounded-attention and transformer-residency only;
-    # the historical off-point bounded-decode sweep remains in the bundle but outside the intersection.
+    # Zero because this live-pin capture contains only unparameterized Resident rows; the historical
+    # off-point bounded-decode sweep remains in the bundle but outside the intersection.
     assert len(unbound_decode_edges) == 0
+    # SC-18237's two q8 Qwen records were measured at the prior pin, but remain current because their
+    # captured provider closure still exactly matches the live `mlx:qwen_image` closure.
+    closure_compatible_qwen = {
+        "imc-56c1f11bd03822d9c241",
+        "imc-a21d2ea9e2d95cf48e82",
+    }
+    assert all(
+        run["semantics"] == "current" and run["binding"]["eligible"]
+        for run in matrix["calibrationRuns"]
+        if run["record"]["id"] in closure_compatible_qwen
+    )
     assert {run["record"]["id"] for run in current_eligible} == (
         measured_at_live_pin - unbound_decode_edges
-    ) | (set(expected_flux2_runtime) if within_audited_window else set())
+    ) | closure_compatible_qwen | (
+        set(expected_candle_flux2_runtime) if within_audited_window else set()
+    )
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.
