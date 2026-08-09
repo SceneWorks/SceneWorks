@@ -9,9 +9,9 @@ publish = false
 serde_json = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# SC-18218 development-only pin to inference PR #531. Repin these four MLX dependencies to the
-# merged inference revision before the first capture; keeping one revision avoids cross-revision
-# gen-core types inside the adapter binary.
+# SC-18218 exact merged inference main used by the authoritative q4/q8 captures. Keep these four
+# MLX dependencies on one revision to avoid cross-revision gen-core types and preserve receipt
+# provenance.
 mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }
 mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "10831e4ca5b8bf780319a8ee7f21427175075448", optional = true }

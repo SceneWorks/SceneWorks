@@ -244,8 +244,10 @@ lands. Land the three pieces together or land none of them.
 
 > The worked example is now wired for a real capture: sc-18218 adds the resident-only arm against
 > the T2I provider's own reference-free contract, four authoritative q4/q8 plan entries at 768² and
-> 1024², and the closure declaration together. No calibration record is shipped by that wiring;
-> `mlx:flux2_dev` remains pending its first real capture (sc-18104).
+> 1024², and the closure declaration together. SC-18218 then completed all four real-weight captures
+> and bound them to the current provider closure: only q4/q8, reference-free T2I Resident cells are
+> Verified. BF16 and every sibling mode, overlay, and rung remain Missing pending independent evidence
+> on suitable hardware (sc-18104).
 
 ## 3. Pick the host
 

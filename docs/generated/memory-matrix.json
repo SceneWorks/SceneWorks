@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:11763cd4f61886926fe044563f482fa56ddf58074a5e00bbe4fd1846749f2d9e",
+    "sceneWorksRevision": "source-tree:24871515605c6f7269fd9f02acc3ac223d95c0fde467e08defe8d890b6ae261f",
     "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "11d27c312a0bab08cdf4bfe9e38413c18ff9b12a20a143539a63fe0dace53cfc"
+        "sha256": "dfead9359a2645d41e9fecaba636fe8245b3949b4654037ec6c1c4ed8967588a"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -132,11 +132,11 @@
     "publishedCells": 184,
     "elidedCells": 8956,
     "elidedByState": {
-      "Implemented/unverified": 3161,
-      "Missing": 5795
+      "Implemented/unverified": 3091,
+      "Missing": 5865
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
-    "mlxStagedStaticCoverage": 39,
+    "mlxStagedStaticCoverage": 38,
     "mlxStagedStaticCoverageDenominator": 53,
     "fullModels": 0,
     "calibrationRuns": 71,
@@ -6597,10 +6597,28 @@
       "coordinates": 36,
       "published": 2,
       "elided": 34,
-      "implemented": 36,
+      "implemented": 2,
       "states": {
-        "Implemented/unverified": 34,
+        "Missing": 34,
         "Runtime verified": 2
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 0,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "character_image": 0,
+          "edit_image": 0,
+          "style_variations": 0,
+          "text_to_image": 2
+        },
+        "overlay": {
+          "control": 0,
+          "identity": 0,
+          "none": 2
+        }
       }
     },
     {
@@ -6610,9 +6628,9 @@
       "coordinates": 36,
       "published": 0,
       "elided": 36,
-      "implemented": 36,
+      "implemented": 0,
       "states": {
-        "Implemented/unverified": 36
+        "Missing": 36
       }
     },
     {
@@ -14867,7 +14885,9 @@
           "720x1280"
         ]
       },
-      "strategyParameters": {},
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
       "engagedRungs": [
         "resident"
       ],
@@ -14958,7 +14978,9 @@
           "720x1280"
         ]
       },
-      "strategyParameters": {},
+      "strategyParameters": {
+        "publishedRanges": {}
+      },
       "engagedRungs": [
         "resident"
       ],

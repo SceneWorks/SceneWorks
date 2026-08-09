@@ -634,6 +634,58 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
 });
 
+test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async () => {
+  const manifest = JSON.parse(stripJsoncComments(await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  )));
+  const contract = manifest.models.find((model) => model.id === "flux2_dev")
+    .mlx.memoryStrategyContract;
+  assert.equal(contract.provider, "flux2_dev");
+  assert.equal(contract.exhaustive, true);
+  assert.deepEqual(
+    contract.implementations.map(({ rung, tiers, modes, overlays, engagedRungs }) => ({
+      rung,
+      tiers,
+      modes,
+      overlays,
+      engagedRungs,
+    })),
+    [{
+      rung: "resident",
+      tiers: ["q4", "q8"],
+      modes: ["text_to_image"],
+      overlays: ["none"],
+      engagedRungs: ["resident"],
+    }],
+  );
+
+  const matrix = await buildMatrix({ publish: false });
+  const cells = matrix.cells.filter(
+    (cell) => cell.modelId === "flux2_dev" && cell.backend === "mlx",
+  );
+  assert.equal(cells.length, 180, "the full 3-tier x 4-mode x 3-overlay x 5-rung slice must exist");
+  assert.deepEqual(
+    cells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
+    [
+      "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
+    ],
+    "BF16 and every sibling mode, overlay, and rung must remain Missing",
+  );
+  assert.ok(
+    cells
+      .filter((cell) => cell.state !== "Missing")
+      .every(
+        (cell) =>
+          cell.state === "Runtime verified" &&
+          cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
+          cell.evidence.currentEnvironmentVerification.length === 2,
+      ),
+    "each admitted cell must be backed by its exact 768 and 1024 current captures",
+  );
+});
+
 test("Z-Image MLX static contracts cover every bounded rung through the actual provider", async () => {
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),

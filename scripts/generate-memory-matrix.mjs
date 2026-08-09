@@ -18,7 +18,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
 const EXPECTED_IMAGE_COUNT = 53;
-const EXPECTED_MLX_STAGED_COUNT = 39;
+// SC-18218 removed FLUX.2-dev from this census: the pinned MLX provider is eager/resident-only,
+// so counting its generic route as staged coverage would contradict the captured contract.
+const EXPECTED_MLX_STAGED_COUNT = 38;
 // Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
 // execution/layout/quantization change that makes measurements unsafe must add or bump its key;
 // ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
@@ -1360,6 +1362,9 @@ function strategyStatus({
           implementation.overlays.includes(overlay),
       )
     : undefined;
+  const staticContractIsExhaustive =
+    staticMemoryContract?.exhaustive === true &&
+    staticContractCoversProvider(staticMemoryContract, provider);
   const allDeclaredCalibrations = (model[backend]?.calibrations ?? []).filter(
     (binding) =>
       binding.provider === provider &&
@@ -1369,6 +1374,15 @@ function strategyStatus({
       binding.rung === rung &&
       staticRung4Allowed,
   );
+  if (staticContractIsExhaustive && !staticImplementation) {
+    if (allDeclaredCalibrations.length) {
+      throw new Error(
+        `${model.id}:${backend}:${tier}:${mode}:${overlay}:${rung} declares calibration ` +
+          `outside exhaustive provider contract ${staticMemoryContract.provider}`,
+      );
+    }
+    return { state: "Missing", source: null, parameters: {} };
+  }
   const currentDeclaredCalibrations = allDeclaredCalibrations.filter((binding) =>
     closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }),
   );
