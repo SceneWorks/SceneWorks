@@ -370,9 +370,9 @@ jobs:
         run: cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings
       # ... and for the same reason the workspace test step below cannot reach its unit tests
       # either: `cargo test` covers default members only. Until sc-18250 this binary's tests ran in
-      # NO lane, so reverting the sc-18104 dispatch-refusal fix (or breaking the sc-18218 flux2_dev
-      # arm's guards) merged green. Twin of windows-candle.yml's memory-candle-adapter test step;
-      # pinned by scripts/platform-review-contracts.test.mjs.
+      # NO lane, so reverting the sc-18104 dispatch-refusal fix merged green. Twin of
+      # windows-candle.yml's memory-candle-adapter test step; pinned by
+      # scripts/platform-review-contracts.test.mjs.
       - name: Test the MLX memory adapter (memory-mlx-adapter)
         run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter
       # The whole workspace suite MINUS the one test that needs matrix-unit silicon.

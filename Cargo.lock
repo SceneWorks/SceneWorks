@@ -6482,7 +6482,6 @@ version = "0.8.1"
 dependencies = [
  "candle-gen",
  "mlx-gen",
- "mlx-gen-flux2",
  "mlx-gen-krea",
  "pmetal-mlx-rs",
  "runtime-cuda",
