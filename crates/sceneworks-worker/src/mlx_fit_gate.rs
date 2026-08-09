@@ -8651,18 +8651,23 @@ mod tests {
 
     /// The shipped manifest is the product-side binding of provider capability to a concrete tier.
     /// Provider contract construction may inspect the on-disk component tree, which this audit
-    /// represents with sparse total-size files; use the manifest's explicit tier declaration to
-    /// prevent that deliberately minimal filesystem fixture from turning an optimized clean route
-    /// (Chroma/FLUX/Klein) into a fake Resident-only cell.
+    /// represents with sparse total-size files; use the manifest's explicit optimized-rung tier
+    /// declaration to prevent that deliberately minimal filesystem fixture from turning an
+    /// optimized clean route (Chroma/FLUX/Klein) into a fake Resident-only cell. A manifest may now
+    /// also declare an exhaustive Resident-only contract (FLUX.2 q4/q8, SC-18218); that is evidence
+    /// that the tier belongs in this audit, not a reason to exclude it.
     #[cfg(target_os = "macos")]
     fn manifest_declares_optimized_tier(model: &Value, tier: &str) -> bool {
         model["mlx"]["memoryStrategyContract"]["implementations"]
             .as_array()
             .is_some_and(|implementations| {
                 implementations.iter().any(|implementation| {
-                    implementation["tiers"]
-                        .as_array()
-                        .is_some_and(|tiers| tiers.iter().any(|item| item.as_str() == Some(tier)))
+                    implementation["rung"]
+                        .as_str()
+                        .is_some_and(|rung| rung != "resident")
+                        && implementation["tiers"].as_array().is_some_and(|tiers| {
+                            tiers.iter().any(|item| item.as_str() == Some(tier))
+                        })
                 })
             })
     }
