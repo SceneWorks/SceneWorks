@@ -1617,6 +1617,14 @@ fn synthesize_estimate_ladder(
         //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
         //    demotion never fires without a verified claim on the route). A contract with no
         //    calibration identity gets no fitted candidates at all — fail closed.
+        //
+        //    The load-shape conjunct compares CONTRACT shape only — deliberately, and unlike the
+        //    Evidence-path filter's measured-candidate leg, which also compares `identity
+        //    .load_shape` (sc-18251). An estimate-basis candidate is graded downstream by the
+        //    estimate wrap of `optimized_eligibility`, which short-circuits at the conformance
+        //    gate's `Unverified` BEFORE the identity load-shape comparison ever runs, so the
+        //    identity's shape is never consulted for an estimate. Adding the conjunct here would
+        //    be stricter than the gate this filter anticipates.
         let fitted = bases
             .iter()
             .filter(|basis| {
@@ -2037,14 +2045,27 @@ fn evaluate_request_with_budget_using_bundle(
     // deferred. Demoting the whole route when any sibling mismatches would throw away the candidate
     // that DOES match and silently downgrade a calibrated request to an estimate, which is its own
     // regression. Filtering keeps every usable measurement and degrades only when nothing is left.
+    //
+    // sc-18251: the same hole class existed on the two structural legs the sc-18101 filter did not
+    // mirror. A promoted binding whose captured `engaged_composition` disagrees with the live
+    // contract's (an engagement edge grew or was excluded since capture), or whose parameters no
+    // longer pass the live `contract.validate_selection` (a declared range narrowed), still entered
+    // `AdmissionPath::Evidence`, lost every candidate inside `select_strategy`
+    // (`CompositionMismatch` / `Invalid`), and hard-refused via `Selection::Unverified` — where
+    // pre-epic code degraded to legacy first (the retired `StaleIdentity` closure pre-demotion
+    // caught every drifted binding before eligibility ran). The filter now mirrors those legs too,
+    // so composition drift and parameter-range narrowing degrade to the estimate ladder exactly
+    // like a shape mismatch.
     if admission.path == AdmissionPath::Evidence {
         // A candidate is USABLE only if the selector could actually reach it: it must have been
-        // measured under a shape the downstream eligibility gate will accept for its rung, and it
-        // must sit on a rung the loaded contract declares `Implemented`. Both are properties of the
-        // LOADED PROVIDER, not of the request, and both are checked downstream where the only
-        // outcome left is a refusal — the rung-support one silently, since `select_strategy` skips
-        // an unimplemented rung without even recording an exclusion, so the request dies with a bare
-        // `Missing`.
+        // measured under a shape the downstream eligibility gate will accept for its rung, its
+        // captured engaged composition must still be the loaded contract's canonical set for that
+        // rung, and the selection it authorizes must still pass the loaded contract's own
+        // `validate_selection`. All three are properties of the LOADED PROVIDER, not of the
+        // request, and all three are checked downstream where the only outcome left is a refusal
+        // (`FingerprintMismatch`, `CompositionMismatch`, and `Invalid` respectively — and an
+        // unimplemented rung silently, since `select_strategy` skips it without even recording an
+        // exclusion, so that request dies with a bare `Missing`).
         //
         // The shape test MIRRORS `optimized_eligibility` rather than tightening it. That gate
         // short-circuits `Ok(())` for `MemoryStrategy::Resident` before it ever compares load
@@ -2055,18 +2076,51 @@ fn evaluate_request_with_budget_using_bundle(
         // bf16 carries a resident binding captured eager against a production deferred load.
         let usable = |candidate: &VerifiedAdmissionCandidate| {
             let evidence = &candidate.evidence;
+            // The two conjuncts mirror `optimized_eligibility`'s pair literally, but they are NOT
+            // independently observable (sc-18251 review): gen-core's `conformance_errors` requires
+            // `calibration.load_shape == contract.load_shape`, and `select_strategy` refuses every
+            // candidate on a non-conformant contract with `Unverified(Invalid)` before grading a
+            // single one — so on any contract where the pair could split, the request refuses no
+            // matter what this filter does. The pair is effectively one comparison; both spellings
+            // are kept so the filter stays a literal mirror of the gate. The premise is pinned by
+            // `gen_core_forbids_a_contract_identity_load_shape_split`: if a pin bump ever legalizes
+            // the split, that test reds and the identity conjunct needs its own fixture arm.
             let shape_agrees = !evidence.key.strategy.is_optimized()
                 || contract.calibration.as_ref().is_some_and(|identity| {
                     evidence.key.load_shape == contract.load_shape
                         && evidence.key.load_shape == identity.load_shape
                 });
-            let rung_implemented = matches!(
-                contract
-                    .capability(evidence.key.strategy)
-                    .map(|capability| &capability.support),
-                Some(gen_core::MemoryStrategySupport::Implemented)
-            );
-            shape_agrees && rung_implemented
+            // sc-18251: COMPOSITION. `optimized_eligibility`'s structural prefix rejects a
+            // candidate whose captured `engaged_composition` is not the loaded contract's canonical
+            // set for its rung (`CompositionMismatch`) — and unlike the shape leg above there is NO
+            // Resident exemption to mirror: both of the gate's composition checks run BEFORE its
+            // `is_optimized` short-circuit, pinned against the pinned gen-core by
+            // `gen_core_rejects_a_resident_cell_whose_composition_disagrees`. The gate's
+            // canonical-form check (`Invalid` for an empty or unsorted captured set) needs no
+            // separate conjunct: `contract.engaged_composition` walks `MemoryStrategy::ALL` in
+            // order, so equality forces the captured set into canonical form — except when both
+            // sides are empty, which requires the selected rung itself to be non-`Implemented`,
+            // and `selection_valid` below drops exactly that candidate.
+            let composition_agrees = evidence.key.engaged_composition
+                == contract.engaged_composition(evidence.key.strategy);
+            // sc-18251: SELECTION. `select_strategy` runs every candidate through the loaded
+            // contract's own `validate_selection` (`memory_strategy::candidate_exclusion`),
+            // excluding with `Invalid` a candidate whose rung the provider no longer declares
+            // `Implemented`, whose prerequisite edges the live contract no longer satisfies, or
+            // whose captured parameters fall outside the provider's live declared ranges — a
+            // narrowed range strands the old measurement. The downstream check applies to every
+            // rung, Resident included, so no exemption is mirrored here either. Consulting the
+            // gate's own predicate (rather than a resembling re-implementation) also subsumes the
+            // previous standalone `Implemented` conjunct: `validate_selection` fails for an
+            // undeclared or non-`Implemented` rung before it looks at parameters.
+            let selection_valid = contract
+                .validate_selection(&MemorySelection {
+                    strategy: evidence.key.strategy,
+                    parameters: evidence.key.parameters,
+                    tier: evidence.key.tier,
+                })
+                .is_ok();
+            shape_agrees && composition_agrees && selection_valid
         };
         let retained = admission.evidence.iter().filter(|c| usable(c)).count();
         if retained != admission.evidence.len() {
@@ -2077,7 +2131,7 @@ fn evaluate_request_with_budget_using_bundle(
                 retained,
                 contract_load_shape = ?contract.load_shape,
                 "dropped measured candidates the loaded provider cannot serve (materialization \
-                 shape or rung support)"
+                 shape, engaged composition, or selection validity)"
             );
             admission.evidence.retain(usable);
         }
@@ -7491,15 +7545,20 @@ mod tests {
             "the exempted resident cell must be served from its RECORD, not an estimate"
         );
 
-        // Fourth arm: the RUNG-SUPPORT leg, which is the other half of `usable` and is load-bearing
-        // in production — on the real `qwen_image` q8 cell the probe records `dropped=2 retained=0`,
-        // and the second drop is this one, not the shape one.
+        // Fourth arm: RUNG SUPPORT, load-bearing in production — on the real `qwen_image` q8 cell
+        // the probe records `dropped=2 retained=0`, and the second drop is this one, not the shape
+        // one. Since sc-18251 the `Implemented` requirement is enforced through the
+        // `validate_selection` conjunct of `usable` (which fails for an undeclared or
+        // non-`Implemented` rung before it looks at parameters); the composition conjunct also
+        // drops this cell (a `Missing` rung is absent from its own live composition), so this arm
+        // pins the OUTCOME — degrade, not a bare-`Missing` refusal — while each conjunct's own
+        // isolating fixture lives in the sc-18251 tests below.
         //
         // Bind ONLY the deferred rung-4 cell and select under the DEFERRED contract, whose
         // `BoundedTransformerResidency` support is `Missing`. The shape now AGREES, so only the
-        // rung check can drop it. It must: otherwise the candidate reaches `select_strategy`, which
-        // skips an unimplemented rung WITHOUT recording an exclusion, leaving every rung empty and
-        // refusing with a bare `Missing` and no log line naming a cause.
+        // new conjuncts can drop it. They must: otherwise the candidate reaches `select_strategy`,
+        // which skips an unimplemented rung WITHOUT recording an exclusion, leaving every rung
+        // empty and refusing with a bare `Missing` and no log line naming a cause.
         let mut rung_plan = plan.clone();
         let MlxCalibrationConfig::Valid(rung_calibration) = &mut rung_plan.calibration else {
             panic!("the fixture plan opts in to calibration");
@@ -7641,6 +7700,378 @@ mod tests {
         assert_eq!(
             identity.load_shape,
             gen_core::LoadShape::EagerMaterialization
+        );
+    }
+
+    /// sc-18251 leg 1: COMPOSITION DRIFT must degrade to the estimate ladder, never refuse — and
+    /// the filter must stay per-candidate, sparing a sibling whose composition still agrees.
+    ///
+    /// The live provider grows a realization prerequisite that engages rung 1 in every rung-2
+    /// request, so the live composition for `BoundedDecode` becomes
+    /// `[Resident, StagedResidency, BoundedDecode]` while the record was captured under
+    /// `[resident, bounded_decode]`. Same shape, same abi, same fingerprint, and the captured
+    /// parameters still pass `validate_selection` (rung 1 owns no parameters, and the new edge is
+    /// satisfied by its own engagement) — the preconditions below pin that, so of the filter's
+    /// three legs ONLY the composition one can drop this candidate. That is what makes the
+    /// mutation "composition conjunct deleted" observable: the candidate then reaches
+    /// `select_strategy`, is excluded with `CompositionMismatch`, and the route refuses with "no
+    /// structurally admissible MLX memory strategy" instead of degrading — the exact pre-sc-18251
+    /// hole, which the retired `StaleIdentity` closure pre-demotion used to mask by demoting every
+    /// drifted binding to Legacy before eligibility ran.
+    #[test]
+    fn a_composition_drift_degrades_to_estimates_and_spares_agreeing_siblings() {
+        use gen_core::{MemoryPrerequisiteScope, MemoryStrategyPrerequisite};
+
+        let bundle = fixture_bundle();
+        let plan = fixture_plan();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.additional_prerequisites.push((
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        ));
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the drifted contract must stay structurally conformant, or the selector refuses \
+             everything for an unrelated reason and the arm passes vacuously"
+        );
+        // The captured composition no longer matches the live one…
+        let captured = fixture_binding("q4", "packed-q4");
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedDecode),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode
+            ],
+            "precondition: the realization edge moved the live rung-2 composition"
+        );
+        // …while the OTHER two legs still pass, so only the composition conjunct can drop it.
+        let captured_selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: captured.selection_parameters,
+            tier: plan.tier,
+        };
+        assert!(
+            contract.validate_selection(&captured_selection).is_ok(),
+            "precondition: the captured parameters remain valid under the drifted contract, \
+             isolating the composition leg"
+        );
+
+        let degraded = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("a composition drift must degrade to the estimate ladder, not refuse the request");
+        assert_eq!(
+            degraded.process_limit_bytes, None,
+            "a degraded cell must not claim a verified record's request-scoped ceiling"
+        );
+
+        // Per-candidate arm: alongside the drifted rung-2 binding, bind the bundle's resident cell
+        // (whose composition `[resident]` is untouched by the rung-2 edge). The survivor must be
+        // served from its RECORD — `evidence.clear()` in place of `retain(usable)` empties the
+        // route and this becomes an estimate with no process ceiling.
+        let mut sibling_plan = plan.clone();
+        let MlxCalibrationConfig::Valid(calibration) = &mut sibling_plan.calibration else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        let mut resident_binding =
+            fixture_binding_for("q4", "packed-q4", StrategyRung::Resident, JsonObject::new());
+        // The bundle's resident record was captured deferred; the binding must declare the shape
+        // its RECORD was captured under, and the Resident shape exemption keeps it usable.
+        resident_binding.query.load_shape =
+            sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        calibration.bindings.push(resident_binding);
+
+        let spared = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &sibling_plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("the agreeing resident sibling is admitted");
+        assert_eq!(
+            spared.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the resident cell whose composition still agrees must survive the filter"
+        );
+        assert!(
+            spared.process_limit_bytes.is_some(),
+            "the spared sibling must be served from its RECORD, not an estimate"
+        );
+    }
+
+    /// sc-18251 leg 2: PARAMETER-RANGE NARROWING must degrade to the estimate ladder, never
+    /// refuse — and the filter must stay per-candidate.
+    ///
+    /// The live provider narrows its declared `decode_tile_edges` from `[512]` to `[256]`, so the
+    /// record captured at 512 no longer passes `contract.validate_selection`. Shape and
+    /// composition still agree (narrowing a range changes neither), pinned below — so only the
+    /// selection-validity conjunct can drop this candidate, which is what makes the mutation
+    /// "selection conjunct deleted" observable: the candidate then reaches `select_strategy`, is
+    /// excluded with `Invalid` by the same `validate_selection` call downstream, and the route
+    /// refuses instead of degrading.
+    #[test]
+    fn a_narrowed_parameter_range_degrades_to_estimates_and_spares_valid_siblings() {
+        let bundle = fixture_bundle();
+        let plan = fixture_plan();
+        let inputs = fixture_inputs(1024, 1024);
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        let bounded_decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        bounded_decode.parameters.decode_tile_edges = vec![256];
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the narrowed contract must stay structurally conformant"
+        );
+        let captured = fixture_binding("q4", "packed-q4");
+        let captured_selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: captured.selection_parameters,
+            tier: plan.tier,
+        };
+        assert!(
+            contract.validate_selection(&captured_selection).is_err(),
+            "precondition: the captured tile edge fell outside the narrowed range"
+        );
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedDecode),
+            vec![MemoryStrategy::Resident, MemoryStrategy::BoundedDecode],
+            "precondition: narrowing a parameter range does not move the composition, isolating \
+             the selection leg"
+        );
+
+        let degraded = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect(
+            "a parameter-range narrowing must degrade to the estimate ladder, not refuse the \
+             request",
+        );
+        assert_eq!(
+            degraded.process_limit_bytes, None,
+            "a degraded cell must not claim a verified record's request-scoped ceiling"
+        );
+
+        // Per-candidate arm: the resident sibling owns no parameters, so no narrowing can strand
+        // it; it must survive and be served from its record.
+        let mut sibling_plan = plan.clone();
+        let MlxCalibrationConfig::Valid(calibration) = &mut sibling_plan.calibration else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        let mut resident_binding =
+            fixture_binding_for("q4", "packed-q4", StrategyRung::Resident, JsonObject::new());
+        resident_binding.query.load_shape =
+            sceneworks_core::memory_calibration::LoadShapeKey::DeferredMaterialization;
+        calibration.bindings.push(resident_binding);
+
+        let spared = evaluate_request_with_budget_using_bundle(
+            &generator,
+            &sibling_plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&bundle),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+        .expect("the still-valid resident sibling is admitted");
+        assert_eq!(
+            spared.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the resident cell whose parameters remain valid must survive the filter"
+        );
+        assert!(
+            spared.process_limit_bytes.is_some(),
+            "the spared sibling must be served from its RECORD, not an estimate"
+        );
+    }
+
+    /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core
+    /// rather than restated.
+    ///
+    /// The shape leg of the `usable` filter exempts `MemoryStrategy::Resident` because
+    /// `optimized_eligibility` short-circuits `Ok(())` for a non-optimized selection before it
+    /// compares load shapes. The composition leg deliberately does NOT mirror that exemption,
+    /// because both of the gate's composition checks — canonical form (`Invalid`) and contract
+    /// agreement (`CompositionMismatch`) — run BEFORE the short-circuit, so gen-core rejects a
+    /// resident cell on either. If a pin bump ever moves those checks behind the Resident
+    /// short-circuit, this test reds and the filter's legs must be re-derived.
+    #[test]
+    fn gen_core_rejects_a_resident_cell_whose_composition_disagrees() {
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+
+        let (selection, mut resident) = resident_evidence(
+            contract,
+            fixture_plan().tier,
+            "text_to_image",
+            None,
+            request_geometry(&fixture_inputs(1024, 1024)),
+            gib_to_bytes(4.0),
+            Some("fixture-formula-v2"),
+        );
+        resident.conformance = gen_core::MemoryConformanceState::Verified;
+        resident.dimensions = gen_core::MemoryEvidenceDimensions::VERIFIED;
+        assert!(
+            !selection.strategy.is_optimized(),
+            "the premise is about the non-optimized rung"
+        );
+        assert_eq!(
+            resident.optimized_eligibility(contract),
+            Ok(()),
+            "precondition: the resident cell is eligible before the composition is disturbed"
+        );
+
+        // Canonical but disagreeing: the gate's contract-agreement check must reject even a
+        // RESIDENT cell, which is why the filter's composition leg carries no Resident exemption.
+        resident.key.engaged_composition =
+            vec![MemoryStrategy::Resident, MemoryStrategy::BoundedDecode];
+        assert_eq!(
+            resident.optimized_eligibility(contract),
+            Err(gen_core::MemoryEvidenceVerdict::CompositionMismatch),
+            "gen-core rejects a RESIDENT cell whose composition disagrees; the filter's \
+             no-exemption composition leg is built on this"
+        );
+
+        // The canonical-form prefix also runs before the Resident short-circuit.
+        resident.key.engaged_composition = Vec::new();
+        assert_eq!(
+            resident.optimized_eligibility(contract),
+            Err(gen_core::MemoryEvidenceVerdict::Invalid),
+            "gen-core rejects a RESIDENT cell whose composition is non-canonical"
+        );
+    }
+
+    /// sc-18251 (review addendum): why the shape leg's `identity.load_shape` conjunct has no
+    /// isolating fixture of its own — the contract↔identity split it would need is impossible by
+    /// construction, and THAT premise is what this test pins against the pinned gen-core.
+    ///
+    /// Every fixture moves `contract.load_shape` and `identity.load_shape` together, so deleting
+    /// either single conjunct of
+    /// `key.load_shape == contract.load_shape && key.load_shape == identity.load_shape` cannot be
+    /// distinguished by those fixtures alone. An isolating arm was written and it demonstrated the
+    /// impossibility empirically: gen-core's `conformance_errors` requires
+    /// `calibration.load_shape == contract.load_shape`, and `select_strategy` refuses EVERY
+    /// candidate on a non-conformant contract with `Unverified(Invalid)` before grading a single
+    /// one, so a split contract refuses the request no matter which conjunct the filter carries.
+    /// The pair is effectively one comparison, kept in both spellings only to mirror
+    /// `optimized_eligibility` literally.
+    ///
+    /// If a pin bump ever legalizes the split, this test reds — and the identity conjunct then
+    /// needs its own fixture arm, because it will have become independently load-bearing.
+    #[test]
+    fn gen_core_forbids_a_contract_identity_load_shape_split() {
+        use gen_core::MemoryCalibrationIdentity;
+
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "precondition: the agreeing fixture contract is conformant"
+        );
+        let fingerprint = contract
+            .calibration
+            .as_ref()
+            .expect("fixture calibration")
+            .fingerprint
+            .clone();
+
+        // Identity moves, contract stays.
+        let mut identity_split = contract.clone();
+        identity_split.calibration = Some(MemoryCalibrationIdentity::new(
+            fingerprint.clone(),
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+        assert!(
+            identity_split
+                .conformance_errors()
+                .iter()
+                .any(|error| error.contains("load shape")),
+            "gen-core must reject a contract whose calibration identity shape disagrees with its \
+             live load shape; the filter's fused shape conjuncts are built on this"
+        );
+
+        // Contract moves, identity stays.
+        let mut contract_split = contract.clone();
+        contract_split.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        assert!(
+            contract_split
+                .conformance_errors()
+                .iter()
+                .any(|error| error.contains("load shape")),
+            "the split must be rejected in both directions"
+        );
+
+        // And a non-conformant contract never grades candidates at all — the refusal outruns the
+        // filter, which is why no fixture can observe the identity conjunct alone.
+        let selection = crate::memory_strategy::select_strategy(
+            crate::memory_strategy::RequestScope {
+                resolved_route: "fixture_provider",
+                backend: "mlx",
+                tier: fixture_plan().tier,
+                mode: "text_to_image",
+                overlay: None,
+                geometry: request_geometry(&fixture_inputs(1024, 1024)),
+                expected_closure_digest: FIXTURE_CLOSURE_DIGEST,
+            },
+            &identity_split,
+            Some(crate::memory_strategy::Budget {
+                available_gb: 64.0,
+                reclaimable_gb: 0.0,
+                total_gb: 64.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &[],
+        );
+        assert_eq!(
+            selection,
+            crate::memory_strategy::Selection::Unverified {
+                reason: gen_core::MemoryEvidenceVerdict::Invalid
+            },
+            "a split contract refuses everything before any candidate is graded"
         );
     }
 
