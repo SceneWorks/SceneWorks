@@ -48,7 +48,8 @@ Verified output shape (run on the sc-18212 branch at inference pin `40fa7583`):
 
 ```
 9 declared lanes: 8 stale, 0 current, 0 pending capture; 6 lanes (declared or planned) have no adapter arm, and 2 planned lanes were never declared.
-33 shipped calibration bindings and 65 evidence records are serving under a widened margin.
+33 shipped calibration bindings are serving under a widened margin; 65 eligible evidence records
+are stale corpus debt, not runtime inputs.
 
 #  LANE                         BINDINGS  RECORDS  MARGIN  ESTIMATE  IMPACT  CAPTURE  MODELS
 1  mlx:qwen_image               9/9       41/41    5.00%   10.00%    0.450   yes      qwen_image
@@ -57,8 +58,9 @@ Verified output shape (run on the sc-18212 branch at inference pin `40fa7583`):
 4  candle:flux1_dev             5/5       5/5      2.00%   4.00%     0.100   NO ARM   flux_dev
 ...
 DECLARED/PLANNED BUT UNCAPTURABLE — no adapter arm can serve these; a capture host booked for
-one is wasted (docs/calibration-runbook.md §2c). This is missing-adapter work, not measurement work:
-  candle:z_image  declared=yes  plan=90 entries (90 authoritative)  evidence=no evidence  status=uncapturable
+one is wasted (docs/calibration-runbook.md §2c). A declared lane needs adapter work before
+measurement; a planned-but-undeclared lane needs both an adapter arm and a closure declaration:
+  candle:z_image  declared=yes  plan=90 entries (90 authoritative)  bindings=0 shipped  records=0 eligible  status=uncapturable
   ...
 ```
 

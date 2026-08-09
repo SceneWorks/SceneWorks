@@ -681,16 +681,54 @@ test("a non-eligible record neither counts as stale nor flips a lane out of pend
 
 test("the human report separates pending capture from uncapturable, and prints the derivation", () => {
   const fixture = twoLaneFixture({
-    extraLanes: [["candle:gamma", digest("d")], ["candle:delta", digest("e")]],
-    plan: { providers: [planEntry("candle", "gamma"), planEntry("candle", "delta"), planEntry("candle", "epsilon", "candidate")] },
+    extraModels: [
+      // An armless lane with a shipped binding but no corpus record: the binding proves current
+      // admission state, not that a retired adapter arm captured anything.
+      { id: "theta_model", candle: { calibrations: [binding("theta", OLD)] } },
+    ],
+    extraLanes: [
+      ["candle:gamma", digest("d")],
+      ["candle:delta", digest("e")],
+      ["candle:theta", digest("f")],
+    ],
+    plan: {
+      providers: [
+        planEntry("candle", "gamma"),
+        planEntry("candle", "delta"),
+        planEntry("candle", "epsilon", "candidate"),
+        // Undeclared AND armless: the report must name both missing prerequisites, not imply that
+        // adding an adapter arm alone would make the lane measurable.
+        planEntry("candle", "zeta", "candidate"),
+      ],
+    },
     // No "beta" arm: the stale candle:beta lane doubles as the measured-but-armless case, so the
     // ranked table's CAPTURE column shows both values at once.
     adapterSources: { mlx: adapterSource(["alpha"]), candle: adapterSource(["gamma", "epsilon"]) },
   });
   const text = formatReport(buildStaleLaneReport(fixture));
+  assert.match(
+    text,
+    /9 shipped calibration bindings are serving under a widened margin; 3 eligible evidence records are stale corpus debt, not runtime inputs\./,
+  );
   assert.match(text, /PENDING CAPTURE \(declared, adapter arm exists, no measurement yet\): candle:gamma \(1 plan entries, 1 authoritative\)/);
   assert.match(text, /DECLARED\/PLANNED BUT UNCAPTURABLE/);
-  assert.match(text, /candle:delta\s+declared=yes\s+plan=1 entries \(1 authoritative\)\s+evidence=no evidence\s+status=uncapturable/);
+  assert.match(
+    text,
+    /candle:theta\s+declared=yes\s+plan=0 entries \(0 authoritative\)\s+bindings=1 shipped\s+records=0 eligible\s+status=stale/,
+  );
+  assert.match(
+    text,
+    /candle:delta\s+declared=yes\s+plan=1 entries \(1 authoritative\)\s+bindings=0 shipped\s+records=0 eligible\s+status=uncapturable/,
+  );
+  assert.match(
+    text,
+    /candle:zeta\s+declared=NO\s+plan=1 entries \(0 authoritative\)\s+bindings=0 shipped\s+records=0 eligible\s+status=undeclared/,
+  );
+  assert.match(
+    text,
+    /planned-but-undeclared lane needs both an adapter arm and a closure declaration/,
+  );
+  assert.doesNotMatch(text, /captured by a retired arm|evidence=.*bindings/);
   assert.match(text, /PLANNED BUT NEVER DECLARED/);
   assert.match(text, /candle:epsilon\s+plan=1 entries \(0 authoritative\)/);
   assert.match(text, /CAPTURE/);

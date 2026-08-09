@@ -711,8 +711,8 @@ export function formatReport(report) {
       `planned) have no adapter arm, and ${totals.undeclaredLanes} planned lanes were never declared.`,
   );
   out.push(
-    `${totals.staleBindings} shipped calibration bindings and ${totals.staleRecords} evidence records ` +
-      "are serving under a widened margin.",
+    `${totals.staleBindings} shipped calibration bindings are serving under a widened margin; ` +
+      `${totals.staleRecords} eligible evidence records are stale corpus debt, not runtime inputs.`,
   );
   out.push("");
 
@@ -770,16 +770,16 @@ export function formatReport(report) {
       "DECLARED/PLANNED BUT UNCAPTURABLE — no adapter arm can serve these; a capture host booked for",
     );
     out.push(
-      "one is wasted (docs/calibration-runbook.md §2c). This is missing-adapter work, not measurement work:",
+      "one is wasted (docs/calibration-runbook.md §2c). A declared lane needs adapter work before",
+    );
+    out.push(
+      "measurement; a planned-but-undeclared lane needs both an adapter arm and a closure declaration:",
     );
     for (const lane of report.uncapturableLanes) {
-      const evidence =
-        (lane.bindings.total ?? 0) + (lane.records.total ?? 0) > 0
-          ? `${lane.bindings.total} bindings + ${lane.records.total} records captured by a retired arm`
-          : "no evidence";
       out.push(
         `  ${lane.lane}  declared=${lane.declared ? "yes" : "NO"}  plan=${lane.plan.entries} entries ` +
-          `(${lane.plan.authoritative} authoritative)  evidence=${evidence}  status=${lane.status}`,
+          `(${lane.plan.authoritative} authoritative)  bindings=${lane.bindings.total ?? 0} shipped  ` +
+          `records=${lane.records.total ?? 0} eligible  status=${lane.status}`,
       );
     }
   }
