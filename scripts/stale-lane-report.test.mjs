@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
+import { digestOccurrences, recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
 import {
@@ -318,14 +318,38 @@ test("the located binding population covers every closure digest the manifest ca
   // `inferenceClosureDigest` occurrence, and a population walk that cannot see it reds here. Same
   // "derive coverage from the source" discipline the pre-push trigger test applies. A
   // `calibrations[]`-only walk fails this by two on the shipped manifest.
+  // The occurrence count comes from `digestOccurrences` — the SAME comment-excluding scan the
+  // locator's own orphan check consumes — not a resembling regex over the raw body (sc-18208). The
+  // manifest is JSONC and narrates digest provenance in prose, so a raw-body regex also counts a
+  // digest shape quoted inside a `//` comment and would false-red this check the day one lands.
   const manifestBody = await readFile(MANIFEST_PATH, "utf8");
   const { manifest } = await loadSources();
   const located = manifestBindings({ manifestBody, manifest });
-  const occurrences = [...manifestBody.matchAll(/"inferenceClosureDigest":\s*"[0-9a-f]{64}"/g)].length;
+  const occurrences = digestOccurrences(manifestBody.split("\n")).length;
   assert.ok(occurrences > 0, "the manifest carries closure digests at all");
   assert.equal(located.length, occurrences, "every manifest closure digest is in the population");
   assert.ok(located.every((item) => /^(mlx|candle):.+/.test(item.lane)));
   assert.ok(located.every((item) => item.digest === null || /^[0-9a-f]{64}$/.test(item.digest)));
+});
+
+test("a digest shape quoted in a // comment is not part of the population, nor of the derived count", () => {
+  // Regression guard for the sc-18208 fix above. The commented copy of the binding shape must be
+  // invisible to BOTH sides of the coverage equation: the locator (which would otherwise report an
+  // orphan and refuse) and the occurrence count (which would otherwise exceed the population and
+  // false-red the coverage test on a perfectly healthy manifest).
+  const models = [{ id: "alpha_model", mlx: { calibrations: [binding("alpha", OLD)] } }];
+  const body = JSON.stringify({ models }, null, 2);
+  const commented =
+    `// provenance prose quoting the shape: "inferenceClosureDigest": "${digest("f")}"\n${body}`;
+
+  assert.equal(digestOccurrences(commented.split("\n")).length, 1, "the commented digest is not counted");
+  const located = manifestBindings({ manifestBody: commented, manifest: { models } });
+  assert.equal(located.length, digestOccurrences(commented.split("\n")).length);
+  assert.deepEqual(located.map((item) => item.digest), [OLD]);
+
+  // The exact hazard the raw-body regex had: it sees 2 where the gate's own predicate sees 1.
+  const naive = [...commented.matchAll(/"inferenceClosureDigest":\s*"[0-9a-f]{64}"/g)].length;
+  assert.equal(naive, 2, "a resembling raw-body regex DOES count the commented digest");
 });
 
 test("the real corpus reports the margins the worker actually applies", async () => {

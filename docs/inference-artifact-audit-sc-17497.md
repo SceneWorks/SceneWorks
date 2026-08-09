@@ -39,7 +39,7 @@ possibly have altered a single instruction.
 
 "The compiled code is identical" is the claim, so the audit hashes the thing that runs. Three
 candidate units were measured before choosing (fixture reproduced in
-`scripts/inference-artifact-audit.test.mjs`):
+`scripts/inference-artifact-audit.test.mjs`, deleted with the rest of the audit in sc-17774):
 
 | Unit | Doc-comment edit | `#[inline]` body `*7` → `*8` | Verdict |
 | --- | --- | --- | --- |
@@ -49,7 +49,8 @@ candidate units were measured before choosing (fixture reproduced in
 
 The binary hashed is the one that produced the measurements: the `candle-gen-flux2` **lib test
 binary** carrying `tests::flux2_dev_probed_generate_for_offload_ab` — the target named in the
-approved capture command that `scripts/sc-15833-flux2-evidence.mjs` prints.
+approved capture command that `scripts/sc-15833-flux2-evidence.mjs` printed *(a one-shot; as of
+sc-18100 it no longer exists, and nothing prints that command)*.
 
 Confirmed on the real closure at the real revisions, **on the Metal lane**: `277f4238` and
 `d2216f6b` — the pin bump the doc comment blocked — both produce
@@ -358,8 +359,9 @@ this is where it would appear.
 
 Two caveats on the field itself, so it is not read as more than it is. It is **descriptive, not
 gated**: it is outside the hashed text (folding it in would make a dev-dependency edit demand a
-re-capture) and neither validator checks it — for the shipped record it is pinned by
-`sc-15833-flux2-evidence.test.mjs`, and a future record's is not. And the tool reports a *change* in
+re-capture) and neither validator checks it — for the shipped record it was pinned by
+`sc-15833-flux2-evidence.test.mjs` *(deleted in sc-18100; no surviving test pins it)*, and a future
+record's is not. And the tool reports a *change* in
 it across the window only when the shipped witness held still: the delta is `measured − shipped`, so
 widening the shipped side widens the delta too, and reporting it there put the primary finding under
 the wrong name. Either way the record is still written and the run still exits 1.
@@ -509,12 +511,15 @@ Moving the live pin at all — with or without a build — also means:
 - the five `flux2_dev` `compatibleInferenceRevision` bindings in
   `config/manifests/builtin.models.jsonc`;
 - `SOURCE_PATHS.inferenceCompatibility` (`scripts/generate-memory-matrix.mjs`) and the same filename
-  hardcoded in `scripts/sc-15833-flux2-evidence.test.mjs`;
-- `LIVE_INFERENCE_REVISION` in `scripts/sc-15833-flux2-evidence.test.mjs`, and its assertion that
+  hardcoded in `scripts/sc-15833-flux2-evidence.test.mjs` *(the key left `SOURCE_PATHS` when
+  sc-17774 deleted the audit; the test went with its one-shot in sc-18100)*;
+- `LIVE_INFERENCE_REVISION` in `scripts/sc-15833-flux2-evidence.test.mjs` *(deleted in sc-18100)*,
+  and its assertion that
   every audited object is `capturedObject === compatibleObject` — true only on the free path;
 - `crates/sceneworks-worker/src/candle_memory_strategy.rs`'s binding test, which asserts the literal
   revision pair;
-- the evidence-classification test in `scripts/calibration-cost-model.test.mjs` and
+- the evidence-classification test in `scripts/generate-memory-matrix.test.mjs` (rehomed there by
+  sc-18100 from the deleted `scripts/calibration-cost-model.test.mjs`) and
   `tests/test_memory_matrix.py::test_calibration_evidence_is_schema_valid_and_matrix_ingested` on the
   parity lane.
 
