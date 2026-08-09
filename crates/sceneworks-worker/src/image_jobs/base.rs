@@ -2820,13 +2820,21 @@ fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn shared_image_reference_count(edit_reference_count: usize, has_single_reference: bool) -> u32 {
-    let count = if edit_reference_count == 0 {
-        usize::from(has_single_reference)
+fn shared_image_reference_count(
+    edit_reference_count: usize,
+    has_single_reference: bool,
+    has_edit_mask: bool,
+    has_hires_fix: bool,
+) -> u32 {
+    if has_hires_fix {
+        hires_fix_reference_count()
     } else {
-        edit_reference_count
-    };
-    u32::try_from(count).unwrap_or(u32::MAX)
+        lane_reference_count(
+            has_single_reference,
+            edit_reference_count,
+            has_edit_mask,
+        )
+    }
 }
 
 #[cfg(any(
@@ -3565,10 +3573,13 @@ mod candle_image_load_shape_tests {
 
     #[test]
     fn shared_reference_count_preserves_mage_multi_reference_geometry() {
-        assert_eq!(shared_image_reference_count(0, false), 0);
-        assert_eq!(shared_image_reference_count(0, true), 1);
-        assert_eq!(shared_image_reference_count(1, true), 1);
-        assert_eq!(shared_image_reference_count(8, true), 8);
+        assert_eq!(shared_image_reference_count(0, false, false, false), 0);
+        assert_eq!(shared_image_reference_count(0, true, false, false), 1);
+        assert_eq!(shared_image_reference_count(1, true, false, false), 1);
+        assert_eq!(shared_image_reference_count(8, true, false, false), 8);
+        assert_eq!(shared_image_reference_count(0, true, true, false), 2);
+        assert_eq!(shared_image_reference_count(8, false, true, false), 9);
+        assert_eq!(shared_image_reference_count(8, true, true, true), 1);
     }
 
     #[test]
@@ -4769,9 +4780,8 @@ fn lane_reference_count(
 /// [`lane_reference_count`] rather than written as a literal so it cannot drift from the rule the
 /// request scope grades against.
 ///
-/// macOS-gated to match its only non-test caller (the MLX lane's admission declaration): on the
-/// parity/candle configurations an ungated helper used only from `cfg(macos)` code is dead.
-#[cfg(target_os = "macos")]
+/// Shared by the MLX and Candle admission declarations so both backends describe the same final-pass
+/// request identity.
 fn hires_fix_reference_count() -> u32 {
     lane_reference_count(true, 0, false)
 }
@@ -6258,6 +6268,11 @@ async fn generate_stream(
     // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Admission describes the heaviest pass. Hires fix renders the first pass at `width`/`height`
+    // and the refinement at the plan dimensions, so every memory fit and request scope must use the
+    // latter. `generate_one_with_hires` derives a base-pass scope from this final-pass identity.
+    let (memory_width, memory_height) =
+        hires_fix.map_or((width, height), |plan| (plan.width, plan.height));
     // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
     let text_style_gain = resolve_text_style_gain(request);
     let calibration_opt_in = request
@@ -6334,8 +6349,8 @@ async fn generate_stream(
         memory_overlays.push("pid".to_owned());
     }
     let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
-        width: hires_fix.map_or(width, |plan| plan.width),
-        height: hires_fix.map_or(height, |plan| plan.height),
+        width: memory_width,
+        height: memory_height,
         count: request.count,
         mode: request.mode.clone(),
         overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
@@ -7842,6 +7857,11 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Admission describes the heaviest pass. Hires fix renders the first pass at `width`/`height`
+    // and the refinement at the plan dimensions, so every memory fit and request scope must use the
+    // latter. `generate_one_with_hires` derives a base-pass scope from this final-pass identity.
+    let (memory_width, memory_height) =
+        hires_fix.map_or((width, height), |plan| (plan.width, plan.height));
     // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
     let text_style_gain = resolve_text_style_gain(request);
     // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
@@ -7969,8 +7989,8 @@ async fn generate_candle_stream(
                         match crate::vram_gate::krea_turbo_fit_with_runtime(
                             &request.model_manifest_entry,
                             candidate,
-                            width,
-                            height,
+                            memory_width,
+                            memory_height,
                             budget,
                             krea_allow_streamed_blocks,
                             candidate_runtime.as_ref(),
@@ -8069,8 +8089,8 @@ async fn generate_candle_stream(
                     let lower_resolution = crate::vram_gate::krea_turbo_smaller_fit_with_runtime(
                         &request.model_manifest_entry,
                         smallest,
-                        width,
-                        height,
+                        memory_width,
+                        memory_height,
                         budget,
                         krea_allow_streamed_blocks,
                         smallest_runtime.as_ref(),
@@ -8090,8 +8110,8 @@ async fn generate_candle_stream(
                                         crate::vram_gate::krea_turbo_fit_with_runtime(
                                             &request.model_manifest_entry,
                                             candidate,
-                                            width,
-                                            height,
+                                            memory_width,
+                                            memory_height,
                                             budget,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
@@ -8170,6 +8190,8 @@ async fn generate_candle_stream(
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
         edit_reference.is_some() || img2img_reference.is_some(),
+        edit_mask.is_some(),
+        hires_fix.is_some(),
     );
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
@@ -8187,8 +8209,8 @@ async fn generate_candle_stream(
         shared_request_mode,
         (adapter_count > 0).then_some("lora"),
         gen_core::MemoryGeometry {
-            width,
-            height,
+            width: memory_width,
+            height: memory_height,
             batch: 1,
             frames: 1,
             reference_count,
@@ -8222,8 +8244,8 @@ async fn generate_candle_stream(
             crate::vram_gate::krea_turbo_fit_with_runtime(
                 &request.model_manifest_entry,
                 tier,
-                width,
-                height,
+                memory_width,
+                memory_height,
                 budget,
                 krea_allow_streamed_blocks,
                 krea_runtime_context.as_ref(),
@@ -8372,8 +8394,8 @@ async fn generate_candle_stream(
                                                 crate::vram_gate::krea_turbo_fit_with_runtime(
                                                     &request.model_manifest_entry,
                                                     candidate,
-                                                    width,
-                                                    height,
+                                                    memory_width,
+                                                    memory_height,
                                                     budget,
                                                     krea_allow_streamed_blocks,
                                                     candidate_runtime.as_ref(),
@@ -8389,8 +8411,8 @@ async fn generate_candle_stream(
                                 crate::vram_gate::krea_turbo_smaller_fit_with_runtime(
                                 &request.model_manifest_entry,
                                 tier,
-                                width,
-                                height,
+                                memory_width,
+                                memory_height,
                                 budget,
                                 krea_allow_streamed_blocks,
                                 krea_runtime_context.as_ref(),
@@ -8531,8 +8553,8 @@ async fn generate_candle_stream(
                                         crate::vram_gate::krea_turbo_fit_with_runtime(
                                             &request.model_manifest_entry,
                                             candidate,
-                                            width,
-                                            height,
+                                            memory_width,
+                                            memory_height,
                                             budget,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
@@ -8613,15 +8635,15 @@ async fn generate_candle_stream(
             calibration_fingerprint,
             load_shape,
             mode: gen_core::MemoryMode::TextToImage,
-            has_reference: false,
+            has_reference: reference_count > 0,
             use_pid: false,
             has_phases: false,
             geometry: gen_core::MemoryGeometry {
-                width,
-                height,
+                width: memory_width,
+                height: memory_height,
                 batch: 1,
                 frames: 1,
-                reference_count: 0,
+                reference_count,
             },
             overlay: None,
             budget: gen_core::MemoryBudget {
