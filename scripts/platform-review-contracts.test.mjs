@@ -152,6 +152,18 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
   assert.match(workflow, /'amortizable','unable_to_amortize'/);
 });
 
+// The MLX twin of the pin above (sc-18250). The adapter crate sits outside the workspace
+// default-members, so the macOS lane's bare `cargo test` never compiles it; without this exact
+// invocation the memory-mlx-adapter unit tests — including the sc-18104 dispatch-refusal guards and
+// the sc-18218 flux2_dev arm guards — run in NO CI lane, and reverting those fixes merges green.
+test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  assert.match(
+    workflow,
+    /cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter/,
+  );
+});
+
 test("Docker relevance gate paginates and checks for truncated file lists", async () => {
   const workflow = await source(".github/workflows/check.yml");
   assert.match(workflow, /gh api --paginate/);
