@@ -462,7 +462,19 @@ source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a72
 dependencies = [
  "candle-core",
  "libc",
- "sceneworks-gen-core",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "candle-audio"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-core",
+ "libc",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
@@ -472,9 +484,24 @@ name = "candle-audio-acestep"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-acestep"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "serde",
@@ -487,20 +514,41 @@ name = "candle-audio-catalog"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
- "candle-audio-acestep",
- "candle-audio-chatterbox",
- "candle-audio-chatterbox-ve",
- "candle-audio-clap",
- "candle-audio-kokoro",
- "candle-audio-mmaudio",
- "candle-audio-moss-sfx",
- "candle-audio-moss-tts",
- "candle-audio-moss-tts-realtime",
- "candle-audio-openvoice",
- "candle-audio-stable-audio-3",
- "candle-audio-whisper",
- "candle-llm",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-acestep 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-chatterbox 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-chatterbox-ve 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-clap 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-kokoro 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-mmaudio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-moss-sfx 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-moss-tts 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-moss-tts-realtime 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-openvoice 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-stable-audio-3 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-whisper 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+]
+
+[[package]]
+name = "candle-audio-catalog"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-acestep 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-chatterbox 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-chatterbox-ve 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-clap 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-kokoro 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-mmaudio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-moss-sfx 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-moss-tts 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-moss-tts-realtime 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-openvoice 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-stable-audio-3 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-whisper 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
 ]
 
 [[package]]
@@ -508,10 +556,26 @@ name = "candle-audio-chatterbox"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
- "candle-audio-chatterbox-ve",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-audio-chatterbox-ve 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-chatterbox"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-audio-chatterbox-ve 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "serde",
@@ -524,7 +588,16 @@ name = "candle-audio-chatterbox-ve"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-nn",
+]
+
+[[package]]
+name = "candle-audio-chatterbox-ve"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "candle-nn",
 ]
 
@@ -533,9 +606,21 @@ name = "candle-audio-clap"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-clap"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde_json",
  "tokenizers 0.22.2",
 ]
@@ -545,10 +630,26 @@ name = "candle-audio-kokoro"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
  "cmudict-fast",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "misaki-rs",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde_json",
+ "zip 7.2.0",
+]
+
+[[package]]
+name = "candle-audio-kokoro"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "cmudict-fast",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "misaki-rs",
  "rand 0.9.4",
  "rand_distr 0.5.1",
@@ -561,7 +662,20 @@ name = "candle-audio-mmaudio"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "candle-nn",
+ "image",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "regex",
+]
+
+[[package]]
+name = "candle-audio-mmaudio"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "candle-nn",
  "image",
  "rand 0.9.4",
@@ -574,9 +688,24 @@ name = "candle-audio-moss-sfx"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-moss-sfx"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "serde",
@@ -589,9 +718,22 @@ name = "candle-audio-moss-tts"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "serde",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-moss-tts"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde",
  "serde_json",
  "tokenizers 0.22.2",
@@ -602,9 +744,22 @@ name = "candle-audio-moss-tts-realtime"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "serde",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-moss-tts-realtime"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde",
  "serde_json",
  "tokenizers 0.22.2",
@@ -615,9 +770,20 @@ name = "candle-audio-openvoice"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "serde_json",
+]
+
+[[package]]
+name = "candle-audio-openvoice"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde_json",
 ]
 
@@ -626,9 +792,25 @@ name = "candle-audio-stable-audio-3"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-stable-audio-3"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "serde",
@@ -642,10 +824,24 @@ name = "candle-audio-whisper"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio",
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-nn",
  "candle-transformers",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "rand 0.9.4",
+ "serde_json",
+ "tokenizers 0.22.2",
+]
+
+[[package]]
+name = "candle-audio-whisper"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "candle-nn",
+ "candle-transformers",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "rand 0.9.4",
  "serde_json",
  "tokenizers 0.22.2",
@@ -694,7 +890,7 @@ dependencies = [
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "safetensors 0.7.0",
- "sceneworks-gen-core",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
@@ -889,7 +1085,7 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "candle-gen",
- "candle-llm",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
 ]
 
 [[package]]
@@ -960,7 +1156,7 @@ dependencies = [
  "candle-transformers",
  "image",
  "rand 0.9.4",
- "sceneworks-gen-core",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "serde_json",
  "sha2 0.10.9",
  "tokenizers 0.22.2",
@@ -1165,7 +1361,19 @@ source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a72
 dependencies = [
  "candle-core",
  "candle-nn",
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "candle-llm"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -1532,6 +1740,18 @@ dependencies = [
 name = "core-llm"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
+dependencies = [
+ "minijinja",
+ "minijinja-contrib",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokenizers 0.21.4",
+]
+
+[[package]]
+name = "core-llm"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
 dependencies = [
  "minijinja",
  "minijinja-contrib",
@@ -4078,7 +4298,22 @@ dependencies = [
  "pmetal-mlx-rs",
  "pmetal-mlx-sys",
  "safetensors 0.4.5",
- "sceneworks-gen-core",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokenizers 0.21.4",
+]
+
+[[package]]
+name = "mlx-gen"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "memmap2",
+ "pmetal-mlx-rs",
+ "pmetal-mlx-sys",
+ "safetensors 0.4.5",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde_json",
  "thiserror 2.0.18",
  "tokenizers 0.21.4",
@@ -4090,9 +4325,21 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-qwen-image",
- "mlx-gen-z-image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-qwen-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-anima"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-qwen-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4102,8 +4349,21 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-wan",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+ "tokenizers 0.21.4",
+]
+
+[[package]]
+name = "mlx-gen-bernini"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
  "tokenizers 0.21.4",
@@ -4115,9 +4375,22 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-pid",
- "mlx-gen-z-image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-boogu"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4127,40 +4400,81 @@ name = "mlx-gen-catalog"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-anima",
- "mlx-gen-bernini",
- "mlx-gen-boogu",
- "mlx-gen-chroma",
- "mlx-gen-clip",
- "mlx-gen-depth",
- "mlx-gen-face",
- "mlx-gen-flux",
- "mlx-gen-flux2",
- "mlx-gen-ideogram",
- "mlx-gen-instantid",
- "mlx-gen-joycaption",
- "mlx-gen-kolors",
- "mlx-gen-krea",
- "mlx-gen-krea-realtime",
- "mlx-gen-lens",
- "mlx-gen-ltx",
- "mlx-gen-mage",
- "mlx-gen-mochi",
- "mlx-gen-pid",
- "mlx-gen-pulid",
- "mlx-gen-qwen-image",
- "mlx-gen-sam2",
- "mlx-gen-sam3",
- "mlx-gen-sana",
- "mlx-gen-scail2",
- "mlx-gen-sd3",
- "mlx-gen-sdxl",
- "mlx-gen-seedvr2",
- "mlx-gen-sensenova",
- "mlx-gen-svd",
- "mlx-gen-wan",
- "mlx-gen-z-image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-anima 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-bernini 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-boogu 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-chroma 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-clip 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-depth 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-face 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-ideogram 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-instantid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-joycaption 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-kolors 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-krea 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-krea-realtime 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-lens 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-ltx 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-mage 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-mochi 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pulid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-qwen-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sam2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sam3 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sana 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-scail2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sd3 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-seedvr2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sensenova 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-svd 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+]
+
+[[package]]
+name = "mlx-gen-catalog"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-anima 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-bernini 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-boogu 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-chroma 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-clip 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-depth 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-face 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-ideogram 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-instantid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-joycaption 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-kolors 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-krea 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-krea-realtime 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-lens 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-ltx 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-mage 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-mochi 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pulid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-qwen-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sam2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sam3 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sana 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-scail2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sd3 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-seedvr2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sensenova 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-svd 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
 ]
 
 [[package]]
@@ -4168,10 +4482,23 @@ name = "mlx-gen-chroma"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-flux",
- "mlx-gen-pid",
- "mlx-gen-z-image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-chroma"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4181,8 +4508,18 @@ name = "mlx-gen-clip"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-sdxl",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-clip"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4191,7 +4528,16 @@ name = "mlx-gen-depth"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-depth"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4200,7 +4546,16 @@ name = "mlx-gen-face"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-face"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4209,10 +4564,25 @@ name = "mlx-gen-flux"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-pid",
- "mlx-gen-sdxl",
- "mlx-gen-z-image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "safetensors 0.4.5",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mlx-gen-flux"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "safetensors 0.4.5",
  "serde_json",
@@ -4224,9 +4594,22 @@ name = "mlx-gen-flux2"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-pid",
- "mlx-llm",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mlx-gen-flux2"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
  "sha2 0.10.9",
@@ -4237,9 +4620,21 @@ name = "mlx-gen-ideogram"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-flux2",
- "mlx-gen-pid",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-ideogram"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4249,10 +4644,22 @@ name = "mlx-gen-instantid"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-face",
- "mlx-gen-pid",
- "mlx-gen-sdxl",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-face 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-instantid"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-face 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4261,8 +4668,17 @@ name = "mlx-gen-joycaption"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-llm",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+]
+
+[[package]]
+name = "mlx-gen-joycaption"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
 ]
 
 [[package]]
@@ -4271,9 +4687,21 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-pid",
- "mlx-gen-sdxl",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-kolors"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4283,10 +4711,24 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-boogu",
- "mlx-gen-pid",
- "mlx-gen-qwen-image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-boogu 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-qwen-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-krea"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-boogu 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-qwen-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4296,8 +4738,19 @@ name = "mlx-gen-krea-realtime"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-wan",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-krea-realtime"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4308,9 +4761,22 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-flux2",
- "mlx-gen-pid",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-lens"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4321,7 +4787,18 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-ltx"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4332,8 +4809,21 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-boogu",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-boogu 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mlx-gen-mage"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-boogu 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
  "sha2 0.10.9",
@@ -4344,8 +4834,19 @@ name = "mlx-gen-mochi"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-flux",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-mochi"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4356,7 +4857,18 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-pid"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4366,9 +4878,21 @@ name = "mlx-gen-pulid"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-face",
- "mlx-gen-flux",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-face 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mlx-gen-pulid"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-face 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "sha2 0.10.9",
 ]
@@ -4378,8 +4902,19 @@ name = "mlx-gen-qwen-image"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-pid",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-qwen-image"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4389,7 +4924,16 @@ name = "mlx-gen-sam2"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-sam2"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4398,7 +4942,16 @@ name = "mlx-gen-sam3"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-sam3"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4407,8 +4960,18 @@ name = "mlx-gen-sana"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-pid",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-sana"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4417,8 +4980,19 @@ name = "mlx-gen-scail2"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-wan",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-scail2"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-wan 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4429,10 +5003,25 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-flux",
- "mlx-gen-sdxl",
- "mlx-gen-z-image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mlx-gen-sd3"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-z-image 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
  "sha2 0.10.9",
@@ -4444,8 +5033,21 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-pid",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-sdxl"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "regex",
  "serde_json",
@@ -4456,7 +5058,17 @@ name = "mlx-gen-seedvr2"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-seedvr2"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4466,8 +5078,20 @@ name = "mlx-gen-sensenova"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-llm",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "mlx-gen-sensenova"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
  "sha2 0.10.9",
@@ -4478,8 +5102,18 @@ name = "mlx-gen-svd"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "mlx-gen",
- "mlx-gen-sdxl",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+]
+
+[[package]]
+name = "mlx-gen-svd"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-sdxl 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
 ]
 
@@ -4489,7 +5123,20 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+ "unicode-normalization",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "mlx-gen-wan"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
  "unicode-normalization",
@@ -4502,8 +5149,20 @@ version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
  "image",
- "mlx-gen",
- "mlx-gen-pid",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "pmetal-mlx-rs",
+ "serde_json",
+]
+
+[[package]]
+name = "mlx-gen-z-image"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "image",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-pid 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "serde_json",
 ]
@@ -4525,7 +5184,20 @@ name = "mlx-llm"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "half",
+ "memmap2",
+ "pmetal-mlx-rs",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mlx-llm"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "half",
  "memmap2",
  "pmetal-mlx-rs",
@@ -6129,8 +6801,18 @@ name = "runtime-catalog"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "core-llm",
- "sceneworks-gen-core",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "serde_json",
+]
+
+[[package]]
+name = "runtime-catalog"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde_json",
 ]
 
@@ -6139,10 +6821,10 @@ name = "runtime-cuda"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio-catalog",
+ "candle-audio-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "candle-gen-catalog",
- "candle-llm",
- "runtime-catalog",
+ "candle-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "runtime-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
 ]
 
 [[package]]
@@ -6150,10 +6832,21 @@ name = "runtime-macos"
 version = "0.0.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "candle-audio-catalog",
- "mlx-gen-catalog",
- "mlx-llm",
- "runtime-catalog",
+ "candle-audio-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-gen-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "runtime-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+]
+
+[[package]]
+name = "runtime-macos"
+version = "0.0.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "candle-audio-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "runtime-catalog 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
 ]
 
 [[package]]
@@ -6437,7 +7130,19 @@ name = "sceneworks-gen-core"
 version = "0.1.0"
 source = "git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956#40fa7583a01974617e2a7275052d6d446688c956"
 dependencies = [
- "core-llm",
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
+ "safetensors 0.4.5",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokenizers 0.21.4",
+]
+
+[[package]]
+name = "sceneworks-gen-core"
+version = "0.1.0"
+source = "git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab#b182e191ad9436ffac6c79f86960b5842573daab"
+dependencies = [
+ "core-llm 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "safetensors 0.4.5",
  "serde_json",
  "thiserror 2.0.18",
@@ -6481,11 +7186,12 @@ name = "sceneworks-memory-adapter"
 version = "0.8.1"
 dependencies = [
  "candle-gen",
- "mlx-gen",
- "mlx-gen-krea",
+ "mlx-gen 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-flux2 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
+ "mlx-gen-krea 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "pmetal-mlx-rs",
  "runtime-cuda",
- "runtime-macos",
+ "runtime-macos 0.0.0 (git+https://github.com/SceneWorks/inference?rev=b182e191ad9436ffac6c79f86960b5842573daab)",
  "serde_json",
 ]
 
@@ -6551,11 +7257,11 @@ dependencies = [
  "pmetal-mlx-rs",
  "reqwest 0.12.28",
  "runtime-cuda",
- "runtime-macos",
+ "runtime-macos 0.0.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "rusqlite",
  "same-file",
  "sceneworks-core",
- "sceneworks-gen-core",
+ "sceneworks-gen-core 0.1.0 (git+https://github.com/SceneWorks/inference?rev=40fa7583a01974617e2a7275052d6d446688c956)",
  "sceneworks-image-quality",
  "serde",
  "serde_json",

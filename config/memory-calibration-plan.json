@@ -1686,6 +1686,130 @@
       ]
     },
     {
+      "name": "mlx-flux2-dev-q4-resident-768",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "fixture": "flux2-dev-mlx-q4-768-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-flux2-dev-q4-resident-1024",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "fixture": "flux2-dev-mlx-q4-1024-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-flux2-dev-q8-resident-768",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 768,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "fixture": "flux2-dev-mlx-q8-768-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-flux2-dev-q8-resident-1024",
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "flux2_dev",
+        "modelId": "flux2_dev",
+        "tier": "q8",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "rung": "resident",
+      "engagedRungs": [
+        "resident"
+      ],
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "fixture": "flux2-dev-mlx-q8-1024-seed18218-step2",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
       "name": "candle-krea-production-current-v1",
       "evidenceScope": "authoritative",
       "backend": "candle",

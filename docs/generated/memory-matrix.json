@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d7f313b635435309b547206faa6526e272735d41b47e6c903ec928cb29bd24fa",
+    "sceneWorksRevision": "source-tree:bd5be1f83c7dbd5c405ecd4827978402d7df8e1c09bcb873394d7399c0d07c97",
     "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956",
     "sources": {
       "manifest": {
@@ -50,11 +50,11 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "8331d90a8da31b5ba6065a4daf9ab1eef5abcb04497bf1d5aa90c882de60645a"
+        "sha256": "d48641b59668cab1ef6f9e98c648f5ffe7c46763b949726b950d76d2a13a7fa8"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "d34b58f997479fec23b3fb18675aceb62525c593604f9e87b207c178d895314b"
+        "sha256": "7b95af845191d8e5e681389dfac29dbf6ad2f736c9f010979af01e43940170cd"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -129,10 +129,10 @@
   "summary": {
     "imageModels": 53,
     "cells": 9140,
-    "publishedCells": 182,
-    "elidedCells": 8958,
+    "publishedCells": 184,
+    "elidedCells": 8956,
     "elidedByState": {
-      "Implemented/unverified": 3163,
+      "Implemented/unverified": 3161,
       "Missing": 5795
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
@@ -6595,8 +6595,8 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 36,
-      "published": 0,
-      "elided": 36,
+      "published": 2,
+      "elided": 34,
       "implemented": 36,
       "states": {
         "Implemented/unverified": 36
@@ -12523,6 +12523,44 @@
         }
       ]
     },
+    "flux2_dev:mlx:q4": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/mlx/minMemoryGb",
+          "tier": "q4"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/mlx/quantize",
+          "tier": "q4"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "variant": "q4"
+        }
+      ]
+    },
+    "flux2_dev:mlx:q8": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/mlx/minMemoryGb",
+          "tier": "q8"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/flux2_dev/mlx/quantize",
+          "tier": "q8"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/flux2-dev-mlx",
+          "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "variant": "q8"
+        }
+      ]
+    },
     "krea_2_turbo:candle:bf16": {
       "declaredCalibration": [
         {
@@ -14805,6 +14843,96 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "flux2_dev:candle:q4"
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "864a40661cfbe29cb857affdafdd056d15e4396b8675dd453aa14d7d34e8e830",
+      "owningFamilyStory": 15519,
+      "owningModelStory": 15482,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "flux2_dev:mlx:q4"
+      }
+    },
+    {
+      "id": "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
+      "modelId": "flux2_dev",
+      "resolvedRoute": "flux2_dev",
+      "provider": "flux2_dev",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "b4ca936f819ceac9753d2b9ab56a2b8333f9c229c7c631d63f1ee9158db93d41",
+      "owningFamilyStory": 15519,
+      "owningModelStory": 15482,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "flux2_dev:mlx:q8"
       }
     },
     {
@@ -29700,7 +29828,9 @@
       "flux2_dev:flux2_dev:candle:q4:text_to_image:none:bounded_decode",
       "flux2_dev:flux2_dev:candle:q4:text_to_image:none:bounded_transformer_residency",
       "flux2_dev:flux2_dev:candle:q4:text_to_image:none:resident",
-      "flux2_dev:flux2_dev:candle:q4:text_to_image:none:staged_residency"
+      "flux2_dev:flux2_dev:candle:q4:text_to_image:none:staged_residency",
+      "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
+      "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident"
     ],
     "flux2_klein_9b": [],
     "flux2_klein_9b_kv": [],

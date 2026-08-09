@@ -585,6 +585,48 @@ test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", a
   }
 });
 
+test("FLUX.2-dev MLX plan is the reference-free T2I q4/q8 resident matrix", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const flux2 = expandPlan(config).filter(
+    (item) => item.backend === "mlx" && item.target.provider === "flux2_dev",
+  );
+
+  assert.equal(flux2.length, 4);
+  assert.deepEqual(
+    flux2.map((item) => [
+      item.target.tier,
+      item.target.geometry.width,
+      item.target.geometry.height,
+      item.strategy.rung,
+    ]).sort(),
+    [
+      ["q4", 768, 768, "resident"],
+      ["q4", 1024, 1024, "resident"],
+      ["q8", 768, 768, "resident"],
+      ["q8", 1024, 1024, "resident"],
+    ].sort(),
+  );
+  assert.ok(flux2.every((item) =>
+    item.evidenceScope === "authoritative" &&
+    item.loadShape === "eager_materialization" &&
+    item.target.modelId === "flux2_dev" &&
+    item.target.mode === "text_to_image" &&
+    item.target.overlay === "none" &&
+    item.target.geometry.batch === 1 &&
+    item.target.geometry.frames === 1 &&
+    item.strategy.engagedRungs.length === 1 &&
+    item.strategy.engagedRungs[0] === "resident" &&
+    Object.keys(item.strategy.parameters).length === 0 &&
+    item.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+  ));
+  assert.ok(flux2.every((item) =>
+    item.fixture ===
+      `flux2-dev-mlx-${item.target.tier}-${item.target.geometry.width}-seed18218-step2`
+  ));
+});
+
 test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const expectedRungs = [

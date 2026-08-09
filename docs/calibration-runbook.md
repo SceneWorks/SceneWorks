@@ -140,7 +140,7 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control` | `mlx.rs:2733-2740` (`run`) — `MLX five-rung calibration does not implement provider "<id>"`; `mlx.rs:1576-1586` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo_control`, `flux2_dev` (sc-18218 — **resident rung only**; every other strategy is `Missing` on the pinned FLUX.2-dev contract, and the arm refuses a non-resident rung by name) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
 | `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
@@ -154,8 +154,8 @@ grep -n '<provider>' crates/sceneworks-memory-adapter/src/bin/<backend>.rs
 ```
 
 Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
-on **both** MLX actions — `run` (`mlx.rs:2733-2740`) and `assess_batch`, where the check lives inside
-`validate_z_image_batch` (`mlx.rs:1576-1586`) so it fires before `runtime_macos::catalog()` is built.
+on **both** MLX actions — `run`, and `assess_batch`, where the check lives inside
+`validate_z_image_batch` so it fires before `runtime_macos::catalog()` is built.
 Trust that message: it means the arm is missing, not that your environment is wrong.
 
 > **This was not true until sc-18104, and the old behaviour is worth knowing** because it may still be
@@ -187,6 +187,11 @@ an adapter that no longer implements them, so they can be *reported* stale but c
 today. `candle:z_image` is the only one the stale-lane report surfaces, because it is the only one
 with no records to be stale.
 
+> Snapshot drift note: sc-18218 has since added **4 authoritative `mlx:flux2_dev` entries** (q4/q8
+> at 768² and 1024²) with an adapter arm and a closure declaration, so the live totals are 159
+> authoritative entries across 9 lanes. The measured proportions above are the
+> sc-18104 snapshot and are kept as measured.
+
 Two more traps in the same area:
 
 - **A named arm is not automatically a current-evidence lane.** `candle:qwen_image` has an adapter arm
@@ -214,7 +219,7 @@ only in §2b**, and mistaking one for the other prescribes writing plan entries 
 | declared | OK | non-empty | capturable | continue to §3 |
 
 Row four is instantiated today: `candle:qwen_image_edit` has **9 plan entries, all `candidate`**, is
-absent from the 9 declared lanes, and has no adapter arm (its rejection is pinned by
+absent from the 10 declared lanes, and has no adapter arm (its rejection is pinned by
 `candle.rs:1668-1673`). Its plan entries being candidate-scope is why nobody has missed the closure
 entry — per §2b, candidate scope can never become current evidence.
 
@@ -236,6 +241,11 @@ be a quick capture", which is exactly why §2 is four greps and not a judgement 
 Do **not** part-build the lane as consolation. Adding a closure stub for a lane with no plan entries
 and no arm creates a digest nothing consumes, which then has to be re-derived when the arm actually
 lands. Land the three pieces together or land none of them.
+
+> The worked example is now wired for a real capture: sc-18218 adds the resident-only arm against
+> the T2I provider's own reference-free contract, four authoritative q4/q8 plan entries at 768² and
+> 1024², and the closure declaration together. No calibration record is shipped by that wiring;
+> `mlx:flux2_dev` remains pending its first real capture (sc-18104).
 
 ## 3. Pick the host
 
@@ -345,7 +355,7 @@ Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE
 `SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
 suffix.
 
-### Adapter environment — five families, one per provider arm
+### Adapter environment — six families, one per provider arm
 
 The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
 where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
@@ -377,6 +387,11 @@ SCENEWORKS_KREA_CONTROL_OVERLAY=/abs/path/to/control_step5000.safetensors
 SCENEWORKS_KREA_CONTROL_OVERLAY_REVISION=<exact overlay revision>
 # overlay artifact: SceneWorks/krea2-pose-controlnet-beta / control_step5000.safetensors
 # (mlx.rs:47-48); the overlay path is validated against that repo + revision before load
+
+# memory-mlx-adapter — flux2_dev   (sc-18218; resident rung only)
+SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx         # fixed; validated against FLUX2_REPOSITORY
+SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
+SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
 
 # memory-mlx-adapter — any lane, optional
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
