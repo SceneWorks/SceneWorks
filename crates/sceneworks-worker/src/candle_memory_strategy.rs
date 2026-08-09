@@ -479,7 +479,14 @@ fn estimate_floor_parameters(
 /// * Rungs 2–4 bound transients/residency the manifest has NOT measured for this cell, so they
 ///   take the STAGED floor unreduced — selectable without promising an unmeasured saving. (Where a
 ///   measured record for a rung exists it is a `verified_candidates` candidate and supersedes the
-///   floor in the selector.)
+///   floor in the selector.) The staged row prices the staged WORKING SET, so it is a sound floor
+///   only for a composition that actually engages `StagedResidency` (sc-18253). A provider may
+///   implement a deep rung whose engaged composition excludes staging
+///   (`gen_core::MemoryProviderContract::engaged_composition`) — such a request runs whole-model
+///   resident, so its floor clamps to the RESIDENT estimate instead: the candle mirror of the MLX
+///   floor's `engaged.contains(&StagedResidency)` max-vs-sum split
+///   (`mlx_fit_gate::estimate_floor_weights_bytes`), which keeps the rung selectable without ever
+///   under-predicting a resident working set behind the estimate margin.
 ///
 /// The candle estimate margin is NOT applied here — the selector owns margin widening
 /// (`crate::memory_strategy::select_strategy`), exactly as it owns the sc-18095 stale widening.
@@ -528,7 +535,14 @@ fn synthesize_estimate_floors(
         if contract.validate_selection(&selection).is_err() {
             continue;
         }
-        let predicted_peak_bytes = staged_floor_bytes;
+        // sc-18253: the staged row is only a sound floor for a composition that engages staging;
+        // a deep rung excluding `StagedResidency` runs whole-model resident and clamps to the
+        // resident estimate (see the doc comment above).
+        let predicted_peak_bytes = if engaged.contains(&MemoryStrategy::StagedResidency) {
+            staged_floor_bytes
+        } else {
+            resident_peak_bytes
+        };
         tracing::info!(
             route = engine_id,
             backend = "candle",
@@ -1627,6 +1641,263 @@ mod tests {
         assert_eq!(
             uncertified_roomy.context.selection.strategy,
             MemoryStrategy::Resident
+        );
+    }
+
+    /// A synthetic provider contract with every rung implemented and rungs 2-4 pinned to either
+    /// side of the staging composition split (sc-18253). `bind_deep_rungs_to_staging` mirrors the
+    /// shipped z-image contract's `additional_prerequisites` edges; without them the gen-core
+    /// default composition excludes `StagedResidency` from every deep rung. `staged_implemented`
+    /// false models the finding's contract — a provider implementing deep rungs with no staging
+    /// rung at all.
+    fn composition_probe_contract(
+        staged_implemented: bool,
+        bind_deep_rungs_to_staging: bool,
+    ) -> gen_core::MemoryProviderContract {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "z_image_turbo",
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        contract.strategies = MemoryStrategy::ALL
+            .into_iter()
+            .map(|strategy| gen_core::MemoryStrategyCapability {
+                strategy,
+                support: if strategy == MemoryStrategy::StagedResidency && !staged_implemented {
+                    gen_core::MemoryStrategySupport::Missing
+                } else {
+                    gen_core::MemoryStrategySupport::Implemented
+                },
+                parameters: match strategy {
+                    MemoryStrategy::BoundedDecode => gen_core::MemoryParameterRanges {
+                        decode_tile_edges: vec![512],
+                        decode_overlaps: vec![128],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedAttention => gen_core::MemoryParameterRanges {
+                        attention_chunk_sizes: vec![1024],
+                        ..Default::default()
+                    },
+                    MemoryStrategy::BoundedTransformerResidency => {
+                        gen_core::MemoryParameterRanges {
+                            transformer_window_sizes: vec![1],
+                            ..Default::default()
+                        }
+                    }
+                    _ => Default::default(),
+                },
+            })
+            .collect();
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            decode_tiling: true,
+            attention_chunking: true,
+            transformer_window_materialization: true,
+        };
+        // Rung 4's SHARED prerequisite is the deferred load shape, not staged residency — which is
+        // exactly why a rung-4-without-staging contract is a legal shape.
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.formula = gen_core::MemoryFormulaKind::AssetBytesPlusHeadroom;
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "sc-18253-composition-probe-v1",
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+        if bind_deep_rungs_to_staging {
+            contract.additional_prerequisites = [
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
+                MemoryStrategy::BoundedTransformerResidency,
+            ]
+            .into_iter()
+            .map(|strategy| {
+                (
+                    strategy,
+                    gen_core::MemoryStrategyPrerequisite::Rung {
+                        rung: MemoryStrategy::StagedResidency,
+                        scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                    },
+                )
+            })
+            .collect();
+        }
+        contract
+    }
+
+    /// sc-18253: the staged manifest row prices the staged WORKING SET, so it is only a sound
+    /// floor for a composition that actually engages `StagedResidency`. The gen-core engagement
+    /// mechanism permits a provider to implement a deep rung whose engaged composition excludes
+    /// staging — such a request runs whole-model resident, so its floor must clamp to the
+    /// RESIDENT estimate (the candle mirror of the MLX floor's
+    /// `engaged.contains(&StagedResidency)` max-vs-sum split) instead of under-predicting a whole
+    /// resident working set behind only the estimate margin.
+    ///
+    /// Both mutation directions are pinned:
+    ///  * deleting the composition check (every deep rung takes the staged row again) flips the
+    ///    staging-free contract's deep-rung assertions red;
+    ///  * inverting it (clamping every optimized floor to the resident row) flips the staged
+    ///    rung's own assertion and the staging-bound contract's deep-rung assertions red.
+    #[test]
+    fn deep_rung_floors_follow_the_engaged_composition_not_the_rung_ordinal() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let resident_peak_bytes = (8.0 * BYTES_PER_GIB) as u64;
+        let staged_floor_bytes =
+            ((2.5 + crate::vram_gate::HEADROOM_GB) * BYTES_PER_GIB).ceil() as u64;
+        assert_ne!(
+            resident_peak_bytes, staged_floor_bytes,
+            "the two floor sources must be distinguishable for the assertions below to bite"
+        );
+        let floors = |contract: &gen_core::MemoryProviderContract| {
+            synthesize_estimate_floors(
+                "z_image_turbo",
+                contract,
+                &manifest,
+                "q4",
+                numeric_tier("q4").expect("q4 tier"),
+                &request_mode("z_image_turbo", "text_to_image"),
+                None,
+                geometry,
+                resident_peak_bytes,
+                0,
+                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            )
+        };
+        let floor_of = |synthesized: &[(MemorySelection, MemoryEvidence)],
+                        strategy: MemoryStrategy| {
+            synthesized
+                .iter()
+                .find(|(selection, _)| selection.strategy == strategy)
+                .map(|(_, evidence)| evidence.predicted_peak_bytes)
+        };
+        const DEEP_RUNGS: [MemoryStrategy; 3] = [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+
+        // Staging-free deep rungs (the gen-core default composition — no staged prerequisite
+        // edges): the staged row must not price them.
+        let synthesized = floors(&composition_probe_contract(true, false));
+        assert_eq!(
+            floor_of(&synthesized, MemoryStrategy::StagedResidency),
+            Some(staged_floor_bytes),
+            "the staged rung itself still takes the staged working-set row"
+        );
+        for deep in DEEP_RUNGS {
+            assert_eq!(
+                floor_of(&synthesized, deep),
+                Some(resident_peak_bytes),
+                "a {deep:?} composition that excludes staging runs whole-model resident and must \
+                 clamp to the resident estimate, not the staged working-set row"
+            );
+        }
+
+        // Control: a contract that binds every deep rung to staging (the shipped z-image shape)
+        // keeps the staged working-set floor on those rungs — clamping regardless of composition
+        // would flip these red.
+        let synthesized = floors(&composition_probe_contract(true, true));
+        for rung in [
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            assert_eq!(
+                floor_of(&synthesized, rung),
+                Some(staged_floor_bytes),
+                "a {rung:?} composition that engages staging keeps the staged working-set floor"
+            );
+        }
+    }
+
+    /// The end-to-end arm of sc-18253: the exact contract the finding names — deep rungs
+    /// implemented, no staging rung at all — must NOT admit a request on the staged row. Its
+    /// floors clamp to the resident estimate, nothing fits below the resident peak, and the lane
+    /// hands back to the established legacy gates (`None`). Before the composition check the
+    /// staging-free `BoundedDecode` floor took the staged row and ADMITTED here at a
+    /// whole-model-resident working set behind only the 4% estimate margin — deleting the check
+    /// flips this arm red.
+    #[test]
+    fn a_staging_free_ladder_never_admits_on_the_staged_row() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
+        // A budget where the WIDENED staged-row floor fits but the resident estimate (8.0 GiB)
+        // does not — recomputed from the policy margin, never a frozen literal.
+        let staged_row_floor_gb = 2.5 + crate::vram_gate::HEADROOM_GB;
+        let free_gb = staged_row_floor_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            + crate::vram_gate::HEADROOM_GB
+            + 0.3;
+        assert!(
+            free_gb - crate::vram_gate::HEADROOM_GB < 8.0,
+            "the budget must stay below the resident estimate to discriminate"
+        );
+        let evaluation = evaluate_shared_bespoke_image(
+            "z_image_turbo",
+            "z_image_turbo",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb,
+                total_gb: 96.0,
+            }),
+            Some(8.0),
+            0,
+            MemoryCacheState::Cold,
+            composition_probe_contract(false, false),
+        )
+        .expect("staging-free bespoke evaluation");
+        assert!(
+            evaluation.is_none(),
+            "a staging-free deep rung must be graded at the resident clamp, not admitted on the \
+             staged working-set row"
         );
     }
 
