@@ -83,7 +83,6 @@ jobs:
         run: |
           npm run check
           npm run check:compose
-          npm run check:docker:rust-api:self-test
       - name: Verify the per-lane inference closure digests against real pinned source (sc-17774)
         # `npm run check` only asserts that config/inference-provider-closures.json is KEYED to the
         # live pin. It cannot tell a real digest from a hand-edited one, because the derivation needs

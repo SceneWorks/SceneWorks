@@ -74,8 +74,16 @@ function executedTestFiles() {
 }
 
 test("every on-disk *.test.mjs is executed by npm run check or the desktop suite", () => {
+  const onDisk = onDiskTestFiles();
+  // A broken walk (wrong root, extension-filter drift, an over-broad SKIPPED_DIRS entry) would
+  // return nothing and make the orphan diff below pass vacuously. This file is on disk by
+  // definition, so the walk must find it.
+  assert.ok(
+    onDisk.includes(path.join("scripts", "test-list-coverage.test.mjs")),
+    "the discovery walk failed to find this very file — the walk is broken, not the repo clean",
+  );
   const executed = new Set(executedTestFiles());
-  const orphans = onDiskTestFiles().filter(
+  const orphans = onDisk.filter(
     (file) => !executed.has(file) && !EXCLUDED.has(file),
   );
   assert.deepEqual(
