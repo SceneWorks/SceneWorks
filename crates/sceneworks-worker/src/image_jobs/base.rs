@@ -113,6 +113,14 @@ enum ImageRoute {
     /// `resolve_imported_krea_dit` returns `None` for it, so the snapshot-dir Krea path is untouched.
     /// txt2img only (a bare imported DiT carries no conditioning components).
     KreaImported,
+    /// An imported/user single-file Krea 2 checkpoint carrying a **strict-pose set** (a non-empty
+    /// `advanced.poses` outside edit mode): the trained pose control-branch overlay rides the
+    /// FILE-LOADED imported DiT via the MLX native control entrypoint
+    /// (`load_control_from_native_dit_file`), one image per pose — the imported twin of
+    /// [`ImageRoute::KreaControl`]. Claimed BEFORE the plain [`ImageRoute::KreaImported`] arm so a
+    /// pose set gets the per-pose count + control render instead of per-image t2i. MLX-only
+    /// (`KREA_IMPORTED_SUPPORTS_POSE_CONTROL`); the candle imported lane has no control path.
+    KreaImportedControl,
     /// A fused SDXL LDM/A1111 single-file checkpoint. The file carries the UNet, both text encoders,
     /// and VAE; tokenizer assets are borrowed from the installed SDXL base turnkey.
     SdxlImported,
@@ -228,6 +236,12 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
         // sibling of the `krea_edit_available` arm above.
         Some(ImageRoute::KreaTurboOnRaw)
+    } else if krea_imported_control_available(request, settings) {
+        // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch
+        // rides the file-loaded imported DiT (the imported twin of the `KreaControl` arm above).
+        // Checked BEFORE the plain imported arm so a pose set renders one pose-locked image per
+        // pose instead of falling into per-image t2i (which would silently drop the poses).
+        Some(ImageRoute::KreaImportedControl)
     } else if krea_imported_available(request, settings) {
         // An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
         // `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
@@ -307,6 +321,7 @@ impl ImageRoute {
                 | ImageRoute::KreaTurboOnRaw
                 | ImageRoute::KreaMultiPhase
                 | ImageRoute::KreaImported
+                | ImageRoute::KreaImportedControl
                 | ImageRoute::SdxlImported
                 | ImageRoute::InstantId
                 | ImageRoute::SdxlAdvanced
@@ -322,7 +337,9 @@ impl ImageRoute {
             | ImageRoute::KolorsControl
             | ImageRoute::KreaControl
             | ImageRoute::Flux1DevControl
-            | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
+            | ImageRoute::Flux2DevControl
+            // The imported strict-pose lane renders one image per pose, like every control lane.
+            | ImageRoute::KreaImportedControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),
             ImageRoute::SensenovaEdit => match edit_grouping(request) {
@@ -365,7 +382,7 @@ impl ImageRoute {
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
             ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
-            ImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
+            ImageRoute::KreaImported | ImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             ImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             ImageRoute::InstantId => INSTANTID_ENGINE,

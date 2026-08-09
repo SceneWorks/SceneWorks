@@ -13877,11 +13877,60 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "an edit with no conditioning image is rejected"
     );
 
-    // Bare-transformer guards stay rejected on EVERY backend: pose, mask, character, multi-phase, a
+    // A strict-pose set follows the backend's pose-control capability, the same shape the LoRA/edit
+    // surfaces follow above: MLX assembles the trained pose branch around the file-loaded imported
+    // DiT (`load_control_from_native_dit_file`), candle's single-file path has no control parameter.
+    let pose = request(json!({
+        "projectId": "p", "model": "kreamania_variant4",
+        "advanced": { "poses": [{ "id": "a" }] },
+        "modelManifestEntry": base.clone()
+    }));
+    if KREA_IMPORTED_SUPPORTS_POSE_CONTROL {
+        assert!(
+            krea_imported_available(&pose, &settings),
+            "a pose set is served on the pose-control-capable backend"
+        );
+        // `krea_imported_control_available` (the route-claim predicate) exists only on the
+        // pose-control-capable build, so probe it under its own cfg rather than the const — the
+        // candle lane compiles this same test file and would not resolve the name.
+        #[cfg(target_os = "macos")]
+        assert!(
+            krea_imported_control_available(&pose, &settings),
+            "...and it is claimed by the pose-control route, not the plain per-image one"
+        );
+    } else {
+        assert!(
+            !krea_imported_available(&pose, &settings),
+            "a pose set is rejected on a backend without pose-control support"
+        );
+    }
+
+    // Bare-transformer guards stay rejected on EVERY backend: mask, character, multi-phase, a
     // NON-edit two-reference SET (the edit surface, only valid in edit mode), and a bare non-edit
     // `sourceAssetId` (the img2img resolve reads only `referenceAssetId`, so it would silently drop it).
+    // A pose set combined with any of them is likewise rejected — the pose render loop reads none of
+    // these fields, so admitting the combination would silently drop the extra conditioning.
     for (label, extra) in [
-        ("pose", json!({ "advanced": { "poses": [{ "id": "a" }] } })),
+        (
+            "pose + non-edit two-ref set",
+            json!({ "referenceAssetIds": ["a", "b"], "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
+        (
+            "pose + bare source",
+            json!({ "sourceAssetId": "s", "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
+        (
+            "pose + edit mode",
+            json!({
+                "mode": "edit_image",
+                "sourceAssetId": "s",
+                "advanced": { "poses": [{ "id": "a" }] },
+            }),
+        ),
+        (
+            "pose + mask",
+            json!({ "maskAssetId": "m", "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
         (
@@ -14232,6 +14281,311 @@ fn krea_imported_mlx_gpu_smoke() {
         png_a.display(),
         png_b.display()
     );
+}
+
+/// Real-weight MLX GPU smoke for the imported-checkpoint **pose ControlNet** lane — the control
+/// sibling of [`krea_imported_mlx_gpu_smoke`], and the end-to-end proof that the trained pose branch
+/// composes with a FILE-LOADED community DiT rather than only the builtin base.
+///
+/// It exercises the same four stages the `KreaImportedControl` arm runs, in order:
+///   1. `resolve_image_route` → [`ImageRoute::KreaImportedControl`] for an imported `krea_2` job
+///      carrying `advanced.poses` — the deterministic ROUTE EVIDENCE that a pose set takes the
+///      pose-control lane (one image per pose) and not the plain per-image imported t2i arm.
+///   2. `resolve_imported_krea_dit` + `resolve_krea_imported_base_tier` → the in-place single-file
+///      DiT (symlinked, no copy) + the resident dense `bf16/` tier supplying TE/VAE/tokenizer/config.
+///   3. `resolve_krea_imported_control_overlay` → the installed pose overlay, CACHE-ONLY.
+///   4. `load_control_from_native_dit_file` → the branch folded onto the imported DiT, then a real
+///      Metal pose-conditioned render driven by a `Conditioning::Control` skeleton.
+///
+/// Two NEGATIVE CONTROLS make the assertion discriminating, because a coherent image alone would
+/// also be produced by a lane that silently dropped the pose:
+///   * **control_scale = 0** renders the same prompt+seed+skeleton with the branch scaled to zero —
+///     the engine-proven bit-exact base passthrough. A pose-locked render must differ from it; a
+///     near-zero delta means the branch contributed nothing (an inert or unloaded overlay).
+///   * **a DIFFERENT skeleton** at the same prompt+seed must also differ, which is the property a
+///     scale-0-only check cannot establish: it proves the output tracks the POSE INPUT, not merely
+///     that some residual perturbed the render.
+///
+/// Loads run sequentially with `clear_cache()` between them to stay under the MLX wired ceiling.
+/// ```text
+/// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
+/// # optional: KREA_STEPS=8 KREA_W=1024 KREA_H=1024 KREA_SEED=42 KREA_CONTROL_SCALE=0.6
+/// cargo test -p sceneworks-worker --release krea_imported_control_mlx_gpu_smoke -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight MLX smoke; needs the imported Krea 2 DiT + the krea-2-turbo-mlx bf16 base + the pose overlay cached + an Apple-Silicon Mac"]
+fn krea_imported_control_mlx_gpu_smoke() {
+    use crate::smoke_support::{
+        env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
+    };
+
+    let home = std::env::var("HOME").expect("HOME");
+    let dit_src = PathBuf::from(env_or(
+        "KREA_IMPORTED_DIT",
+        &format!("{home}/models/kreamania_variant5.safetensors"),
+    ));
+    assert!(
+        dit_src.is_file(),
+        "imported DiT not found at {} — download it or set KREA_IMPORTED_DIT",
+        dit_src.display()
+    );
+
+    // Register the checkpoint the S0c way: an app-managed install dir holding ONLY the checkpoint.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let install_dir = data_dir
+        .path()
+        .join("models")
+        .join("imports")
+        .join("kreamania_v5");
+    std::fs::create_dir_all(&install_dir).expect("install dir");
+    let dit_link = install_dir.join("kreamania_variant5.safetensors");
+    std::os::unix::fs::symlink(&dit_src, &dit_link).expect("symlink DiT into app-managed dir");
+
+    let real_hub = PathBuf::from(format!("{home}/.cache/huggingface/hub"));
+    let _hf = isolate_hf_hub_cache_to(&real_hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+
+    let steps: u32 = env_or("KREA_STEPS", "8").parse().expect("KREA_STEPS");
+    let w: u32 = env_or("KREA_W", "1024").parse().expect("KREA_W");
+    let h: u32 = env_or("KREA_H", "1024").parse().expect("KREA_H");
+    let seed: u64 = env_or("KREA_SEED", "42").parse().expect("KREA_SEED");
+    let control_scale: f32 = env_or("KREA_CONTROL_SCALE", "0.6")
+        .parse()
+        .expect("KREA_CONTROL_SCALE");
+    let prompt = env_or(
+        "KREA_PROMPT",
+        "a photorealistic full-body portrait of a woman in a red jacket, studio lighting, \
+         sharp focus",
+    );
+    let out_dir = PathBuf::from(env_or("KREA_OUT_DIR", "/tmp/krea_imported_control_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    // Two GENUINELY different 18-point OpenPose skeletons (the `advanced.poses` entries the pose
+    // library sends). `parse_poses` reads the `keypoints` array — an entry carrying only an `id`
+    // would normalize to `vec![None; 18]`, i.e. a BLANK control image, which would make the two
+    // "different pose" renders identical and turn the pose-tracking assertion below into a
+    // guaranteed failure. So both skeletons are spelled out: `arms_down` is a neutral standing
+    // pose, `arms_up` raises both forearms and widens the stance — a large, unmistakable change in
+    // the wrists/elbows/ankles the branch conditions on.
+    let arms_down = json!([
+        [0.50, 0.20],
+        [0.50, 0.35],
+        [0.42, 0.35],
+        [0.40, 0.50],
+        [0.40, 0.65],
+        [0.58, 0.35],
+        [0.60, 0.50],
+        [0.60, 0.65],
+        [0.45, 0.60],
+        [0.45, 0.80],
+        [0.45, 0.95],
+        [0.55, 0.60],
+        [0.55, 0.80],
+        [0.55, 0.95],
+        [0.48, 0.18],
+        [0.52, 0.18],
+        [0.46, 0.20],
+        [0.54, 0.20]
+    ]);
+    let arms_up = json!([
+        [0.50, 0.20],
+        [0.50, 0.35],
+        [0.42, 0.35],
+        [0.34, 0.26],
+        [0.30, 0.12],
+        [0.58, 0.35],
+        [0.66, 0.26],
+        [0.70, 0.12],
+        [0.45, 0.60],
+        [0.40, 0.80],
+        [0.36, 0.95],
+        [0.55, 0.60],
+        [0.60, 0.80],
+        [0.64, 0.95],
+        [0.48, 0.18],
+        [0.52, 0.18],
+        [0.46, 0.20],
+        [0.54, 0.20]
+    ]);
+
+    // ---- 1. ROUTE EVIDENCE: a pose set on an imported krea_2 takes the pose-control lane ----
+    let pose_payload = |poses: Value| {
+        json!({
+            "projectId": "p",
+            "model": "imported_kreamania_v5",
+            "prompt": prompt,
+            "width": w, "height": h,
+            "advanced": { "poses": poses, "controlScale": control_scale, "steps": steps },
+            "modelManifestEntry": {
+                "catalogScope": "user",
+                "family": "krea_2",
+                "paths": { "model": install_dir.to_str().unwrap() }
+            }
+        })
+    };
+    let req = request(pose_payload(
+        json!([{ "id": "arms_down", "keypoints": arms_down }]),
+    ));
+    let route = resolve_image_route(&req, &settings);
+    assert_eq!(
+        route,
+        Some(ImageRoute::KreaImportedControl),
+        "ROUTE EVIDENCE: an imported krea_2 job with a pose set must take the pose-control lane"
+    );
+    assert_eq!(
+        ImageRoute::KreaImportedControl.image_count(&req, &settings),
+        1,
+        "the pose-control lane renders one image PER POSE"
+    );
+    eprintln!("[route] resolve_image_route(imported + poses) = {route:?}");
+
+    // ---- 2 + 3. The three resolves the arm makes before any compute ----
+    let dit = resolve_imported_krea_dit(&req, &settings)
+        .expect("resolve ok")
+        .expect("imported single-file Krea 2 DiT resolves");
+    let base =
+        resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base tier");
+    let overlay = resolve_krea_imported_control_overlay(&settings, &req)
+        .expect("installed Krea 2 pose control overlay (cache-only)");
+    eprintln!(
+        "[route] load_control_from_native_dit_file(dit={}, base={}, control={})",
+        dit.display(),
+        base.display(),
+        overlay.display()
+    );
+
+    // ---- 4. Load the branch onto the IMPORTED DiT, then render three variants ----
+    let t0 = std::time::Instant::now();
+    let model = runtime_macos::providers::krea::load_control_from_native_dit_file(
+        &dit,
+        &base,
+        &overlay,
+        &[],
+    )
+    .expect("load the pose control branch onto the imported Krea 2 DiT");
+    eprintln!("[load] assembled in {:.1}s", t0.elapsed().as_secs_f64());
+    assert_eq!(
+        model.descriptor().id,
+        "krea_2_turbo_control",
+        "the imported control assembly keeps the builtin provider identity"
+    );
+
+    // Two DIFFERENT skeletons rendered at the same size as the output. `draw_wholebody` is the same
+    // renderer the lane (and training) uses, so these are real conditioning inputs, not noise.
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(w, h);
+    let skeleton = |pose_id: &str, keypoints: &Value| {
+        let pose = parse_poses(&request(pose_payload(
+            json!([{ "id": pose_id, "keypoints": keypoints }]),
+        )))
+        .into_iter()
+        .next()
+        .expect("one pose entry");
+        assert!(
+            pose.keypoints.iter().filter(|kp| kp.is_some()).count() >= 14,
+            "{pose_id} must carry real keypoints — a blank skeleton would make the pose-tracking \
+             assertion below vacuous"
+        );
+        preprocess_control_entry(
+            &ControlKind::Pose,
+            None,
+            Some(&pose),
+            None,
+            w,
+            h,
+            stickwidth,
+            None,
+        )
+        .expect("render the DWPose skeleton for the pose entry")
+    };
+    let render = |label: &str, control: Image, scale: f32| {
+        let request = GenerationRequest {
+            prompt: prompt.clone(),
+            width: w,
+            height: h,
+            count: 1,
+            seed: Some(seed),
+            steps: Some(steps),
+            guidance: None,
+            conditioning: vec![Conditioning::Control {
+                image: control,
+                kind: ControlKind::Pose,
+                scale: Some(scale),
+            }],
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let mut last = String::new();
+        let out = model
+            .generate(&request, &mut |p| {
+                let s = format!("{p:?}");
+                if s != last {
+                    eprintln!("[{label}] {s}");
+                    last = s;
+                }
+            })
+            .unwrap_or_else(|error| panic!("{label} generate: {error}"));
+        let image = match out {
+            GenerationOutput::Images(mut images) => images.pop().expect("one image"),
+            other => panic!("expected Images, got {other:?}"),
+        };
+        let std = image_std(&image);
+        let png = out_dir.join(format!("{label}.png"));
+        save_png(&image, &png);
+        eprintln!(
+            "[{label}] {}x{} std {std:.2} scale {scale} in {:.1}s -> {}",
+            image.width,
+            image.height,
+            started.elapsed().as_secs_f64(),
+            png.display()
+        );
+        assert_eq!((image.width, image.height), (w, h), "{label} wrong size");
+        assert!(
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
+            "{label} render looks degenerate (std {std:.2}) — NaN / all-black / flat decode"
+        );
+        image
+    };
+
+    // The two skeletons must genuinely differ as IMAGES before either render runs — otherwise the
+    // pose-tracking assertion below could pass or fail for reasons that have nothing to do with the
+    // branch. This is the cheap, weights-free precondition for that assertion.
+    let arms_down_map = skeleton("arms_down", &arms_down);
+    let arms_up_map = skeleton("arms_up", &arms_up);
+    let skeleton_delta = mean_abs_frame_delta(&arms_down_map, &arms_up_map);
+    eprintln!("[input] mean_abs_pixel_delta(arms_down_map, arms_up_map) = {skeleton_delta:.3}");
+    assert!(
+        skeleton_delta > 0.5,
+        "the two control maps must differ ({skeleton_delta:.3}) or the pose-tracking assertion is \
+         vacuous"
+    );
+
+    let posed = render("arms_down_locked", arms_down_map.clone(), control_scale);
+    let passthrough = render("arms_down_scale0", arms_down_map, 0.0);
+    let other_pose = render("arms_up_locked", arms_up_map, control_scale);
+
+    drop(model);
+    mlx_rs::memory::clear_cache();
+
+    // ---- DIFFER 1: the branch actually contributes (vs the bit-exact scale-0 base passthrough) ----
+    let branch_delta = mean_abs_frame_delta(&posed, &passthrough);
+    eprintln!("[differ] mean_abs_pixel_delta(pose_locked, scale0_passthrough) = {branch_delta:.3}");
+    assert!(
+        branch_delta > 2.0,
+        "the pose branch must change the render against its own scale-0 passthrough — a near-zero \
+         delta ({branch_delta:.3}) means the overlay contributed nothing on the imported DiT"
+    );
+
+    // ---- DIFFER 2: the render tracks the POSE INPUT, not merely 'some residual fired' ----
+    let pose_delta = mean_abs_frame_delta(&posed, &other_pose);
+    eprintln!("[differ] mean_abs_pixel_delta(arms_down, arms_up) = {pose_delta:.3}");
+    assert!(
+        pose_delta > 2.0,
+        "two different skeletons at the same prompt+seed must produce different images — a \
+         near-zero delta ({pose_delta:.3}) means the pose input is not reaching the branch"
+    );
+    eprintln!("[DONE] KreaImportedControl lane validated on real weights.");
 }
 
 /// Settings + a complete fine-tuned Mage transformer component dir under the app data root

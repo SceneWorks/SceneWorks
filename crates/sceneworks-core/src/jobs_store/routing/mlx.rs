@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_family_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES,
-    MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
+    imported_image_request_family_eligible, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
+    MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
     has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
@@ -58,9 +58,15 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         // future) candle-only builtin — a builtin id absent from `MLX_ROUTED_MODELS` — not-eligible
         // here rather than family-routed. Today every builtin is `mlx_routed`, so this branch is only
         // ever reached by imported ids; the guard is defensive parity, not live behavior.
-        // `adapters_supported = true`: the MLX native single-file loader takes an adapter slice
-        // (inference #211), so the imported lane serves LoRAs (sc-14111) + Kontext edit (sc-14119).
-        return imported_image_request_family_eligible(model, payload, MLX_ROUTED_FAMILIES, true);
+        // `MLX_IMPORTED_CAPS`: the MLX native single-file loader takes an adapter slice
+        // (inference #211) — LoRAs (sc-14111) + Kontext edit (sc-14119) — and assembles the Krea
+        // pose control branch around the file-loaded DiT (strict-pose sets on the krea_2 family).
+        return imported_image_request_family_eligible(
+            model,
+            payload,
+            MLX_ROUTED_FAMILIES,
+            MLX_IMPORTED_CAPS,
+        );
     }
     match model {
         "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
@@ -1223,15 +1229,31 @@ mod tests {
             img2img.as_object().expect("probe is an object")
         ));
 
-        // A base-tier-only shape (a pose set) is still rejected.
+        // A strict-pose set → eligible: the trained pose control branch folds onto the file-loaded
+        // imported DiT (the MLX native control entrypoint), one pose-locked image per pose.
         let pose = json!({
             "model": imported_id,
             "advanced": { "poses": [{}] },
             "modelManifestEntry": entry.clone(),
         });
-        assert!(!image_request_mlx_eligible(
+        assert!(image_request_mlx_eligible(
             imported_id,
             pose.as_object().expect("probe is an object")
+        ));
+
+        // A pose set whose conditioning the pose render loop would silently drop (the plural edit
+        // reference set) stays rejected — never flattened into an unposed or unreferenced render.
+        let pose_with_reference_list = json!({
+            "model": imported_id,
+            "referenceAssetIds": ["scene", "person"],
+            "advanced": { "poses": [{}] },
+            "modelManifestEntry": entry.clone(),
+        });
+        assert!(!image_request_mlx_eligible(
+            imported_id,
+            pose_with_reference_list
+                .as_object()
+                .expect("probe is an object")
         ));
 
         // A bare non-edit `sourceAssetId` is still rejected (the img2img path reads referenceAssetId).
