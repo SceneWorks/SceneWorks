@@ -1423,7 +1423,9 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   );
   for (const output of session.outputs) {
     const local = path.join(rawLogDir, output.path);
-    assert.equal(createHash("sha256").update(await readFile(local)).digest("hex"), output.sha256);
+    const bytes = await readFile(local);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), output.sha256);
+    assert.equal(bytes.length, output.bytes);
   }
   assert.equal(validateBundle(result), result);
   assert.equal(await validateSourceSessionFiles(result, rawLogDir), result);
@@ -1435,8 +1437,12 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   authoritativeRecord.target.modelId = "qwen_image";
   authoritativeRecord.target.provider = "qwen_image";
   authoritativeRecord.loadability.resolvedPathFingerprint = `SceneWorks/fixture@${"c".repeat(40)}:q4`;
+  const priorLogicalCaseId = authoritativeRecord.logicalCaseId;
   authoritativeRecord.logicalCaseId = logicalCaseId(authoritativeRecord);
   authoritativeRecord.id = recordId(authoritativeRecord);
+  for (const output of authoritative.sourceSessions[0].outputs.filter(({ role }) => role !== "request")) {
+    output.path = output.path.replace(priorLogicalCaseId, authoritativeRecord.logicalCaseId);
+  }
   assert.equal(validateBundle(authoritative), authoritative);
 
   const missingDerivation = structuredClone(authoritative);
@@ -1448,7 +1454,9 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   assert.throws(() => validateBundle(wrongInventory), /does not match the record artifact inventory/);
 
   const missingOutput = structuredClone(result);
-  missingOutput.sourceSessions[0].outputs[1].path = `${sourcePathPrefix}/missing.rgb`;
+  missingOutput.sourceSessions[0].outputs[1].sha256 = "0".repeat(64);
+  missingOutput.sourceSessions[0].outputs[1].path =
+    `${sourcePathPrefix}/${record.logicalCaseId}-selected_rgb-1024x1024-${"0".repeat(64)}.rgb`;
   await assert.rejects(
     validateSourceSessionFiles(missingOutput, rawLogDir),
     /missing immutable source receipt/,
@@ -1470,7 +1478,52 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
 
   const duplicatePath = structuredClone(result);
   duplicatePath.sourceSessions[0].outputs[2].path = duplicatePath.sourceSessions[0].outputs[1].path;
-  assert.throws(() => validateBundle(duplicatePath), /repeats output path/);
+  assert.throws(() => validateBundle(duplicatePath), /schema validation|wrong role|repeats output path/);
+
+  const swappedRoles = structuredClone(result);
+  swappedRoles.sourceSessions[0].outputs[0].role = "selected_rgb";
+  swappedRoles.sourceSessions[0].outputs[1].role = "request";
+  assert.throws(
+    () => validateBundle(swappedRoles),
+    /schema validation|request receipt|wrong role|repeats output role/,
+  );
+
+  const requestOutput = session.outputs.find(({ role }) => role === "request");
+  const requestPath = path.join(rawLogDir, requestOutput.path);
+  const originalRequest = await readFile(requestPath);
+  const forgedRequest = canonicalJson({ action: "run", planned: {} });
+  await writeFile(requestPath, forgedRequest);
+  const forgedRequestBundle = structuredClone(result);
+  const forgedRequestOutput = forgedRequestBundle.sourceSessions[0].outputs
+    .find(({ role }) => role === "request");
+  forgedRequestOutput.sha256 = createHash("sha256").update(forgedRequest).digest("hex");
+  forgedRequestOutput.bytes = Buffer.byteLength(forgedRequest);
+  await assert.rejects(
+    validateSourceSessionFiles(forgedRequestBundle, rawLogDir),
+    /request receipt logicalCaseId does not match/,
+  );
+  await writeFile(requestPath, originalRequest);
+
+  const tamperedCaptureDir = await mkdtemp(path.join(tmpdir(), "physical-mlx-tamper-race-"));
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config,
+      providerCommand: [
+        process.execPath,
+        fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+        tamperedCaptureDir,
+        sourcePathPrefix,
+        tamperedCaptureDir,
+        "tamper-after-attest",
+      ],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      rawLogDir: tamperedCaptureDir,
+      sourcePathPrefix,
+    }),
+    /provider output differs from its provider attestation/,
+  );
 
   await writeFile(path.join(rawLogDir, session.sourcePath), "tampered provider output");
   await assert.rejects(

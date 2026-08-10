@@ -485,11 +485,15 @@ For physical MLX capture, the raw-log directory must also stay outside the check
 the campaign, export the two inventory values it reports, and set
 `SCENEWORKS_MEMORY_CAPTURE_DIR` plus `SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX`. The adapter persists the
 selected and reference RGB bytes under `<capture-dir>/<source-prefix>` using role- and
-content-addressed filenames with exclusive creation; the harness adds one
+content-addressed filenames with exclusive creation. The adapter separately attests each RGB
+receipt's SHA-256 and byte count; the harness requires those values to match the role/dimensions/hash
+encoded in the filename and the bytes it reads after the provider exits. The harness adds one
 `physical_mlx` source session per fresh case and writes the exact request and provider response beside
 them. A physical session is invalid unless it carries exactly one typed `request`, `selected_rgb`,
 and `reference_rgb` receipt at three distinct paths, so removing an entry cannot make a missing file
-disappear from validation. The temporary directory therefore mirrors the repository-relative tree. The inventory command
+disappear from validation. The request receipt must be canonical JSON for the one record bound to the
+session, and both RGB receipts must match that record's logical case and geometry. The temporary
+directory therefore mirrors the repository-relative tree. The inventory command
 streams and hashes every artifact byte, including Hugging Face symlink targets.
 
 ### 6a. Locally on the host

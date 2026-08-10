@@ -37,6 +37,7 @@ const PHYSICAL_MLX_SESSION_OUTPUT_ROLES = Object.freeze([
 const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
   "selected_rgb", "reference_rgb",
 ]);
+const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -56,6 +57,12 @@ function validateExactOutputReceipts(outputs, expectedRoles, label) {
     object(output, `${label}[]`);
     text(output.role, `${label}[].role`);
     text(output.path, `${label}[].path`);
+    if (!/^[0-9a-f]{64}$/.test(output.sha256)) {
+      fail(`${label}[].sha256 must be a lowercase SHA-256 digest`);
+    }
+    if (!Number.isSafeInteger(output.bytes) || output.bytes <= 0) {
+      fail(`${label}[].bytes must be a positive safe integer`);
+    }
     if (roles.has(output.role)) fail(`${label} repeats output role ${output.role}`);
     if (paths.has(output.path)) fail(`${label} repeats output path ${output.path}`);
     roles.add(output.role);
@@ -64,6 +71,51 @@ function validateExactOutputReceipts(outputs, expectedRoles, label) {
   const expected = new Set(expectedRoles);
   if (roles.size !== expected.size || [...roles].some((role) => !expected.has(role))) {
     fail(`${label} must contain exactly ${expectedRoles.join(", ")}`);
+  }
+}
+
+function physicalMlxRgbMetadata(output, label) {
+  const match = path.posix.basename(output.path).match(PHYSICAL_MLX_RGB_BASENAME);
+  if (!match || match[2] !== output.role) {
+    fail(`${label} path must bind its logical case, RGB role, dimensions, and content digest`);
+  }
+  const width = Number(match[3]);
+  const height = Number(match[4]);
+  const expectedBytes = width * height * 3;
+  if (!Number.isSafeInteger(expectedBytes) || output.bytes !== expectedBytes) {
+    fail(`${label} byte count must equal its encoded RGB dimensions`);
+  }
+  if (output.sha256 !== match[5]) {
+    fail(`${label} SHA-256 must match its content-addressed filename`);
+  }
+  return { logicalCaseId: match[1], width, height };
+}
+
+function validatePhysicalMlxSessionReceipts(session) {
+  const sourceDirectory = path.posix.dirname(session.sourcePath);
+  if (session.sourcePath !== `${sourceDirectory}/${session.id}.log`) {
+    fail(`${session.id}: physical MLX sourcePath must be named from the session id`);
+  }
+  const request = session.outputs.find((output) => output.role === "request");
+  if (request.path !== `${sourceDirectory}/${session.id}.request.json`) {
+    fail(`${session.id}: request receipt must share the source directory and session id`);
+  }
+  for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
+    if (path.posix.dirname(output.path) !== sourceDirectory) {
+      fail(`${session.id}: physical MLX RGB receipts must share the source directory`);
+    }
+    physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+  }
+}
+
+function validatePhysicalMlxOutputsAgainstRecord(record, session) {
+  for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
+    const metadata = physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    if (metadata.logicalCaseId !== record.logicalCaseId
+        || metadata.width !== record.target.geometry.width
+        || metadata.height !== record.target.geometry.height) {
+      fail(`${record.id}: physical MLX RGB receipt does not match the measured logical case geometry`);
+    }
   }
 }
 
@@ -600,6 +652,7 @@ export function validateBundle(bundle) {
         PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
         `${session.id}.outputs`,
       );
+      validatePhysicalMlxSessionReceipts(session);
       for (const output of session.outputs) {
         if (!isNormalizedCalibrationPath(output.path)) {
           fail(`${session.id}: physical MLX output must be a normalized path under docs/calibration`);
@@ -706,6 +759,10 @@ export function validateBundle(bundle) {
       if (requiresQwenMlxDerivation && derivationSessionIds.size !== 1) {
         fail(`${record.id}: authoritative Qwen MLX claims must share one physical capture session`);
       }
+      if (requiresQwenMlxDerivation) {
+        const [sessionId] = derivationSessionIds;
+        validatePhysicalMlxOutputsAgainstRecord(record, sessions.get(sessionId));
+      }
     }
   }
   return bundle;
@@ -784,14 +841,80 @@ export async function validateSourceSessionFiles(
   const roots = [...new Set([extraRoot, ROOT].filter(Boolean).map((root) => path.resolve(root)))];
   for (const session of bundle.sourceSessions ?? []) {
     const sourceFile = await resolveReceiptPath(session.sourcePath, roots);
-    if (await sha256File(sourceFile) !== session.stdoutSha256) {
+    const sourceBytes = await readFile(sourceFile);
+    if (createHash("sha256").update(sourceBytes).digest("hex") !== session.stdoutSha256) {
       fail(`${session.id}: sourcePath no longer matches stdoutSha256`);
     }
     if (session.kind !== "physical_mlx") continue;
+    const boundRecords = bundle.records.filter((record) => Object.entries(record.derivation ?? {})
+      .filter(([key]) => key !== "justification")
+      .some(([, reference]) => reference.sourceSessionIds.includes(session.id)));
+    if (boundRecords.length !== 1) {
+      fail(`${session.id}: physical MLX session must bind exactly one evidence record`);
+    }
+    const record = boundRecords[0];
+    const requestOutput = session.outputs.find((output) => output.role === "request");
     for (const output of session.outputs) {
       const outputFile = await resolveReceiptPath(output.path, roots);
-      if (await sha256File(outputFile) !== output.sha256) {
+      const outputBytes = await readFile(outputFile);
+      if (createHash("sha256").update(outputBytes).digest("hex") !== output.sha256
+          || outputBytes.length !== output.bytes) {
         fail(`${session.id}: output ${output.path} no longer matches its SHA-256 receipt`);
+      }
+    }
+    const requestBytes = await readFile(await resolveReceiptPath(requestOutput.path, roots));
+    let request;
+    try {
+      request = JSON.parse(requestBytes.toString("utf8"));
+    } catch {
+      fail(`${session.id}: request receipt must contain JSON`);
+    }
+    if (canonicalJson(request) !== requestBytes.toString("utf8")) {
+      fail(`${session.id}: request receipt must contain canonical JSON`);
+    }
+    if (request.action !== "run" || !request.planned) {
+      fail(`${session.id}: request receipt must describe one fresh planned case`);
+    }
+    for (const key of [
+      "logicalCaseId", "evidenceScope", "backend", "loadShape", "target", "strategy",
+      "sourceProvenance", "calibrationFingerprint", "fixture",
+    ]) {
+      if (!equal(request.planned[key], record[key])) {
+        fail(`${session.id}: request receipt ${key} does not match its evidence record`);
+      }
+    }
+    if (!equal(request.repositories, record.repositories)
+        || !equal(request.hardware, record.hardware)
+        || !equal(session.hardware, record.hardware)) {
+      fail(`${session.id}: request receipt provenance does not match its evidence record`);
+    }
+    let providerResponse;
+    try {
+      providerResponse = JSON.parse(sourceBytes.toString("utf8"));
+    } catch {
+      fail(`${session.id}: provider response receipt must contain JSON`);
+    }
+    validateExactOutputReceipts(
+      providerResponse?.sourceCapture?.outputs,
+      PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+      `${session.id}.providerResponse.sourceCapture.outputs`,
+    );
+    for (const providerOutput of providerResponse.sourceCapture.outputs) {
+      physicalMlxRgbMetadata(
+        providerOutput,
+        `${session.id}.providerResponse.sourceCapture.outputs[${providerOutput.role}]`,
+      );
+      const sessionOutput = session.outputs.find((output) => output.role === providerOutput.role);
+      if (!equal(
+        {
+          role: providerOutput.role,
+          path: providerOutput.path,
+          sha256: providerOutput.sha256,
+          bytes: providerOutput.bytes,
+        },
+        sessionOutput,
+      )) {
+        fail(`${session.id}: provider response output attestation does not match the session receipt`);
       }
     }
   }
@@ -1404,12 +1527,22 @@ export async function runProviderPlan({
           role: "request",
           path: `${sourcePathPrefix}/${requestFileName}`,
           sha256: createHash("sha256").update(providerRequest).digest("hex"),
+          bytes: Buffer.byteLength(providerRequest),
         }];
         for (const output of sourceCapture.outputs) {
           object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
           text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
           text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
           text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
+          const metadata = physicalMlxRgbMetadata(
+            output,
+            `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+          );
+          if (metadata.logicalCaseId !== planned.logicalCaseId
+              || metadata.width !== planned.target.geometry.width
+              || metadata.height !== planned.target.geometry.height) {
+            fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
+          }
           const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
           if (!outputRelative || outputRelative.startsWith("../") || path.posix.isAbsolute(outputRelative)) {
             fail(`${planned.logicalCaseId}: physical MLX output path must stay under ${sourcePathPrefix}`);
@@ -1423,10 +1556,15 @@ export async function runProviderPlan({
             fail(`${planned.logicalCaseId}: physical MLX local output must stay under the raw log directory`);
           }
           const bytes = await readFile(physicalOutputPath);
+          const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+          if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
+            fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
+          }
           outputs.push({
             role: output.role,
             path: output.path,
-            sha256: createHash("sha256").update(bytes).digest("hex"),
+            sha256: output.sha256,
+            bytes: output.bytes,
           });
         }
         validateExactOutputReceipts(

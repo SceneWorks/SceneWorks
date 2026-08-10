@@ -186,6 +186,7 @@ pub struct SourceOutput {
     pub role: Option<SourceOutputRole>,
     pub path: String,
     pub sha256: String,
+    pub bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -1161,6 +1162,10 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
     }
     let mut physical_output_roles = BTreeSet::new();
     let mut physical_output_paths = BTreeSet::new();
+    let source_directory = session
+        .source_path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent);
     if session.kind == SourceSessionKind::PhysicalMlx && session.outputs.len() != 3 {
         return Err(format!(
             "{} physical MLX session requires exactly request, selected_rgb, and reference_rgb outputs",
@@ -1179,6 +1184,18 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
             let role = output
                 .role
                 .ok_or_else(|| format!("{} physical MLX output is missing its role", session.id))?;
+            let bytes = output.bytes.ok_or_else(|| {
+                format!(
+                    "{} physical MLX output is missing its byte count",
+                    session.id
+                )
+            })?;
+            if bytes == 0 {
+                return Err(format!(
+                    "{} physical MLX output byte count must be positive",
+                    session.id
+                ));
+            }
             if !physical_output_roles.insert(role) {
                 return Err(format!(
                     "{} physical MLX session repeats an output role",
@@ -1190,6 +1207,31 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
                     "{} physical MLX session repeats an output path",
                     session.id
                 ));
+            }
+            let output_directory = output.path.rsplit_once('/').map(|(parent, _)| parent);
+            if output_directory != source_directory {
+                return Err(format!(
+                    "{} physical MLX outputs must share the source directory",
+                    session.id
+                ));
+            }
+            match role {
+                SourceOutputRole::Request => {
+                    let expected = format!(
+                        "{}/{}.request.json",
+                        source_directory.unwrap_or_default(),
+                        session.id
+                    );
+                    if output.path != expected {
+                        return Err(format!(
+                            "{} request receipt must be named from the session id",
+                            session.id
+                        ));
+                    }
+                }
+                SourceOutputRole::SelectedRgb | SourceOutputRole::ReferenceRgb => {
+                    physical_mlx_rgb_metadata(output)?;
+                }
             }
         }
         if !is_sha256(&output.sha256) {
@@ -1211,6 +1253,91 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
             "{} physical MLX session must contain request, selected_rgb, and reference_rgb outputs",
             session.id
         ));
+    }
+    if session.kind == SourceSessionKind::PhysicalMlx {
+        let expected_source = format!(
+            "{}/{}.log",
+            source_directory.unwrap_or_default(),
+            session.id
+        );
+        if session.source_path != expected_source {
+            return Err(format!(
+                "{} physical MLX sourcePath must be named from the session id",
+                session.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn physical_mlx_rgb_metadata(output: &SourceOutput) -> Result<(String, u32, u32), String> {
+    let role = match output.role {
+        Some(SourceOutputRole::SelectedRgb) => "selected_rgb",
+        Some(SourceOutputRole::ReferenceRgb) => "reference_rgb",
+        _ => return Err("physical MLX RGB receipt has a non-RGB role".to_owned()),
+    };
+    let file_name = output.path.rsplit('/').next().unwrap_or_default();
+    let stem = file_name
+        .strip_suffix(".rgb")
+        .ok_or_else(|| format!("physical MLX {role} receipt must end in .rgb"))?;
+    if stem.len() < 27 || !has_prefixed_hex(&stem[..27], "implan-", 20) {
+        return Err(format!(
+            "physical MLX {role} receipt must begin with its logical case id"
+        ));
+    }
+    let logical_case_id = stem[..27].to_owned();
+    let remainder = stem[27..]
+        .strip_prefix(&format!("-{role}-"))
+        .ok_or_else(|| format!("physical MLX {role} receipt path has the wrong role"))?;
+    let (dimensions, content_sha256) = remainder
+        .split_once('-')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing its digest"))?;
+    let (width, height) = dimensions
+        .split_once('x')
+        .ok_or_else(|| format!("physical MLX {role} receipt path is missing dimensions"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt width is invalid"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| format!("physical MLX {role} receipt height is invalid"))?;
+    let expected_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|value| value.checked_mul(3))
+        .ok_or_else(|| format!("physical MLX {role} receipt dimensions overflow"))?;
+    if width == 0 || height == 0 || output.bytes != Some(expected_bytes) {
+        return Err(format!(
+            "physical MLX {role} receipt byte count does not match its dimensions"
+        ));
+    }
+    if !is_sha256(content_sha256) || content_sha256 != output.sha256 {
+        return Err(format!(
+            "physical MLX {role} receipt digest does not match its content-addressed path"
+        ));
+    }
+    Ok((logical_case_id, width, height))
+}
+
+fn validate_physical_mlx_outputs_against_record(
+    record: &EvidenceRecord,
+    session: &SourceSession,
+) -> Result<(), String> {
+    for output in &session.outputs {
+        if matches!(
+            output.role,
+            Some(SourceOutputRole::SelectedRgb | SourceOutputRole::ReferenceRgb)
+        ) {
+            let (logical_case_id, width, height) = physical_mlx_rgb_metadata(output)?;
+            if logical_case_id != record.logical_case_id
+                || width != record.target.geometry.width
+                || height != record.target.geometry.height
+            {
+                return Err(format!(
+                    "{} physical MLX RGB receipt does not match its logical case geometry",
+                    record.id
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1353,6 +1480,16 @@ fn validate_derivation(
             "{} authoritative Qwen MLX claims must share one physical capture session",
             record.id
         ));
+    }
+    if requires_qwen_mlx_provenance {
+        let session_id = derivation_session_ids
+            .iter()
+            .next()
+            .expect("physical MLX derivation has exactly one session");
+        let session = sessions
+            .get(session_id)
+            .expect("physical MLX derivation session was resolved above");
+        validate_physical_mlx_outputs_against_record(record, session)?;
     }
     if !matches!(
         derivation.memory.kind,
@@ -2485,6 +2622,10 @@ mod tests {
         record["loadability"]["resolvedPathFingerprint"] =
             json!(format!("SceneWorks/fixture@{}:q4", "c".repeat(40)));
         let session_id = format!("ims-{}", "1".repeat(20));
+        let logical_case_id = record["logicalCaseId"]
+            .as_str()
+            .expect("fixture logical case id")
+            .to_owned();
         let direct = || json!({ "kind": "direct", "sourceSessionIds": [session_id.clone()] });
         record["derivation"] = json!({
             "memory": direct(),
@@ -2496,10 +2637,10 @@ mod tests {
             "justification": "exact physical MLX capture",
         });
         let source_session = json!({
-            "id": session_id,
+            "id": session_id.clone(),
             "kind": "physical_mlx",
             "command": "memory-mlx-adapter",
-            "sourcePath": "docs/calibration/sc-test/fixture.log",
+            "sourcePath": format!("docs/calibration/sc-test/{session_id}.log"),
             "capturedAt": "2026-08-01T12:00:00Z",
             "repositories": record["repositories"].clone(),
             "hardware": record["hardware"].clone(),
@@ -2520,18 +2661,27 @@ mod tests {
             "outputs": [
                 {
                     "role": "request",
-                    "path": "docs/calibration/sc-test/fixture.request.json",
-                    "sha256": "3".repeat(64)
+                    "path": format!("docs/calibration/sc-test/{session_id}.request.json"),
+                    "sha256": "3".repeat(64),
+                    "bytes": 1024
                 },
                 {
                     "role": "selected_rgb",
-                    "path": "docs/calibration/sc-test/fixture-selected.rgb",
-                    "sha256": "4".repeat(64)
+                    "path": format!(
+                        "docs/calibration/sc-test/{logical_case_id}-selected_rgb-1024x1024-{}.rgb",
+                        "4".repeat(64)
+                    ),
+                    "sha256": "4".repeat(64),
+                    "bytes": 1024 * 1024 * 3
                 },
                 {
                     "role": "reference_rgb",
-                    "path": "docs/calibration/sc-test/fixture-reference.rgb",
-                    "sha256": "5".repeat(64)
+                    "path": format!(
+                        "docs/calibration/sc-test/{logical_case_id}-reference_rgb-1024x1024-{}.rgb",
+                        "5".repeat(64)
+                    ),
+                    "sha256": "5".repeat(64),
+                    "bytes": 1024 * 1024 * 3
                 }
             ],
             "claims": ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
@@ -2565,6 +2715,39 @@ mod tests {
         duplicate_role["sourceSessions"][0]["outputs"][2]["role"] = json!("selected_rgb");
         assert!(matches!(
             load_bundle(&duplicate_role.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+
+        let mut swapped_roles = document.clone();
+        swapped_roles["sourceSessions"][0]["outputs"][0]["role"] = json!("selected_rgb");
+        swapped_roles["sourceSessions"][0]["outputs"][1]["role"] = json!("request");
+        assert!(matches!(
+            load_bundle(&swapped_roles.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+
+        let mut mismatched_digest = document.clone();
+        mismatched_digest["sourceSessions"][0]["outputs"][1]["sha256"] = json!("6".repeat(64));
+        assert!(matches!(
+            load_bundle(&mismatched_digest.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+
+        let mut mismatched_bytes = document.clone();
+        mismatched_bytes["sourceSessions"][0]["outputs"][1]["bytes"] = json!(1);
+        assert!(matches!(
+            load_bundle(&mismatched_bytes.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+
+        let mut wrong_logical_case = document.clone();
+        wrong_logical_case["sourceSessions"][0]["outputs"][1]["path"] = json!(format!(
+            "docs/calibration/sc-test/implan-{}-selected_rgb-1024x1024-{}.rgb",
+            "0".repeat(20),
+            "4".repeat(64)
+        ));
+        assert!(matches!(
+            load_bundle(&wrong_logical_case.to_string()),
             Err(BundleLoadError::Invalid(_))
         ));
 

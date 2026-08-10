@@ -276,7 +276,10 @@ authoritative provider through the harness, hashes every artifact byte, schema-c
 uploads the evidence JSON together with a repository-relative receipt tree containing the exact
 request, raw provider response, and selected/reference RGB outputs. The three session outputs are a
 closed typed set (`request`, `selected_rgb`, `reference_rgb`) with unique paths; RGB filenames include
-their role and content SHA-256, and receipt creation never overwrites different existing bytes. Every newly planned q4/bf16
+their logical case, role, dimensions, and content SHA-256, and receipt creation never overwrites
+different existing bytes. The adapter independently emits each RGB digest and byte count; capture
+fails if the post-provider bytes, the attestation, and the content-addressed filename disagree. The
+request must be canonical JSON matching the one evidence record bound to the session. Every newly planned q4/bf16
 record carries `sourceProvenance: physical_mlx_v1`; JS and Rust bundle consumers require its claims
 to share one `physical_mlx` session bound to the record's exact inventory. Validate the downloaded
 artifact with `check --source-root <unpacked-raw-root>`, copy its `docs/calibration/...` tree into the

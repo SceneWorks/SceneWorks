@@ -702,6 +702,8 @@ fn persist_physical_mlx_image(
         "role": role,
         "path": format!("{source_prefix}/{file_name}"),
         "localPath": local_path,
+        "sha256": content_sha256,
+        "bytes": image.pixels.len(),
     }))
 }
 

@@ -1,10 +1,12 @@
 import process from "node:process";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const captureDir = process.argv[2];
 const sourcePrefix = process.argv[3];
 const outputDir = process.argv[4] ?? captureDir;
+const captureMutation = process.argv[5] ?? null;
 
 let body = "";
 for await (const chunk of process.stdin) body += chunk;
@@ -85,10 +87,29 @@ const fragment = async (planned) => {
   if (captureDir) {
     const receiptDir = path.join(outputDir, ...sourcePrefix.split("/"));
     await mkdir(receiptDir, { recursive: true });
-    const selected = path.join(receiptDir, `${planned.logicalCaseId}-selected.rgb`);
-    const reference = path.join(receiptDir, `${planned.logicalCaseId}-reference.rgb`);
-    await writeFile(selected, "selected fixture pixels");
-    await writeFile(reference, "reference fixture pixels");
+    const persistRgb = async (role, fill) => {
+      const bytes = Buffer.alloc(
+        planned.target.geometry.width * planned.target.geometry.height * 3,
+        fill,
+      );
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      const fileName = `${planned.logicalCaseId}-${role}-${planned.target.geometry.width}x${
+        planned.target.geometry.height}-${sha256}.rgb`;
+      const localPath = path.join(receiptDir, fileName);
+      await writeFile(localPath, bytes);
+      return {
+        role,
+        path: `${sourcePrefix}/${fileName}`,
+        localPath,
+        sha256,
+        bytes: bytes.length,
+      };
+    };
+    const selected = await persistRgb("selected_rgb", 0x31);
+    const reference = await persistRgb("reference_rgb", 0x52);
+    if (captureMutation === "tamper-after-attest") {
+      await writeFile(selected.localPath, Buffer.alloc(selected.bytes, 0xff));
+    }
     result.sourceCapture = {
       kind: "physical_mlx",
       inputs: [{
@@ -100,18 +121,7 @@ const fragment = async (planned) => {
         resolvedRevision: "c".repeat(40),
         variant: "q4",
       }],
-      outputs: [
-        {
-          role: "selected_rgb",
-          path: `${sourcePrefix}/${path.basename(selected)}`,
-          localPath: selected,
-        },
-        {
-          role: "reference_rgb",
-          path: `${sourcePrefix}/${path.basename(reference)}`,
-          localPath: reference,
-        },
-      ],
+      outputs: [selected, reference],
       claims: ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
     };
   }
