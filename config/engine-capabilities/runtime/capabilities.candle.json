@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedFrom": {
     "inferenceRevision": "6c0eeddcf734f8de099ad6ff8c75b9b561be1edb",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
@@ -59,6 +59,169 @@
     "z_image_edit": "z_image_turbo",
     "z_image_turbo": "z_image_turbo"
   },
+  "videoModelMappings": [
+    {
+      "modelId": "bernini",
+      "mode": "ads2v",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "multi_video_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "reference_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "reference_video_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "text_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "bernini",
+      "mode": "video_to_video",
+      "engineIds": [
+        "bernini"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3",
+      "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "ltx_2_3_eros",
+      "mode": "text_to_video",
+      "engineIds": [
+        "ltx_2_3_distilled"
+      ]
+    },
+    {
+      "modelId": "scail2_14b",
+      "mode": "animate_character",
+      "engineIds": [
+        "scail2_14b"
+      ]
+    },
+    {
+      "modelId": "scail2_14b",
+      "mode": "replace_person",
+      "engineIds": [
+        "scail2_14b"
+      ]
+    },
+    {
+      "modelId": "svd",
+      "mode": "image_to_video",
+      "engineIds": [
+        "svd_xt"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "extend_clip",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "replace_person",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "text_to_video",
+      "engineIds": [
+        "wan2_2_ti2v_5b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2",
+      "mode": "video_bridge",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "mode": "extend_clip",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "mode": "image_to_video",
+      "engineIds": [
+        "wan2_2_i2v_14b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "mode": "replace_person",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "mode": "video_bridge",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "mode": "extend_clip",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "mode": "replace_person",
+      "engineIds": [
+        "wan_vace"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "mode": "text_to_video",
+      "engineIds": [
+        "wan2_2_t2v_14b"
+      ]
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "mode": "video_bridge",
+      "engineIds": [
+        "wan_vace"
+      ]
+    }
+  ],
   "trainerMappings": {
     "anima_base_lora": "anima_base",
     "illustrious_xl_v1_lora": "sdxl",
@@ -97,10 +260,13 @@
     "lora_train_execute",
     "nvfp4",
     "person_detect",
+    "person_replace",
     "person_track",
     "pose_detect",
     "prompt_refine",
     "training_caption",
+    "video_bridge",
+    "video_extend",
     "video_generate",
     "video_upscale"
   ],

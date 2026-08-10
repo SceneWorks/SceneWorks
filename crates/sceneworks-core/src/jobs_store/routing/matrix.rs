@@ -1008,53 +1008,6 @@ fn conditioning_payload(
     let (mut job_type, mut payload) = canonical_model_request(model, modality, mlx, candle)?;
     let operations = manifested_operations(model);
 
-    if model.model_type == "video" {
-        let candidates: &[&str] = match shape {
-            "reference" => &["image_to_video"],
-            "keyframe" => &["first_last_frame"],
-            "multiReference" | "reduxRefs" => &[
-                "reference_to_video",
-                "reference_video_to_video",
-                "ads2v",
-                "animate_character",
-                "replace_person",
-            ],
-            "videoClip" => &[
-                "video_to_video",
-                "reference_video_to_video",
-                "multi_video_to_video",
-                "ads2v",
-                "extend_clip",
-                "video_bridge",
-            ],
-            "controlClip" => &["replace_person", "animate_character"],
-            other => {
-                return Err(format!(
-                    "descriptor video conditioning {other:?} has no canonical production mode"
-                ));
-            }
-        };
-        for mode in candidates {
-            let job = super::canonical_video_route_probe(&model.id, mode)?;
-            let route_supports_shape = |facts: &RuntimeDescriptorFacts| {
-                native_video_route_descriptors(facts, &model.id, mode)
-                    .into_iter()
-                    .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape))
-            };
-            if (route_supports_shape(mlx) && backend_supports(&job, mlx)?)
-                || (route_supports_shape(candle) && backend_supports(&job, candle)?)
-            {
-                let mut payload = job.payload;
-                payload.remove("model");
-                return Ok((job.job_type, Value::Object(payload)));
-            }
-        }
-        return Err(format!(
-            "video descriptor conditioning {shape:?} for {:?} has no routed, structurally valid production request",
-            model.id
-        ));
-    }
-
     match shape {
         "referenceAudio" | "voiceEmbedding" if modality == Some("audio") => {
             payload["referenceAudioAssetId"] = Value::String("probe-audio".to_owned());
@@ -1149,19 +1102,61 @@ fn conditioning_cell(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<CapabilityCell, String> {
+    if model.model_type == "video" {
+        // Derive the probe set from the production mode contract rather than maintaining a second
+        // shape-to-mode table. A descriptor axis with no production semantic is an error; an axis
+        // whose semantic exists but which this model never routes is represented as false/false.
+        // This distinction keeps broad `both` descriptors (Bernini's still-image `reference`, for
+        // example) visible without falsely claiming that the video wrapper constructs that shape.
+        let requirement_shape = match shape {
+            "reduxRefs" => "multiReference",
+            other => other,
+        };
+        let modes: Vec<&str> = VIDEO_UI_MODES
+            .iter()
+            .copied()
+            .filter(|mode| {
+                super::video_mode_conditioning_requirements(mode)
+                    .iter()
+                    .any(|alternatives| alternatives.contains(&requirement_shape))
+                    // PersonReplace's public request names a tracked person; the production worker
+                    // resolves that track to the engine's Mask conditioning internally. It is the
+                    // one descriptor shape intentionally realized rather than supplied by the API.
+                    || (shape == "mask" && *mode == "replace_person")
+            })
+            .collect();
+        if modes.is_empty() {
+            return Err(format!(
+                "descriptor video conditioning {shape:?} for {:?} has no production mode semantic",
+                model.id
+            ));
+        }
+        let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
+            for mode in &modes {
+                let job = super::canonical_video_route_probe(&model.id, mode)?;
+                let descriptor_supports = native_video_route_descriptors(facts, &model.id, mode)
+                    .into_iter()
+                    .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape));
+                if descriptor_supports && backend_supports(&job, facts)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        let mlx = supports(mlx_facts)?;
+        let candle = supports(candle_facts)?;
+        return Ok(cell(
+            shape.to_owned(),
+            mlx,
+            candle,
+            gap_for(&model.id, "video-conditioning", shape),
+        ));
+    }
+
     let (job_type, payload) = conditioning_payload(model, shape, mlx_facts, candle_facts)?;
     let job = probe_job(job_type, &model.id, payload)?;
     let supports = |facts: &RuntimeDescriptorFacts| {
-        let descriptors = if model.model_type == "video" {
-            let mode = job
-                .payload
-                .get("mode")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            native_video_route_descriptors(facts, &model.id, mode)
-        } else {
-            native_generator_descriptors(facts, &model.id)
-        };
+        let descriptors = native_generator_descriptors(facts, &model.id);
         descriptors
             .into_iter()
             .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape))
@@ -1172,15 +1167,7 @@ fn conditioning_cell(
         shape.to_owned(),
         mlx,
         candle,
-        gap_for(
-            &model.id,
-            if model.model_type == "video" {
-                "video-conditioning"
-            } else {
-                "conditioning"
-            },
-            shape,
-        ),
+        gap_for(&model.id, "conditioning", shape),
     ))
 }
 
@@ -2541,6 +2528,64 @@ mod tests {
             video_mlx_only > 0,
             "the shipped matrix must retain explicit MLX-only video parity obligations"
         );
+
+        let vace_fun = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "wan_2_2_vace_fun_14b")
+            .expect("the shipped VACE-Fun row is represented");
+        let replace = vace_fun
+            .operation_and_mode
+            .iter()
+            .find(|cell| cell.capability == "replace_person")
+            .expect("VACE-Fun replace_person operation is represented");
+        assert_eq!((replace.mlx, replace.candle), (Some(true), Some(false)));
+        for shape in ["controlClip", "reference"] {
+            let cell = vace_fun
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == shape)
+                .expect("VACE-Fun descriptor conditioning is represented");
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
+        }
+        for capability in ["lora", "lokr"] {
+            let cell = vace_fun
+                .user_adapters
+                .iter()
+                .find(|cell| cell.capability == capability)
+                .expect("VACE-Fun adapter axis is represented");
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
+        }
+        for tier in ["bf16", "q4", "q8"] {
+            let cell = vace_fun
+                .precision_tier
+                .iter()
+                .find(|cell| cell.capability == tier)
+                .expect("VACE-Fun precision axis is represented");
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
+        }
+
+        // Bernini's `both` descriptor also advertises singular Reference for its still-image
+        // renderer, but the shipped video wrapper intentionally constructs MultiReference from
+        // `referenceAssetIds`. Keep the rich axis visible without turning a non-existent video
+        // request into support on either backend.
+        let bernini = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "bernini")
+            .expect("the shipped Bernini video row is represented");
+        for (shape, expected) in [
+            ("reference", (Some(false), Some(false))),
+            ("multiReference", (Some(true), Some(true))),
+            ("videoClip", (Some(true), Some(true))),
+        ] {
+            let cell = bernini
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == shape)
+                .unwrap_or_else(|| panic!("Bernini descriptor axis {shape} is represented"));
+            assert_eq!((cell.mlx, cell.candle), expected, "Bernini {shape}");
+        }
 
         let krea = matrix
             .models
