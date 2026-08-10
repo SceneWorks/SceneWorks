@@ -6344,14 +6344,14 @@ async fn generate_stream(
                         let probe =
                             tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
                         let gb = crate::mlx_fit_gate::spec_weights_gb(engine_id, &probe);
-                        (gb > 0.0)
-                            .then(|| {
-                                format!(
-                                    " — ~{} GB of weights plus headroom for activations and the OS",
-                                    gb.round() as i64
-                                )
-                            })
-                            .unwrap_or_default()
+                        if gb > 0.0 {
+                            format!(
+                                " — ~{} GB of weights plus headroom for activations and the OS",
+                                gb.round() as i64
+                            )
+                        } else {
+                            String::new()
+                        }
                     } else {
                         String::new()
                     };
