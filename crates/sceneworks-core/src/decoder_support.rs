@@ -199,7 +199,7 @@ mod tests {
             assert_eq!(option["id"], "wan_2_1_vae", "{id}");
             assert_eq!(option["componentId"], "vae", "{id}");
             assert_eq!(option["experimental"], true, "{id}");
-            assert!(table[id].get("candle").is_none(), "{id}");
+            assert!(!table[id].contains_key("candle"), "{id}");
         }
         assert!(
             table.get("wan2_2_ti2v_5b").is_none(),
