@@ -23,10 +23,11 @@
 // txt2img plus img2img (reference-guided latent-init off a single `referenceAssetId` + strength, resolved
 // through the shared cross-platform `resolve_img2img_init_generic` on the SAME Turbo t2i descriptor — the
 // engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
-// imported lanes get img2img). Pose / edit conditioning is still deliberately NOT claimed here (the
-// imported checkpoint is a bare transformer; those need base-tier control/edit components this lane does
-// not stage — imported edit is sc-14119). Descriptor contents and per-row scale shapes are validated by
-// the inference loader before dequantization; ConvRot descriptors remain on their separate loader arm.
+// imported lanes get img2img). MLX also claims strict pose conditioning by composing the cached base-tier
+// control branch with the imported DiT; candle still rejects pose because its native loader has no control
+// parameter. Edit conditioning remains a separate surface (sc-14119). Descriptor contents and per-row scale
+// shapes are validated by the inference loader before dequantization; ConvRot descriptors remain on their
+// separate loader arm.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
@@ -446,8 +447,9 @@ fn krea_imported_control_raw_settings(
 /// `load_control_from_native_dit_file` entrypoint instead of the registry snapshot load). The
 /// imported DiT is paired with the resident base tier's TE/VAE/tokenizer
 /// ([`resolve_krea_imported_base_tier`] — the same staging the t2i lane uses) plus the pose control
-/// overlay ([`ensure_krea_control_weights`] — the same env → payload-path → pinned hosted-repo
-/// resolution the builtin lane uses, downloaded on first use). Job LoRA/LoKr adapters install on the
+/// overlay ([`resolve_krea_imported_control_overlay`] — the same env → payload-path → pinned
+/// hosted-repo lookup as the builtin lane, but cache-only so jobs never download weights). Job
+/// LoRA/LoKr adapters install on the
 /// imported DiT (the branch is never an adapter target); `control_scale = 0` is engine-proven
 /// byte-identical to the imported base. Shares one seed across the pose set (noise-derived
 /// attributes constant, only the pose changes) and scores identity likeness against an optional
