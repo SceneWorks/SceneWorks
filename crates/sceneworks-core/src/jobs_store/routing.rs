@@ -7,6 +7,7 @@
 pub(crate) mod candle;
 pub(crate) mod catalog;
 pub(crate) mod gaps;
+pub(crate) mod matrix;
 pub(crate) mod mlx;
 
 use serde_json::{Map, Value};

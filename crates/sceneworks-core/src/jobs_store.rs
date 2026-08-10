@@ -41,6 +41,7 @@ pub use routing::catalog::{
 pub use routing::gaps::{
     candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
 };
+pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 
 pub const ACTIVE_STATUSES: &[&str] = &[
     "preparing",
