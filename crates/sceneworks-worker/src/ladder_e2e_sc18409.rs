@@ -18,6 +18,7 @@
 //! its own `cargo test` invocation.
 //!
 //! ```text
+//! SC18409_ARTIFACT_REVISION=<exact-40-hex-revision> \
 //! cargo test -p sceneworks-worker --release --lib -- --ignored --exact --nocapture \
 //!     ladder_e2e_sc18409::z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling
 //! ```
@@ -82,9 +83,10 @@ fn process_physical_footprint() -> Result<PhysicalFootprintSample, String> {
 
 /// Measures the process's full Darwin physical footprint across the complete load + render
 /// interval. `phys_footprint_peak` is maintained by the kernel for the process lifetime, so the
-/// post-render reading cannot miss a short-lived peak. It includes mmap-backed pages and wired
-/// GPU/shared allocations that process RSS and MLX's active-memory gauge can omit. The safe
-/// subprocess boundary preserves `sceneworks-worker`'s crate-wide `forbid(unsafe_code)` policy.
+/// post-render reading cannot miss a short-lived peak. It captures kernel-accounted dirty/wired
+/// memory, including GPU allocations that process RSS and MLX's active-memory gauge can omit;
+/// clean reclaimable file-backed pages are not necessarily billed. The safe subprocess boundary
+/// preserves `sceneworks-worker`'s crate-wide `forbid(unsafe_code)` policy.
 struct PhysicalFootprintMeasurement {
     baseline_bytes: u64,
 }
@@ -167,13 +169,19 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
     let Some((tier_dir, revision)) = cached_tier_dir(REPO_DIR, TIER, SENTINEL) else {
         panic!("SKIP-AS-FAILURE: no {REPO_DIR} {TIER} weights cached; sc-18409 cannot be validated without them");
     };
-    let expected_revision = crate::smoke_support::env_or("SC18409_ARTIFACT_REVISION", "");
-    if !expected_revision.is_empty() {
-        assert_eq!(
-            revision, expected_revision,
-            "the cached Z-Image artifact must match the exact requested revision"
-        );
-    }
+    let expected_revision = std::env::var("SC18409_ARTIFACT_REVISION")
+        .expect("SC18409_ARTIFACT_REVISION must pin the exact Z-Image artifact");
+    assert!(
+        expected_revision.len() == 40
+            && expected_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "SC18409_ARTIFACT_REVISION must be exact lowercase 40-hex"
+    );
+    assert_eq!(
+        revision, expected_revision,
+        "the cached Z-Image artifact must match the exact requested revision"
+    );
     let entry = shipped_manifest_entry(ENGINE);
     // No shipped binding names the bf16 tier, so there is no provenance to prove — and if one ever
     // appears this scenario must start proving it (mirrors sc-18101's provenance discipline).
@@ -271,8 +279,9 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
 
     // Load with EXACTLY that spec and drive the real request seam under the same cap. Capture the
     // kernel-maintained process physical footprint from immediately before load through the
-    // completed render: deferred mmap-backed weights are outside MLX's active-memory counter, so
-    // only this weights- and GPU-inclusive process metric can grade the estimate's ceiling.
+    // completed render: deferred allocations can sit outside MLX's active-memory counter, so use
+    // the kernel's dirty/wired pressure ledger (including GPU allocations) to grade the ceiling.
+    // Clean reclaimable file-backed pages are not necessarily billed by this ledger.
     let footprint_measurement = PhysicalFootprintMeasurement::start();
     let footprint_baseline_bytes = footprint_measurement.baseline_bytes;
     let width: u32 = crate::smoke_support::env_or("SC18409_W", "1024")
