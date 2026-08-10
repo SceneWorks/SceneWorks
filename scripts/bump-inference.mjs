@@ -746,7 +746,10 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   const narrowRuntime = verifyFacts({ narrowRuntime: true });
   check(
     "a narrow runtime projection without parity axes is refused",
-    !!narrowRuntime && /omits conditioning, adapter, quant, trainer, or worker/.test(narrowRuntime),
+    !!narrowRuntime &&
+      /omits conditioning, adapter, quant, prompt-enhancement, trainer, or worker/.test(
+        narrowRuntime,
+      ),
   );
   const missingPromptEnhancement = (() => {
     const root = fixture();
