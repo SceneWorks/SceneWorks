@@ -25,9 +25,11 @@ name: macOS MLX worker
 # all external contributors' workflows" enabled in the repo Actions settings as
 # defense in depth.
 
-# Epic-3018 stories merged to main via PR #456 and `rust-mlx-integration` was
-# deleted; epic work now branches off and PRs into main (sc-4177 re-pointed the
-# lane after it sat dead on the deleted branch).
+# Ordinary work still PRs into `main`, while substantial epics PR their story
+# branches into protected `feature/*` integration branches. The hosted required
+# check must report on both targets. The self-hosted NAX job below deliberately
+# remains limited to final integration PRs targeting `main` and explicit
+# dispatches so feature-story traffic does not consume the two-Mac pool.
 on:
   # THE MERGE QUEUE'S SPECULATIVE MERGE. Without this trigger the queue's `gh-readonly-queue/main/**`
   # ref is validated only by check.yml's hosted Linux jobs, and this lane — the ONLY compiler of
@@ -107,7 +109,7 @@ on:
   # replaces it: a job skipped by `if:` reports Success, which a required check accepts. The `push:`
   # trigger above keeps its filter, since nothing gates on main pushes.
   pull_request:
-    branches: [main]
+    branches: [main, "feature/*"]
   workflow_dispatch:
     inputs:
       run_memory_calibration:
@@ -390,6 +392,12 @@ jobs:
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     #
+    # FEATURE-TARGET STORY PRS ARE HOSTED-ONLY. `macos-checks` is required on
+    # `feature/*`, but automatically running this job for every story would turn
+    # the two-Mac NAX pool into feature-branch queue capacity. NAX evidence is
+    # instead captured by an explicit dispatch at the frozen feature head; this
+    # job also continues to run on the final same-repo integration PR to `main`.
+    #
     # AND NEVER ON A MERGE GROUP, deliberately. The pool is two hand-registered Macs, one of them a
     # developer's daily driver, and PR runs there already compete with real-weight jobs for unified
     # memory badly enough to have produced six jetsam kills on 2026-08-04. A merge group is an
@@ -401,8 +409,9 @@ jobs:
     # job skips. Everything else this lane proves — the whole workspace suite, both clippy scopes,
     # the MLX-linked build — is `macos-checks` above, which DOES gate the queue. And `nax_guard`
     # asserts a property of the M5 matrix-unit kernels, not of how two PRs compose, so it is a poor
-    # fit for the class the merge queue exists to catch. It still runs on every PR and on the
-    # post-merge main push, which is where a NAX regression would surface anyway.
+    # fit for the class the merge queue exists to catch. It still runs on final integration PRs
+    # targeting `main`, explicit final-head dispatches, and the post-merge main push, which are
+    # the points where authoritative NAX evidence is required.
     #
     # `needs: changes` IS LOAD-BEARING HERE, not just an optimisation. sc-17014 dropped the
     # `paths:` filter from this workflow's pull_request trigger so `macos-checks` could become a
@@ -419,7 +428,7 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     # The PR/main path needs only `nax`. The workflow_dispatch calibration paths
     # additionally need the HF snapshots, and those are HOST STATE that does not travel
     # with a label — the same defect class this repo just fixed for release.yml's signing
