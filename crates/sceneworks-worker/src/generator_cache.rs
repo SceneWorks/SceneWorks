@@ -1041,61 +1041,67 @@ mod tests {
         }
     }
 
-    fn fully_populated_load_spec() -> LoadSpec {
-        let mut spec = LoadSpec::new(WeightsSource::File(PathBuf::from("/load/base.safetensors")));
+    fn fully_populated_load_spec(root: &Path) -> LoadSpec {
+        let file = |name: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, name.as_bytes()).expect("write load-identity fixture");
+            path
+        };
+        let dir = |name: &str| {
+            let path = root.join(name);
+            std::fs::create_dir_all(&path).expect("create load-identity fixture directory");
+            path
+        };
+
+        let mut spec = LoadSpec::new(WeightsSource::File(file("base.safetensors")));
         spec.quantize = Some(Quant::Q4);
         spec.precision = Precision::Bf16;
-        spec.control = Some(WeightsSource::File(PathBuf::from(
-            "/load/control.safetensors",
-        )));
+        spec.control = Some(WeightsSource::File(file("control.safetensors")));
         spec.extra_controls = vec![
-            WeightsSource::File(PathBuf::from("/load/control-2.safetensors")),
-            WeightsSource::File(PathBuf::from("/load/control-3.safetensors")),
+            WeightsSource::File(file("control-2.safetensors")),
+            WeightsSource::File(file("control-3.safetensors")),
         ];
-        spec.ip_adapter = Some(WeightsSource::File(PathBuf::from(
-            "/load/ip-adapter.safetensors",
-        )));
+        spec.ip_adapter = Some(WeightsSource::File(file("ip-adapter.safetensors")));
         spec.adapters = vec![
-            AdapterSpec::new(
-                PathBuf::from("/load/adapter-a.safetensors"),
-                0.75,
-                AdapterKind::Lora,
-            )
-            .with_pass_scales(vec![0.25, 0.75])
-            .with_moe_expert(MoeExpert::High),
-            AdapterSpec::new(
-                PathBuf::from("/load/adapter-b.safetensors"),
-                1.25,
-                AdapterKind::Lokr,
-            )
-            .with_moe_expert(MoeExpert::Low),
+            AdapterSpec::new(file("adapter-a.safetensors"), 0.75, AdapterKind::Lora)
+                .with_pass_scales(vec![0.25, 0.75])
+                .with_moe_expert(MoeExpert::High),
+            AdapterSpec::new(file("adapter-b.safetensors"), 1.25, AdapterKind::Lokr)
+                .with_moe_expert(MoeExpert::Low),
         ];
         spec.pid = Some(gen_core::PidWeights {
-            checkpoint: WeightsSource::File(PathBuf::from("/load/pid.safetensors")),
-            gemma: WeightsSource::Dir(PathBuf::from("/load/gemma")),
+            checkpoint: WeightsSource::File(file("pid.safetensors")),
+            gemma: WeightsSource::Dir(dir("gemma")),
         });
         spec.identity = Some(gen_core::IdentityWeights {
-            encoder: Some(WeightsSource::File(PathBuf::from(
-                "/load/identity.safetensors",
-            ))),
-            eva: Some(WeightsSource::File(PathBuf::from("/load/eva.safetensors"))),
-            face_dir: Some(WeightsSource::Dir(PathBuf::from("/load/face"))),
+            encoder: Some(WeightsSource::File(file("identity.safetensors"))),
+            eva: Some(WeightsSource::File(file("eva.safetensors"))),
+            face_dir: Some(WeightsSource::Dir(dir("face"))),
         });
-        spec.text_encoder = Some(WeightsSource::Dir(PathBuf::from("/load/text-encoder")));
-        spec.components.insert(
-            "tokenizer".to_owned(),
-            WeightsSource::Dir(PathBuf::from("/load/tokenizer")),
-        );
+        spec.text_encoder = Some(WeightsSource::Dir(dir("text-encoder")));
+        spec.components
+            .insert("tokenizer".to_owned(), WeightsSource::Dir(dir("tokenizer")));
         spec.components.insert(
             "vae".to_owned(),
-            WeightsSource::File(PathBuf::from("/load/vae.safetensors")),
+            WeightsSource::File(file("vae.safetensors")),
         );
         spec
     }
 
     #[test]
     fn every_load_affecting_field_discriminates_load_identity() {
-        let base = fully_populated_load_spec();
+        let fixtures = tempfile::tempdir().expect("load-identity fixtures");
+        let other_base = fixtures.path().join("other-base.safetensors");
+        let other_adapter = fixtures.path().join("other-adapter.safetensors");
+        let other_pid = fixtures.path().join("other-pid.safetensors");
+        let other_gemma = fixtures.path().join("other-gemma");
+        let other_vae = fixtures.path().join("other-vae.safetensors");
+        for path in [&other_base, &other_adapter, &other_pid, &other_vae] {
+            std::fs::write(path, b"alternate").expect("write alternate load-identity fixture");
+        }
+        std::fs::create_dir(&other_gemma).expect("create alternate Gemma fixture");
+
+        let base = fully_populated_load_spec(fixtures.path());
         let identity = LoadIdentity::from_load_spec("provider", &base);
 
         macro_rules! assert_field_changes_identity {
@@ -1117,7 +1123,7 @@ mod tests {
             "engine id must participate in load identity"
         );
         assert_field_changes_identity!("weights", |spec: &mut LoadSpec| {
-            spec.weights = WeightsSource::File(PathBuf::from("/load/other-base.safetensors"));
+            spec.weights = WeightsSource::File(other_base.clone());
         });
         assert_field_changes_identity!("quantize", |spec: &mut LoadSpec| {
             spec.quantize = Some(Quant::Q8);
@@ -1135,7 +1141,7 @@ mod tests {
             spec.ip_adapter = None;
         });
         assert_field_changes_identity!("adapter path", |spec: &mut LoadSpec| {
-            spec.adapters[0].path = PathBuf::from("/load/other-adapter.safetensors");
+            spec.adapters[0].path = other_adapter.clone();
         });
         assert_field_changes_identity!("adapter scale", |spec: &mut LoadSpec| {
             spec.adapters[0].scale = 0.5;
@@ -1153,12 +1159,10 @@ mod tests {
             spec.adapters.swap(0, 1);
         });
         assert_field_changes_identity!("PiD checkpoint", |spec: &mut LoadSpec| {
-            spec.pid.as_mut().unwrap().checkpoint =
-                WeightsSource::File(PathBuf::from("/load/other-pid.safetensors"));
+            spec.pid.as_mut().unwrap().checkpoint = WeightsSource::File(other_pid.clone());
         });
         assert_field_changes_identity!("PiD Gemma", |spec: &mut LoadSpec| {
-            spec.pid.as_mut().unwrap().gemma =
-                WeightsSource::Dir(PathBuf::from("/load/other-gemma"));
+            spec.pid.as_mut().unwrap().gemma = WeightsSource::Dir(other_gemma.clone());
         });
         assert_field_changes_identity!("identity encoder", |spec: &mut LoadSpec| {
             spec.identity.as_mut().unwrap().encoder = None;
@@ -1191,10 +1195,8 @@ mod tests {
             );
         });
         assert_field_changes_identity!("component source", |spec: &mut LoadSpec| {
-            spec.components.insert(
-                "vae".to_owned(),
-                WeightsSource::File(PathBuf::from("/load/other-vae.safetensors")),
-            );
+            spec.components
+                .insert("vae".to_owned(), WeightsSource::File(other_vae.clone()));
         });
 
         let policy_only = base
@@ -1451,6 +1453,9 @@ mod tests {
 
     #[test]
     fn load_identity_includes_identity_text_encoder_and_named_components() {
+        let fixtures = tempfile::tempdir().expect("component-identity fixtures");
+        let vae = fixtures.path().join("model.safetensors");
+        std::fs::write(&vae, b"vae").expect("write component-identity fixture");
         let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
 
         let mut identity = base.clone();
@@ -1470,16 +1475,10 @@ mod tests {
         let components = base
             .clone()
             .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")))
-            .with_component(
-                "vae",
-                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
-            );
+            .with_component("vae", WeightsSource::File(vae.clone()));
         let components_reversed = base
             .clone()
-            .with_component(
-                "vae",
-                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
-            )
+            .with_component("vae", WeightsSource::File(vae))
             .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")));
 
         let base_identity = LoadIdentity::from_load_spec("provider", &base);
