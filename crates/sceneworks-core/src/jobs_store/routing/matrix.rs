@@ -231,6 +231,7 @@ struct GeneratorCapabilityFacts {
     #[serde(default)]
     supported_quants: Vec<String>,
     supports_preview: bool,
+    supports_prompt_enhancement: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,19 +305,7 @@ fn model_row(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<ModelCapabilityRow, String> {
-    let mut manifest_operations = model.capabilities.clone();
-    if model.ui.get("img2img").and_then(Value::as_bool) == Some(true) {
-        manifest_operations.push("image_to_image".to_owned());
-    }
-    if model.ui.get("promptEnhance").and_then(Value::as_bool) == Some(true) {
-        manifest_operations.push("prompt_enhancement".to_owned());
-    }
-    if model.model_type == "video" {
-        manifest_operations.extend(VIDEO_UI_MODES.iter().map(|mode| (*mode).to_owned()));
-    }
-    manifest_operations.sort();
-    manifest_operations.dedup();
-
+    let manifest_operations = manifested_operations(model);
     let is_image = model.model_type == "image";
     let is_video = model.model_type == "video";
     let mut operation_and_mode = Vec::new();
@@ -328,10 +317,6 @@ fn model_row(
         for operation in &manifest_operations {
             operation_and_mode.push(operation_cell(model, operation, mlx_facts, candle_facts)?);
         }
-        let conditioning = descriptor_conditioning_union(model, mlx_facts, candle_facts)?;
-        for shape in conditioning {
-            conditioning_shape.push(conditioning_cell(model, &shape, mlx_facts, candle_facts)?);
-        }
         for adapter in ["lora", "lokr"] {
             user_adapters.push(adapter_cell(model, adapter, mlx_facts, candle_facts)?);
         }
@@ -342,9 +327,6 @@ fn model_row(
                 adapter.parity_obligation = None;
                 adapter.preserved_candle_only = false;
             }
-        }
-        for tier in precision_union(model, mlx_facts, candle_facts)? {
-            precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
         }
     } else if is_video {
         for mode in &manifest_operations {
@@ -362,35 +344,22 @@ fn model_row(
             )?);
         }
         for network_type in ["lora", "lokr"] {
-            let job = probe_job(
-                JobType::VideoGenerate,
-                &model.id,
-                json!({
-                    "mode": "text_to_video",
-                    "loras": [{ "id": "probe", "networkType": network_type }]
-                }),
-            )?;
-            let mlx = backend_supports(&job, mlx_facts)?
-                && descriptor_supports_adapter(mlx_facts, &model.id, network_type);
-            let candle = backend_supports(&job, candle_facts)?
-                && descriptor_supports_adapter(candle_facts, &model.id, network_type);
-            user_adapters.push(cell(
-                network_type.to_owned(),
-                mlx,
-                candle,
-                gap_for(&model.id, "video-adapter", network_type),
-            ));
-        }
-        for tier in precision_union(model, mlx_facts, candle_facts)? {
-            precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
-        }
-        for shape in descriptor_conditioning_union(model, mlx_facts, candle_facts)? {
-            conditioning_shape.push(conditioning_cell(model, &shape, mlx_facts, candle_facts)?);
+            user_adapters.push(adapter_cell(model, network_type, mlx_facts, candle_facts)?);
         }
     }
 
     if !is_image && !is_video {
         operation_and_mode.extend(utility_model_cells(model, mlx_facts, candle_facts)?);
+    }
+
+    // Descriptor axes apply to every registered generator modality. In particular, audio
+    // generators live in the Candle audio registry even in a macOS runtime snapshot, and utility
+    // manifest rows such as MMAudio still carry generator conditioning that must not disappear.
+    for shape in descriptor_conditioning_union(model, mlx_facts, candle_facts)? {
+        conditioning_shape.push(conditioning_cell(model, &shape, mlx_facts, candle_facts)?);
+    }
+    for tier in precision_union(model, mlx_facts, candle_facts)? {
+        precision_tier.push(precision_cell(model, &tier, mlx_facts, candle_facts)?);
     }
 
     let mlx_preview = descriptor_preview(model, mlx_facts)
@@ -422,6 +391,22 @@ fn model_row(
         precision_tier,
         preview,
     })
+}
+
+fn manifested_operations(model: &ManifestModel) -> Vec<String> {
+    let mut operations = model.capabilities.clone();
+    if model.ui.get("img2img").and_then(Value::as_bool) == Some(true) {
+        operations.push("image_to_image".to_owned());
+    }
+    if model.ui.get("promptEnhance").and_then(Value::as_bool) == Some(true) {
+        operations.push("prompt_enhancement".to_owned());
+    }
+    if model.model_type == "video" {
+        operations.extend(VIDEO_UI_MODES.iter().map(|mode| (*mode).to_owned()));
+    }
+    operations.sort();
+    operations.dedup();
+    operations
 }
 
 fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescriptorFacts, String> {
@@ -490,6 +475,22 @@ fn validate_runtime_pair(
                 ));
             }
         }
+        for descriptor in &facts.snapshot.audio_generator_capabilities {
+            if descriptor.backend.trim().is_empty() || descriptor.modality != "audio" {
+                return Err(format!(
+                    "{} runtime audio generator {:?} has backend/modality drift",
+                    facts.snapshot.backend, descriptor.id
+                ));
+            }
+        }
+        for (model, engine) in &facts.model_mappings {
+            if descriptor_by_engine(facts, engine).is_none() {
+                return Err(format!(
+                    "{} production model mapping {model:?} -> {engine:?} names no descriptor",
+                    facts.snapshot.backend
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -498,16 +499,71 @@ fn generator_descriptor<'a>(
     facts: &'a RuntimeDescriptorFacts,
     model: &str,
 ) -> Option<&'a GeneratorCapabilityFacts> {
-    let engine = facts.model_mappings.get(model)?;
+    let mapped = facts.model_mappings.get(model).and_then(|engine| {
+        facts
+            .snapshot
+            .generator_capabilities
+            .iter()
+            .find(|descriptor| descriptor.id == *engine)
+    });
+    mapped.or_else(|| {
+        let provider = provider_alias(model);
+        facts
+            .snapshot
+            .audio_generator_capabilities
+            .iter()
+            .find(|descriptor| descriptor.id == provider)
+    })
+}
+
+fn descriptor_is_native_to_snapshot(
+    descriptor: &GeneratorCapabilityFacts,
+    facts: &RuntimeDescriptorFacts,
+) -> bool {
+    descriptor.backend == facts.snapshot.backend
+}
+
+fn native_generator_descriptor<'a>(
+    facts: &'a RuntimeDescriptorFacts,
+    model: &str,
+) -> Option<&'a GeneratorCapabilityFacts> {
+    generator_descriptor(facts, model)
+        .filter(|descriptor| descriptor_is_native_to_snapshot(descriptor, facts))
+}
+
+fn descriptor_modality<'a>(
+    model: &ManifestModel,
+    mlx: &'a RuntimeDescriptorFacts,
+    candle: &'a RuntimeDescriptorFacts,
+) -> Result<Option<&'a str>, String> {
+    let modalities: BTreeSet<&str> = [mlx, candle]
+        .into_iter()
+        .filter_map(|facts| generator_descriptor(facts, &model.id))
+        .map(|descriptor| descriptor.modality.as_str())
+        .collect();
+    if modalities.len() > 1 {
+        return Err(format!(
+            "runtime descriptors disagree on modality for {:?}: {modalities:?}",
+            model.id
+        ));
+    }
+    Ok(modalities.into_iter().next())
+}
+
+fn descriptor_by_engine<'a>(
+    facts: &'a RuntimeDescriptorFacts,
+    engine: &str,
+) -> Option<&'a GeneratorCapabilityFacts> {
     facts
         .snapshot
         .generator_capabilities
         .iter()
-        .find(|descriptor| descriptor.id == *engine)
+        .chain(facts.snapshot.audio_generator_capabilities.iter())
+        .find(|descriptor| descriptor.id == engine)
 }
 
 fn descriptor_preview(model: &ManifestModel, facts: &RuntimeDescriptorFacts) -> Option<bool> {
-    generator_descriptor(facts, &model.id).map(|descriptor| descriptor.supports_preview)
+    native_generator_descriptor(facts, &model.id).map(|descriptor| descriptor.supports_preview)
 }
 
 fn descriptor_supports_adapter(
@@ -515,7 +571,7 @@ fn descriptor_supports_adapter(
     model: &str,
     network_type: &str,
 ) -> bool {
-    generator_descriptor(facts, model).is_some_and(|descriptor| match network_type {
+    native_generator_descriptor(facts, model).is_some_and(|descriptor| match network_type {
         "lora" => descriptor.supports_lora,
         "lokr" => descriptor.supports_lokr,
         _ => false,
@@ -574,9 +630,9 @@ fn routed_cell(
     require_descriptor: bool,
 ) -> Result<CapabilityCell, String> {
     let mlx = backend_supports(job, mlx_facts)?
-        && (!require_descriptor || generator_descriptor(mlx_facts, model).is_some());
+        && (!require_descriptor || native_generator_descriptor(mlx_facts, model).is_some());
     let candle = backend_supports(job, candle_facts)?
-        && (!require_descriptor || generator_descriptor(candle_facts, model).is_some());
+        && (!require_descriptor || native_generator_descriptor(candle_facts, model).is_some());
     Ok(cell(
         capability.to_owned(),
         mlx,
@@ -591,7 +647,38 @@ fn operation_cell(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<CapabilityCell, String> {
-    let (job_type, payload, require_descriptor) = match operation {
+    let (job_type, payload, require_descriptor) = operation_request(model, operation)?;
+    let job = probe_job(job_type, &model.id, payload)?;
+    if operation == "prompt_enhancement" {
+        let supports = |facts: &RuntimeDescriptorFacts| {
+            native_generator_descriptor(facts, &model.id)
+                .is_some_and(|descriptor| descriptor.supports_prompt_enhancement)
+        };
+        let mlx = supports(mlx_facts) && backend_supports(&job, mlx_facts)?;
+        let candle = supports(candle_facts) && backend_supports(&job, candle_facts)?;
+        return Ok(cell(
+            operation.to_owned(),
+            mlx,
+            candle,
+            gap_for(&model.id, "operation", operation),
+        ));
+    }
+    routed_cell(
+        operation,
+        &model.id,
+        "operation",
+        &job,
+        mlx_facts,
+        candle_facts,
+        require_descriptor,
+    )
+}
+
+fn operation_request(
+    model: &ManifestModel,
+    operation: &str,
+) -> Result<(JobType, Value, bool), String> {
+    let request = match operation {
         "text_to_image" => (JobType::ImageGenerate, json!({ "mode": operation }), true),
         "edit_image" => (
             JobType::ImageEdit,
@@ -633,9 +720,12 @@ fn operation_cell(
             true,
         ),
         "prompt_enhancement" => (
-            JobType::PromptRefine,
-            json!({ "prompt": "probe", "model": "prompt_refine_anubis_8b" }),
-            false,
+            JobType::ImageGenerate,
+            json!({
+                "mode": "text_to_image",
+                "advanced": { "enhancePrompt": true }
+            }),
+            true,
         ),
         other => {
             return Err(format!(
@@ -644,16 +734,7 @@ fn operation_cell(
             ));
         }
     };
-    let job = probe_job(job_type, &model.id, payload)?;
-    routed_cell(
-        operation,
-        &model.id,
-        "operation",
-        &job,
-        mlx_facts,
-        candle_facts,
-        require_descriptor,
-    )
+    Ok(request)
 }
 
 fn descriptor_conditioning_union(
@@ -685,62 +766,156 @@ fn descriptor_conditioning_union(
     Ok(shapes.into_iter().collect())
 }
 
-fn conditioning_payload(model_type: &str, shape: &str) -> Result<(JobType, Value), String> {
-    let image_edit = || {
-        (
-            JobType::ImageEdit,
-            json!({ "mode": "edit_image", "sourceAssetId": "probe" }),
-        )
-    };
-    let pair = match shape {
-        "reference" if model_type == "video" => (
-            JobType::VideoGenerate,
-            json!({ "mode": "image_to_video", "sourceAssetId": "probe" }),
-        ),
-        "reference" => (
-            JobType::ImageGenerate,
-            json!({ "mode": "text_to_image", "referenceAssetId": "probe" }),
-        ),
-        "multiReference" | "reduxRefs" => (
-            JobType::ImageEdit,
-            json!({ "mode": "edit_image", "referenceAssetIds": ["probe-a", "probe-b"] }),
-        ),
-        "control" => (
-            JobType::ImageGenerate,
-            json!({ "mode": "text_to_image", "advanced": { "poses": [{}] } }),
-        ),
-        "depth" => (
-            JobType::ImageGenerate,
-            json!({ "mode": "text_to_image", "advanced": { "depthAssetId": "probe" } }),
-        ),
-        "mask" => {
-            let (kind, mut payload) = image_edit();
-            payload["maskAssetId"] = Value::String("probe-mask".to_owned());
-            (kind, payload)
+fn canonical_model_request(
+    model: &ManifestModel,
+    descriptor_modality: Option<&str>,
+) -> Result<(JobType, Value), String> {
+    if descriptor_modality == Some("audio") || model.model_type == "audio" {
+        return Ok((JobType::AudioGenerate, json!({ "prompt": "probe" })));
+    }
+    if model.model_type == "video" {
+        let mode = [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge",
+            "replace_person",
+            "animate_character",
+        ]
+        .into_iter()
+        .find(|mode| manifested_operations(model).iter().any(|item| item == mode))
+        .ok_or_else(|| {
+            format!(
+                "video model {:?} has no canonical manifested mode",
+                model.id
+            )
+        })?;
+        return Ok((video_job_type(mode), video_payload(mode)));
+    }
+    if model.model_type == "image" {
+        for operation in [
+            "text_to_image",
+            "edit_image",
+            "character_image",
+            "image_to_image",
+            "style_variations",
+            "image_inpaint",
+            "image_detail",
+            "vqa",
+            "interleave",
+        ] {
+            if manifested_operations(model)
+                .iter()
+                .any(|item| item == operation)
+            {
+                let (job_type, payload, _) = operation_request(model, operation)?;
+                return Ok((job_type, payload));
+            }
         }
-        "keyframe" => (
-            JobType::VideoGenerate,
-            json!({ "mode": "first_last_frame", "sourceAssetId": "probe", "endAssetId": "probe-end" }),
-        ),
-        "videoClip" => (
-            JobType::VideoExtend,
-            json!({ "mode": "extend_clip", "sourceClipAssetId": "probe" }),
-        ),
-        "controlClip" | "videoSync" => (
-            JobType::VideoGenerate,
-            json!({ "mode": "animate_character", "sourceClipAssetId": "probe", "referenceAssetIds": ["probe-ref"] }),
-        ),
-        "conversationHistory" => (
-            JobType::ImageInterleave,
-            json!({ "prompt": "probe", "conversationHistory": [] }),
-        ),
+    }
+    Err(format!(
+        "model {:?} has descriptor axes but no canonical generation request",
+        model.id
+    ))
+}
+
+fn conditioning_payload(
+    model: &ManifestModel,
+    shape: &str,
+    mlx: &RuntimeDescriptorFacts,
+    candle: &RuntimeDescriptorFacts,
+) -> Result<(JobType, Value), String> {
+    let modality = descriptor_modality(model, mlx, candle)?;
+    let (mut job_type, mut payload) = canonical_model_request(model, modality)?;
+    let operations = manifested_operations(model);
+
+    match shape {
+        "referenceAudio" | "voiceEmbedding" if modality == Some("audio") => {
+            payload["referenceAudioAssetId"] = Value::String("probe-audio".to_owned());
+        }
+        "audioEdit" if modality == Some("audio") => {
+            payload["sourceAudioAssetId"] = Value::String("probe-audio".to_owned());
+            payload["editMode"] = Value::String("cover".to_owned());
+        }
+        "audioEditRegions" if modality == Some("audio") => {
+            payload["sourceAudioAssetId"] = Value::String("probe-audio".to_owned());
+            payload["editMode"] = Value::String("inpaint".to_owned());
+            payload["editRegionStartSecs"] = json!(1.0);
+            payload["editRegionEndSecs"] = json!(2.0);
+        }
+        "videoSync" if modality == Some("audio") => {
+            payload["sourceClipAssetId"] = Value::String("probe-video".to_owned());
+        }
+        "conversationHistory" if modality == Some("audio") => {
+            payload["conversationHistory"] = json!([{ "role": "user", "text": "probe" }]);
+        }
+        "reference" if model.model_type == "video" => {
+            job_type = JobType::VideoGenerate;
+            payload = video_payload("image_to_video");
+        }
+        "reference" => {
+            if job_type != JobType::ImageEdit {
+                payload["referenceAssetId"] = Value::String("probe".to_owned());
+            }
+        }
+        "multiReference" | "reduxRefs" => {
+            if operations.iter().any(|item| item == "character_image") {
+                let (kind, mut character, _) = operation_request(model, "character_image")?;
+                character["referenceAssetIds"] = json!(["probe-a", "probe-b"]);
+                job_type = kind;
+                payload = character;
+            } else if operations.iter().any(|item| item == "edit_image") {
+                let (kind, mut edit, _) = operation_request(model, "edit_image")?;
+                // The product's source-with-multi-reference edit shape always keeps the primary
+                // source; optional ordered references augment it. A plural list alone is not a
+                // structurally valid Mage-Flow edit request.
+                edit["sourceAssetId"] = Value::String("probe-source".to_owned());
+                edit["referenceAssetIds"] = json!(["probe-a", "probe-b"]);
+                job_type = kind;
+                payload = edit;
+            } else {
+                payload["referenceAssetIds"] = json!(["probe-a", "probe-b"]);
+            }
+        }
+        "control" => {
+            payload["advanced"] = json!({ "poses": [{}] });
+        }
+        "depth" => {
+            payload["advanced"] = json!({ "depthAssetId": "probe" });
+        }
+        "mask" => {
+            let (kind, mut edit, _) = operation_request(model, "edit_image")?;
+            edit["maskAssetId"] = Value::String("probe-mask".to_owned());
+            job_type = kind;
+            payload = edit;
+        }
+        "keyframe" => {
+            job_type = JobType::VideoGenerate;
+            payload = video_payload("first_last_frame");
+        }
+        "videoClip" => {
+            job_type = JobType::VideoExtend;
+            payload = video_payload("extend_clip");
+        }
+        "controlClip" | "videoSync" => {
+            job_type = JobType::VideoGenerate;
+            payload = video_payload("animate_character");
+        }
+        "conversationHistory" => {
+            job_type = JobType::ImageInterleave;
+            payload = json!({
+                "prompt": "probe",
+                "conversationHistory": [{ "role": "user", "text": "probe" }]
+            });
+        }
         other => {
             return Err(format!(
-                "descriptor conditioning {other:?} has no SceneWorks canonical request"
+                "descriptor conditioning {other:?} for modality {modality:?} has no SceneWorks canonical request"
             ));
         }
-    };
-    Ok(pair)
+    }
+    Ok((job_type, payload))
 }
 
 fn conditioning_cell(
@@ -749,10 +924,10 @@ fn conditioning_cell(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<CapabilityCell, String> {
-    let (job_type, payload) = conditioning_payload(&model.model_type, shape)?;
+    let (job_type, payload) = conditioning_payload(model, shape, mlx_facts, candle_facts)?;
     let job = probe_job(job_type, &model.id, payload)?;
     let supports = |facts: &RuntimeDescriptorFacts| {
-        generator_descriptor(facts, &model.id)
+        native_generator_descriptor(facts, &model.id)
             .is_some_and(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape))
     };
     let mlx = supports(mlx_facts) && backend_supports(&job, mlx_facts)?;
@@ -771,21 +946,10 @@ fn adapter_cell(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<CapabilityCell, String> {
-    let job_type = if model.model_type == "video" {
-        JobType::VideoGenerate
-    } else {
-        JobType::ImageGenerate
-    };
-    let mode = if model.model_type == "video" {
-        "text_to_video"
-    } else {
-        "text_to_image"
-    };
-    let job = probe_job(
-        job_type,
-        &model.id,
-        json!({ "mode": mode, "loras": [{ "id": "probe", "networkType": adapter }] }),
-    )?;
+    let modality = descriptor_modality(model, mlx_facts, candle_facts)?;
+    let (job_type, mut payload) = canonical_model_request(model, modality)?;
+    payload["loras"] = json!([{ "id": "probe", "networkType": adapter }]);
+    let job = probe_job(job_type, &model.id, payload)?;
     let mlx = descriptor_supports_adapter(mlx_facts, &model.id, adapter)
         && backend_supports(&job, mlx_facts)?;
     let candle = descriptor_supports_adapter(candle_facts, &model.id, adapter)
@@ -812,7 +976,9 @@ fn precision_union(
         .collect();
     for facts in [mlx, candle] {
         if let Some(descriptor) = generator_descriptor(facts, &model.id) {
-            tiers.insert("bf16".to_owned());
+            if matches!(descriptor.modality.as_str(), "image" | "video" | "both") {
+                tiers.insert("bf16".to_owned());
+            }
             tiers.extend(descriptor.supported_quants.iter().cloned());
         }
     }
@@ -841,7 +1007,7 @@ fn manifest_tier_support(model: &ManifestModel, tier: &str, backend: &str) -> bo
 }
 
 fn descriptor_tier_support(facts: &RuntimeDescriptorFacts, model: &str, tier: &str) -> bool {
-    generator_descriptor(facts, model).is_some_and(|descriptor| {
+    native_generator_descriptor(facts, model).is_some_and(|descriptor| {
         tier == "bf16"
             || descriptor
                 .supported_quants
@@ -850,29 +1016,29 @@ fn descriptor_tier_support(facts: &RuntimeDescriptorFacts, model: &str, tier: &s
     })
 }
 
-fn precision_payload(model: &ManifestModel, tier: &str) -> Result<(JobType, Value), String> {
-    let mode = if model.model_type == "video" {
-        "text_to_video"
-    } else {
-        "text_to_image"
-    };
-    let job_type = if model.model_type == "video" {
-        JobType::VideoGenerate
-    } else {
-        JobType::ImageGenerate
-    };
-    let payload = match tier {
-        "bf16" => json!({ "mode": mode }),
-        "q4" => json!({ "mode": mode, "advanced": { "mlxQuantize": 4 } }),
-        "q8" => json!({ "mode": mode, "advanced": { "mlxQuantize": 8 } }),
-        "nvfp4" => json!({ "mode": mode, "advanced": { "quantTier": "nvfp4" } }),
-        "int8-convrot" => json!({ "mode": mode, "advanced": { "convRot": true } }),
+fn precision_payload(
+    model: &ManifestModel,
+    tier: &str,
+    mlx: &RuntimeDescriptorFacts,
+    candle: &RuntimeDescriptorFacts,
+) -> Result<(JobType, Value), String> {
+    let modality = descriptor_modality(model, mlx, candle)?;
+    let (job_type, mut payload) = canonical_model_request(model, modality)?;
+    let advanced = match tier {
+        "bf16" => None,
+        "q4" => Some(json!({ "mlxQuantize": 4 })),
+        "q8" => Some(json!({ "mlxQuantize": 8 })),
+        "nvfp4" => Some(json!({ "quantTier": "nvfp4" })),
+        "int8-convrot" => Some(json!({ "convRot": true })),
         other => {
             return Err(format!(
                 "manifest precision tier {other:?} has no canonical request"
             ))
         }
     };
+    if let Some(advanced) = advanced {
+        payload["advanced"] = advanced;
+    }
     Ok((job_type, payload))
 }
 
@@ -882,7 +1048,7 @@ fn precision_cell(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<CapabilityCell, String> {
-    let (job_type, payload) = precision_payload(model, tier)?;
+    let (job_type, payload) = precision_payload(model, tier, mlx_facts, candle_facts)?;
     let job = probe_job(job_type, &model.id, payload)?;
     let support = |facts: &RuntimeDescriptorFacts| {
         let backend = facts.snapshot.backend.as_str();
@@ -1128,7 +1294,7 @@ fn video_payload(mode: &str) -> Value {
         "first_last_frame" => json!({
             "mode": mode,
             "sourceAssetId": "probe",
-            "endAssetId": "probe-end"
+            "lastFrameAssetId": "probe-end"
         }),
         "extend_clip" => json!({ "mode": mode, "sourceClipAssetId": "probe" }),
         "video_bridge" => json!({
@@ -1166,6 +1332,7 @@ fn probe_job(job_type: JobType, model: &str, payload: Value) -> Result<JobSnapsh
         .cloned()
         .ok_or_else(|| "probe payload must be an object".to_owned())?;
     payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    validate_probe_structure(&job_type, &payload)?;
     Ok(JobSnapshot {
         id: "capability-matrix-probe".to_owned(),
         job_type,
@@ -1199,6 +1366,100 @@ fn probe_job(job_type: JobType, model: &str, payload: Value) -> Result<JobSnapsh
         title: None,
         extra: BTreeMap::new(),
     })
+}
+
+fn validate_probe_structure(
+    job_type: &JobType,
+    payload: &Map<String, Value>,
+) -> Result<(), String> {
+    let nonempty = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let mode = payload.get("mode").and_then(Value::as_str);
+    let require = |condition: bool, detail: &str| {
+        condition.then_some(()).ok_or_else(|| {
+            format!("canonical {job_type:?} probe is structurally invalid: {detail}")
+        })
+    };
+
+    match job_type {
+        JobType::ImageGenerate => {
+            require(nonempty("model"), "model is required")?;
+            require(
+                mode.is_some_and(|value| !value.trim().is_empty()),
+                "mode is required",
+            )?;
+        }
+        JobType::ImageEdit => {
+            require(nonempty("model"), "model is required")?;
+            require(mode == Some("edit_image"), "mode must be edit_image")?;
+            require(nonempty("sourceAssetId"), "sourceAssetId is required")?;
+        }
+        JobType::ImageVqa => {
+            require(nonempty("model"), "model is required")?;
+            require(nonempty("sourceAssetId"), "sourceAssetId is required")?;
+            require(nonempty("question"), "question is required")?;
+        }
+        JobType::ImageInterleave => {
+            require(nonempty("model"), "model is required")?;
+            require(nonempty("prompt"), "prompt is required")?;
+        }
+        JobType::VideoGenerate => {
+            require(nonempty("model"), "model is required")?;
+            require(
+                mode.is_some_and(|value| !value.trim().is_empty()),
+                "mode is required",
+            )?;
+            if matches!(mode, Some("image_to_video" | "first_last_frame")) {
+                require(nonempty("sourceAssetId"), "sourceAssetId is required")?;
+            }
+            if mode == Some("first_last_frame") {
+                require(nonempty("lastFrameAssetId"), "lastFrameAssetId is required")?;
+            }
+        }
+        JobType::VideoExtend => {
+            require(mode == Some("extend_clip"), "mode must be extend_clip")?;
+            require(
+                nonempty("sourceClipAssetId"),
+                "sourceClipAssetId is required",
+            )?;
+        }
+        JobType::VideoBridge => {
+            require(mode == Some("video_bridge"), "mode must be video_bridge")?;
+            require(
+                nonempty("sourceClipAssetId"),
+                "sourceClipAssetId is required",
+            )?;
+            require(
+                nonempty("bridgeRightClipAssetId"),
+                "bridgeRightClipAssetId is required",
+            )?;
+        }
+        JobType::PersonReplace => {
+            require(
+                mode == Some("replace_person"),
+                "mode must be replace_person",
+            )?;
+            require(
+                nonempty("sourceClipAssetId"),
+                "sourceClipAssetId is required",
+            )?;
+            require(nonempty("personTrackId"), "personTrackId is required")?;
+            require(nonempty("characterId"), "characterId is required")?;
+        }
+        JobType::AudioGenerate => {
+            require(nonempty("model"), "model is required")?;
+            require(nonempty("prompt"), "prompt is required")?;
+            if nonempty("sourceAudioAssetId") {
+                require(nonempty("editMode"), "editMode is required for audio edit")?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn manifest_model_for_operation<'a>(
@@ -1906,6 +2167,28 @@ mod tests {
     #[test]
     fn audit_regressions_are_derived_from_production_truth() {
         let matrix = backend_capability_matrix().unwrap();
+        let flux2 = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "flux2_dev")
+            .unwrap();
+        let enhancement = flux2
+            .operation_and_mode
+            .iter()
+            .find(|cell| cell.capability == "prompt_enhancement")
+            .expect("FLUX.2 prompt enhancement is represented");
+        assert_eq!(
+            (enhancement.mlx, enhancement.candle),
+            (Some(true), Some(false))
+        );
+        assert_eq!(
+            enhancement
+                .parity_obligation
+                .as_ref()
+                .map(|item| item.work_item.as_str()),
+            Some("sc-18474")
+        );
+
         let krea = matrix
             .models
             .iter()
@@ -1925,6 +2208,51 @@ mod tests {
             .find(|row| row.target == "mage_flow_base_lora" && row.network_type == "full")
             .expect("production Mage target offers full fine-tuning");
         assert_eq!(mage.support.mlx, Some(true));
+
+        let mage_edit = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "mage_flow_edit")
+            .unwrap();
+        for tier in ["q4", "q8"] {
+            let cell = mage_edit
+                .precision_tier
+                .iter()
+                .find(|cell| cell.capability == tier)
+                .unwrap();
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "Mage Edit precision must use a structurally valid edit probe"
+            );
+        }
+        for shape in ["reference", "multiReference"] {
+            let cell = mage_edit
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == shape)
+                .unwrap();
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "Mage Edit conditioning must retain its required primary source"
+            );
+        }
+
+        let chatterbox = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "chatterbox_tts")
+            .unwrap();
+        for shape in ["referenceAudio", "voiceEmbedding"] {
+            let cell = chatterbox
+                .conditioning_shape
+                .iter()
+                .find(|cell| cell.capability == shape)
+                .expect("Chatterbox descriptor conditioning is represented");
+            assert_eq!((cell.mlx, cell.candle), (Some(false), Some(true)));
+            assert!(cell.preserved_candle_only);
+        }
 
         let upscale = matrix
             .gpu_job_types
@@ -2082,6 +2410,120 @@ mod tests {
             .conditioning
             .iter()
             .any(|kind| kind == "reference"));
+
+        let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        let flux2 = manifest
+            .models
+            .iter()
+            .find(|model| model.id == "flux2_dev")
+            .unwrap();
+        let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+        let original_cell =
+            operation_cell(flux2, "prompt_enhancement", &original, &candle).unwrap();
+        assert_eq!(
+            (original_cell.mlx, original_cell.candle),
+            (Some(true), Some(false))
+        );
+
+        let mut no_enhancement: Value = serde_json::from_str(MLX_RUNTIME_FACTS).unwrap();
+        let engine = original.model_mappings.get("flux2_dev").unwrap();
+        no_enhancement["snapshot"]["generator_capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|descriptor| descriptor["id"].as_str() == Some(engine))
+            .unwrap()["supports_prompt_enhancement"] = Value::Bool(false);
+        let no_enhancement =
+            runtime_facts(&serde_json::to_string(&no_enhancement).unwrap(), "mlx").unwrap();
+        let mutated_cell =
+            operation_cell(flux2, "prompt_enhancement", &no_enhancement, &candle).unwrap();
+        assert_eq!(mutated_cell.mlx, Some(false));
+    }
+
+    #[test]
+    fn every_descriptor_axis_for_a_shipped_generator_has_a_matrix_cell() {
+        let matrix = backend_capability_matrix().unwrap();
+        let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+
+        for model in &manifest.models {
+            let row = matrix.models.iter().find(|row| row.id == model.id).unwrap();
+            let descriptors: Vec<_> = [&mlx, &candle]
+                .into_iter()
+                .filter_map(|facts| generator_descriptor(facts, &model.id))
+                .collect();
+            if descriptors.is_empty() {
+                continue;
+            }
+            let conditioning: BTreeSet<&str> = row
+                .conditioning_shape
+                .iter()
+                .map(|cell| cell.capability.as_str())
+                .collect();
+            let precision: BTreeSet<&str> = row
+                .precision_tier
+                .iter()
+                .map(|cell| cell.capability.as_str())
+                .collect();
+            let adapters: BTreeSet<&str> = row
+                .user_adapters
+                .iter()
+                .map(|cell| cell.capability.as_str())
+                .collect();
+            for descriptor in descriptors {
+                for shape in &descriptor.conditioning {
+                    assert!(
+                        conditioning.contains(shape.as_str()),
+                        "{} descriptor conditioning {shape} has no matrix cell",
+                        model.id
+                    );
+                }
+                for tier in &descriptor.supported_quants {
+                    assert!(
+                        precision.contains(tier.as_str()),
+                        "{} descriptor precision {tier} has no matrix cell",
+                        model.id
+                    );
+                }
+                if descriptor.supports_lora {
+                    assert!(
+                        adapters.contains("lora"),
+                        "{} loses descriptor LoRA",
+                        model.id
+                    );
+                }
+                if descriptor.supports_lokr {
+                    assert!(
+                        adapters.contains("lokr"),
+                        "{} loses descriptor LoKr",
+                        model.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_probe_validation_rejects_missing_operation_inputs() {
+        assert!(probe_job(
+            JobType::ImageEdit,
+            "mage_flow_edit",
+            json!({ "mode": "edit_image", "referenceAssetIds": ["probe"] })
+        )
+        .is_err());
+        assert!(probe_job(
+            JobType::VideoGenerate,
+            "ltx_2_3",
+            json!({ "mode": "first_last_frame", "sourceAssetId": "probe" })
+        )
+        .is_err());
+        assert!(probe_job(
+            JobType::AudioGenerate,
+            "chatterbox_tts",
+            json!({ "referenceAudioAssetId": "probe" })
+        )
+        .is_err());
     }
 
     fn known_job_types() -> BTreeSet<String> {

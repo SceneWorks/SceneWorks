@@ -385,11 +385,12 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
           !Array.isArray(descriptor?.conditioning) ||
           !Array.isArray(descriptor?.supported_quants) ||
           typeof descriptor?.supports_lora !== "boolean" ||
-          typeof descriptor?.supports_lokr !== "boolean",
+          typeof descriptor?.supports_lokr !== "boolean" ||
+          typeof descriptor?.supports_prompt_enhancement !== "boolean",
       )
     ) {
       throw new Error(
-        `runtime/${name} omits conditioning, adapter, quant, trainer, or worker capability truth; ` +
+        `runtime/${name} omits conditioning, adapter, quant, prompt-enhancement, trainer, or worker capability truth; ` +
           "re-dump the full runtime snapshot on the matching platform.",
       );
     }
@@ -653,6 +654,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
                 supported_quants: ["q4"],
                 supports_lora: true,
                 supports_lokr: false,
+                supports_prompt_enhancement: true,
               },
             ],
         trainer_capabilities: [{ id: "x", supports_lora: true }],
@@ -745,6 +747,25 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   check(
     "a narrow runtime projection without parity axes is refused",
     !!narrowRuntime && /omits conditioning, adapter, quant, trainer, or worker/.test(narrowRuntime),
+  );
+  const missingPromptEnhancement = (() => {
+    const root = fixture();
+    try {
+      const path = join(root, "config/engine-capabilities/runtime/capabilities.mlx.json");
+      const facts = JSON.parse(readFileSync(path, "utf8"));
+      delete facts.snapshot.generator_capabilities[0].supports_prompt_enhancement;
+      writeFileSync(path, JSON.stringify(facts));
+      verifyEngineCapabilityFacts(SHA, root);
+      return null;
+    } catch (error) {
+      return error?.message ?? String(error);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  check(
+    "a runtime snapshot missing prompt-enhancement support is refused",
+    !!missingPromptEnhancement && /omits conditioning, adapter, quant/.test(missingPromptEnhancement),
   );
   // Both dumps carry `backend: "candle"`, so swapping the two directories is invisible to a check
   // that reads `backend` alone — it would count an audio file as media coverage and vice versa, and

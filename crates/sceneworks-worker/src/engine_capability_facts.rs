@@ -581,6 +581,37 @@ pub fn runtime_descriptor_facts_from_snapshot(
             ));
         }
     }
+    for capabilities in ["generator_capabilities", "audio_generator_capabilities"] {
+        for descriptor in snapshot
+            .get(capabilities)
+            .and_then(serde_json::Value::as_array)
+            .expect("capability array checked above")
+        {
+            let complete = descriptor
+                .get("conditioning")
+                .is_some_and(serde_json::Value::is_array)
+                && descriptor
+                    .get("supported_quants")
+                    .is_some_and(serde_json::Value::is_array)
+                && [
+                    "supports_lora",
+                    "supports_lokr",
+                    "supports_preview",
+                    "supports_prompt_enhancement",
+                ]
+                .into_iter()
+                .all(|field| {
+                    descriptor
+                        .get(field)
+                        .is_some_and(serde_json::Value::is_boolean)
+                });
+            if !complete {
+                return Err(format!(
+                    "runtime capability snapshot {capabilities} contains a descriptor without complete conditioning, adapter, quant, preview, and prompt-enhancement axes"
+                ));
+            }
+        }
+    }
     if model_mappings.is_empty() {
         return Err("runtime capability facts have no SceneWorks model mappings".to_owned());
     }
@@ -767,7 +798,8 @@ mod tests {
                 "supports_lora": true,
                 "supports_lokr": false,
                 "supported_quants": ["q4"],
-                "supports_preview": true
+                "supports_preview": true,
+                "supports_prompt_enhancement": true
             }],
             "trainer_ids": ["probe"],
             "trainer_capabilities": [{
@@ -816,6 +848,22 @@ mod tests {
             .expect_err("a missing rich descriptor axis must fail the dump");
             assert!(error.contains(field), "got: {error}");
         }
+
+        let mut narrow = runtime_snapshot();
+        narrow["generator_capabilities"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("supports_prompt_enhancement");
+        let error = runtime_descriptor_facts_from_snapshot(
+            narrow,
+            mappings.clone(),
+            trainers.clone(),
+            capabilities.clone(),
+            "rev",
+            "dump",
+        )
+        .expect_err("a missing prompt-enhancement axis must fail the dump");
+        assert!(error.contains("prompt-enhancement"), "got: {error}");
 
         let mut mismatched = runtime_snapshot();
         mismatched["generator_capabilities"] = serde_json::json!([]);
