@@ -1,9 +1,9 @@
 use super::huggingface_snapshot_dir;
 use super::{
     admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
-    GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
-    Value, WorkerError, WorkerResult,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream, ApiClient,
+    GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    LoadSpec, Path, PathBuf, Settings, Value, WeightsSource, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -14,10 +14,9 @@ use serde_json::json;
 // row (assembled by the API's `external_base_models`); its `modelManifestEntry` carries `family:"z-image"`
 // and a `components[]` list of {role, path} for the DiT / text-encoder / VAE.
 //
-// **Candle-only**, and a **bespoke provider** (like `ZImageEdit`/`ZImageControl`): the loaded generator is
-// not registry-resolvable (its weights are three separate in-place files, not a diffusers snapshot dir),
-// so it is loaded fresh per job through `start_gen_stream` rather than the cached registry path. This file
-// is a child module of the `image_jobs` module, sharing its imports.
+// **Candle-only**, but no longer a bespoke provider: the imported files form the registered
+// `z_image_turbo` provider's normal `LoadSpec`, so they share cache, fit-gate, residency, and future
+// planner behavior with snapshot-backed jobs.
 
 /// The adapter/engine id recorded on candle ComfyUI Z-Image assets + telemetry (distinct from the
 /// registry `candle_z_image` txt2img and the `candle_zimage_edit`/`_control` lanes).
@@ -44,8 +43,9 @@ struct ComfyuiZImagePaths {
 /// Resolve the ComfyUI Z-Image component paths from the forwarded `external_base_*` row. Returns
 /// `Ok(None)` when this is not a runnable ComfyUI Z-Image job (wrong family, missing a component, or our
 /// tokenizer snapshot is not resident), so the router falls through rather than erroring. Each component
-/// path is confined by `normalize_app_managed_model_path` (widened to admit the operator's external roots,
-/// sc-10668) — a payload can never point a component outside a declared root (epic 4484).
+/// path is confined by `normalize_app_managed_model_file_path` (widened to admit the operator's
+/// external roots, sc-10668) — a payload can never point a component outside a declared root, while
+/// the lexical path is retained for lstat-pinned re-opening (sc-18306).
 fn resolve_zimage_comfyui_paths(
     request: &ImageRequest,
     settings: &Settings,
@@ -85,17 +85,21 @@ fn resolve_zimage_comfyui_paths(
         return Ok(None);
     };
     Ok(Some(ComfyuiZImagePaths {
-        transformer: crate::paths::normalize_app_managed_model_path(
+        transformer: crate::paths::normalize_app_managed_model_file_path(
             settings,
             transformer,
             "ComfyUI Z-Image transformer",
         )?,
-        text_encoder: crate::paths::normalize_app_managed_model_path(
+        text_encoder: crate::paths::normalize_app_managed_model_file_path(
             settings,
             text_encoder,
             "ComfyUI Z-Image text encoder",
         )?,
-        vae: crate::paths::normalize_app_managed_model_path(settings, vae, "ComfyUI Z-Image VAE")?,
+        vae: crate::paths::normalize_app_managed_model_file_path(
+            settings,
+            vae,
+            "ComfyUI Z-Image VAE",
+        )?,
         tokenizer_dir,
     }))
 }
@@ -127,10 +131,9 @@ fn zimage_comfyui_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject
     raw
 }
 
-/// Real candle in-place ComfyUI Z-Image txt2img generation: resolve + confine the three component paths on
-/// the async side, then load `load_from_comfyui_components` once + generate each image on the blocking
-/// thread. `request.count` images, each its own seed. Z-Image-Turbo is distilled (no CFG / negative
-/// prompt). The loaded `Box<dyn Generator>` is bespoke (not registry-cached), driven like the edit lane.
+/// Real candle in-place ComfyUI Z-Image txt2img generation through the registered `z_image_turbo`
+/// provider. `request.count` images, each its own seed. Z-Image-Turbo is distilled (no CFG / negative
+/// prompt).
 pub(super) async fn generate_candle_zimage_comfyui_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -147,6 +150,8 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 .to_owned(),
         )
     })?;
+    // The tokenizer snapshot is a structural companion, not another model to price recursively.
+    // Admission counts exactly the three external weight files consumed by this assembly.
     admit_candle_base_floor(
         &request.model,
         "ComfyUI Z-Image",
@@ -158,6 +163,19 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         ],
     )
     .await?;
+    let spec = LoadSpec::new(WeightsSource::File(paths.transformer.clone()))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(paths.tokenizer_dir.clone()),
+        )
+        .with_component(
+            gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
+            WeightsSource::File(paths.text_encoder.clone()),
+        )
+        .with_component(
+            gen_core::COMFYUI_VAE_COMPONENT,
+            WeightsSource::File(paths.vae.clone()),
+        );
 
     let (width, height) = (request.width, request.height);
     let steps =
@@ -170,28 +188,12 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        "zimage_comfyui",
+        "z_image_turbo",
         0,
-        move || {
-            let ComfyuiZImagePaths {
-                transformer,
-                text_encoder,
-                vae,
-                tokenizer_dir,
-            } = paths;
-            let model = runtime_cuda::providers::z_image::load_from_comfyui_components(
-                transformer,
-                text_encoder,
-                vae,
-                tokenizer_dir,
-            )
-            .map_err(|error| {
-                WorkerError::Engine(format!("ComfyUI Z-Image load failed: {error}"))
-            })?;
-            Ok(model)
-        },
+        spec,
+        "ComfyUI Z-Image load failed".to_owned(),
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,

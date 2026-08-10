@@ -197,6 +197,63 @@ pub(crate) fn normalize_app_managed_model_path(
     ensure_path_under(path, &roots, label)
 }
 
+/// Confine a payload-supplied model **file** while retaining the lexical, extension-bearing path the
+/// runtime must re-open (sc-18306). Both the lexical entry and canonical target cross the trust
+/// boundary: an outside entry cannot be admitted merely because it currently points inward, and an
+/// inside entry cannot escape through its target. Both are checked against the same data/HF/operator roots as
+/// [`normalize_app_managed_model_path`]. Once that target is proven confined, return the absolute
+/// pre-canonical path when it resolves to exactly the vetted file. This lets inference pin the entry
+/// with `lstat` and re-open it for transformer windows; returning only the canonical HF blob path would
+/// discard both the user-visible filename extension and the symlink-entry identity.
+pub(crate) fn normalize_app_managed_model_file_path(
+    settings: &Settings,
+    raw_path: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    normalize_app_managed_model_file_entry_path(settings, Path::new(raw_path), label)
+}
+
+/// Path-valued sibling of [`normalize_app_managed_model_file_path`], used after an install directory
+/// has selected its lone checkpoint entry. Re-running the canonical confinement check on that child
+/// is essential: a confined directory can contain a `.safetensors` symlink whose target escapes every
+/// app-managed root.
+pub(crate) fn normalize_app_managed_model_file_entry_path(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    let data_dir = normalized_data_dir(settings)?;
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
+    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let canonical_hf_cache =
+        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    for root in &settings.external_model_roots {
+        roots.push(normalize_absolute_path(root)?);
+        if let Ok(canonical) = normalize_existing_or_absolute(root) {
+            roots.push(canonical);
+        }
+    }
+
+    let lexical = normalize_absolute_path(raw_path)?;
+    ensure_path_under(lexical.clone(), &roots, label)?;
+    let resolved = normalize_existing_or_absolute(&lexical)?;
+    let confined = ensure_path_under(resolved, &roots, label)?;
+    match (lexical.canonicalize(), confined.canonicalize()) {
+        (Ok(lexical_target), Ok(confined_target)) if lexical_target == confined_target => {
+            Ok(lexical)
+        }
+        _ => Ok(confined),
+    }
+}
+
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root
 /// (sc-5723 / WKA-002). The path arrives untrusted (`installedPath`/`sourcePath`/
 /// `path`/`source.path` on a LoRA spec) and is loaded as adapter weights, so —

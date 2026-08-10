@@ -336,6 +336,38 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn imported_file_floor_excludes_the_replaced_snapshot_transformer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let imported = temp.path().join("imported.safetensors");
+        let base = temp.path().join("base");
+        let text_encoder = base.join("text_encoder");
+        let vae = base.join("vae");
+        let replaced_transformer = base.join("transformer");
+        std::fs::create_dir_all(&text_encoder).expect("text encoder dir");
+        std::fs::create_dir_all(&vae).expect("vae dir");
+        std::fs::create_dir_all(&replaced_transformer).expect("transformer dir");
+        std::fs::write(&imported, vec![0_u8; 11]).expect("imported weights");
+        std::fs::write(text_encoder.join("model.safetensors"), vec![0_u8; 13])
+            .expect("text encoder weights");
+        std::fs::write(vae.join("model.safetensors"), vec![0_u8; 17]).expect("vae weights");
+        std::fs::write(
+            replaced_transformer.join("model.safetensors"),
+            vec![0_u8; 19],
+        )
+        .expect("snapshot transformer weights");
+
+        let consumed =
+            distinct_weight_bytes(&[imported.as_path(), text_encoder.as_path(), vae.as_path()]);
+        let recursively_priced = distinct_weight_bytes(&[imported.as_path(), base.as_path()]);
+        assert_eq!(consumed, 11 + 13 + 17);
+        assert_eq!(recursively_priced, consumed + 19);
+        assert!(
+            consumed < recursively_priced,
+            "the companion snapshot's replaced transformer must stay outside the imported-file floor"
+        );
+    }
+
+    #[test]
     fn catalog_evidence_requires_a_per_tier_row_not_the_static_minimum() {
         let static_only = json!({ "candle": { "minMemoryGb": 24 } })
             .as_object()

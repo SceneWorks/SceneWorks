@@ -4,8 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use gen_core::{
-    AdapterKind, AdapterSpec, Generator, LoadShape, LoadSpec, MemoryCacheState, MoeExpert,
-    OffloadPolicy, Precision, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, FileStatFingerprint, Generator, LoadShape, LoadSpec,
+    MemoryCacheState, MoeExpert, OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
 };
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -88,13 +88,47 @@ pub(crate) struct ExecutionPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheWeightsSource {
     Dir(PathBuf, Fingerprint),
-    File(PathBuf, Fingerprint),
+    File(PathBuf, CacheFileFingerprint),
+}
+
+/// Mutation-sensitive identity for an imported single-file source or adapter.
+///
+/// The legacy [`Fingerprint`] follows symlinks and records only target length + mtime, so retargeting
+/// an extension-bearing snapshot link to a different same-sized blob with the same timestamp could
+/// otherwise collide with a resident generator. Keep both the lexical entry and resolved target
+/// identity, matching the pin that streamed providers enforce on every reopen. If pinning fails, use
+/// a fresh nonce so an unstatable source can never hit an older cache entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheFileFingerprint {
+    Pinned {
+        entry: FileStatFingerprint,
+        target: FileStatFingerprint,
+    },
+    Unavailable(u64),
+}
+
+static UNAVAILABLE_FILE_FINGERPRINT_NONCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+impl CacheFileFingerprint {
+    fn of(path: &Path) -> Self {
+        match PinnedWeightsFile::pin(path) {
+            Ok(pinned) => Self::Pinned {
+                entry: pinned.entry_fingerprint().clone(),
+                target: pinned.target_fingerprint().clone(),
+            },
+            Err(_) => Self::Unavailable(
+                UNAVAILABLE_FILE_FINGERPRINT_NONCE
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CacheAdapterSpec {
     path: PathBuf,
-    fingerprint: Fingerprint,
+    fingerprint: CacheFileFingerprint,
     scale_bits: u32,
     kind: AdapterKind,
     pass_scale_bits: Option<Vec<u32>>,
@@ -177,7 +211,7 @@ impl From<&WeightsSource> for CacheWeightsSource {
     fn from(source: &WeightsSource) -> Self {
         match source {
             WeightsSource::Dir(path) => Self::Dir(path.clone(), Fingerprint::of(path)),
-            WeightsSource::File(path) => Self::File(path.clone(), Fingerprint::of(path)),
+            WeightsSource::File(path) => Self::File(path.clone(), CacheFileFingerprint::of(path)),
         }
     }
 }
@@ -186,7 +220,7 @@ impl From<&AdapterSpec> for CacheAdapterSpec {
     fn from(spec: &AdapterSpec) -> Self {
         Self {
             path: spec.path.clone(),
-            fingerprint: Fingerprint::of(&spec.path),
+            fingerprint: CacheFileFingerprint::of(&spec.path),
             scale_bits: spec.scale.to_bits(),
             kind: spec.kind,
             pass_scale_bits: spec
@@ -959,13 +993,12 @@ mod tests {
 
     #[test]
     fn cache_key_includes_adapter_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let adapter = dir.path().join("style.safetensors");
+        std::fs::write(&adapter, b"adapter").expect("write adapter");
         let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
         let mut with_adapter = base.clone();
-        with_adapter.adapters = vec![AdapterSpec::new(
-            PathBuf::from("/loras/style.safetensors"),
-            0.8,
-            AdapterKind::Lora,
-        )];
+        with_adapter.adapters = vec![AdapterSpec::new(adapter, 0.8, AdapterKind::Lora)];
         let mut different_scale = with_adapter.clone();
         different_scale.adapters[0].scale = 0.9;
 
@@ -1486,6 +1519,106 @@ mod tests {
         assert_ne!(
             before, after,
             "replacing a named component at the same path must invalidate the resident generator"
+        );
+    }
+
+    #[test]
+    fn cache_key_fingerprints_primary_file_and_named_companions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dit = dir.path().join("dit.safetensors");
+        let vae = dir.path().join("vae.safetensors");
+        std::fs::write(&dit, b"dit-v1").expect("write dit");
+        std::fs::write(&vae, b"vae-v1").expect("write vae");
+        let make_spec = || {
+            LoadSpec::new(WeightsSource::File(dit.clone()))
+                .with_component(
+                    gen_core::BASE_SNAPSHOT_COMPONENT,
+                    WeightsSource::Dir(dir.path().join("base")),
+                )
+                .with_component(
+                    gen_core::COMFYUI_VAE_COMPONENT,
+                    WeightsSource::File(vae.clone()),
+                )
+        };
+
+        let original = GeneratorCacheKey::from_load_spec("qwen_image", &make_spec());
+        assert_eq!(
+            original,
+            GeneratorCacheKey::from_load_spec("qwen_image", &make_spec()),
+            "an unchanged imported assembly must hit the cache"
+        );
+        std::fs::write(&vae, b"vae-v2-with-different-size").expect("replace vae");
+        let companion_changed = GeneratorCacheKey::from_load_spec("qwen_image", &make_spec());
+        assert_ne!(
+            original, companion_changed,
+            "replacing a named companion must invalidate the imported generator"
+        );
+        std::fs::write(&dit, b"dit-v2-with-different-size").expect("replace dit");
+        assert_ne!(
+            companion_changed,
+            GeneratorCacheKey::from_load_spec("qwen_image", &make_spec()),
+            "replacing the primary File must invalidate the imported generator"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_keys_detect_same_metadata_symlink_retarget_for_files_and_adapters() {
+        use std::fs::{File, FileTimes};
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, SystemTime};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("blob-a");
+        let second = dir.path().join("blob-b");
+        let selected = dir.path().join("model.safetensors");
+        std::fs::write(&first, b"same-size-a").expect("write first blob");
+        std::fs::write(&second, b"same-size-b").expect("write second blob");
+
+        // Reproduce the collision the old target-only `(len, mtime)` fingerprint could not see.
+        let common_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let times = FileTimes::new().set_modified(common_mtime);
+        File::options()
+            .write(true)
+            .open(&first)
+            .expect("open first blob")
+            .set_times(times)
+            .expect("set first mtime");
+        File::options()
+            .write(true)
+            .open(&second)
+            .expect("open second blob")
+            .set_times(times)
+            .expect("set second mtime");
+
+        symlink(&first, &selected).expect("link first blob");
+        let legacy_first = Fingerprint::of(&selected);
+        let make_file_spec = || LoadSpec::new(WeightsSource::File(selected.clone()));
+        let make_adapter_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(dir.path().join("base-snapshot")));
+            spec.adapters = vec![AdapterSpec::new(selected.clone(), 0.8, AdapterKind::Lora)];
+            spec
+        };
+        let first_file_key = GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_file_spec());
+        let first_adapter_key =
+            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_adapter_spec());
+
+        std::fs::remove_file(&selected).expect("remove first link");
+        symlink(&second, &selected).expect("link second blob");
+        let legacy_second = Fingerprint::of(&selected);
+        assert_eq!(
+            legacy_first, legacy_second,
+            "fixture must collide under the former target-only length/mtime fingerprint"
+        );
+        assert_ne!(
+            first_file_key,
+            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_file_spec()),
+            "retargeting the lexical checkpoint link must invalidate the resident generator"
+        );
+        assert_ne!(
+            first_adapter_key,
+            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_adapter_spec()),
+            "retargeting an adapter link must invalidate the resident generator"
         );
     }
 

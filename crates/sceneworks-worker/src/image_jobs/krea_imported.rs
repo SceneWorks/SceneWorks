@@ -4,15 +4,11 @@
 // single file, e.g. a ComfyUI-exported `kreamania_variant5.safetensors`) — read in place, no copy, no
 // re-download — by pairing it with a resident `krea_2` base tier that supplies the shared Qwen3-VL text
 // encoder, Qwen VAE, tokenizer, and the DiT architecture config the single file omits. The assembly is
-// the selected runtime's `providers::krea::load_from_native_dit_file(dit, base, adapters, descriptor)`
-// — the sc-10670/10671 "read the DiT in place, source shared components from a resident tier" pattern, and
-// following the candle z-image `load_from_comfyui_components` in-place assembly pattern.
+// a normal registry `LoadSpec` whose primary source is `WeightsSource::File(dit)` and whose
+// `base_snapshot` companion supplies the shared components.
 //
-// This is a **bespoke provider** on both backends: the loaded generator is not registry-resolvable (its
-// transformer is a single in-place file, not a diffusers snapshot dir), so it bypasses the registry
-// snapshot-dir descriptor path and is loaded fresh per job through `start_gen_stream` rather than the
-// cached registry path — like the z-image comfyui / Wan comfyui in-place lanes. This file is `include!`d
-// into the `image_jobs` module, sharing its imports.
+// The imported and snapshot shapes now share the same provider ids, cache, fit gate, residency policy,
+// and planner seam (sc-18306). The old inference entrypoints remain construction shims only.
 //
 // Routing (S0d, sc-14019) already marks an imported/user image model whose declared `family` is `krea_2`
 // as same-family routable; this lane is what actually loads it. A builtin Krea model (`krea_2_turbo` /
@@ -35,11 +31,10 @@
 const KREA_IMPORTED_ENGINE: &str = "mlx_krea_imported";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const KREA_IMPORTED_ENGINE: &str = "candle_krea_imported";
-/// Whether the selected backend's native single-file entrypoint accepts adapters — i.e. it serves job
-/// LoRAs (sc-14111) and the Kontext edit surface (sc-14119, whose required `krea2_identity_edit` LoRA
-/// IS an adapter). The MLX `load_from_native_dit_file` takes an `&[AdapterSpec]` (inference #211); the
-/// candle one does NOT yet (it threads no load-time adapters — sc-14135, the candle follow-up), so the
-/// candle imported lane stays **t2i / img2img only**. img2img (a `Conditioning::Reference` init) needs
+/// Whether the selected backend's imported registry lane is exposed by this worker for adapters — i.e.
+/// it serves job LoRAs (sc-14111) and the Kontext edit surface (sc-14119, whose required
+/// `krea2_identity_edit` LoRA IS an adapter). The candle worker lane stays **t2i / img2img only** until
+/// its edit-conditioning helpers are shared cross-platform. img2img (a `Conditioning::Reference` init) needs
 /// no adapter, so it is served on both backends regardless of this flag. Read by
 /// [`krea_imported_available`] (the claim gate mirrors the scheduler's
 /// `imported_image_request_family_eligible(adapters_supported)`), so a candle host never routes a
@@ -52,8 +47,8 @@ const KREA_IMPORTED_SUPPORTS_ADAPTERS: bool = false;
 /// checkpoint. The pose ControlNet is a `control_scale`-scaled residual branch (`Krea2ControlBranch`)
 /// folded onto the frozen Turbo DiT at load — architecturally independent of the DiT's weights, so a
 /// same-shape imported fine-tune composes with it exactly as the builtin base does. The MLX runtime
-/// has the native control entrypoint (`load_control_from_native_dit_file`); the candle single-file
-/// path has no control (nor adapter, sc-14135) parameter, so candle keeps rejecting pose here — and
+/// has the registered File-capable `krea_2_turbo_control` provider; the candle worker keeps rejecting
+/// pose here until its control surface is enabled — and
 /// the scheduler mirror (`imported_image_request_family_eligible`) agrees per backend, so a candle
 /// host never claims an imported pose job (a candle-required deployment fails it terminally via the
 /// `candle_unsupported` enforce sweep rather than stranding it).
@@ -141,8 +136,10 @@ fn imported_dit_file(path: &Path) -> Option<PathBuf> {
 ///     an app-managed root, to a single `.safetensors` DiT ([`imported_dit_file`]): the file directly,
 ///     or the lone weight file inside its single-file install dir, but NOT a diffusers snapshot dir.
 ///
-/// Each path is confined by `normalize_app_managed_model_path` (a payload can never point the checkpoint
-/// outside a declared root; LAN jobs API, epic 4484) — the same confinement `resolve_weights_dir` uses.
+/// Both the supplied location and the checkpoint selected from an install directory are confined by
+/// `normalize_app_managed_model_file_path` (a payload or child symlink can never point the checkpoint
+/// outside a declared root; LAN jobs API, epic 4484), while retaining the lexical entry for
+/// lstat-pinned re-opening (sc-18306).
 fn resolve_imported_krea_dit(
     request: &ImageRequest,
     settings: &Settings,
@@ -179,12 +176,20 @@ fn resolve_imported_krea_dit(
     else {
         return Ok(None);
     };
-    let path = crate::paths::normalize_app_managed_model_path(
+    let path = crate::paths::normalize_app_managed_model_file_path(
         settings,
         raw_path,
         "Imported Krea 2 checkpoint",
     )?;
-    Ok(imported_dit_file(&path))
+    imported_dit_file(&path)
+        .map(|dit| {
+            crate::paths::normalize_app_managed_model_file_entry_path(
+                settings,
+                &dit,
+                "Imported Krea 2 checkpoint",
+            )
+        })
+        .transpose()
 }
 
 /// Resolve the resident `krea_2` base tier snapshot dir that supplies the shared text encoder, VAE,
@@ -443,8 +448,8 @@ fn krea_imported_control_raw_settings(
 
 /// Real MLX imported-checkpoint Krea 2 strict-pose generation: one image per pose, each conditioned
 /// on a full DWPose skeleton via the trained control-branch overlay riding the FILE-LOADED imported
-/// DiT (the imported twin of [`generate_krea_control_stream`], assembled through the native
-/// `load_control_from_native_dit_file` entrypoint instead of the registry snapshot load). The
+/// DiT (the imported twin of [`generate_krea_control_stream`], assembled through the registered
+/// `krea_2_turbo_control` provider with a File primary). The
 /// imported DiT is paired with the resident base tier's TE/VAE/tokenizer
 /// ([`resolve_krea_imported_base_tier`] — the same staging the t2i lane uses) plus the pose control
 /// overlay ([`resolve_krea_imported_control_overlay`] — the same env → payload-path → pinned
@@ -549,18 +554,22 @@ async fn generate_krea_imported_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
 
-    // Fit-gate estimation spec: the resolved dense base tier + the overlay + the adapter stack. The
-    // imported DiT has the same shape (and therefore the same dense footprint) as the tier's
-    // transformer, so the tier's on-disk bytes stand in for the single file's resident bytes.
-    let mut estimation_spec = LoadSpec::new(WeightsSource::Dir(base_dir.clone()))
+    // The actual imported assembly is the fit/cache/provider source of truth: primary File DiT, base
+    // snapshot companion, control overlay, and adapters. The provider reports the File's own bytes;
+    // it does not relabel a directory-tier rung-4 measurement as imported evidence.
+    let mut spec = LoadSpec::new(WeightsSource::File(dit))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(base_dir),
+        )
         .with_control(WeightsSource::File(control_weights.clone()));
     if !adapters.is_empty() {
-        estimation_spec = estimation_spec.with_adapters(adapters.clone());
+        spec = spec.with_adapters(adapters);
     }
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         KREA_CONTROL_ENGINE_ID,
         &request.model,
-        &estimation_spec,
+        &spec,
         Some(&request.model_manifest_entry),
         None,
     );
@@ -570,29 +579,13 @@ async fn generate_krea_imported_control_stream(
     let memory_inputs =
         krea_control_memory_inputs(width, height, &request.mode, adapter_count);
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
-        KREA_IMPORTED_ENGINE,
+        KREA_CONTROL_ENGINE_ID,
         adapter_count,
-        move || {
-            // The native control entrypoint reads the DiT from the single file (key-remap +
-            // coverage/shape validation against the base tier's architecture config, fail-closed),
-            // installs the job adapters, sources the shared TE/VAE/tokenizer from the base tier, and
-            // folds the pose control branch onto the file-loaded DiT — the builtin assembly with
-            // only the DiT swapped.
-            runtime_macos::providers::krea::load_control_from_native_dit_file(
-                &dit,
-                &base_dir,
-                &control_weights,
-                &adapters,
-            )
-            .map_err(|error| {
-                WorkerError::Engine(format!(
-                    "Krea 2 imported checkpoint pose-control load failed: {error}"
-                ))
-            })
-        },
-        move |model, tx, cancel| {
+        spec,
+        "Krea 2 imported checkpoint pose-control load failed".to_owned(),
+        move |model, initial_cache_state, load_policy, external_committed_bytes, tx, cancel| {
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             // Build the per-job identity-likeness scorer ONCE on the generator-worker thread (the
@@ -604,7 +597,7 @@ async fn generate_krea_imported_control_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            let mut cache_state = gen_core::MemoryCacheState::Cold;
+            let mut cache_state = initial_cache_state;
             drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -621,16 +614,16 @@ async fn generate_krea_imported_control_stream(
                 let conditioning =
                     build_control_conditioning(control, control_kind.clone(), control_scale, None);
                 let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
-                    model.as_ref(),
+                    model,
                     &memory_plan,
                     &memory_inputs,
                     cache_state,
-                    gen_core::OffloadPolicy::Resident,
-                    0,
+                    load_policy,
+                    external_committed_bytes,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;
                 let (out_w, out_h, pixels) = krea_control_generate_one(
-                    model.as_ref(),
+                    model,
                     &prompt,
                     width,
                     height,
@@ -806,13 +799,13 @@ fn resolve_krea_imported_adapters_and_edit(
 /// Real in-place imported single-file Krea 2 generation (epic 14015 S0c, sc-14023 + sc-14071 +
 /// sc-14111 + sc-14119): resolve the imported DiT, the resident base tier, any img2img reference, and —
 /// on the adapter-capable MLX backend — the job LoRA stack + Kontext edit conditioning, then load the
-/// selected runtime's native entrypoint once and generate each image on the blocking thread.
+/// selected runtime's registered provider once and generate each image on the cache worker thread.
 ///
 /// Three shapes ride one lane: plain **t2i**, reference-guided **img2img** (one `Conditioning::Reference`
 /// on the Turbo t2i descriptor, both backends), and — MLX only — **LoRA-adapted** t2i/img2img (sc-14111)
-/// and the **Kontext edit** surface (sc-14119: the `turbo_edit_descriptor` + the fitted source
+/// and the **Kontext edit** surface (sc-14119: the `krea_2_turbo_edit` provider + the fitted source
 /// reference(s) as `Reference`/`MultiReference` + the `krea2_identity_edit` adapter). The merge is
-/// distilled Turbo (no CFG / negative prompt). The `Box<dyn Generator>` is bespoke (not registry-cached).
+/// distilled Turbo (no CFG / negative prompt).
 async fn generate_krea_imported_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -833,6 +826,8 @@ async fn generate_krea_imported_stream(
     let base_dir = resolve_krea_imported_base_tier(settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
+        // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
+        // not be double-priced. Admit exactly the weight-bearing paths the provider consumes.
         let text_encoder = base_dir.join("text_encoder");
         let vae = base_dir.join("vae");
         admit_candle_base_floor(
@@ -843,7 +838,6 @@ async fn generate_krea_imported_stream(
         )
         .await?;
     }
-
     let is_edit = request.mode == "edit_image";
 
     // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
@@ -881,40 +875,28 @@ async fn generate_krea_imported_stream(
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let engine_id = if is_edit {
+        "krea_2_turbo_edit"
+    } else {
+        "krea_2_turbo"
+    };
+    let spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(base_dir),
+    );
+    #[cfg(target_os = "macos")]
+    let spec = if adapters.is_empty() {
+        spec
+    } else {
+        spec.with_adapters(adapters)
+    };
+
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        KREA_IMPORTED_ENGINE,
+        engine_id,
         adapter_count,
-        move || {
-            // The S0b entrypoint reads the DiT from the single file, key-remaps native→diffusers,
-            // coverage/shape-validates it against the base tier's Krea 2 geometry (fail-closed — the
-            // architecture-compatibility check happens here, before pairing), installs any adapters onto
-            // the DiT (MLX), and sources the shared TE/VAE/tokenizer from `base_dir`. Descriptor: the
-            // distilled-Turbo t2i surface (`variant5` dense / `variant4` plain-int8 are Turbo merges), or
-            // the CFG-free Turbo **edit** surface (`turbo_edit_descriptor`) for an `edit_image` job.
-            #[cfg(target_os = "macos")]
-            let loaded = {
-                let descriptor = if is_edit {
-                    runtime_macos::providers::krea::turbo_edit_descriptor()
-                } else {
-                    runtime_macos::providers::krea::descriptor()
-                };
-                runtime_macos::providers::krea::load_from_native_dit_file(
-                    &dit, &base_dir, &adapters, descriptor,
-                )
-            };
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            let loaded = runtime_cuda::providers::krea::load_from_native_dit_file(
-                &dit,
-                &base_dir,
-                runtime_cuda::providers::krea::descriptor(),
-            );
-            let model = loaded
-            .map_err(|error| {
-                WorkerError::Engine(format!("Krea 2 imported checkpoint load failed: {error}"))
-            })?;
-            Ok(model)
-        },
+        spec,
+        "Krea 2 imported checkpoint load failed".to_owned(),
         move |model, tx, cancel| {
             // Build the conditioning once, then clone it per rendered image: the Kontext edit
             // `Reference`/`MultiReference` for an edit job (MLX), else the img2img `Reference` (or empty
@@ -930,7 +912,7 @@ async fn generate_krea_imported_stream(
                 }
                 if let Some(hires_fix) = hires_fix {
                     let (out_width, out_height, pixels) = generate_one_with_hires(
-                        model.as_ref(),
+                        model,
                         &prompt,
                         width,
                         height,
