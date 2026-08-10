@@ -2919,6 +2919,8 @@ mod tests {
         // runtime records and seven physical sessions without replacing any prior source receipt.
         // SC-18218 adds four eager MLX FLUX.2-dev runtime records across the q4/q8 tiers and
         // 768/1024 geometries.
+        // SC-18353 adds thirteen physical MLX source sessions for the exact deferred Qwen bf16/q4
+        // captures, without replacing the historical Qwen evidence they supersede for admission.
         // SC-16915 re-collects the MLX qwen_image and krea_2_turbo_control evidence at pin
         // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
         // superseded 7fbcb4a2/1244b82f/96b13b66 rows in place as history — a receipt cannot be
@@ -3010,6 +3012,57 @@ mod tests {
                 ),
             ),
         ]);
+        let qwen_sessions = BTreeMap::from([
+            (
+                "ims-0a88e8a2c2458d260e67",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-0ef338a58c51e4817de8",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-13fca8fa2f40f7c3190c",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-740649850057d6213fab",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-7950e071813e8805705c",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-a266e9aff977a2d60775",
+                ("bf16", StrategyRung::StagedResidency),
+            ),
+            ("ims-adfab948e327840be555", ("bf16", StrategyRung::Resident)),
+            (
+                "ims-afcf19e7b205488da74d",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-b4923bb54b289b41ca28",
+                ("bf16", StrategyRung::BoundedAttention),
+            ),
+            (
+                "ims-c181f62841b2d13bc390",
+                ("bf16", StrategyRung::BoundedDecode),
+            ),
+            (
+                "ims-d42d5acce36df4155e30",
+                ("q4", StrategyRung::BoundedAttention),
+            ),
+            (
+                "ims-e9d3e4897ee17296f42d",
+                ("q4", StrategyRung::BoundedTransformerResidency),
+            ),
+            (
+                "ims-f6e39653ec1d973f41cf",
+                ("bf16", StrategyRung::BoundedTransformerResidency),
+            ),
+        ]);
         let actual_session_ids = bundle
             .source_sessions
             .iter()
@@ -3019,11 +3072,12 @@ mod tests {
             .iter()
             .copied()
             .chain(flux2_sessions.keys().copied())
+            .chain(qwen_sessions.keys().copied())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual_session_ids, expected_session_ids);
         assert_eq!(
             bundle.source_sessions.len(),
-            preserved_session_ids.len() + flux2_sessions.len()
+            preserved_session_ids.len() + flux2_sessions.len() + qwen_sessions.len()
         );
         for session in &bundle.source_sessions {
             let Some((path, rung, mode, overlay)) = flux2_sessions.get(session.id.as_str()) else {
@@ -3037,21 +3091,46 @@ mod tests {
             assert_eq!(target.mode, *mode);
             assert_eq!(target.overlay, *overlay);
         }
-        assert!(bundle.source_sessions.iter().all(|session| {
-            session.hardware.extensions.contains_key("deviceId")
-                && session
+        for session in &bundle.source_sessions {
+            let Some((tier, rung)) = qwen_sessions.get(session.id.as_str()) else {
+                continue;
+            };
+            assert_eq!(session.kind, SourceSessionKind::PhysicalMlx);
+            assert_eq!(
+                session.source_path,
+                format!("docs/calibration/sc-18353/{}.log", session.id)
+            );
+            let target = session.target.as_ref().expect("SC-18353 target receipt");
+            assert_eq!(target.tier, *tier);
+            assert_eq!(target.rung, *rung);
+            assert_eq!(target.mode, "text_to_image");
+            assert_eq!(target.overlay, "none");
+            assert_eq!(
+                session
                     .hardware
                     .extensions
-                    .contains_key("computeCapability")
-                && session.hardware.extensions.contains_key("driverVersion")
-                && session.hardware.extensions.contains_key("runtimeVersion")
+                    .get("chip")
+                    .and_then(Value::as_str),
+                Some("Apple M5 Max")
+            );
+            assert_eq!(session.hardware.memory_bytes, 137_438_953_472);
+        }
+        assert!(bundle.source_sessions.iter().all(|session| {
+            session.kind == SourceSessionKind::PhysicalMlx
+                || (session.hardware.extensions.contains_key("deviceId")
+                    && session
+                        .hardware
+                        .extensions
+                        .contains_key("computeCapability")
+                    && session.hardware.extensions.contains_key("driverVersion")
+                    && session.hardware.extensions.contains_key("runtimeVersion"))
         }));
         let complete_count = bundle
             .records
             .iter()
             .filter(|record| record.status == RecordStatus::Complete)
             .count();
-        assert_eq!(complete_count, 52);
+        assert_eq!(complete_count, 65);
         let runtime_keys = bundle
             .records
             .iter()
@@ -3091,7 +3170,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::DeferredMaterialization)
                 .count(),
-            17
+            30
         );
     }
 
