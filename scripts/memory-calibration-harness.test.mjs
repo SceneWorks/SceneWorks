@@ -310,6 +310,49 @@ test("the Krea adapter's complete fragment shape passes the real harness with si
   );
 });
 
+test("the SDXL adapter's complete fragment shape passes the real harness and keeps string scope out of numeric axes", async () => {
+  const adapter = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  const start = adapter.indexOf("fn run_sdxl(request:");
+  const sdxlArm = adapter.slice(start, adapter.indexOf("fn run_krea_control", start));
+  assert.match(sdxlArm, /"status": "complete"/);
+  assert.match(sdxlArm, /"sweep": sdxl_complete_sweep\(request\)\?/);
+  assert.match(sdxlArm, /verify_plain_lifecycle\(/);
+  assert.match(sdxlArm, /"negativeMutation": \{/);
+
+  const record = qwenPositiveComplete();
+  record.target = {
+    modelId: "sdxl", provider: "sdxl", tier: "q4",
+    mode: "text_to_image", overlay: "none",
+    geometry: { width: 768, height: 768, batch: 1, frames: 1 },
+  };
+  record.fixture = "sdxl-base-mlx-q4-768-seed18379-step2";
+  record.calibrationFingerprint = "sdxl-mlx-unet-shared-ladder-v3";
+  record.strategy = {
+    rung: "bounded_transformer_residency",
+    engagedRungs: ["resident", "staged_residency", "bounded_transformer_residency"],
+    parameters: { transformerWindowSize: 1, transformerWindowComponent: "dit" },
+  };
+  record.sweep = {
+    axes: [{ parameter: "transformerWindowSize", testedValues: [1] }],
+    cases: [{ parameters: structuredClone(record.strategy.parameters), result: "passed" }],
+    rangeVerified: true,
+  };
+  record.negativeMutation.parameters = structuredClone(record.strategy.parameters);
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+
+  const stringAxis = structuredClone(record);
+  stringAxis.sweep.axes.push({ parameter: "transformerWindowComponent", testedValues: ["dit"] });
+  assert.throws(
+    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [stringAxis] }),
+    /schema validation failed/,
+  );
+});
+
 test("complete status fails closed on scenario, quality, mutation, memory and loadability mutations", () => {
   const mutations = [
     [(r) => (r.scenarios.find((x) => x.name === "warm_repeat").result = "not_run"), /warm_repeat/],

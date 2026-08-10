@@ -1060,7 +1060,25 @@ fn planned_qwen_seed(request: &Value, tier: &str) -> Result<u64, String> {
 
 fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
     let strategy = planned_memory_strategy(request)?;
+    let parameters = protocol::strategy_parameters(request)?;
     let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
+    let transformer_window_component = match parameters.get("transformerWindowComponent") {
+        None if transformer_window_size.is_none() => None,
+        None => Some(TransformerComponent::Dit),
+        Some(value) if transformer_window_size.is_none() => {
+            return Err(format!(
+                "planned.strategy.parameters.transformerWindowComponent requires transformerWindowSize, got {value}"
+            ));
+        }
+        Some(value) => match value.as_str() {
+            Some("dit") => Some(TransformerComponent::Dit),
+            _ => {
+                return Err(format!(
+                    "planned.strategy.parameters.transformerWindowComponent must be \"dit\" for the implemented MLX adapter arms, got {value}"
+                ));
+            }
+        },
+    };
     let (precision, quant) = match planned_qwen_tier(request)? {
         "bf16" => (Precision::Bf16, None),
         "q4" => (Precision::Bf16, Some(Quant::Q4)),
@@ -1074,8 +1092,7 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
             decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
             attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
             transformer_window_size,
-            transformer_window_component: transformer_window_size
-                .map(|_| TransformerComponent::Dit),
+            transformer_window_component,
         },
         tier: MemoryNumericTier {
             precision,
@@ -2473,7 +2490,7 @@ fn krea_base_context(
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct KreaBaseLifecycleMetrics {
+struct PlainLifecycleMetrics {
     clean_warm_peak: u64,
     clean_post_cleanup: AllocatorState,
     max_fault_post_cleanup: AllocatorState,
@@ -2481,19 +2498,20 @@ struct KreaBaseLifecycleMetrics {
     max_recovery_post_cleanup: AllocatorState,
 }
 
-fn verify_krea_base_lifecycle(
+fn verify_plain_lifecycle(
     generator: &dyn Generator,
     context: &MemoryRunContext,
     selected: &Image,
-    width: u32,
-    height: u32,
-    seed: u64,
-) -> Result<KreaBaseLifecycleMetrics, String> {
+    request_factory: &dyn Fn() -> GenerationRequest,
+    provider_label: &str,
+    maximum_error_threshold: f64,
+    mean_error_threshold: f64,
+) -> Result<PlainLifecycleMetrics, String> {
     clear_cache();
     reset_peak_memory();
     let clean_warm = one_image(scoped_generate(
         generator,
-        krea_base_request(width, height, seed),
+        request_factory(),
         context,
         None,
         &mut |_| {},
@@ -2503,11 +2521,13 @@ fn verify_krea_base_lifecycle(
     let clean_post_cleanup = AllocatorState::capture_current();
     let bounds = LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
     let (warm_maximum, warm_mean) = image_max_mean_abs(selected, &clean_warm)?;
-    if warm_maximum > KREA_MAX_THRESHOLD || warm_mean > KREA_MEAN_THRESHOLD {
-        return Err("Krea base clean warm control changed the deterministic output".to_owned());
+    if warm_maximum > maximum_error_threshold || warm_mean > mean_error_threshold {
+        return Err(format!(
+            "{provider_label} clean warm control changed the deterministic output"
+        ));
     }
 
-    let mut metrics = KreaBaseLifecycleMetrics {
+    let mut metrics = PlainLifecycleMetrics {
         clean_warm_peak,
         clean_post_cleanup,
         ..Default::default()
@@ -2521,7 +2541,7 @@ fn verify_krea_base_lifecycle(
         if phase == MemoryPhase::Conditioning {
             cancel.cancel();
         }
-        let mut cancelled = krea_base_request(width, height, seed);
+        let mut cancelled = request_factory();
         cancelled.cancel = cancel.clone();
         let result = scoped_generate(generator, cancelled, context, None, &mut |progress| {
             if (phase == MemoryPhase::Denoise
@@ -2535,12 +2555,12 @@ fn verify_krea_base_lifecycle(
             Err(error) if error.to_ascii_lowercase().contains("cancel") => {}
             Err(error) => {
                 return Err(format!(
-                    "Krea base {phase:?} cancellation returned the wrong error: {error}"
+                    "{provider_label} {phase:?} cancellation returned the wrong error: {error}"
                 ));
             }
             Ok(_) => {
                 return Err(format!(
-                    "Krea base {phase:?} cancellation returned images instead of the typed cancellation path"
+                    "{provider_label} {phase:?} cancellation returned images instead of the typed cancellation path"
                 ));
             }
         }
@@ -2556,14 +2576,14 @@ fn verify_krea_base_lifecycle(
             .max(fault_cleanup.cache);
         if !bounds.allows_retained(fault_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{provider_label} {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         reset_peak_memory();
         let recovery = one_image(scoped_generate(
             generator,
-            krea_base_request(width, height, seed),
+            request_factory(),
             context,
             None,
             &mut |_| {},
@@ -2572,7 +2592,7 @@ fn verify_krea_base_lifecycle(
         metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
         if !bounds.allows_warm_peak(recovery_peak) {
             return Err(format!(
-                "Krea base {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+                "{provider_label} {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
             ));
         }
         clear_cache();
@@ -2587,14 +2607,14 @@ fn verify_krea_base_lifecycle(
             .max(recovery_cleanup.cache);
         if !bounds.allows_retained(recovery_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{provider_label} {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
-        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
+        if maximum > maximum_error_threshold || mean > mean_error_threshold {
             return Err(format!(
-                "Krea base {phase:?} cancellation cleanup changed the warm follow-up"
+                "{provider_label} {phase:?} cancellation cleanup changed the warm follow-up"
             ));
         }
     }
@@ -2606,7 +2626,7 @@ fn verify_krea_base_lifecycle(
     ] {
         let result = scoped_generate(
             generator,
-            krea_base_request(width, height, seed),
+            request_factory(),
             context,
             Some(phase),
             &mut |_| {},
@@ -2615,12 +2635,12 @@ fn verify_krea_base_lifecycle(
             Err(error) if error.contains("injected memory-strategy calibration error") => {}
             Err(error) => {
                 return Err(format!(
-                    "Krea base {phase:?} error injection returned the wrong error: {error}"
+                    "{provider_label} {phase:?} error injection returned the wrong error: {error}"
                 ));
             }
             Ok(_) => {
                 return Err(format!(
-                    "Krea base {phase:?} error injection returned images instead of failing at its physical boundary"
+                    "{provider_label} {phase:?} error injection returned images instead of failing at its physical boundary"
                 ));
             }
         }
@@ -2636,14 +2656,14 @@ fn verify_krea_base_lifecycle(
             .max(fault_cleanup.cache);
         if !bounds.allows_retained(fault_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{provider_label} {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         reset_peak_memory();
         let recovery = one_image(scoped_generate(
             generator,
-            krea_base_request(width, height, seed),
+            request_factory(),
             context,
             None,
             &mut |_| {},
@@ -2652,7 +2672,7 @@ fn verify_krea_base_lifecycle(
         metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
         if !bounds.allows_warm_peak(recovery_peak) {
             return Err(format!(
-                "Krea base {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+                "{provider_label} {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
             ));
         }
         clear_cache();
@@ -2667,14 +2687,14 @@ fn verify_krea_base_lifecycle(
             .max(recovery_cleanup.cache);
         if !bounds.allows_retained(recovery_cleanup) {
             return Err(format!(
-                "Krea base {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "{provider_label} {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
-        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
+        if maximum > maximum_error_threshold || mean > mean_error_threshold {
             return Err(format!(
-                "Krea base {phase:?} error cleanup changed the warm follow-up"
+                "{provider_label} {phase:?} error cleanup changed the warm follow-up"
             ));
         }
     }
@@ -2847,8 +2867,15 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
             "Krea base selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
         ));
     }
-    let lifecycle =
-        verify_krea_base_lifecycle(generator.as_ref(), &context, &selected, width, height, seed)?;
+    let lifecycle = verify_plain_lifecycle(
+        generator.as_ref(),
+        &context,
+        &selected,
+        &|| krea_base_request(width, height, seed),
+        "Krea base",
+        KREA_MAX_THRESHOLD,
+        KREA_MEAN_THRESHOLD,
+    )?;
     let mutated = qwen_negative_mutation(&selected);
     let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
     if mutated_maximum <= KREA_MAX_THRESHOLD && mutated_mean <= KREA_MEAN_THRESHOLD {
@@ -2938,14 +2965,69 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
 }
 
 fn validate_sdxl_target(request: &Value) -> Result<(), String> {
-    let provider = protocol::planned(request)?
-        .pointer("/target/provider")
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
     if provider != SDXL_PROVIDER {
         return Err(format!(
             "MLX SDXL base calibration does not implement provider {provider:?}"
         ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != SDXL_PROVIDER {
+        return Err(format!(
+            "MLX SDXL base calibration requires modelId {SDXL_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_image" {
+        return Err(format!(
+            "MLX SDXL base calibration requires reference-free text_to_image mode, got {mode:?}"
+        ));
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
+        let actual = geometry
+            .get(axis)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
+        if actual != expected {
+            return Err(format!(
+                "MLX SDXL base calibration requires geometry.{axis} == {expected}, got {actual}"
+            ));
+        }
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "MLX SDXL base calibration requires {field} == 0 when declared"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "MLX SDXL base calibration requires {field} == false when declared"
+                ));
+            }
+        }
     }
     protocol::validate_plain_overlay_target(request, SDXL_PLAIN_EXECUTION_PATH)
 }
@@ -2974,6 +3056,20 @@ fn planned_sdxl_seed(request: &Value, tier: &str, width: u32) -> Result<u64, Str
         ));
     }
     Ok(seed)
+}
+
+fn sdxl_complete_sweep(request: &Value) -> Result<Value, String> {
+    let parameters = protocol::strategy_parameters(request)?;
+    let axes = parameters
+        .iter()
+        .filter_map(|(name, value)| value.as_u64().map(|value| (name, value)))
+        .map(|(name, value)| json!({ "parameter": name, "testedValues": [value] }))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "axes": axes,
+        "cases": [{ "parameters": parameters, "result": "passed" }],
+        "rangeVerified": true,
+    }))
 }
 
 fn sdxl_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
@@ -3222,6 +3318,15 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             "SDXL selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
         ));
     }
+    let lifecycle = verify_plain_lifecycle(
+        generator.as_ref(),
+        &context,
+        &selected,
+        &|| sdxl_request(width, height, seed),
+        "SDXL base",
+        MAX_THRESHOLD,
+        MEAN_THRESHOLD,
+    )?;
     let mutated = qwen_negative_mutation(&selected);
     let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
     if mutated_maximum <= MAX_THRESHOLD && mutated_mean <= MEAN_THRESHOLD {
@@ -3229,7 +3334,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
     }
 
     let mut fragment = json!({
-        "status": "runtime_complete",
+        "status": "complete",
         "strategy": strategy,
         "loadShape": load_shape_key(calibration.load_shape),
         "artifact": {
@@ -3237,16 +3342,14 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             "resolvedRevision": revision,
             "variant": tier,
         },
-        "sweep": {
-            "axes": [],
-            "cases": [{ "parameters": protocol::strategy_parameters(request)?, "result": "passed" }],
-            "rangeVerified": true,
-        },
+        "sweep": sdxl_complete_sweep(request)?,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
             { "name": "unknown_budget", "result": "passed" },
             { "name": "stale_evidence", "result": "passed" },
             { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "reason": "conditioning, denoise, and decode cancellation returned typed cancellation; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
@@ -3293,6 +3396,14 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
                 ("denoiseActivePeak", "bytes", denoise.active),
                 ("decodeActivePeak", "bytes", decode.active),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", lifecycle.clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", lifecycle.clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", lifecycle.clean_post_cleanup.cache),
+                ("lifecycleMaximumFaultPostCleanupActive", "bytes", lifecycle.max_fault_post_cleanup.active),
+                ("lifecycleMaximumFaultPostCleanupCache", "bytes", lifecycle.max_fault_post_cleanup.cache),
+                ("lifecycleMaximumRecoveryPeak", "bytes", lifecycle.max_recovery_peak),
+                ("lifecycleMaximumRecoveryPostCleanupActive", "bytes", lifecycle.max_recovery_post_cleanup.active),
+                ("lifecycleMaximumRecoveryPostCleanupCache", "bytes", lifecycle.max_recovery_post_cleanup.cache),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
                 ("loadShapeDeferred", "count", 1),
@@ -5039,7 +5150,16 @@ mod sdxl_tests {
     fn minimal_request(provider: &str) -> Value {
         json!({
             "planned": {
-                "target": { "provider": provider, "mode": "text_to_image", "overlay": "none" },
+                "target": {
+                    "provider": provider,
+                    "modelId": "sdxl",
+                    "tier": "q4",
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
+                "loadShape": "deferred_materialization",
+                "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
                 "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} }
             }
         })
@@ -5106,6 +5226,93 @@ mod sdxl_tests {
         assert_eq!(context.geometry.reference_count, 0);
         assert!(context.overlay.is_none());
         assert!(!context.use_pid);
+    }
+
+    #[test]
+    fn sdxl_arm_rejects_every_non_base_target_axis_before_weight_work() {
+        let base = minimal_request(SDXL_PROVIDER);
+        assert!(validate_sdxl_target(&base).is_ok());
+        for (pointer, value) in [
+            ("/planned/target/modelId", json!("realvisxl")),
+            ("/planned/target/mode", json!("image_to_image")),
+            ("/planned/target/geometry/batch", json!(2)),
+            ("/planned/target/geometry/frames", json!(2)),
+        ] {
+            let mut request = base.clone();
+            *request.pointer_mut(pointer).unwrap_or_else(|| {
+                panic!("test mutation path must exist before assignment: {pointer}")
+            }) = value;
+            assert!(
+                validate_sdxl_target(&request).is_err(),
+                "SDXL target mutation {pointer} must fail closed"
+            );
+        }
+
+        for (field, value) in [("referenceCount", json!(1)), ("hasReference", json!(true))] {
+            let mut request = base.clone();
+            request["planned"]["target"][field] = value;
+            assert!(
+                validate_sdxl_target(&request).is_err(),
+                "SDXL target mutation {field} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn sdxl_selection_rejects_a_non_dit_or_detached_window_component() {
+        let mut request = minimal_request(SDXL_PROVIDER);
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_transformer_residency",
+            "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "dit" }
+        });
+        assert_eq!(
+            planned_selection(&request)
+                .unwrap()
+                .parameters
+                .transformer_window_component,
+            Some(TransformerComponent::Dit)
+        );
+
+        for component in ["text_encoder", "both", "unknown"] {
+            request["planned"]["strategy"]["parameters"]["transformerWindowComponent"] =
+                json!(component);
+            assert!(
+                planned_selection(&request).is_err(),
+                "component {component:?} must not execute as Dit"
+            );
+        }
+        request["planned"]["strategy"]["parameters"] =
+            json!({ "transformerWindowComponent": "dit" });
+        assert!(planned_selection(&request).is_err());
+    }
+
+    #[test]
+    fn sdxl_complete_sweep_attests_the_exact_tuple_without_a_string_axis() {
+        let mut request = minimal_request(SDXL_PROVIDER);
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_transformer_residency",
+            "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+            "parameters": { "transformerWindowSize": 5, "transformerWindowComponent": "dit" }
+        });
+        assert_eq!(
+            sdxl_complete_sweep(&request).unwrap(),
+            json!({
+                "axes": [{ "parameter": "transformerWindowSize", "testedValues": [5] }],
+                "cases": [{
+                    "parameters": {
+                        "transformerWindowSize": 5,
+                        "transformerWindowComponent": "dit"
+                    },
+                    "result": "passed"
+                }],
+                "rangeVerified": true
+            })
+        );
+
+        request["planned"]["strategy"] =
+            json!({ "rung": "resident", "engagedRungs": ["resident"], "parameters": {} });
+        assert_eq!(sdxl_complete_sweep(&request).unwrap()["axes"], json!([]));
     }
 
     #[test]

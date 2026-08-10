@@ -332,7 +332,9 @@ deferred-materialization shape. Each tier includes only Resident, Staged, and bo
 residency across cadence `1, 2, 5, 10` (`Dit`): SDXL's bounded decode and bounded attention were measured `Missing`
 and are not invented here. The arm records synchronized conditioning/denoise/decode peaks, exact-fit,
 unknown-budget and stale-evidence behavior, selected-versus-unselected parity, and a required failing
-output mutation. SC-18379 publishes apparatus only—no physical capture, evidence record, or manifest
+output mutation. It also injects cancellation and errors at every physical phase, bounds retained
+memory against a clean warm control, and requires a successful deterministic warm recovery after
+each fault. SC-18379 publishes apparatus only—no physical capture, evidence record, or manifest
 binding—so production remains estimate-backed until a real Apple-Silicon capture is reviewed.
 
 The Candle adapter requires:
