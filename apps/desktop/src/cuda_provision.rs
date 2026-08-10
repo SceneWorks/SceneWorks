@@ -87,7 +87,13 @@ struct Component {
 }
 
 /// The pinned redist set — matches what the build previously bundled (CUDA 12.9 gen
-/// libs + the onnxruntime-gpu 1.26.0 CV-aux set). URLs + sha256 were resolved from
+/// libs + the onnxruntime-gpu 1.26.0 CV-aux set). The onnxruntime version is NOT free to
+/// bump: it must satisfy the ORT API the `ort` crate requests (its `api-N` feature, pinned
+/// in the workspace Cargo.toml — asserted at compile time beside
+/// `PROVISIONED_ONNXRUNTIME_MINOR` in `crates/sceneworks-worker/src/pose_jobs.rs`), and
+/// onnxruntime-gpu 1.27+ moved its CUDA execution provider to CUDA 13 (`nvidia-*-cu13`),
+/// which the CUDA 12.9 set below cannot serve. Raising it is a whole-runtime migration.
+/// URLs + sha256 were resolved from
 /// the PyPI JSON API (`https://pypi.org/pypi/<pkg>/<ver>/json`, the `*-win_amd64.whl`
 /// file's `url` + `digests.sha256`). nvidia-*-cu12 wheels put DLLs under
 /// `nvidia/<comp>/bin/*.dll`; onnxruntime-gpu under `onnxruntime/capi/*.dll`. The

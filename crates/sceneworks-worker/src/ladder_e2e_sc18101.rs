@@ -109,7 +109,7 @@ impl Tee {
 ///
 /// Field ordering inside a `tracing` event is the macro's, not a map's, so the captured text is
 /// deterministic for a given build — which is what makes the cross-commit diff meaningful.
-fn with_captured_tracing<T>(body: impl FnOnce() -> T) -> (T, String) {
+pub(crate) fn with_captured_tracing<T>(body: impl FnOnce() -> T) -> (T, String) {
     let tee = Tee::default();
     let writer = tee.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -127,7 +127,11 @@ fn with_captured_tracing<T>(body: impl FnOnce() -> T) -> (T, String) {
 ///
 /// A tier DIRECTORY existing is not proof the tier is present, so this probes for the weights file
 /// the loader actually opens rather than for the directory.
-fn cached_tier_dir(repo_dir: &str, tier: &str, sentinel: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn cached_tier_dir(
+    repo_dir: &str,
+    tier: &str,
+    sentinel: &str,
+) -> Option<(PathBuf, String)> {
     let snapshots = PathBuf::from(std::env::var("HOME").ok()?)
         .join(".cache/huggingface/hub")
         .join(repo_dir)
@@ -140,7 +144,7 @@ fn cached_tier_dir(repo_dir: &str, tier: &str, sentinel: &str) -> Option<(PathBu
 }
 
 /// The shipped manifest entry for one catalog model id.
-fn shipped_manifest_entry(model_id: &str) -> serde_json::Map<String, Value> {
+pub(crate) fn shipped_manifest_entry(model_id: &str) -> serde_json::Map<String, Value> {
     let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
     let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
         .expect("builtin.models.jsonc parses");
@@ -264,7 +268,7 @@ fn production_spec(engine: &str, tier_dir: &std::path::Path, tier: &str) -> Load
     spec
 }
 
-fn inputs(width: u32, height: u32) -> MlxRequestInputs {
+pub(crate) fn inputs(width: u32, height: u32) -> MlxRequestInputs {
     MlxRequestInputs {
         width,
         height,
@@ -303,7 +307,7 @@ fn write_log(name: &str, text: &str) -> PathBuf {
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-fn gib(bytes: u64) -> f64 {
+pub(crate) fn gib(bytes: u64) -> f64 {
     bytes as f64 / GIB
 }
 
@@ -1065,7 +1069,7 @@ fn c3_current_lane_enforces_exact_static_boundary() {
 
 /// The `path=…`/`fallback_reason=…` pair from the admission event, recorded alongside a scenario so
 /// the written record can never claim a route the run did not take (sc-18101 review #1).
-fn admission_path_line(log: &str) -> String {
+pub(crate) fn admission_path_line(log: &str) -> String {
     log.lines()
         .find(|line| line.contains("mlx_memory_admission_path"))
         .and_then(|line| {
@@ -1207,7 +1211,7 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
 /// Scoped to a line because the admission events and the selection event carry the same field
 /// names for different rungs: a whole-buffer search would return whichever candidate happened to be
 /// logged first, not the one that was selected.
-fn field_in_line(log: &str, marker: &str, key: &str) -> Option<u64> {
+pub(crate) fn field_in_line(log: &str, marker: &str, key: &str) -> Option<u64> {
     log.lines()
         .find(|line| line.contains(marker))
         .and_then(|line| field_after(line, key))

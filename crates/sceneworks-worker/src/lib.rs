@@ -507,6 +507,12 @@ mod resolution_sweep;
 // checkout, a stale-closure lane admitting at the widened peak, and an oversized request refusing.
 #[cfg(all(test, target_os = "macos"))]
 mod ladder_e2e_sc18101;
+// On-device validation of z_image_turbo's DeferredMaterialization Sequential cold load (sc-18409).
+// Test-only + macOS-only; one `#[ignore]`d scenario proving PR #2215's `apply_residency_policy`
+// coupling (Sequential branch ⇒ deferred load shape for z_image_turbo) on real bf16 weights, with
+// a real render and an observed-peak-vs-admitted-ceiling comparison.
+#[cfg(all(test, target_os = "macos"))]
+mod ladder_e2e_sc18409;
 // On-device build helper for the Wan2.2 T2V-A14B quant matrix (sc-9942, epic 8506). Test-only +
 // macOS-only; an #[ignore]d helper that drives `runtime_macos::providers::wan::convert::convert_t2v_14b` once per tier
 // (bf16/q8/q4) against the native checkpoint to produce the self-contained hosted tier subdirs, then
