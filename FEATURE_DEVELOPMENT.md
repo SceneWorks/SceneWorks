@@ -81,6 +81,14 @@ merge-queue rule whose condition is the wildcard `feature/*`. The bootstrap
 command must treat the two exact queue rulesets and the two refs as one durable,
 recoverable operation.
 
+For each repository, capture the current `origin/main` SHA and verify every
+configured required context on that exact commit is terminal `success`,
+`skipped`, or `neutral` from the expected GitHub Actions app before mutation.
+Then install the exact queue ruleset and create the ref at that immutable SHA.
+Because the wildcard base policy sets `do_not_enforce_on_create=false`, pending,
+missing, wrong-app, or failed contexts are a stop condition; do not loosen the
+rule or silently choose an older commit to make branch creation succeed.
+
 The equivalent manual ref creation is:
 
 ```bash
@@ -334,31 +342,34 @@ must:
 
 The exact-branch queue ruleset must also have no bypass actors. It contains the
 `merge_queue` rule for that one feature ref, uses merge commits, and uses merge
-groups of one entry unless deliberate batch validation is accepted. If GitHub
-ever stops aggregating a queue-only exact ruleset with the wildcard pull-request
-and status rules, repeat those rules in the exact ruleset; never remove them
-from the wildcard layer. Record the exact queue ruleset ID and payload digest
-with the epic bootstrap evidence.
+groups of one entry unless deliberate batch validation is accepted. If the
+disposable proof shows that GitHub does not aggregate a queue-only exact
+ruleset with the wildcard pull-request and status rules, repeat those rules in
+the exact ruleset; never remove them from the wildcard layer. Record the exact
+queue ruleset ID and payload digest with the epic bootstrap evidence.
 
-The wildcard deletion-guard ruleset must contain only the deletion rule and normally have no
-bypass actors. After a disposable ruleset proof succeeds, or after the
-post-merge checklist succeeds, an administrator may temporarily add one closed
-maintainer team or cleanup automation as its exact cleanup actor. If neither
-exists, one explicitly named repository administrator may be the temporary
-actor; record its immutable actor ID, the approved proof-or-completed branch
-names, and the start/end of the cleanup window. Delete only those branches and
-immediately restore the no-bypass deletion guard. Never leave deletion
-authority active during an epic. Bypass is ruleset-wide: never put the
-deletion rule and its cleanup bypass in the core merge-policy ruleset, because
-that would also let the cleanup actor bypass pull-request, status-check, and
-non-fast-forward protections. Matching rulesets aggregate, so the no-bypass
-base and exact queue policies remain enforced during that bounded cleanup
-window. Delete the obsolete exact queue ruleset only after its feature ref has
-been deleted and the completed cleanup has been audited.
+The wildcard deletion-guard ruleset must contain only the deletion rule and
+normally have no bypass actors. After every non-cleanup assertion passes on a
+disposable proof branch, or after the post-merge checklist succeeds, an
+administrator may temporarily add one closed maintainer team or cleanup
+automation as its exact cleanup actor. If neither exists, one explicitly named
+repository administrator may be the temporary actor; record its immutable
+actor ID, the approved proof-or-completed branch names, and the start/end of
+the cleanup window. Delete only those branches and restore `bypass_actors: []`
+immediately in a finally-style cleanup step. Never leave deletion authority
+active during an epic. Bypass is ruleset-wide: never put the deletion rule and
+its cleanup bypass in the base policy or exact queue ruleset, because that
+would also let the cleanup actor bypass pull-request, status-check,
+non-fast-forward, or queue protections. Matching rulesets aggregate, so the
+no-bypass base and exact queue policies remain enforced during that bounded
+cleanup window. Audit the restored guard after ref deletion, then delete the
+obsolete exact queue ruleset.
 
-Start the rulesets in Evaluate mode if available, prove them with disposable
-branches, and activate them only after the check matrix is complete. GitHub's
-ruleset pattern and bypass behavior is documented in
+Evaluate mode, when available, is an optional preview of matched refs and rule
+evaluations; it cannot prove enforced denials or merge-queue admission. Activate
+the three layers on disposable branches before running those enforcement tests,
+and do not create the real epic branches until the complete proof matrix passes.
+GitHub's ruleset pattern and bypass behavior is documented in
 [Creating rulesets for a repository](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
 
 #### 2. Make every required SceneWorks check report
