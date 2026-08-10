@@ -276,7 +276,12 @@ pub(crate) fn training_progress(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
-    match plan.target.kernel.as_str() {
+    engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+}
+
+/// Pure production mapping used by both dispatch and matching-platform capability facts.
+pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
+    match kernel {
         "z_image_lora" => Some("z_image_turbo"),
         "sdxl_lora" => Some("sdxl"),
         // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
@@ -297,7 +302,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // MMDiT-X `sd3_5_medium` (T4 sc-7885). The trained adapter records `family: sd3` and applies
         // back at that base (Large also covers the family-arch-identical `sd3_5_large_turbo`) via the
         // `apply_sd3_adapters` seam — no base-model gating (family-match, like Krea Raw→Turbo).
-        "sd3_lora" => match plan.target.base_model.as_str() {
+        "sd3_lora" => match base_model {
             "sd3_5_large" => Some("sd3_5_large"),
             "sd3_5_medium" => Some("sd3_5_medium"),
             _ => None,
@@ -306,7 +311,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // Dense Wan2.2-TI2V-5B.
         "wan_lora" => Some("wan2_2_ti2v_5b"),
         // A14B dual-expert MoE; the T2V/I2V base model picks the trainer.
-        "wan_moe_lora" => match plan.target.base_model.as_str() {
+        "wan_moe_lora" => match base_model {
             "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
             "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
             _ => None,
@@ -315,7 +320,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // id as the inference generator of the training base. All three variants share one architecture,
         // so a LoRA trained on any applies back to every variant via `apply_anima_adapters`; the base
         // model selects which variant's dense weights the trainer loads (default `anima_base`).
-        "anima_lora" => match plan.target.base_model.as_str() {
+        "anima_lora" => match base_model {
             "anima_aesthetic" => Some("anima_aesthetic"),
             "anima_turbo" => Some("anima_turbo"),
             _ => Some("anima_base"),
@@ -335,7 +340,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // inference, so the adapter would be fitted on a distribution the model never sees and would
         // train silently WRONG rather than fail. Anything that is not the Base checkpoint therefore
         // resolves to `None` and fails loudly. See `mage_flow_edit_base` in sc-15320.
-        "mage_flow_lora" => match plan.target.base_model.as_str() {
+        "mage_flow_lora" => match base_model {
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },

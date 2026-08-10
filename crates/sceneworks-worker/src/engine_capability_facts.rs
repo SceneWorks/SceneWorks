@@ -252,6 +252,9 @@ pub struct RuntimeDescriptorFacts {
     /// SceneWorks job-payload id -> inference registry id, sourced from the production
     /// `MODEL_TABLE` used by worker dispatch.
     pub model_mappings: BTreeMap<String, String>,
+    /// Training-target id -> inference trainer registry id, sourced from the production worker
+    /// dispatch mapping rather than inferred from naming conventions.
+    pub trainer_mappings: BTreeMap<String, String>,
     /// The exact capability advertisement produced by the matching platform's production GPU
     /// worker constructor. The matrix replays canonical requests against this list and the API's
     /// `worker_supports_job` predicate instead of assigning utility support by hand.
@@ -477,10 +480,19 @@ pub fn collect_runtime_descriptor_facts() -> Result<RuntimeDescriptorFacts, Stri
         .iter()
         .map(|row| (row.sceneworks_id.to_owned(), row.engine_id.to_owned()))
         .collect();
+    let trainer_mappings = sceneworks_core::training::builtin_training_targets()
+        .targets
+        .into_iter()
+        .filter_map(|target| {
+            crate::training_jobs::engine_trainer_id_for(&target.kernel, &target.base_model)
+                .map(|engine_id| (target.id, engine_id.to_owned()))
+        })
+        .collect();
     let worker_capabilities = matching_platform_worker_capabilities()?;
     runtime_descriptor_facts_from_snapshot(
         snapshot,
         model_mappings,
+        trainer_mappings,
         worker_capabilities,
         crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
         dumper_invocation(),
@@ -543,6 +555,7 @@ fn matching_platform_worker_capabilities() -> Result<Vec<String>, String> {
 pub fn runtime_descriptor_facts_from_snapshot(
     snapshot: serde_json::Value,
     model_mappings: BTreeMap<String, String>,
+    trainer_mappings: BTreeMap<String, String>,
     mut worker_capabilities: Vec<String>,
     inference_revision: &str,
     dumper: &str,
@@ -571,6 +584,9 @@ pub fn runtime_descriptor_facts_from_snapshot(
     if model_mappings.is_empty() {
         return Err("runtime capability facts have no SceneWorks model mappings".to_owned());
     }
+    if trainer_mappings.is_empty() {
+        return Err("runtime capability facts have no SceneWorks trainer mappings".to_owned());
+    }
     worker_capabilities.sort();
     if worker_capabilities.is_empty() {
         return Err("runtime capability facts have no worker capabilities".to_owned());
@@ -588,6 +604,7 @@ pub fn runtime_descriptor_facts_from_snapshot(
             dumper: dumper.to_owned(),
         },
         model_mappings,
+        trainer_mappings,
         worker_capabilities,
         snapshot,
     };
@@ -768,10 +785,12 @@ mod tests {
     #[test]
     fn runtime_snapshot_requires_rich_generator_and_trainer_records() {
         let mappings = BTreeMap::from([("probe-ui".to_owned(), "probe".to_owned())]);
+        let trainers = BTreeMap::from([("probe-target".to_owned(), "probe".to_owned())]);
         let capabilities = vec!["gpu".to_owned(), "image_generate".to_owned()];
         let facts = runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             mappings.clone(),
+            trainers.clone(),
             capabilities.clone(),
             "rev",
             "dump",
@@ -780,6 +799,7 @@ mod tests {
         assert_eq!(facts.backend().unwrap(), "mlx");
         assert_eq!(facts.file_name().unwrap(), "capabilities.mlx.json");
         assert_eq!(facts.model_mappings["probe-ui"], "probe");
+        assert_eq!(facts.trainer_mappings["probe-target"], "probe");
         assert_eq!(facts.worker_capabilities, ["gpu", "image_generate"]);
 
         for field in ["generator_capabilities", "trainer_capabilities"] {
@@ -788,6 +808,7 @@ mod tests {
             let error = runtime_descriptor_facts_from_snapshot(
                 mutated,
                 mappings.clone(),
+                trainers.clone(),
                 capabilities.clone(),
                 "rev",
                 "dump",
@@ -801,6 +822,7 @@ mod tests {
         let error = runtime_descriptor_facts_from_snapshot(
             mismatched,
             mappings.clone(),
+            trainers.clone(),
             capabilities.clone(),
             "rev",
             "dump",
@@ -811,6 +833,7 @@ mod tests {
         assert!(runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             BTreeMap::new(),
+            trainers.clone(),
             capabilities.clone(),
             "rev",
             "dump",
@@ -820,6 +843,17 @@ mod tests {
         assert!(runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             mappings.clone(),
+            BTreeMap::new(),
+            capabilities.clone(),
+            "rev",
+            "dump",
+        )
+        .expect_err("missing trainer mappings must fail")
+        .contains("trainer mappings"));
+        assert!(runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            mappings.clone(),
+            trainers.clone(),
             Vec::new(),
             "rev",
             "dump",
@@ -829,6 +863,7 @@ mod tests {
         assert!(runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             mappings,
+            trainers,
             vec!["gpu".to_owned(), "gpu".to_owned()],
             "rev",
             "dump",
