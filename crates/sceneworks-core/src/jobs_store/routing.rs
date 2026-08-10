@@ -10,7 +10,11 @@ pub(crate) mod gaps;
 pub(crate) mod matrix;
 pub(crate) mod mlx;
 
-use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+
+use serde_json::{json, Map, Value};
+
+use crate::contracts::{ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage};
 
 /// Every built-in SenseNova-U1 variant. Keep routing, understanding, and gap
 /// classification on one list so adding an Infographic/distilled tier cannot
@@ -23,6 +27,157 @@ pub(crate) const SENSENOVA_MODEL_IDS: &[&str] = &[
     "sensenova_u1_8b_infographic_v2_fast",
     "sensenova_u1_8b_infographic_v3_fast",
 ];
+
+/// Every video mode exposed by the production UI/router catalog.
+///
+/// The capability dumper consumes this accessor instead of carrying a second mode list, so a newly
+/// shipped mode cannot be omitted from matching-platform descriptor evidence.
+pub fn video_ui_modes() -> &'static [&'static str] {
+    catalog::VIDEO_UI_MODES
+}
+
+/// Build the canonical, structurally complete production request used to probe one video route.
+/// The payload contains the same required asset seams enforced by the Rust API before enqueue.
+pub fn canonical_video_route_probe(model: &str, mode: &str) -> Result<JobSnapshot, String> {
+    let (job_type, payload) = match mode {
+        "image_to_video" => (
+            JobType::VideoGenerate,
+            json!({ "model": model, "mode": mode, "sourceAssetId": "probe" }),
+        ),
+        "first_last_frame" => (
+            JobType::VideoGenerate,
+            json!({
+                "model": model,
+                "mode": mode,
+                "sourceAssetId": "probe",
+                "lastFrameAssetId": "probe-end"
+            }),
+        ),
+        "extend_clip" => (
+            JobType::VideoExtend,
+            json!({ "model": model, "mode": mode, "sourceClipAssetId": "probe" }),
+        ),
+        "video_bridge" => (
+            JobType::VideoBridge,
+            json!({
+                "model": model,
+                "mode": mode,
+                "sourceClipAssetId": "probe",
+                "bridgeRightClipAssetId": "probe-right"
+            }),
+        ),
+        "replace_person" => (
+            JobType::PersonReplace,
+            json!({
+                "model": model,
+                "mode": mode,
+                "sourceClipAssetId": "probe",
+                "personTrackId": "probe-person",
+                "characterId": "probe-character"
+            }),
+        ),
+        "animate_character" => (
+            JobType::VideoGenerate,
+            json!({
+                "model": model,
+                "mode": mode,
+                "referenceAssetId": "probe",
+                "sourceClipAssetId": "probe-clip"
+            }),
+        ),
+        "video_to_video" => (
+            JobType::VideoGenerate,
+            json!({ "model": model, "mode": mode, "sourceClipAssetId": "probe" }),
+        ),
+        "reference_to_video" => (
+            JobType::VideoGenerate,
+            json!({ "model": model, "mode": mode, "referenceAssetIds": ["probe"] }),
+        ),
+        "reference_video_to_video" => (
+            JobType::VideoGenerate,
+            json!({
+                "model": model,
+                "mode": mode,
+                "sourceClipAssetId": "probe",
+                "referenceAssetIds": ["probe-reference"]
+            }),
+        ),
+        "multi_video_to_video" => (
+            JobType::VideoGenerate,
+            json!({
+                "model": model,
+                "mode": mode,
+                "sourceClipAssetIds": ["probe-a", "probe-b"]
+            }),
+        ),
+        "ads2v" => (
+            JobType::VideoGenerate,
+            json!({
+                "model": model,
+                "mode": mode,
+                "sourceClipAssetId": "probe",
+                "referenceClipAssetId": "probe-reference-video",
+                "referenceAssetIds": ["probe-reference-image"]
+            }),
+        ),
+        "text_to_video" => (
+            JobType::VideoGenerate,
+            json!({ "model": model, "mode": mode }),
+        ),
+        other => return Err(format!("unknown production video mode {other:?}")),
+    };
+    let payload = payload
+        .as_object()
+        .cloned()
+        .expect("canonical video payload is an object");
+    Ok(JobSnapshot {
+        id: "video-route-probe".to_owned(),
+        job_type,
+        status: JobStatus::Queued,
+        project_id: None,
+        project_name: None,
+        payload,
+        result: Map::new(),
+        requested_gpu: "auto".to_owned(),
+        assigned_gpu: None,
+        worker_id: None,
+        progress: ContractNumber::from(0_u64),
+        stage: ProgressStage::Queued,
+        message: String::new(),
+        error: None,
+        eta_seconds: None,
+        elapsed_seconds: None,
+        attempts: 0,
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        cancel_requested: false,
+        created_at: String::new(),
+        updated_at: String::new(),
+        started_at: None,
+        completed_at: None,
+        canceled_at: None,
+        last_heartbeat_at: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        title: None,
+        extra: BTreeMap::new(),
+    })
+}
+
+/// Evaluate one canonical video request through the production backend predicate.
+pub fn video_backend_mode_supported(
+    backend: &str,
+    model: &str,
+    mode: &str,
+) -> Result<bool, String> {
+    let job = canonical_video_route_probe(model, mode)?;
+    match backend {
+        "mlx" => Ok(mlx::video_job_is_mlx_eligible(&job)),
+        "candle" => Ok(candle::video_job_is_candle_eligible(&job)),
+        other => Err(format!("unknown native video backend {other:?}")),
+    }
+}
 
 /// True when a payload key contains a non-blank string.
 pub(super) fn has_nonempty_string(payload: &Map<String, Value>, key: &str) -> bool {

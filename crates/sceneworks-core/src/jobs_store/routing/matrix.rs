@@ -39,11 +39,36 @@ const ROUTING_MLX: &str = include_str!("mlx.rs");
 const ROUTING_CANDLE: &str = include_str!("candle.rs");
 const ROUTING_GAPS: &str = include_str!("gaps.rs");
 const API_VALIDATION: &str = include_str!("../../../../../apps/rust-api/src/jobs.rs");
+const API_GENERATION: &str = include_str!("../../../../../apps/rust-api/src/generation.rs");
+const API_CONTRACT_ENTRY: &str = include_str!("../../../../../apps/rust-api/src/lib.rs");
+const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
 const WORKER_IMAGE_DISPATCH: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/base.rs");
 const WORKER_ENGINE_TABLE: &str = include_str!("../../../../sceneworks-worker/src/engines.rs");
 const WORKER_GPU_CAPABILITIES: &str = include_str!("../../../../sceneworks-worker/src/gpu.rs");
+const WORKER_VIDEO_DISPATCH: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/mod.rs");
+const WORKER_VIDEO_WAN: &str = include_str!("../../../../sceneworks-worker/src/video_jobs/wan.rs");
+const WORKER_VIDEO_VACE: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/vace.rs");
+const WORKER_VIDEO_LTX: &str = include_str!("../../../../sceneworks-worker/src/video_jobs/ltx.rs");
+const WORKER_VIDEO_SVD: &str = include_str!("../../../../sceneworks-worker/src/video_jobs/svd.rs");
+const WORKER_VIDEO_BERNINI: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/bernini.rs");
+const WORKER_VIDEO_SCAIL2: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/scail2.rs");
+const WORKER_VIDEO_KREA: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/krea_realtime.rs");
+const WORKER_VIDEO_MOCHI: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/mochi.rs");
+const WORKER_VIDEO_CANDLE: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/candle.rs");
+const WORKER_VIDEO_SEEDVR2: &str =
+    include_str!("../../../../sceneworks-worker/src/video_jobs/seedvr2.rs");
+const WORKER_AUDIO_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/audio_jobs.rs");
+const WORKER_UTILITY_DISPATCH: &str =
+    include_str!("../../../../sceneworks-worker/src/upscale_jobs.rs");
 const WORKER_TRAINING_DISPATCH: &str =
     include_str!("../../../../sceneworks-worker/src/training_jobs.rs");
 const SCHEDULER: &str = include_str!("../../jobs_store.rs");
@@ -52,6 +77,14 @@ const WEB_IMAGE_REQUEST: &str = include_str!("../../../../../apps/web/src/imageJ
 const WEB_IMAGE_ADVANCED: &str = include_str!("../../../../../apps/web/src/imageJobAdvanced.js");
 const WEB_MAC_GATING: &str = include_str!("../../../../../apps/web/src/macGating.js");
 const WEB_PREVIEW_GATING: &str = include_str!("../../../../../apps/web/src/previewSupport.js");
+const WEB_SIMPLE_JOBS: &str = include_str!("../../../../../apps/web/src/simple/simpleJobs.js");
+const WEB_SIMPLE_VIDEO: &str =
+    include_str!("../../../../../apps/web/src/simple/SimpleVideoStudio.jsx");
+const WEB_VIDEO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx");
+const WEB_SIMPLE_AUDIO: &str =
+    include_str!("../../../../../apps/web/src/simple/simpleAudioParts.jsx");
+const WEB_AUDIO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx");
+const WEB_UPSCALE_ENGINES: &str = include_str!("../../../../../apps/web/src/upscaleEngines.js");
 
 const GENERATOR: &str = "cargo run -p sceneworks-core --bin dump-backend-capability-matrix";
 
@@ -179,24 +212,33 @@ struct ManifestDownload {
     platforms: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeDescriptorFacts {
     schema_version: u32,
     generated_from: RuntimeProvenance,
     model_mappings: BTreeMap<String, String>,
+    video_model_mappings: Vec<VideoModelMapping>,
     trainer_mappings: BTreeMap<String, String>,
     worker_capabilities: Vec<String>,
     snapshot: RuntimeSnapshot,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct VideoModelMapping {
+    model_id: String,
+    mode: String,
+    engine_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeProvenance {
     inference_revision: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RuntimeSnapshot {
     backend: String,
     generator_capabilities: Vec<GeneratorCapabilityFacts>,
@@ -219,7 +261,7 @@ struct RuntimeSnapshot {
     audio_embedder_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct GeneratorCapabilityFacts {
     id: String,
     backend: String,
@@ -234,7 +276,7 @@ struct GeneratorCapabilityFacts {
     supports_prompt_enhancement: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct TrainerCapabilityFacts {
     id: String,
     backend: String,
@@ -412,7 +454,7 @@ fn manifested_operations(model: &ManifestModel) -> Vec<String> {
 fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescriptorFacts, String> {
     let facts: RuntimeDescriptorFacts = serde_json::from_str(source)
         .map_err(|error| format!("parse {expected_backend} runtime descriptor facts: {error}"))?;
-    if facts.schema_version != 1 {
+    if facts.schema_version != 2 {
         return Err(format!(
             "unsupported {expected_backend} runtime descriptor schema {}",
             facts.schema_version
@@ -432,6 +474,11 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
     if facts.worker_capabilities.is_empty() {
         return Err(format!(
             "{expected_backend} runtime artifact has no production worker capabilities"
+        ));
+    }
+    if facts.video_model_mappings.is_empty() {
+        return Err(format!(
+            "{expected_backend} runtime artifact has no production video model mappings"
         ));
     }
     Ok(facts)
@@ -496,28 +543,73 @@ fn validate_runtime_pair(
             ));
         }
     }
+    for facts in [mlx, candle] {
+        let mut keys = BTreeSet::new();
+        for mapping in &facts.video_model_mappings {
+            if mapping.model_id.trim().is_empty()
+                || mapping.mode.trim().is_empty()
+                || mapping.engine_ids.is_empty()
+            {
+                return Err(format!(
+                    "{} runtime artifact contains an incomplete video mapping",
+                    facts.snapshot.backend
+                ));
+            }
+            if !keys.insert((&mapping.model_id, &mapping.mode)) {
+                return Err(format!(
+                    "{} runtime artifact repeats video mapping {:?}/{:?}",
+                    facts.snapshot.backend, mapping.model_id, mapping.mode
+                ));
+            }
+            for engine in &mapping.engine_ids {
+                let Some(descriptor) = descriptor_by_engine(facts, engine) else {
+                    return Err(format!(
+                        "{} video mapping {:?}/{:?} names missing descriptor {:?}",
+                        facts.snapshot.backend, mapping.model_id, mapping.mode, engine
+                    ));
+                };
+                if !matches!(descriptor.modality.as_str(), "video" | "both") {
+                    return Err(format!(
+                        "{} video mapping {:?}/{:?} names non-video descriptor {:?}",
+                        facts.snapshot.backend, mapping.model_id, mapping.mode, engine
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
-fn generator_descriptor<'a>(
+fn generator_descriptors<'a>(
     facts: &'a RuntimeDescriptorFacts,
     model: &str,
-) -> Option<&'a GeneratorCapabilityFacts> {
-    let mapped = facts.model_mappings.get(model).and_then(|engine| {
-        facts
-            .snapshot
-            .generator_capabilities
-            .iter()
-            .find(|descriptor| descriptor.id == *engine)
-    });
-    mapped.or_else(|| {
+) -> Vec<&'a GeneratorCapabilityFacts> {
+    let mut engine_ids = BTreeSet::new();
+    if let Some(engine) = facts.model_mappings.get(model) {
+        engine_ids.insert(engine.as_str());
+    }
+    for mapping in facts
+        .video_model_mappings
+        .iter()
+        .filter(|mapping| mapping.model_id == model)
+    {
+        engine_ids.extend(mapping.engine_ids.iter().map(String::as_str));
+    }
+    let mut descriptors: Vec<_> = engine_ids
+        .into_iter()
+        .filter_map(|engine| descriptor_by_engine(facts, engine))
+        .collect();
+    if descriptors.is_empty() {
         let provider = provider_alias(model);
-        facts
-            .snapshot
-            .audio_generator_capabilities
-            .iter()
-            .find(|descriptor| descriptor.id == provider)
-    })
+        descriptors.extend(
+            facts
+                .snapshot
+                .audio_generator_capabilities
+                .iter()
+                .find(|descriptor| descriptor.id == provider),
+        );
+    }
+    descriptors
 }
 
 fn descriptor_is_native_to_snapshot(
@@ -527,12 +619,29 @@ fn descriptor_is_native_to_snapshot(
     descriptor.backend == facts.snapshot.backend
 }
 
-fn native_generator_descriptor<'a>(
+fn native_generator_descriptors<'a>(
     facts: &'a RuntimeDescriptorFacts,
     model: &str,
-) -> Option<&'a GeneratorCapabilityFacts> {
-    generator_descriptor(facts, model)
+) -> Vec<&'a GeneratorCapabilityFacts> {
+    generator_descriptors(facts, model)
+        .into_iter()
         .filter(|descriptor| descriptor_is_native_to_snapshot(descriptor, facts))
+        .collect()
+}
+
+fn native_video_route_descriptors<'a>(
+    facts: &'a RuntimeDescriptorFacts,
+    model: &str,
+    mode: &str,
+) -> Vec<&'a GeneratorCapabilityFacts> {
+    facts
+        .video_model_mappings
+        .iter()
+        .filter(|mapping| mapping.model_id == model && mapping.mode == mode)
+        .flat_map(|mapping| mapping.engine_ids.iter())
+        .filter_map(|engine| descriptor_by_engine(facts, engine))
+        .filter(|descriptor| descriptor_is_native_to_snapshot(descriptor, facts))
+        .collect()
 }
 
 fn descriptor_modality<'a>(
@@ -542,7 +651,7 @@ fn descriptor_modality<'a>(
 ) -> Result<Option<&'a str>, String> {
     let modalities: BTreeSet<&str> = [mlx, candle]
         .into_iter()
-        .filter_map(|facts| generator_descriptor(facts, &model.id))
+        .flat_map(|facts| generator_descriptors(facts, &model.id))
         .map(|descriptor| descriptor.modality.as_str())
         .collect();
     if modalities.contains("audio") {
@@ -582,19 +691,31 @@ fn descriptor_by_engine<'a>(
 }
 
 fn descriptor_preview(model: &ManifestModel, facts: &RuntimeDescriptorFacts) -> Option<bool> {
-    native_generator_descriptor(facts, &model.id).map(|descriptor| descriptor.supports_preview)
+    let descriptors = native_generator_descriptors(facts, &model.id);
+    (!descriptors.is_empty()).then(|| {
+        descriptors
+            .iter()
+            .any(|descriptor| descriptor.supports_preview)
+    })
 }
 
 fn descriptor_supports_adapter(
     facts: &RuntimeDescriptorFacts,
     model: &str,
+    video_mode: Option<&str>,
     network_type: &str,
 ) -> bool {
-    native_generator_descriptor(facts, model).is_some_and(|descriptor| match network_type {
-        "lora" => descriptor.supports_lora,
-        "lokr" => descriptor.supports_lokr,
-        _ => false,
-    })
+    let descriptors = video_mode.map_or_else(
+        || native_generator_descriptors(facts, model),
+        |mode| native_video_route_descriptors(facts, model, mode),
+    );
+    descriptors
+        .into_iter()
+        .any(|descriptor| match network_type {
+            "lora" => descriptor.supports_lora,
+            "lokr" => descriptor.supports_lokr,
+            _ => false,
+        })
 }
 
 fn backend_worker(facts: &RuntimeDescriptorFacts) -> Result<WorkerSnapshot, String> {
@@ -648,10 +769,26 @@ fn routed_cell(
     candle_facts: &RuntimeDescriptorFacts,
     require_descriptor: bool,
 ) -> Result<CapabilityCell, String> {
-    let mlx = backend_supports(job, mlx_facts)?
-        && (!require_descriptor || native_generator_descriptor(mlx_facts, model).is_some());
-    let candle = backend_supports(job, candle_facts)?
-        && (!require_descriptor || native_generator_descriptor(candle_facts, model).is_some());
+    let evaluate = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
+        let routed = backend_supports(job, facts)?;
+        if !routed || !require_descriptor {
+            return Ok(routed);
+        }
+        let descriptors = if category == "video" {
+            native_video_route_descriptors(facts, model, capability)
+        } else {
+            native_generator_descriptors(facts, model)
+        };
+        if descriptors.is_empty() && category == "video" {
+            return Err(format!(
+                "production {} router admits shipped video route {model:?}/{capability:?}, but the matching-platform artifact has no descriptor mapping",
+                facts.snapshot.backend
+            ));
+        }
+        Ok(!descriptors.is_empty())
+    };
+    let mlx = evaluate(mlx_facts)?;
+    let candle = evaluate(candle_facts)?;
     Ok(cell(
         capability.to_owned(),
         mlx,
@@ -670,8 +807,9 @@ fn operation_cell(
     let job = probe_job(job_type, &model.id, payload)?;
     if operation == "prompt_enhancement" {
         let supports = |facts: &RuntimeDescriptorFacts| {
-            native_generator_descriptor(facts, &model.id)
-                .is_some_and(|descriptor| descriptor.supports_prompt_enhancement)
+            native_generator_descriptors(facts, &model.id)
+                .into_iter()
+                .any(|descriptor| descriptor.supports_prompt_enhancement)
         };
         let mlx = supports(mlx_facts) && backend_supports(&job, mlx_facts)?;
         let candle = supports(candle_facts) && backend_supports(&job, candle_facts)?;
@@ -763,7 +901,7 @@ fn descriptor_conditioning_union(
 ) -> Result<Vec<String>, String> {
     let mut shapes = BTreeSet::new();
     for facts in [mlx, candle] {
-        if let Some(descriptor) = generator_descriptor(facts, &model.id) {
+        for descriptor in generator_descriptors(facts, &model.id) {
             shapes.extend(descriptor.conditioning.iter().cloned());
         }
     }
@@ -788,29 +926,27 @@ fn descriptor_conditioning_union(
 fn canonical_model_request(
     model: &ManifestModel,
     descriptor_modality: Option<&str>,
+    mlx: &RuntimeDescriptorFacts,
+    candle: &RuntimeDescriptorFacts,
 ) -> Result<(JobType, Value), String> {
     if descriptor_modality == Some("audio") || model.model_type == "audio" {
         return Ok((JobType::AudioGenerate, json!({ "prompt": "probe" })));
     }
     if model.model_type == "video" {
-        let mode = [
-            "text_to_video",
-            "image_to_video",
-            "first_last_frame",
-            "extend_clip",
-            "video_bridge",
-            "replace_person",
-            "animate_character",
-        ]
-        .into_iter()
-        .find(|mode| manifested_operations(model).iter().any(|item| item == mode))
-        .ok_or_else(|| {
-            format!(
-                "video model {:?} has no canonical manifested mode",
-                model.id
-            )
-        })?;
-        return Ok((video_job_type(mode), video_payload(mode)));
+        for mode in VIDEO_UI_MODES {
+            let job = super::canonical_video_route_probe(&model.id, mode)?;
+            let mapped = !native_video_route_descriptors(mlx, &model.id, mode).is_empty()
+                || !native_video_route_descriptors(candle, &model.id, mode).is_empty();
+            if mapped && (backend_supports(&job, mlx)? || backend_supports(&job, candle)?) {
+                let mut payload = job.payload;
+                payload.remove("model");
+                return Ok((job.job_type, Value::Object(payload)));
+            }
+        }
+        return Err(format!(
+            "video model {:?} has no routed descriptor-backed canonical mode",
+            model.id
+        ));
     }
     if model.model_type == "image" {
         for operation in [
@@ -846,8 +982,55 @@ fn conditioning_payload(
     candle: &RuntimeDescriptorFacts,
 ) -> Result<(JobType, Value), String> {
     let modality = descriptor_modality(model, mlx, candle)?;
-    let (mut job_type, mut payload) = canonical_model_request(model, modality)?;
+    let (mut job_type, mut payload) = canonical_model_request(model, modality, mlx, candle)?;
     let operations = manifested_operations(model);
+
+    if model.model_type == "video" {
+        let candidates: &[&str] = match shape {
+            "reference" => &["image_to_video"],
+            "keyframe" => &["first_last_frame"],
+            "multiReference" | "reduxRefs" => &[
+                "reference_to_video",
+                "reference_video_to_video",
+                "ads2v",
+                "animate_character",
+                "replace_person",
+            ],
+            "videoClip" => &[
+                "video_to_video",
+                "reference_video_to_video",
+                "multi_video_to_video",
+                "ads2v",
+                "extend_clip",
+                "video_bridge",
+            ],
+            "controlClip" => &["replace_person", "animate_character"],
+            other => {
+                return Err(format!(
+                    "descriptor video conditioning {other:?} has no canonical production mode"
+                ));
+            }
+        };
+        for mode in candidates {
+            let job = super::canonical_video_route_probe(&model.id, mode)?;
+            let route_supports_shape = |facts: &RuntimeDescriptorFacts| {
+                native_video_route_descriptors(facts, &model.id, mode)
+                    .into_iter()
+                    .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape))
+            };
+            if (route_supports_shape(mlx) && backend_supports(&job, mlx)?)
+                || (route_supports_shape(candle) && backend_supports(&job, candle)?)
+            {
+                let mut payload = job.payload;
+                payload.remove("model");
+                return Ok((job.job_type, Value::Object(payload)));
+            }
+        }
+        return Err(format!(
+            "video descriptor conditioning {shape:?} for {:?} has no routed, structurally valid production request",
+            model.id
+        ));
+    }
 
     match shape {
         "referenceAudio" | "voiceEmbedding" if modality == Some("audio") => {
@@ -946,8 +1129,19 @@ fn conditioning_cell(
     let (job_type, payload) = conditioning_payload(model, shape, mlx_facts, candle_facts)?;
     let job = probe_job(job_type, &model.id, payload)?;
     let supports = |facts: &RuntimeDescriptorFacts| {
-        native_generator_descriptor(facts, &model.id)
-            .is_some_and(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape))
+        let descriptors = if model.model_type == "video" {
+            let mode = job
+                .payload
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            native_video_route_descriptors(facts, &model.id, mode)
+        } else {
+            native_generator_descriptors(facts, &model.id)
+        };
+        descriptors
+            .into_iter()
+            .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape))
     };
     let mlx = supports(mlx_facts) && backend_supports(&job, mlx_facts)?;
     let candle = supports(candle_facts) && backend_supports(&job, candle_facts)?;
@@ -966,12 +1160,16 @@ fn adapter_cell(
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<CapabilityCell, String> {
     let modality = descriptor_modality(model, mlx_facts, candle_facts)?;
-    let (job_type, mut payload) = canonical_model_request(model, modality)?;
+    let (job_type, mut payload) =
+        canonical_model_request(model, modality, mlx_facts, candle_facts)?;
     payload["loras"] = json!([{ "id": "probe", "networkType": adapter }]);
     let job = probe_job(job_type, &model.id, payload)?;
-    let mlx = descriptor_supports_adapter(mlx_facts, &model.id, adapter)
+    let video_mode = (model.model_type == "video")
+        .then(|| job.payload.get("mode").and_then(Value::as_str))
+        .flatten();
+    let mlx = descriptor_supports_adapter(mlx_facts, &model.id, video_mode, adapter)
         && backend_supports(&job, mlx_facts)?;
-    let candle = descriptor_supports_adapter(candle_facts, &model.id, adapter)
+    let candle = descriptor_supports_adapter(candle_facts, &model.id, video_mode, adapter)
         && backend_supports(&job, candle_facts)?;
     Ok(cell(
         adapter.to_owned(),
@@ -994,7 +1192,7 @@ fn precision_union(
         .map(str::to_owned)
         .collect();
     for facts in [mlx, candle] {
-        if let Some(descriptor) = generator_descriptor(facts, &model.id) {
+        for descriptor in generator_descriptors(facts, &model.id) {
             if matches!(descriptor.modality.as_str(), "image" | "video" | "both") {
                 tiers.insert("bf16".to_owned());
             }
@@ -1025,8 +1223,17 @@ fn manifest_tier_support(model: &ManifestModel, tier: &str, backend: &str) -> bo
     })
 }
 
-fn descriptor_tier_support(facts: &RuntimeDescriptorFacts, model: &str, tier: &str) -> bool {
-    native_generator_descriptor(facts, model).is_some_and(|descriptor| {
+fn descriptor_tier_support(
+    facts: &RuntimeDescriptorFacts,
+    model: &str,
+    video_mode: Option<&str>,
+    tier: &str,
+) -> bool {
+    let descriptors = video_mode.map_or_else(
+        || native_generator_descriptors(facts, model),
+        |mode| native_video_route_descriptors(facts, model, mode),
+    );
+    descriptors.into_iter().any(|descriptor| {
         tier == "bf16"
             || descriptor
                 .supported_quants
@@ -1042,7 +1249,7 @@ fn precision_payload(
     candle: &RuntimeDescriptorFacts,
 ) -> Result<(JobType, Value), String> {
     let modality = descriptor_modality(model, mlx, candle)?;
-    let (job_type, mut payload) = canonical_model_request(model, modality)?;
+    let (job_type, mut payload) = canonical_model_request(model, modality, mlx, candle)?;
     let advanced = match tier {
         "bf16" => None,
         "q4" => Some(json!({ "mlxQuantize": 4 })),
@@ -1069,9 +1276,12 @@ fn precision_cell(
 ) -> Result<CapabilityCell, String> {
     let (job_type, payload) = precision_payload(model, tier, mlx_facts, candle_facts)?;
     let job = probe_job(job_type, &model.id, payload)?;
+    let video_mode = (model.model_type == "video")
+        .then(|| job.payload.get("mode").and_then(Value::as_str))
+        .flatten();
     let support = |facts: &RuntimeDescriptorFacts| {
         let backend = facts.snapshot.backend.as_str();
-        let descriptor = descriptor_tier_support(facts, &model.id, tier);
+        let descriptor = descriptor_tier_support(facts, &model.id, video_mode, tier);
         let artifact_only = model
             .downloads
             .iter()
@@ -1308,32 +1518,10 @@ fn shortcut_url(work_item: &str) -> String {
 }
 
 fn video_payload(mode: &str) -> Value {
-    match mode {
-        "image_to_video" => json!({ "mode": mode, "sourceAssetId": "probe" }),
-        "first_last_frame" => json!({
-            "mode": mode,
-            "sourceAssetId": "probe",
-            "lastFrameAssetId": "probe-end"
-        }),
-        "extend_clip" => json!({ "mode": mode, "sourceClipAssetId": "probe" }),
-        "video_bridge" => json!({
-            "mode": mode,
-            "sourceClipAssetId": "probe",
-            "bridgeRightClipAssetId": "probe-right"
-        }),
-        "replace_person" => json!({
-            "mode": mode,
-            "sourceClipAssetId": "probe",
-            "personTrackId": "probe-person",
-            "characterId": "probe-character"
-        }),
-        "animate_character" => json!({
-            "mode": mode,
-            "referenceAssetId": "probe",
-            "sourceClipAssetId": "probe-clip"
-        }),
-        _ => json!({ "mode": mode }),
-    }
+    let mut job = super::canonical_video_route_probe("capability-matrix-probe", mode)
+        .expect("VIDEO_UI_MODES contains only canonical production modes");
+    job.payload.remove("model");
+    Value::Object(job.payload)
 }
 
 fn video_job_type(mode: &str) -> JobType {
@@ -1437,6 +1625,49 @@ fn validate_probe_structure(
             }
             if mode == Some("first_last_frame") {
                 require(nonempty("lastFrameAssetId"), "lastFrameAssetId is required")?;
+            }
+            if matches!(
+                mode,
+                Some("video_to_video" | "reference_video_to_video" | "ads2v")
+            ) {
+                require(
+                    nonempty("sourceClipAssetId"),
+                    "sourceClipAssetId is required",
+                )?;
+            }
+            if matches!(
+                mode,
+                Some("reference_to_video" | "reference_video_to_video" | "ads2v")
+            ) {
+                require(
+                    payload
+                        .get("referenceAssetIds")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ids| !ids.is_empty()),
+                    "referenceAssetIds is required",
+                )?;
+            }
+            if mode == Some("multi_video_to_video") {
+                require(
+                    payload
+                        .get("sourceClipAssetIds")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ids| ids.len() >= 2),
+                    "at least two sourceClipAssetIds are required",
+                )?;
+            }
+            if mode == Some("ads2v") {
+                require(
+                    nonempty("referenceClipAssetId"),
+                    "referenceClipAssetId is required",
+                )?;
+            }
+            if mode == Some("animate_character") {
+                require(nonempty("referenceAssetId"), "referenceAssetId is required")?;
+                require(
+                    nonempty("sourceClipAssetId"),
+                    "sourceClipAssetId is required",
+                )?;
             }
         }
         JobType::VideoExtend => {
@@ -2058,12 +2289,28 @@ fn source_digests() -> BTreeMap<String, String> {
         ("routerCandle", ROUTING_CANDLE),
         ("routerGaps", ROUTING_GAPS),
         ("apiValidation", API_VALIDATION),
+        ("apiGeneration", API_GENERATION),
+        ("apiContractEntry", API_CONTRACT_ENTRY),
+        ("apiDto", API_DTO),
         ("scheduler", SCHEDULER),
         ("trainingCatalog", TRAINING_CATALOG),
         ("workerDispatch", WORKER_DISPATCH),
         ("workerImageDispatch", WORKER_IMAGE_DISPATCH),
         ("workerEngineTable", WORKER_ENGINE_TABLE),
         ("workerGpuCapabilities", WORKER_GPU_CAPABILITIES),
+        ("workerVideoDispatch", WORKER_VIDEO_DISPATCH),
+        ("workerVideoWan", WORKER_VIDEO_WAN),
+        ("workerVideoVace", WORKER_VIDEO_VACE),
+        ("workerVideoLtx", WORKER_VIDEO_LTX),
+        ("workerVideoSvd", WORKER_VIDEO_SVD),
+        ("workerVideoBernini", WORKER_VIDEO_BERNINI),
+        ("workerVideoScail2", WORKER_VIDEO_SCAIL2),
+        ("workerVideoKreaRealtime", WORKER_VIDEO_KREA),
+        ("workerVideoMochi", WORKER_VIDEO_MOCHI),
+        ("workerVideoCandle", WORKER_VIDEO_CANDLE),
+        ("workerVideoSeedvr2", WORKER_VIDEO_SEEDVR2),
+        ("workerAudioDispatch", WORKER_AUDIO_DISPATCH),
+        ("workerUtilityDispatch", WORKER_UTILITY_DISPATCH),
         ("workerTrainingDispatch", WORKER_TRAINING_DISPATCH),
         ("descriptorMlxFacts", MLX_DESCRIPTOR_FACTS),
         ("descriptorCandleFacts", CANDLE_DESCRIPTOR_FACTS),
@@ -2075,6 +2322,12 @@ fn source_digests() -> BTreeMap<String, String> {
         ("webImageAdvanced", WEB_IMAGE_ADVANCED),
         ("webMacGating", WEB_MAC_GATING),
         ("webPreviewGating", WEB_PREVIEW_GATING),
+        ("webSimpleJobs", WEB_SIMPLE_JOBS),
+        ("webSimpleVideo", WEB_SIMPLE_VIDEO),
+        ("webVideoStudio", WEB_VIDEO_STUDIO),
+        ("webSimpleAudio", WEB_SIMPLE_AUDIO),
+        ("webAudioStudio", WEB_AUDIO_STUDIO),
+        ("webUpscaleEngines", WEB_UPSCALE_ENGINES),
         ("exceptionRegister", EXCEPTIONS),
     ]
     .into_iter()
@@ -2419,13 +2672,11 @@ mod tests {
             .unwrap()["conditioning"] = json!([]);
         let missing_descriptor =
             runtime_facts(&serde_json::to_string(&value).unwrap(), "mlx").unwrap();
-        assert!(generator_descriptor(&original, "sana_1600m")
-            .unwrap()
+        assert!(generator_descriptors(&original, "sana_1600m")[0]
             .conditioning
             .iter()
             .any(|kind| kind == "reference"));
-        assert!(!generator_descriptor(&missing_descriptor, "sana_1600m")
-            .unwrap()
+        assert!(!generator_descriptors(&missing_descriptor, "sana_1600m")[0]
             .conditioning
             .iter()
             .any(|kind| kind == "reference"));
@@ -2470,6 +2721,108 @@ mod tests {
     }
 
     #[test]
+    fn every_routed_shipped_video_mode_has_an_exact_descriptor_join() {
+        let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        let matrix = backend_capability_matrix().unwrap();
+        let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+        for model in manifest
+            .models
+            .iter()
+            .filter(|model| model.model_type == "video")
+        {
+            let row = matrix.models.iter().find(|row| row.id == model.id).unwrap();
+            for mode in VIDEO_UI_MODES {
+                let job = super::super::canonical_video_route_probe(&model.id, mode).unwrap();
+                for facts in [&mlx, &candle] {
+                    if backend_supports(&job, facts).unwrap() {
+                        let descriptors = native_video_route_descriptors(facts, &model.id, mode);
+                        assert!(
+                            !descriptors.is_empty(),
+                            "{} routed {:?}/{mode:?} without a generated video descriptor join",
+                            facts.snapshot.backend,
+                            model.id
+                        );
+                        assert!(row
+                            .operation_and_mode
+                            .iter()
+                            .any(|cell| cell.capability == *mode));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_any_routed_video_mapping_fails_closed() {
+        let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+        for original in [&mlx, &candle] {
+            for index in 0..original.video_model_mappings.len() {
+                let mapping = &original.video_model_mappings[index];
+                let job =
+                    super::super::canonical_video_route_probe(&mapping.model_id, &mapping.mode)
+                        .unwrap();
+                assert!(backend_supports(&job, original).unwrap());
+                let mut mutated = original.clone();
+                mutated.video_model_mappings.remove(index);
+                assert!(routed_cell(
+                    &mapping.mode,
+                    &mapping.model_id,
+                    "video",
+                    &job,
+                    if original.snapshot.backend == "mlx" {
+                        &mutated
+                    } else {
+                        &mlx
+                    },
+                    if original.snapshot.backend == "candle" {
+                        &mutated
+                    } else {
+                        &candle
+                    },
+                    true,
+                )
+                .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn drift_digest_covers_video_audio_and_utility_owners() {
+        let sources = source_digests();
+        for required in [
+            "apiGeneration",
+            "apiContractEntry",
+            "apiDto",
+            "workerVideoDispatch",
+            "workerVideoWan",
+            "workerVideoVace",
+            "workerVideoLtx",
+            "workerVideoSvd",
+            "workerVideoBernini",
+            "workerVideoScail2",
+            "workerVideoKreaRealtime",
+            "workerVideoMochi",
+            "workerVideoCandle",
+            "workerVideoSeedvr2",
+            "workerAudioDispatch",
+            "workerUtilityDispatch",
+            "webSimpleJobs",
+            "webSimpleVideo",
+            "webVideoStudio",
+            "webSimpleAudio",
+            "webAudioStudio",
+            "webUpscaleEngines",
+        ] {
+            assert!(
+                sources.contains_key(required),
+                "missing source digest {required}"
+            );
+        }
+    }
+
+    #[test]
     fn every_descriptor_axis_for_a_shipped_generator_has_a_matrix_cell() {
         let matrix = backend_capability_matrix().unwrap();
         let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
@@ -2480,7 +2833,7 @@ mod tests {
             let row = matrix.models.iter().find(|row| row.id == model.id).unwrap();
             let descriptors: Vec<_> = [&mlx, &candle]
                 .into_iter()
-                .filter_map(|facts| generator_descriptor(facts, &model.id))
+                .flat_map(|facts| generator_descriptors(facts, &model.id))
                 .collect();
             if descriptors.is_empty() {
                 continue;

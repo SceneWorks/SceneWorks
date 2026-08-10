@@ -365,9 +365,9 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   const runtimeBackends = runtimeNames.map((name) => {
     const facts = JSON.parse(readFileSync(join(runtimeDir, name), "utf8"));
     const backend = facts?.snapshot?.backend;
-    if (facts?.schemaVersion !== 1 || typeof backend !== "string" || backend.length === 0) {
+    if (facts?.schemaVersion !== 2 || typeof backend !== "string" || backend.length === 0) {
       throw new Error(
-        `runtime/${name} is not a schema-1 rich runtime descriptor dump; re-dump it on the ` +
+        `runtime/${name} is not a schema-2 rich runtime descriptor dump; re-dump it on the ` +
           "matching platform rather than projecting or hand-editing descriptor facts.",
       );
     }
@@ -380,6 +380,15 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
       trainers.length === 0 ||
       !Array.isArray(facts?.workerCapabilities) ||
       facts.workerCapabilities.length === 0 ||
+      !Array.isArray(facts?.videoModelMappings) ||
+      facts.videoModelMappings.length === 0 ||
+      facts.videoModelMappings.some(
+        (mapping) =>
+          typeof mapping?.modelId !== "string" ||
+          typeof mapping?.mode !== "string" ||
+          !Array.isArray(mapping?.engineIds) ||
+          mapping.engineIds.length === 0,
+      ) ||
       generators.some(
         (descriptor) =>
           !Array.isArray(descriptor?.conditioning) ||
@@ -390,7 +399,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
       )
     ) {
       throw new Error(
-        `runtime/${name} omits conditioning, adapter, quant, prompt-enhancement, trainer, or worker capability truth; ` +
+        `runtime/${name} omits video mappings, conditioning, adapter, quant, prompt-enhancement, trainer, or worker capability truth; ` +
           "re-dump the full runtime snapshot on the matching platform.",
       );
     }
@@ -638,9 +647,10 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     });
   const runtimeFactsFile = (backend, revision, narrow = false) =>
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
       modelMappings: { x: "x" },
+      videoModelMappings: [{ modelId: "video-x", mode: "text_to_video", engineIds: ["x"] }],
       trainerMappings: { x: "x" },
       workerCapabilities: ["gpu", "image_generate", "lora_train_execute"],
       snapshot: {
@@ -747,7 +757,7 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   check(
     "a narrow runtime projection without parity axes is refused",
     !!narrowRuntime &&
-      /omits conditioning, adapter, quant, prompt-enhancement, trainer, or worker/.test(
+      /omits video mappings, conditioning, adapter, quant, prompt-enhancement, trainer, or worker/.test(
         narrowRuntime,
       ),
   );
@@ -768,7 +778,27 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   })();
   check(
     "a runtime snapshot missing prompt-enhancement support is refused",
-    !!missingPromptEnhancement && /omits conditioning, adapter, quant/.test(missingPromptEnhancement),
+    !!missingPromptEnhancement &&
+      /omits video mappings, conditioning, adapter, quant/.test(missingPromptEnhancement),
+  );
+  const missingVideoMappings = (() => {
+    const root = fixture();
+    try {
+      const path = join(root, "config/engine-capabilities/runtime/capabilities.mlx.json");
+      const facts = JSON.parse(readFileSync(path, "utf8"));
+      facts.videoModelMappings = [];
+      writeFileSync(path, JSON.stringify(facts));
+      verifyEngineCapabilityFacts(SHA, root);
+      return null;
+    } catch (error) {
+      return error?.message ?? String(error);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  check(
+    "a runtime snapshot missing production video mappings is refused",
+    !!missingVideoMappings && /omits video mappings/.test(missingVideoMappings),
   );
   // Both dumps carry `backend: "candle"`, so swapping the two directories is invisible to a check
   // that reads `backend` alone — it would count an audio file as media coverage and vice versa, and

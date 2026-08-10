@@ -252,6 +252,10 @@ pub struct RuntimeDescriptorFacts {
     /// SceneWorks job-payload id -> inference registry id, sourced from the production
     /// `MODEL_TABLE` used by worker dispatch.
     pub model_mappings: BTreeMap<String, String>,
+    /// Shipped SceneWorks video model/mode -> every inference generator the production worker may
+    /// load for that route. Generated from the builtin manifest, the core router predicate, and the
+    /// worker's real dispatch resolvers.
+    pub video_model_mappings: Vec<VideoModelMapping>,
     /// Training-target id -> inference trainer registry id, sourced from the production worker
     /// dispatch mapping rather than inferred from naming conventions.
     pub trainer_mappings: BTreeMap<String, String>,
@@ -260,6 +264,14 @@ pub struct RuntimeDescriptorFacts {
     /// `worker_supports_job` predicate instead of assigning utility support by hand.
     pub worker_capabilities: Vec<String>,
     pub snapshot: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoModelMapping {
+    pub model_id: String,
+    pub mode: String,
+    pub engine_ids: Vec<String>,
 }
 
 impl RuntimeDescriptorFacts {
@@ -480,6 +492,12 @@ pub fn collect_runtime_descriptor_facts() -> Result<RuntimeDescriptorFacts, Stri
         .iter()
         .map(|row| (row.sceneworks_id.to_owned(), row.engine_id.to_owned()))
         .collect();
+    let video_model_mappings = collect_video_model_mappings(
+        snapshot
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "runtime capability snapshot has no backend".to_owned())?,
+    )?;
     let trainer_mappings = sceneworks_core::training::builtin_training_targets()
         .targets
         .into_iter()
@@ -492,11 +510,80 @@ pub fn collect_runtime_descriptor_facts() -> Result<RuntimeDescriptorFacts, Stri
     runtime_descriptor_facts_from_snapshot(
         snapshot,
         model_mappings,
+        video_model_mappings,
         trainer_mappings,
         worker_capabilities,
         crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
         dumper_invocation(),
     )
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn collect_video_model_mappings(backend: &str) -> Result<Vec<VideoModelMapping>, String> {
+    let (_, source) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .ok_or_else(|| "builtin.models.jsonc is not embedded".to_owned())?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(source))
+            .map_err(|error| format!("parse embedded builtin.models.jsonc: {error}"))?;
+    let models = manifest
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "builtin.models.jsonc has no models array".to_owned())?;
+    let mut mappings = Vec::new();
+    for model in models
+        .iter()
+        .filter(|model| model.get("type").and_then(serde_json::Value::as_str) == Some("video"))
+    {
+        let model_id = model
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "shipped video manifest row has no id".to_owned())?;
+        for mode in sceneworks_core::jobs_store::video_ui_modes() {
+            if !sceneworks_core::jobs_store::video_backend_mode_supported(backend, model_id, mode)?
+            {
+                continue;
+            }
+            let mut engine_ids: Vec<String> =
+                crate::video_jobs::runtime_descriptor_engine_ids(model_id, mode)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+            engine_ids.sort();
+            engine_ids.dedup();
+            if engine_ids.is_empty() {
+                return Err(format!(
+                    "production {backend} router admits video route {model_id:?}/{mode:?}, but worker dispatch resolves no inference engine"
+                ));
+            }
+            mappings.push(VideoModelMapping {
+                model_id: model_id.to_owned(),
+                mode: (*mode).to_owned(),
+                engine_ids,
+            });
+        }
+    }
+    mappings
+        .sort_by(|left, right| (&left.model_id, &left.mode).cmp(&(&right.model_id, &right.mode)));
+    if mappings.is_empty() {
+        return Err(format!(
+            "production {backend} router exposes no shipped video routes"
+        ));
+    }
+    Ok(mappings)
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+)))]
+fn collect_video_model_mappings(_backend: &str) -> Result<Vec<VideoModelMapping>, String> {
+    Err("video model mappings require a matching MLX or backend-candle build".to_owned())
 }
 
 /// Build the same GPU capability list production registers on this matching-platform lane.
@@ -555,6 +642,7 @@ fn matching_platform_worker_capabilities() -> Result<Vec<String>, String> {
 pub fn runtime_descriptor_facts_from_snapshot(
     snapshot: serde_json::Value,
     model_mappings: BTreeMap<String, String>,
+    mut video_model_mappings: Vec<VideoModelMapping>,
     trainer_mappings: BTreeMap<String, String>,
     mut worker_capabilities: Vec<String>,
     inference_revision: &str,
@@ -628,13 +716,47 @@ pub fn runtime_descriptor_facts_from_snapshot(
     {
         return Err("runtime capability facts contain duplicate worker capabilities".to_owned());
     }
+    video_model_mappings
+        .sort_by(|left, right| (&left.model_id, &left.mode).cmp(&(&right.model_id, &right.mode)));
+    for pair in video_model_mappings.windows(2) {
+        if pair[0].model_id == pair[1].model_id && pair[0].mode == pair[1].mode {
+            return Err(format!(
+                "runtime capability facts contain duplicate video mapping {:?}/{:?}",
+                pair[0].model_id, pair[0].mode
+            ));
+        }
+    }
+    let generator_ids: std::collections::BTreeSet<&str> = snapshot
+        .get("generator_capabilities")
+        .and_then(serde_json::Value::as_array)
+        .expect("generator capability array checked above")
+        .iter()
+        .filter_map(|descriptor| descriptor.get("id").and_then(serde_json::Value::as_str))
+        .collect();
+    for mapping in &video_model_mappings {
+        if mapping.model_id.trim().is_empty()
+            || mapping.mode.trim().is_empty()
+            || mapping.engine_ids.is_empty()
+        {
+            return Err("runtime capability facts contain an incomplete video mapping".to_owned());
+        }
+        for engine_id in &mapping.engine_ids {
+            if !generator_ids.contains(engine_id.as_str()) {
+                return Err(format!(
+                    "production video mapping {:?}/{:?} names missing runtime descriptor {:?}",
+                    mapping.model_id, mapping.mode, engine_id
+                ));
+            }
+        }
+    }
     let facts = RuntimeDescriptorFacts {
-        schema_version: 1,
+        schema_version: 2,
         generated_from: FactsProvenance {
             inference_revision: inference_revision.to_owned(),
             dumper: dumper.to_owned(),
         },
         model_mappings,
+        video_model_mappings,
         trainer_mappings,
         worker_capabilities,
         snapshot,
@@ -822,6 +944,7 @@ mod tests {
         let facts = runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             mappings.clone(),
+            Vec::new(),
             trainers.clone(),
             capabilities.clone(),
             "rev",
@@ -840,6 +963,7 @@ mod tests {
             let error = runtime_descriptor_facts_from_snapshot(
                 mutated,
                 mappings.clone(),
+                Vec::new(),
                 trainers.clone(),
                 capabilities.clone(),
                 "rev",
@@ -857,6 +981,7 @@ mod tests {
         let error = runtime_descriptor_facts_from_snapshot(
             narrow,
             mappings.clone(),
+            Vec::new(),
             trainers.clone(),
             capabilities.clone(),
             "rev",
@@ -870,6 +995,7 @@ mod tests {
         let error = runtime_descriptor_facts_from_snapshot(
             mismatched,
             mappings.clone(),
+            Vec::new(),
             trainers.clone(),
             capabilities.clone(),
             "rev",
@@ -881,6 +1007,7 @@ mod tests {
         assert!(runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             BTreeMap::new(),
+            Vec::new(),
             trainers.clone(),
             capabilities.clone(),
             "rev",
@@ -891,6 +1018,7 @@ mod tests {
         assert!(runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             mappings.clone(),
+            Vec::new(),
             BTreeMap::new(),
             capabilities.clone(),
             "rev",
@@ -901,6 +1029,7 @@ mod tests {
         assert!(runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             mappings.clone(),
+            Vec::new(),
             trainers.clone(),
             Vec::new(),
             "rev",
@@ -911,6 +1040,7 @@ mod tests {
         assert!(runtime_descriptor_facts_from_snapshot(
             runtime_snapshot(),
             mappings,
+            Vec::new(),
             trainers,
             vec!["gpu".to_owned(), "gpu".to_owned()],
             "rev",
@@ -918,6 +1048,57 @@ mod tests {
         )
         .expect_err("duplicate capability facts must fail")
         .contains("duplicate"));
+    }
+
+    #[test]
+    fn runtime_snapshot_video_mappings_fail_closed() {
+        let mappings = BTreeMap::from([("probe-ui".to_owned(), "probe".to_owned())]);
+        let trainers = BTreeMap::from([("probe-target".to_owned(), "probe".to_owned())]);
+        let capabilities = vec!["gpu".to_owned(), "video_generate".to_owned()];
+        let mapping = VideoModelMapping {
+            model_id: "video-probe".to_owned(),
+            mode: "text_to_video".to_owned(),
+            engine_ids: vec!["probe".to_owned()],
+        };
+        let facts = runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            mappings.clone(),
+            vec![mapping.clone()],
+            trainers.clone(),
+            capabilities.clone(),
+            "rev",
+            "dump",
+        )
+        .expect("a complete production video join is accepted");
+        assert_eq!(facts.schema_version, 2);
+        assert_eq!(facts.video_model_mappings.len(), 1);
+        assert_eq!(facts.video_model_mappings[0], mapping);
+
+        let mut missing_engine = mapping.clone();
+        missing_engine.engine_ids = vec!["not-registered".to_owned()];
+        assert!(runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            mappings.clone(),
+            vec![missing_engine],
+            trainers.clone(),
+            capabilities.clone(),
+            "rev",
+            "dump",
+        )
+        .expect_err("a video join to a missing descriptor must fail")
+        .contains("missing runtime descriptor"));
+
+        assert!(runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            mappings,
+            vec![mapping.clone(), mapping],
+            trainers,
+            capabilities,
+            "rev",
+            "dump",
+        )
+        .expect_err("a duplicate model/mode mapping must fail")
+        .contains("duplicate video mapping"));
     }
 
     // The vacuous-green trap (epic 16948 decision, activity-16974). An empty registry is the
