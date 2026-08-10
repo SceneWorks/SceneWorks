@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_os = "macos")]
 use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};
+use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
 
 #[test]
 fn video_jobs_remains_split_into_real_engine_modules() {
@@ -6040,6 +6040,88 @@ fn scail2_engine_id_maps_only_the_scail2_family() {
     assert_eq!(scail2_engine_id("ltx_2_3"), None);
     assert_eq!(scail2_engine_id("scail2"), None);
     assert_eq!(scail2_engine_id(""), None);
+}
+
+/// The off-Mac resolver must consume the exact pinned bf16 tier that Model Manager installs, and it
+/// must use the provider-owned completeness predicate rather than a weaker worker-side sentinel.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    assert_eq!(
+        sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES,
+        runtime_cuda::providers::scail2::SHARED_TIER_FILES,
+        "API/MLX completeness and the pinned candle provider must require identical package files"
+    );
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_shared_")
+        .tempdir()
+        .expect("temp dir");
+    let tier = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
+        .expect("repo cache path")
+        .join("snapshots")
+        .join(SCAIL2_REVISION)
+        .join("bf16");
+    std::fs::create_dir_all(&tier).unwrap();
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+
+    // A directory or one plausible tensor is not an install. Missing any provider-required file
+    // must keep routing closed and name Model Manager as the repair path.
+    std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+    let error = resolve_managed_candle_scail2_model_dir(&settings)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Model Manager"), "got: {error}");
+    assert!(error.contains("bf16"), "got: {error}");
+
+    for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+        std::fs::write(tier.join(file), b"").unwrap();
+    }
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        tier
+    );
+
+    std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+}
+
+/// Existing manually assembled candle snapshots remain a compatibility fallback, but only when the
+/// provider accepts their complete legacy component shape.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_preserves_complete_legacy_layout_only() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_legacy_")
+        .tempdir()
+        .expect("temp dir");
+    let legacy = data.path().join("models").join("candle").join("scail2");
+    for component in ["transformer", "text_encoder", "vae", "clip", "tokenizer"] {
+        std::fs::create_dir_all(legacy.join(component)).unwrap();
+    }
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+
+    std::fs::write(legacy.join("tokenizer/tokenizer.json"), b"").unwrap();
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        legacy
+    );
 }
 
 /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),

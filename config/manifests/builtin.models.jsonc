@@ -12466,8 +12466,9 @@
     // I2V (dense) + the stock Wan2.1 z16 VAE / umt5-xxl + an open-CLIP XLM-RoBERTa
     // ViT-H/14 image tower; packed-token conditioning with auto-generated color-coded
     // segmentation masks (the worker paints them from native SAM3 — no user masks).
-    // macOS-only native MLX (mlx-gen-scail2, engine id "scail2_14b"); no Torch path.
-    // Distributed the SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
+    // Native MLX on macOS and native Candle on NVIDIA Windows/Linux (engine id "scail2_14b").
+    // Both backends share the dense bf16 tier; q4/q8 remain MLX-only. Distributed the
+    // SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
     // published as `SceneWorks/scail2-mlx` (sc-5445), downloaded on first use. This entry
     // covers the standalone `animate_character` mode (sc-5447 /
     // sc-5448) AND cross-identity `replace_person` (sc-5452 — the SAME engine with
@@ -12485,7 +12486,7 @@
         "replace_person"
       ],
       "downloads": [
-        // macOS quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // Quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
         // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Each tier subdir is
         // fully self-contained (the DiT `dit.safetensors` at the tier's precision + the shared dense
         // Wan2.1 z16 VAE + UMT5 T5 encoder + open-CLIP ViT-H/14 visual tower + tokenizer + config.json
@@ -12525,7 +12526,7 @@
           "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           // Dense bf16 tier (sc-9944): the DiT as a true dense mirror of the zai-org fp32 checkpoint
           // (reconstructed for this story; the pre-sc-5445 dense snapshot had been pruned) + the shared
           // dense VAE/T5/CLIP/tokenizer. Exact on-disk size of the built bf16/ subdir.
@@ -12603,7 +12604,7 @@
       },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; macOS native MLX only. Needs ample unified memory and runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Needs ample memory and runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {

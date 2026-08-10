@@ -6,7 +6,7 @@ use super::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
         mochi_vram_precheck, resolve_mochi_model_dir, validate_mochi_mode, MOCHI_REPO,
     },
-    scail2::{scail2_engine_video_mode, scail2_raw_settings},
+    scail2::{scail2_engine_video_mode, scail2_raw_settings, SCAIL2_REPO, SCAIL2_REVISION},
     svd::{svd_f32, svd_i32, svd_raw_settings, svd_steps, SVD_REPO},
     vace::{
         build_extend_bridge_vace_conditioning, build_vace_conditioning, extend_anchor_frames,
@@ -1350,33 +1350,60 @@ pub(super) async fn generate_candle_wan_comfyui(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const CANDLE_SCAIL2_ADAPTER: &str = "candle_scail2";
 
-/// Resolve the candle SCAIL-2 snapshot dir from the `SCENEWORKS_CANDLE_SCAIL2_DIR` override, else the
-/// app-managed `<data>/models/candle/scail2`. The sentinel is the `transformer/` subdir (the converted
-/// SCAIL2Model DiT): the `candle_gen_scail2` provider builds its `Scail2Config` from hardcoded
-/// Wan2.1-14B dims and reads only the component subdirs (transformer, vae, text_encoder, clip, and
-/// `tokenizer/tokenizer.json`), not a root `config.json`, so that is the right marker. Errors loudly
-/// when absent — like the candle Wan-VACE resolver, a missing checkpoint surfaces a clear error
+/// Resolve candle SCAIL-2 weights from an explicit override, the exact Model Manager-installed
+/// `SceneWorks/scail2-mlx` bf16 tier, or the legacy app-managed candle component tree. Both native
+/// engines consume the same six bf16 files; q4/q8 stay MLX-only because their DiT tensors use MLX
+/// packing. Every candidate is classified by the pinned provider's own fail-closed layout predicate.
+/// When none is complete, a missing checkpoint surfaces a clear repair error
 /// instead of degrading to a stub (a character animation / replacement must never silently produce
 /// meaningless output). The provider's `load` then validates each subdir and reports the precise gap.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_candle_scail2_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
     if let Ok(dir) = std::env::var("SCENEWORKS_CANDLE_SCAIL2_DIR") {
         let path = PathBuf::from(dir.trim());
-        if path.join("transformer").is_dir() {
+        if !dir.trim().is_empty() {
+            runtime_cuda::providers::scail2::snapshot_layout(&path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "scail2 (candle): $SCENEWORKS_CANDLE_SCAIL2_DIR points to an incomplete snapshot at {}: {error}",
+                    path.display()
+                ))
+            })?;
             return Ok(path);
         }
     }
+
+    resolve_managed_candle_scail2_model_dir(settings)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_managed_candle_scail2_model_dir(
+    settings: &Settings,
+) -> WorkerResult<PathBuf> {
+    if let Some(snapshot) = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        SCAIL2_REPO,
+        SCAIL2_REVISION,
+    ) {
+        let bf16 = snapshot.join("bf16");
+        if runtime_cuda::providers::scail2::snapshot_layout(&bf16).is_ok() {
+            return Ok(bf16);
+        }
+    }
+
+    // Retain the pre-Model-Manager manual component layout as a compatibility fallback.
     let managed = settings
         .data_dir
         .join("models")
         .join("candle")
         .join("scail2");
-    if managed.join("transformer").is_dir() {
+    if runtime_cuda::providers::scail2::snapshot_layout(&managed).is_ok() {
         return Ok(managed);
     }
     Err(WorkerError::InvalidPayload(format!(
-        "scail2 (candle): no weights found. Place a candle-layout SCAIL-2 snapshot (transformer/ + \
-         vae/ + text_encoder/ + clip/ + tokenizer/) at {} or set $SCENEWORKS_CANDLE_SCAIL2_DIR.",
+        "scail2 (candle): the shared SCAIL-2 bf16 package is not installed or is incomplete. \
+         Install the bf16 tier from Model Manager ({SCAIL2_REPO} at {SCAIL2_REVISION}), repair that \
+         download, or set $SCENEWORKS_CANDLE_SCAIL2_DIR to a complete shared/legacy snapshot. \
+         Legacy fallback checked: {}.",
         managed.display(),
     )))
 }

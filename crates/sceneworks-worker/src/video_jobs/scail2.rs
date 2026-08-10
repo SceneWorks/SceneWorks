@@ -86,7 +86,10 @@ pub(super) fn resolve_scail2_quant(request: &VideoRequest) -> Option<Quant> {
 /// the worker now descends into the chosen tier so a pre-packed snapshot loads with no install-time
 /// convert peak. The flat root files stay for back-compat with already-shipped workers that resolve
 /// the repo root; a new worker only ever resolves the tier subdirs.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
 
 /// Pinned revision for [`SCAIL2_REPO`] (mirrors [`WAN_T2V_14B_REVISION`]). The repo is a hard-coded
@@ -94,7 +97,10 @@ pub(super) const SCAIL2_REPO: &str = "SceneWorks/scail2-mlx";
 /// the mutable `main` branch would let an upstream re-push silently swap a checkpoint we load. This is
 /// the commit that added the `q4/`/`q8/`/`bf16/` tier subdirs (sc-9944); the native downloader still verifies
 /// each file's own hash on download.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(super) const SCAIL2_REVISION: &str = "ce88cfdb1008f395e9c820e525e6db7b6695f7b3";
 
 /// The files that make a SCAIL-2 tier subdir COMPLETE — the six files the snapshot loader opens
@@ -103,14 +109,8 @@ pub(super) const SCAIL2_REVISION: &str = "ce88cfdb1008f395e9c820e525e6db7b6695f7
 /// manifest for `q4`/`q8`, or none for the dense `bf16` tier). A partially-downloaded tier fails this
 /// so [`scail2_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
 #[cfg(target_os = "macos")]
-pub(super) const SCAIL2_TIER_FILES: &[&str] = &[
-    "dit.safetensors",
-    "vae.safetensors",
-    "t5_encoder.safetensors",
-    "clip.safetensors",
-    "tokenizer.json",
-    "config.json",
-];
+pub(super) const SCAIL2_TIER_FILES: &[&str] =
+    sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES;
 
 /// Map a SCAIL-2 model id to its `(quant-matrix repo, pinned revision)` for the on-demand tier fetch,
 /// or `None` for a non-SCAIL-2 id. Keyed here so the whole tier-resolve/fetch path (mirroring the Wan
@@ -146,9 +146,7 @@ pub(super) fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static st
 /// tier rather than half-loading.
 #[cfg(target_os = "macos")]
 pub(super) fn scail2_tier_is_complete(dir: &Path) -> bool {
-    SCAIL2_TIER_FILES
-        .iter()
-        .all(|file| dir.join(file).is_file())
+    sceneworks_core::mlx_tier_completeness::scail2_tier_complete(dir)
 }
 
 /// Descend a resolved SCAIL-2 quant-matrix repo `root` into the requested quant tier subdir (sc-9944,
