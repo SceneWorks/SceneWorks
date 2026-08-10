@@ -4061,8 +4061,9 @@ mod tests {
 
     /// sc-18237: every shipped Qwen binding must describe a load shape the production route can
     /// execute. Native Qwen is deliberately deferred under both Resident and Sequential policies;
-    /// q8 was re-captured under that exact materialization contract, while the old eager BF16/Q4
-    /// records remain historical corpus entries only.
+    /// q8 and the SC-18353 bf16/q4 ladder coordinates were captured under that exact
+    /// materialization contract, while the old eager BF16/Q4 records remain historical corpus
+    /// entries only.
     /// This is deliberately mutation-sensitive: adding any eager binding, or reintroducing an
     /// uncaptured tier, makes the production-shape assertion red.
     #[test]
@@ -4080,7 +4081,11 @@ mod tests {
             .expect("Qwen calibration bindings are valid")
             .expect("Qwen declares exact MLX calibration bindings");
 
-        assert_eq!(bindings.len(), 2, "the recaptured q8 pair only");
+        assert_eq!(
+            bindings.len(),
+            9,
+            "the exact deferred q8, q4, and bf16 bindings"
+        );
         assert!(
             !live_mlx_closure_digest("qwen_image").is_empty(),
             "qwen_image must be declared in config/inference-provider-closures.json; an undeclared \
@@ -4091,7 +4096,7 @@ mod tests {
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
                 && binding.provider == "qwen_image"
-                && binding.tier == "q8"
+                && ["bf16", "q4", "q8"].contains(&binding.tier.as_str())
                 && binding.mode == "text_to_image"
                 && binding.overlay == "none"
                 && binding.geometry
@@ -4120,8 +4125,20 @@ mod tests {
             rungs_for("q8"),
             ["BoundedAttention", "BoundedTransformerResidency"]
         );
-        assert!(rungs_for("bf16").is_empty());
-        assert!(rungs_for("q4").is_empty());
+        assert_eq!(
+            rungs_for("q4"),
+            ["BoundedAttention", "BoundedTransformerResidency"]
+        );
+        assert_eq!(
+            rungs_for("bf16"),
+            [
+                "BoundedAttention",
+                "BoundedDecode",
+                "BoundedTransformerResidency",
+                "Resident",
+                "StagedResidency",
+            ]
+        );
     }
 
     /// sc-18408: the audited-model set is DERIVED from the manifest — every model declaring

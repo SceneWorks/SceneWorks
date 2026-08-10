@@ -3653,8 +3653,24 @@ export function App() {
           ) : null}
         </header>
 
+        {/* Every notice is dismissible. Most kinds clear themselves (a retry succeeds, the
+            next run completes), but a terminal one — a failed job's panic message — is
+            pushed once and never re-pushed, so without an X it sat above every screen for
+            the rest of the session. Dismissing removes only this kind; the same kind
+            failing again re-raises it. */}
         {notices.map((notice) => (
-          <p className="notice error" key={notice.kind}>{notice.message}</p>
+          <div className="notice error" key={notice.kind} role="alert">
+            <span className="notice-message">{notice.message}</span>
+            <button
+              aria-label="Dismiss this message"
+              className="notice-dismiss"
+              onClick={() => dismissNoticeKind(notice.kind)}
+              title="Dismiss"
+              type="button"
+            >
+              <Icon.Close size={15} />
+            </button>
+          </div>
         ))}
 
         {workflowEmbedNoticeOpen ? (
