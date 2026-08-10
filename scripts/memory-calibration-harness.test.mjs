@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   HARNESS_VERSION, RUNG_REUSE_TOLERANCE, assessProviderReuse, atomicWrite, canonicalJson,
   compareRungReuse, evidenceSemantics, expandPlan, logicalCaseId, mergeBundles, recordId,
-  runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
+  physicalMlxSessionId, runProviderPlan, validateBundle, validateRecord, validateSourceSessionFiles,
 } from "./memory-calibration-harness.mjs";
 import { calibrationBinding } from "./generate-memory-matrix.mjs";
 
@@ -1429,6 +1429,41 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   }
   assert.equal(validateBundle(result), result);
   assert.equal(await validateSourceSessionFiles(result, rawLogDir), result);
+
+  const semanticTamper = structuredClone(result);
+  const semanticSession = semanticTamper.sourceSessions[0];
+  const semanticRecord = semanticTamper.records[0];
+  const tamperedProviderResponse = JSON.parse(raw.toString("utf8"));
+  tamperedProviderResponse.observedMemory.overall.deviceBytes = 987654321;
+  tamperedProviderResponse.quality.maximumError = 0.077;
+  const tamperedProviderBytes = Buffer.from(JSON.stringify(tamperedProviderResponse));
+  const tamperedStdoutSha256 = createHash("sha256").update(tamperedProviderBytes).digest("hex");
+  const tamperedSessionId = physicalMlxSessionId({
+    kind: semanticSession.kind,
+    logicalCaseId: semanticRecord.logicalCaseId,
+    capturedAt: tamperedProviderResponse.capturedAt,
+    repositories: semanticSession.repositories,
+    hardware: semanticSession.hardware,
+    stdoutSha256: tamperedStdoutSha256,
+  });
+  const oldSessionId = semanticSession.id;
+  semanticSession.id = tamperedSessionId;
+  semanticSession.stdoutSha256 = tamperedStdoutSha256;
+  semanticSession.sourcePath = semanticSession.sourcePath.replace(oldSessionId, tamperedSessionId);
+  const semanticRequestOutput = semanticSession.outputs.find(({ role }) => role === "request");
+  semanticRequestOutput.path = semanticRequestOutput.path.replace(oldSessionId, tamperedSessionId);
+  for (const [claim, reference] of Object.entries(semanticRecord.derivation)) {
+    if (claim !== "justification") reference.sourceSessionIds = [tamperedSessionId];
+  }
+  await writeFile(path.join(rawLogDir, semanticSession.sourcePath), tamperedProviderBytes);
+  await writeFile(
+    path.join(rawLogDir, semanticRequestOutput.path),
+    await readFile(path.join(rawLogDir, session.outputs.find(({ role }) => role === "request").path)),
+  );
+  await assert.rejects(
+    validateSourceSessionFiles(semanticTamper, rawLogDir),
+    /provider response measurements do not match the evidence record/,
+  );
 
   const authoritative = structuredClone(result);
   const authoritativeRecord = authoritative.records[0];

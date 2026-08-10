@@ -280,7 +280,10 @@ their logical case, role, dimensions, and content SHA-256, and receipt creation 
 different existing bytes. The adapter independently emits each RGB digest and byte count; capture
 fails if the post-provider bytes, the attestation, and the content-addressed filename disagree. The
 request must be canonical JSON matching the one evidence record bound to the session. Every newly planned q4/bf16
-record carries `sourceProvenance: physical_mlx_v1`; JS and Rust bundle consumers require its claims
+record carries `sourceProvenance: physical_mlx_v1`. Receipt validation reconstructs the complete
+adapter-owned record from the provider response and exact request, compares the source inputs and
+claims, and re-derives the deterministic session ID, so editing measurements and restamping only the
+log digest is rejected. JS and Rust bundle consumers require its claims
 to share one `physical_mlx` session bound to the record's exact inventory. Validate the downloaded
 artifact with `check --source-root <unpacked-raw-root>`, copy its `docs/calibration/...` tree into the
 checkout, and then ingest. Missing or altered receipt files fail both check and ingest. The workflow

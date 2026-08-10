@@ -119,6 +119,57 @@ function validatePhysicalMlxOutputsAgainstRecord(record, session) {
   }
 }
 
+export function physicalMlxSessionId({
+  kind, logicalCaseId, capturedAt, repositories, hardware, stdoutSha256,
+}) {
+  return `ims-${digest({
+    kind,
+    logicalCaseId,
+    capturedAt,
+    repositories,
+    hardware,
+    stdoutSha256,
+  }).slice(0, 20)}`;
+}
+
+function physicalMlxDerivation(sessionId) {
+  const direct = { kind: "direct", sourceSessionIds: [sessionId] };
+  return {
+    memory: direct,
+    quality: direct,
+    negativeMutation: direct,
+    lifecycle: direct,
+    loadability: direct,
+    overlay: direct,
+    justification: "Exact physical MLX provider response, artifact inventory, and selected/reference outputs are preserved as immutable capture receipts.",
+  };
+}
+
+function recordFromPhysicalMlxResponse(providerResponse, request, session) {
+  const { sourceCapture, ...fragment } = providerResponse;
+  const planned = request.planned;
+  const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
+  const record = {
+    ...fragment,
+    artifact: { ...fragment.artifact, inventorySha256: baseInput.sha256 },
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: fragment.loadShape,
+    repositories: request.repositories,
+    hardware: request.hardware,
+    target: planned.target,
+    strategy: fragment.strategy,
+    ...(planned.sourceProvenance ? { sourceProvenance: planned.sourceProvenance } : {}),
+    calibrationFingerprint: planned.calibrationFingerprint,
+    fixture: planned.fixture,
+    harnessVersion: HARNESS_VERSION,
+    derivation: physicalMlxDerivation(session.id),
+  };
+  record.id = recordId(record);
+  return record;
+}
+
 async function writeImmutableReceipt(file, contents) {
   const bytes = Buffer.isBuffer(contents) ? contents : Buffer.from(contents, "utf8");
   try {
@@ -894,6 +945,13 @@ export async function validateSourceSessionFiles(
     } catch {
       fail(`${session.id}: provider response receipt must contain JSON`);
     }
+    object(providerResponse, `${session.id}.providerResponse`);
+    object(providerResponse.sourceCapture, `${session.id}.providerResponse.sourceCapture`);
+    if (providerResponse.sourceCapture.kind !== session.kind
+        || !equal(providerResponse.sourceCapture.inputs, session.inputs)
+        || !equal(providerResponse.sourceCapture.claims, session.claims)) {
+      fail(`${session.id}: provider response source inputs or claims do not match the session receipt`);
+    }
     validateExactOutputReceipts(
       providerResponse?.sourceCapture?.outputs,
       PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
@@ -916,6 +974,21 @@ export async function validateSourceSessionFiles(
       )) {
         fail(`${session.id}: provider response output attestation does not match the session receipt`);
       }
+    }
+    const expectedSessionId = physicalMlxSessionId({
+      kind: providerResponse.sourceCapture.kind,
+      logicalCaseId: request.planned.logicalCaseId,
+      capturedAt: providerResponse.capturedAt,
+      repositories: session.repositories,
+      hardware: session.hardware,
+      stdoutSha256: session.stdoutSha256,
+    });
+    if (session.id !== expectedSessionId) {
+      fail(`${session.id}: physical MLX session id does not match its provider response digest`);
+    }
+    const reconstructedRecord = recordFromPhysicalMlxResponse(providerResponse, request, session);
+    if (!equal(reconstructedRecord, record)) {
+      fail(`${session.id}: provider response measurements do not match the evidence record`);
     }
   }
   return bundle;
@@ -1407,7 +1480,7 @@ export async function runProviderPlan({
     const providerRequest = canonicalJson({
       action,
       ...(action === "run" ? { planned: first } : { planned: invocation }),
-      repositories,
+      repositories: repositoriesFor(first),
       repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
       hardware: probe.hardware,
     });
@@ -1509,14 +1582,14 @@ export async function runProviderPlan({
         }
         record.artifact.inventorySha256 = baseInput.sha256;
         const stdoutSha256 = createHash("sha256").update(providerOutput).digest("hex");
-        const sessionId = `ims-${digest({
+        const sessionId = physicalMlxSessionId({
           kind: sourceCapture.kind,
           logicalCaseId: planned.logicalCaseId,
           capturedAt: fragment.capturedAt,
           repositories: repositoriesFor(planned),
           hardware: probe.hardware,
           stdoutSha256,
-        }).slice(0, 20)}`;
+        });
         const sourcePath = `${sourcePathPrefix}/${sessionId}.log`;
         const receiptDir = path.join(rawLogDir, ...sourcePathPrefix.split("/"));
         await mkdir(receiptDir, { recursive: true });
@@ -1572,16 +1645,7 @@ export async function runProviderPlan({
           PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
           `${sessionId}.outputs`,
         );
-        const direct = { kind: "direct", sourceSessionIds: [sessionId] };
-        record.derivation = {
-          memory: direct,
-          quality: direct,
-          negativeMutation: direct,
-          lifecycle: direct,
-          loadability: direct,
-          overlay: direct,
-          justification: "Exact physical MLX provider response, artifact inventory, and selected/reference outputs are preserved as immutable capture receipts.",
-        };
+        record.derivation = physicalMlxDerivation(sessionId);
         incomingSessions.push({
           id: sessionId,
           kind: sourceCapture.kind,

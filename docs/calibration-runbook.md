@@ -493,7 +493,11 @@ them. A physical session is invalid unless it carries exactly one typed `request
 and `reference_rgb` receipt at three distinct paths, so removing an entry cannot make a missing file
 disappear from validation. The request receipt must be canonical JSON for the one record bound to the
 session, and both RGB receipts must match that record's logical case and geometry. The temporary
-directory therefore mirrors the repository-relative tree. The inventory command
+directory therefore mirrors the repository-relative tree. Validation also reconstructs the full
+evidence record from the immutable provider response, request, and artifact input, requires every
+adapter-owned measurement/quality/sweep/scenario field to match, and re-derives the session ID from
+the response digest and capture provenance. Changing a log and merely updating `stdoutSha256` is not
+valid provenance. The inventory command
 streams and hashes every artifact byte, including Hugging Face symlink targets.
 
 ### 6a. Locally on the host
