@@ -635,4 +635,59 @@ describe("SceneWorks app shell", () => {
     expect(noticeTexts.some((text) => text.includes("Failed without additional worker detail."))).toBe(true);
   });
 
+  // A failed job's notice is pushed once and never re-pushed (the terminal-revision dedupe
+  // in useJobEvents drops the replay), so before the dismiss control it sat above every
+  // screen until the app was restarted. Clicking the X must clear it and leave it cleared.
+  it("dismisses a notice from its X and keeps unrelated kinds", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+    });
+    await settle();
+
+    async function failJob(job) {
+      await act(async () => {
+        FakeEventSource.instances[0].listeners["job.updated"]({ data: JSON.stringify(job) });
+      });
+      await settle();
+    }
+
+    const poseFailure = {
+      id: "job-pose-fail",
+      type: "pose_detect",
+      status: "failed",
+      projectId: "project-default",
+      createdAt: "2026-08-10T00:00:00Z",
+      revision: 4,
+      error: "task 1287 panicked",
+    };
+    await failJob(poseFailure);
+    // A second kind, so the dismiss is proven to be per-kind rather than a blanket clear.
+    await failJob({
+      id: "job-import-fail",
+      type: "lora_import",
+      status: "failed",
+      projectId: "project-default",
+      createdAt: "2026-08-10T00:00:01Z",
+      revision: 2,
+      error: "bad adapter",
+    });
+
+    const noticeOf = (text) =>
+      [...document.body.querySelectorAll(".notice.error")].find((node) => node.textContent.includes(text));
+    expect(noticeOf("task 1287 panicked")).toBeTruthy();
+
+    await act(async () => {
+      noticeOf("task 1287 panicked").querySelector(".notice-dismiss").click();
+    });
+    await settle();
+
+    expect(noticeOf("task 1287 panicked")).toBeUndefined();
+    expect(noticeOf("bad adapter")).toBeTruthy();
+
+    // The same SSE row replayed (reconnect/snapshot) must not resurrect what was dismissed.
+    await failJob(poseFailure);
+    expect(noticeOf("task 1287 panicked")).toBeUndefined();
+  });
+
 });
