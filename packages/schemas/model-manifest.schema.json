@@ -945,6 +945,10 @@
                 ],
                 "description": "Optional exact per-cell MLX calibration bindings. Multiple tiers and request cells are allowed; absence deliberately keeps legacy admission, while duplicate selectors and malformed opt-ins fail closed."
               },
+              "supportsSequentialOffload": {
+                "type": "boolean",
+                "description": "Static provider capability: the registered MLX generator can defer and release model components during request execution. Exact per-rung availability remains declared by memoryStrategyContract and runtime evidence."
+              },
               "memoryStrategyContract": {
                 "type": "object",
                 "required": ["abi", "provider", "implementations"],

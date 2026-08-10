@@ -701,6 +701,22 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_schema_accepts_mlx_sequential_offload_capability():
+    """SC-18377: MLX staged-residency declarations are part of the authoring contract."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    entry = _model_entry_with_download(
+        {"provider": "huggingface", "repo": "namespace/model", "files": []}
+    )
+    entry["mlx"] = {"supportsSequentialOffload": True}
+
+    errors = list(validator.iter_errors({"schemaVersion": 1, "models": [entry]}))
+
+    assert not errors, [
+        (error.validator, list(error.absolute_path), error.message) for error in errors
+    ]
+
+
 def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
     """Static capabilities and exact provider contracts share one overlay vocabulary.
 
