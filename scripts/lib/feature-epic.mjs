@@ -3613,8 +3613,44 @@ function recordEvidenceUnlocked(
     story: classification.story ?? null,
     recordedAt: existingReceipt?.recordedAt ?? nowIso(clock),
   };
-  if (existingReceipt && !sameJson(existingReceipt, receipt)) {
-    refuse(`PR ${fixed.slug}#${number} conflicts with its recorded head/base`, "PR_RECEIPT_CONFLICT");
+  if (existingReceipt && !sameJson(
+    { ...existingReceipt, headSha: null },
+    { ...receipt, headSha: null },
+  )) {
+    refuse(`PR ${fixed.slug}#${number} conflicts with its recorded identity`, "PR_RECEIPT_CONFLICT");
+  }
+  if (existingReceipt && existingReceipt.headSha !== receipt.headSha) {
+    const alreadyQueued = github.timeline(fixed.slug, number)
+      .some((event) => MERGE_QUEUE_EVENTS.has(event?.event));
+    const boundRuntimeEvidence = state.privilegedRuns.some(
+      (item) => item.finalPrRepo === repo && item.finalPrNumber === number,
+    );
+    const boundDeploymentEvidence = state.deployments.some(
+      (item) => item.finalPrRepo === repo && item.finalPrNumber === number,
+    );
+    if (
+      pr.state !== "open" ||
+      pr.merged_at ||
+      alreadyQueued ||
+      boundRuntimeEvidence ||
+      boundDeploymentEvidence
+    ) {
+      refuse(
+        `PR ${fixed.slug}#${number} cannot advance its recorded head after queue or immutable evidence`,
+        "PR_HEAD_ADVANCE_FORBIDDEN",
+      );
+    }
+    if (!comparisonContains(github, fixed.slug, existingReceipt.headSha, receipt.headSha)) {
+      refuse(
+        `PR ${fixed.slug}#${number} recorded head may advance only by fast-forward`,
+        "PR_HEAD_NON_FAST_FORWARD",
+      );
+    }
+    existingReceipt.headSha = receipt.headSha;
+    const existingPointer = state.finalPullRequests[repo];
+    if (existingPointer?.number === number && existingPointer.mergeCommit === null) {
+      existingPointer.headSha = receipt.headSha;
+    }
   }
   if (!existingReceipt) state.pullRequests.push(receipt);
   if (classification.kind === "final") {

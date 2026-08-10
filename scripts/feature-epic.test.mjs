@@ -2772,6 +2772,65 @@ test("record-pr separates pre-queue source-head runtime from post-merge deployme
   );
 });
 
+test("record-pr refreshes only fast-forward source heads before queue evidence", (t) => {
+  const f = fixture(t);
+  planFixture(f);
+  const original = f.sceneWorksMain;
+  const divergent = sideCommit(f.origins.sceneworks, "divergent-pr-head.txt");
+  f.github.prs.set("sceneworks:19", {
+    html_url: "https://github.com/SceneWorks/SceneWorks/pull/19",
+    head: {
+      ref: "story/sc-18419-epic-18304-pipeline-flexibility-mlx-perf",
+      sha: original,
+      repo: { full_name: REPOSITORIES.sceneworks.slug },
+    },
+    base: {
+      ref: "feature/sc-18304-pipeline-flexibility-mlx-perf",
+      repo: { full_name: REPOSITORIES.sceneworks.slug },
+    },
+  });
+
+  const first = recordEvidence(
+    f.statePath,
+    { repo: "sceneworks", number: 19 },
+    { github: f.github, clock },
+  );
+  const advanced = advanceMain(f.origins.sceneworks, "advanced-pr-head.txt");
+  f.github.prs.get("sceneworks:19").head.sha = advanced;
+  const refreshed = recordEvidence(
+    f.statePath,
+    { repo: "sceneworks", number: 19 },
+    { github: f.github, clock },
+  );
+  assert.equal(refreshed.headSha, advanced);
+  assert.equal(refreshed.recordedAt, first.recordedAt);
+  assert.equal(loadState(f.statePath).pullRequests[0].headSha, advanced);
+
+  f.github.prs.get("sceneworks:19").head.sha = divergent;
+  assert.throws(
+    () => recordEvidence(
+      f.statePath,
+      { repo: "sceneworks", number: 19 },
+      { github: f.github, clock },
+    ),
+    /only by fast-forward/,
+  );
+
+  const queuedHead = advanceMain(f.origins.sceneworks, "queued-pr-head.txt");
+  f.github.prs.get("sceneworks:19").head.sha = queuedHead;
+  f.github.timelines.set("sceneworks:19", [
+    { event: "added_to_merge_queue", created_at: EPOCH },
+  ]);
+  assert.throws(
+    () => recordEvidence(
+      f.statePath,
+      { repo: "sceneworks", number: 19 },
+      { github: f.github, clock },
+    ),
+    /cannot advance its recorded head/,
+  );
+});
+
 test("timeline pagination finds queue evidence after item 100 for recording and closeout", (t) => {
   const f = fixture(t);
   planFixture(f);
