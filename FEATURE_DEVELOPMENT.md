@@ -75,7 +75,49 @@ Do not create an epic branch as a substitute for incomplete requirements.
 
 ## 2. Create the integration branches
 
-Use current remote state and a clean checkout:
+Use current remote state and a clean checkout. GitHub rejects a merge-queue rule
+whose condition is the wildcard `feature/*`, while an active exact queue rule
+rejects creation of its not-yet-existing ref. The bootstrap command must
+therefore treat the applicable exact queue ruleset and ref as one durable,
+recoverable transaction; when inference is in scope, that transaction covers
+both repositories' queue rulesets and refs.
+
+Run the complete read-only preflight for every applicable repository before the
+first mutation: capture the current `origin/main` SHA; verify both wildcard
+ruleset layers; and verify every configured required context on that exact
+commit is terminal `success`, `skipped`, or `neutral` from the expected GitHub
+Actions app. Pending, missing, wrong-app, or failed contexts are a stop
+condition. Persist the plan, then for each repository:
+
+1. create or verify the exact queue ruleset in disabled mode and record its ID
+   and payload digest;
+2. create the feature ref at the captured immutable SHA under the active
+   wildcard base and deletion guards;
+3. immediately activate only the recorded exact queue ruleset; and
+4. query the effective rules and require the five-rule aggregate.
+
+Only after every repository reaches that state may bootstrap create a workspace
+or declare success. Do not loosen `do_not_enforce_on_create=false` or silently
+choose an older commit to make branch creation succeed.
+
+Recovery resumes recognized durable states instead of blindly rolling back:
+
+- missing queue/no ref: create the recorded policy disabled, then continue;
+- disabled queue/no ref: create the ref, then activate;
+- disabled queue/ref at the recorded SHA: activate;
+- active queue/ref at the recorded SHA: verify the aggregate;
+- active queue/no ref: first disable that exact recorded, still-matching policy,
+  then create the ref and reactivate it; and
+- missing queue/ref at the recorded SHA: create the recorded policy disabled,
+  then activate it.
+
+An unexpected ref SHA, duplicate matching ref or ruleset, payload drift, or an
+unrecognized partial state fails closed. A partial success in one repository is
+resumed after revalidation; it is not force-deleted or rewritten. A ref whose
+queue rule is missing or disabled remains protected by the wildcard layers but
+is unsafe: expose no workspace and admit no story PR until recovery completes.
+
+The equivalent manual ref creation is:
 
 ```bash
 git fetch origin
@@ -86,9 +128,10 @@ git push -u origin feature/sc-<epic-id>-<epic-slug>
 Create the inference branch only when inference changes are part of the approved
 scope. Use the identical command and branch name in that repository.
 
-Immediately verify that the appropriate feature-branch ruleset applies. Do not
-begin story merges while the branch allows unreviewed direct pushes or lacks
-required checks.
+Immediately verify that all three applicable active layers aggregate: the wildcard
+base policy, the wildcard deletion guard, and the exact-branch queue policy. Do
+not begin story merges while the branch allows unreviewed direct pushes, lacks
+required checks, can be deleted, or has no merge queue.
 
 Add the following to the Shortcut epic:
 
@@ -291,9 +334,21 @@ dated baseline, not a substitute for current inspection.
 
 #### 1. Add feature-branch rulesets
 
-Create a `Feature integration` branch ruleset in each repository targeting
-`feature/*`. GitHub rulesets use `fnmatch`; this pattern intentionally matches
-the one-slash branch format defined above.
+Create three layers of `Feature integration` rulesets in each repository.
+GitHub rulesets use `fnmatch`, so the two durable wildcard layers target
+`feature/*`, which intentionally matches the one-slash branch format defined
+above. The third layer targets one exact feature branch.
+
+GitHub's ruleset API rejects `merge_queue` when the condition contains a
+wildcard (`Invalid rule 'merge_queue': Wildcard ref names are not supported
+when merge queue is enabled`). An active exact queue rule also rejects initial
+creation of its matching ref with `Changes must be made through the merge
+queue`. Consequently the wildcard base policy must not contain the queue rule.
+Every bootstrap must create or verify a separate disabled exact queue ruleset
+for `feature/sc-<epic-id>-<epic-slug>`, create the checked ref under the active
+wildcard guards, immediately activate the exact rule, and verify the aggregate.
+A wildcard queue payload or a feature ref with a missing/disabled exact queue
+rule is a configuration error, not a degraded mode.
 
 SceneWorks must require at least the same integration contexts currently
 required on `main`:
@@ -308,30 +363,66 @@ required on `main`:
 
 Inference must require `CI gate`.
 
-Both rulesets must:
+The wildcard base-policy ruleset in each repository must have no bypass actors and
+must:
 
 - require pull requests;
 - block force pushes and non-fast-forward updates;
 - require code-owner/review behavior consistent with each repository's `main`;
 - require current-head status checks;
-- use merge commits so story and synchronization provenance is retained;
-- use a merge queue after every required workflow supports `merge_group`;
-- use merge groups of one entry unless deliberate batch validation is accepted;
-  and
-- restrict deletion while giving only a maintainer team or cleanup automation a
-  narrow bypass for branch removal after verified epic completion.
+- use merge commits so story and synchronization provenance is retained.
 
-Start the rulesets in Evaluate mode if available, prove them with disposable
-branches, and activate them only after the check matrix is complete. GitHub's
-ruleset pattern and bypass behavior is documented in
+The exact-branch queue ruleset must also have no bypass actors. It contains the
+`merge_queue` rule for that one feature ref, uses merge commits, and uses merge
+groups of one entry unless deliberate batch validation is accepted. Persist its
+ID and payload digest while it is disabled, then activate only that exact
+recorded policy after ref creation. If the disposable proof shows that GitHub
+does not aggregate a queue-only exact ruleset with the wildcard pull-request
+and status rules, repeat those rules in the exact ruleset; never remove them
+from the wildcard layer. Record the final active state with the epic bootstrap
+evidence.
+
+The wildcard deletion-guard ruleset must contain only the deletion rule and
+normally have no bypass actors. After every non-cleanup assertion passes on a
+disposable proof branch, or after the post-merge checklist succeeds, freeze the
+target branch and require no open PR or queue entry. First attempt the proof
+deletion with the exact queue still active. If GitHub's queue rule rejects
+deletion, disable only the recorded exact queue policy and re-verify that the
+wildcard base and deletion layers remain active before continuing.
+
+An administrator may then temporarily add one closed maintainer team or cleanup
+automation as the deletion guard's exact cleanup actor. If neither exists, one
+explicitly named repository administrator may be the temporary actor; record
+its immutable actor ID, the approved proof-or-completed branch names, and the
+start/end of the cleanup window. Delete only those branches and restore
+`bypass_actors: []` immediately in a finally-style cleanup step, whether the
+deletion succeeds or fails. If deletion failed after the exact queue was
+disabled, reactivate that recorded queue policy and verify all five effective
+rules before releasing the freeze. If reactivation also fails, keep the branch
+explicitly unsafe, expose no workspace, admit no PR, and record an incident for
+recovery. Never leave deletion authority active during an epic. Bypass is
+ruleset-wide: never put the deletion rule and its cleanup bypass in the base
+policy or exact queue ruleset, because that would also let the cleanup actor
+bypass pull-request, status-check, non-fast-forward, or queue protections. If
+the ref is absent, audit the restored guard and then delete the obsolete exact
+queue ruleset. If activation failed during bootstrap, keep the disabled-queue
+ref as a fail-closed resumable state; use this same bounded cleanup only after
+an explicit abandonment decision.
+
+Evaluate mode, when available, is an optional preview of matched refs and rule
+evaluations; it cannot prove enforced denials or merge-queue admission. Activate
+the three layers on disposable branches before running those enforcement tests,
+and do not create the real epic branches until the complete proof matrix passes.
+GitHub's ruleset pattern and bypass behavior is documented in
 [Creating rulesets for a repository](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
 
 #### 2. Make every required SceneWorks check report
 
 At minimum:
 
-1. Extend `macos-mlx.yml` ordinary PR targeting from `main` to `main` plus
-   `feature/*`.
+1. Keep `macos-mlx.yml` ordinary PR targeting on both `main` and `feature/*`.
+   Repository contract tests must reject a required workflow whose base filter
+   would prevent its status from reporting on a feature-target PR.
 2. Audit every required workflow and job condition for assumptions about
    `main`, `pull_request.base.sha`, or `github.event.before`. A merge-group run
    must use `github.event.merge_group.base_sha` where a base is required.
@@ -351,15 +442,21 @@ separate property.
 
 #### 3. Decide the privileged runtime policy
 
-`windows-candle.yml` supplies real CUDA-linked runtime coverage but is not part
-of the current required-status set and is limited to PRs targeting `main`.
-Choose and document one policy before feature work begins:
+`windows-candle.yml` and `macos-mlx.yml`'s `nax-worker` supply authoritative
+CUDA-linked and Apple matrix-unit runtime coverage, but they run on scarce,
+self-hosted hardware and are not feature-branch required checks. Use this
+policy:
 
-- **Recommended:** extend its PR support to `feature/*`, add a merge-group-safe
-  change-selection pattern, and require the relevant successful job for changes
-  selected by its paths; or
-- require an operator-dispatched run at the final feature head and record its
-  URL in the epic before the final PR to `main`.
+- feature-target story and synchronization PRs run the required hosted checks,
+  including `macOS build, lint and workspace tests (hosted)`;
+- `nax-worker` does not auto-run for PRs targeting `feature/*` or for merge
+  groups; it continues to run for the final same-repo integration PR targeting
+  `main`;
+- `windows-candle.yml` remains limited to ordinary PRs targeting `main` and
+  stays out of the merge queue; and
+- at the frozen final feature head, explicitly dispatch both privileged
+  workflows and record their exact head SHA and successful run URLs in the epic
+  before opening the final PR to `main`.
 
 Apply the same rule to privileged inference real-weight lanes: ordinary CI may
 select their impact without having authority or hardware to execute them. An
@@ -382,7 +479,9 @@ After adding the inference ruleset:
 Implement small fail-closed automation rather than relying only on memory:
 
 - a feature bootstrap command or agent skill that creates and records mirrored
-  branches from exact main SHAs;
+  branches from exact main SHAs, verifies both wildcard layers, and safely
+  stages, activates, or recovers each exact-branch queue ruleset around creation
+  of its ref;
 - a PR policy check that rejects a feature story targeting `main` or the wrong
   epic branch;
 - a check that rejects a final SceneWorks feature PR while its inference pin is
@@ -407,10 +506,13 @@ feature branches and exercise all of the following:
    pinned by the SceneWorks feature branch.
 6. SceneWorks and inference merge queues validate their speculative commits and
    do not cancel one another.
-7. Direct and force pushes to feature branches fail.
-8. An unauthorized deletion fails, while the authorized post-epic cleanup path
-   succeeds.
-9. The final inference-first merge and SceneWorks pin transition succeed without
+7. The API refuses a wildcard queue payload and an active queue rejects initial
+   ref creation; disabled staging followed by ref creation and immediate queue
+   activation produces all five effective rules.
+8. Direct and force pushes to feature branches fail.
+9. An unauthorized deletion fails, while the authorized post-epic cleanup path
+   succeeds without bypassing the base or exact queue policies.
+10. The final inference-first merge and SceneWorks pin transition succeed without
    leaving `main` dependent on a feature-only inference commit.
 
 Capture the disposable PRs and run URLs in the CI implementation PR. Only after
