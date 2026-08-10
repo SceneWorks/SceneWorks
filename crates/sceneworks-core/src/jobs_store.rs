@@ -42,7 +42,10 @@ pub use routing::gaps::{
     candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
-pub use routing::{canonical_video_route_probe, video_backend_mode_supported, video_ui_modes};
+pub use routing::{
+    canonical_video_route_probe, video_backend_mode_supported,
+    video_mode_conditioning_requirements, video_ui_modes,
+};
 
 pub const ACTIVE_STATUSES: &[&str] = &[
     "preparing",

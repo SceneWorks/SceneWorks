@@ -561,6 +561,7 @@ fn validate_runtime_pair(
                     facts.snapshot.backend, mapping.model_id, mapping.mode
                 ));
             }
+            let mut conditioning = BTreeSet::new();
             for engine in &mapping.engine_ids {
                 let Some(descriptor) = descriptor_by_engine(facts, engine) else {
                     return Err(format!(
@@ -572,6 +573,18 @@ fn validate_runtime_pair(
                     return Err(format!(
                         "{} video mapping {:?}/{:?} names non-video descriptor {:?}",
                         facts.snapshot.backend, mapping.model_id, mapping.mode, engine
+                    ));
+                }
+                conditioning.extend(descriptor.conditioning.iter().map(String::as_str));
+            }
+            for alternatives in super::video_mode_conditioning_requirements(&mapping.mode) {
+                if !alternatives
+                    .iter()
+                    .any(|required| conditioning.contains(required))
+                {
+                    return Err(format!(
+                        "{} video mapping {:?}/{:?} descriptors cannot satisfy required conditioning alternatives {:?}",
+                        facts.snapshot.backend, mapping.model_id, mapping.mode, alternatives
                     ));
                 }
             }
@@ -2718,6 +2731,17 @@ mod tests {
             );
         }
         assert!(validate_runtime_pair(&bad_mlx, &bad_candle).is_err());
+
+        let mut wrong_video_shape = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        wrong_video_shape
+            .video_model_mappings
+            .iter_mut()
+            .find(|mapping| {
+                mapping.model_id == "wan_2_2_i2v_14b" && mapping.mode == "image_to_video"
+            })
+            .unwrap()
+            .engine_ids = vec!["wan2_2_t2v_14b".to_owned()];
+        assert!(validate_runtime_pair(&wrong_video_shape, &candle).is_err());
     }
 
     #[test]

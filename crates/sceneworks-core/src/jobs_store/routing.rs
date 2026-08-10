@@ -36,6 +36,24 @@ pub fn video_ui_modes() -> &'static [&'static str] {
     catalog::VIDEO_UI_MODES
 }
 
+/// Descriptor conditioning alternatives required by a structurally valid request for `mode`.
+/// Each inner slice is one required group; at least one conditioning kind in every group must be
+/// present across the route's resolved descriptors.
+pub fn video_mode_conditioning_requirements(mode: &str) -> &'static [&'static [&'static str]] {
+    match mode {
+        "image_to_video" => &[&["reference"]],
+        "first_last_frame" => &[&["keyframe"]],
+        "video_to_video" | "multi_video_to_video" => &[&["videoClip"]],
+        "reference_to_video" => &[&["multiReference"]],
+        "reference_video_to_video" | "ads2v" => &[&["videoClip"], &["multiReference"]],
+        "replace_person" | "animate_character" => {
+            &[&["controlClip"], &["reference", "multiReference"]]
+        }
+        "extend_clip" | "video_bridge" => &[&["controlClip", "keyframe", "videoClip"]],
+        _ => &[],
+    }
+}
+
 /// Build the canonical, structurally complete production request used to probe one video route.
 /// The payload contains the same required asset seams enforced by the Rust API before enqueue.
 pub fn canonical_video_route_probe(model: &str, mode: &str) -> Result<JobSnapshot, String> {

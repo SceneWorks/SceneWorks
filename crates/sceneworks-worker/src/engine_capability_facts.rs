@@ -733,6 +733,23 @@ pub fn runtime_descriptor_facts_from_snapshot(
         .iter()
         .filter_map(|descriptor| descriptor.get("id").and_then(serde_json::Value::as_str))
         .collect();
+    let generator_conditioning: BTreeMap<&str, std::collections::BTreeSet<&str>> = snapshot
+        .get("generator_capabilities")
+        .and_then(serde_json::Value::as_array)
+        .expect("generator capability array checked above")
+        .iter()
+        .filter_map(|descriptor| {
+            Some((
+                descriptor.get("id")?.as_str()?,
+                descriptor
+                    .get("conditioning")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect(),
+            ))
+        })
+        .collect();
     for mapping in &video_model_mappings {
         if mapping.model_id.trim().is_empty()
             || mapping.mode.trim().is_empty()
@@ -740,11 +757,31 @@ pub fn runtime_descriptor_facts_from_snapshot(
         {
             return Err("runtime capability facts contain an incomplete video mapping".to_owned());
         }
+        let mut conditioning = std::collections::BTreeSet::new();
         for engine_id in &mapping.engine_ids {
             if !generator_ids.contains(engine_id.as_str()) {
                 return Err(format!(
                     "production video mapping {:?}/{:?} names missing runtime descriptor {:?}",
                     mapping.model_id, mapping.mode, engine_id
+                ));
+            }
+            conditioning.extend(
+                generator_conditioning
+                    .get(engine_id.as_str())
+                    .into_iter()
+                    .flat_map(|kinds| kinds.iter().copied()),
+            );
+        }
+        for alternatives in
+            sceneworks_core::jobs_store::video_mode_conditioning_requirements(&mapping.mode)
+        {
+            if !alternatives
+                .iter()
+                .any(|required| conditioning.contains(required))
+            {
+                return Err(format!(
+                    "production video mapping {:?}/{:?} descriptors cannot satisfy required conditioning alternatives {:?}",
+                    mapping.model_id, mapping.mode, alternatives
                 ));
             }
         }
