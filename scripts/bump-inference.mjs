@@ -275,9 +275,10 @@ function regenerateMemoryMatrix() {
 // to be regenerated here as the second step of the matrix cascade. The memory matrix now has no
 // generated consumer, so the regen above is the whole of that cascade.
 
-// `config/engine-capabilities/capabilities.<backend>.json` is keyed to the pin exactly like the
+// Every checked-in file under `config/engine-capabilities/` is keyed to the pin exactly like the
 // licence audit above: each file stamps `generatedFrom.inferenceRevision`, and it is a dump of
-// `Capabilities.supports_preview` read off the LINKED provider registry at that revision (sc-16965,
+// the preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability
+// surfaces read off the LINKED registries at that revision (sc-16965,
 // epic 16948). A bump can move any descriptor's flag — every remaining family story in that epic
 // flips more of them — so the checked-in dumps go stale by construction.
 //
@@ -302,6 +303,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   // keeps the two sets apart on its own. They are validated for staleness together and for coverage
   // separately, because their declared backend sets are different consts.
   const audioDir = join(dir, "audio");
+  const runtimeDir = join(dir, "runtime");
   const factsFileNames = (from) => {
     try {
       return readdirSync(from).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
@@ -311,6 +313,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   };
   const names = factsFileNames(dir);
   const audioNames = factsFileNames(audioDir);
+  const runtimeNames = factsFileNames(runtimeDir);
   if (names.length === 0) {
     throw new Error(
       `no engine-capability facts under ${dir}. Dump them on a lane that links engines: ` +
@@ -359,6 +362,46 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
     parseSceneworksBackends(factsDeclarationSource),
     dumpedBackendsIn(dir, names, "SCENEWORKS_BACKENDS", "media"),
   );
+  const runtimeBackends = runtimeNames.map((name) => {
+    const facts = JSON.parse(readFileSync(join(runtimeDir, name), "utf8"));
+    const backend = facts?.snapshot?.backend;
+    if (facts?.schemaVersion !== 1 || typeof backend !== "string" || backend.length === 0) {
+      throw new Error(
+        `runtime/${name} is not a schema-1 rich runtime descriptor dump; re-dump it on the ` +
+          "matching platform rather than projecting or hand-editing descriptor facts.",
+      );
+    }
+    const generators = facts?.snapshot?.generator_capabilities;
+    const trainers = facts?.snapshot?.trainer_capabilities;
+    if (
+      !Array.isArray(generators) ||
+      generators.length === 0 ||
+      !Array.isArray(trainers) ||
+      trainers.length === 0 ||
+      !Array.isArray(facts?.workerCapabilities) ||
+      facts.workerCapabilities.length === 0 ||
+      generators.some(
+        (descriptor) =>
+          !Array.isArray(descriptor?.conditioning) ||
+          !Array.isArray(descriptor?.supported_quants) ||
+          typeof descriptor?.supports_lora !== "boolean" ||
+          typeof descriptor?.supports_lokr !== "boolean",
+      )
+    ) {
+      throw new Error(
+        `runtime/${name} omits conditioning, adapter, quant, trainer, or worker capability truth; ` +
+          "re-dump the full runtime snapshot on the matching platform.",
+      );
+    }
+    return backend;
+  });
+  if (runtimeNames.length === 0) {
+    throw new Error(
+      "rich runtime descriptor facts are missing. Re-run dump-engine-capabilities on the MLX and " +
+        "Candle matching-platform lanes; the runtime/ files cannot be projected or hand-authored.",
+    );
+  }
+  assertBackendCoverage(parseSceneworksBackends(factsDeclarationSource), runtimeBackends);
   // sc-17593. The audio registry is dumped separately and its coverage must be asserted separately:
   // `candle` in SCENEWORKS_BACKENDS is satisfied by the media dump alone, so an undumped audio
   // registry cleared the check above every time — which is how it stayed invisible.
@@ -372,6 +415,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   for (const [from, fileNames, label] of [
     [dir, names, ""],
     [audioDir, audioNames, "audio/"],
+    [runtimeDir, runtimeNames, "runtime/"],
   ]) {
     for (const name of fileNames) {
       const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
@@ -398,7 +442,7 @@ function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   if (root === repoRoot) {
     console.log(
       `OK: ${names.length} engine-capability facts file(s) + ${audioNames.length} audio file(s) ` +
-        `dumped at ${sha}`,
+        `+ ${runtimeNames.length} rich runtime file(s) dumped at ${sha}`,
     );
   }
 }
@@ -591,7 +635,37 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
       engines: [{ id: "x", modality: "image", supportsPreview: false }],
     });
-  const fixture = ({ audio = true, revision = SHA, swapped = false } = {}) => {
+  const runtimeFactsFile = (backend, revision, narrow = false) =>
+    JSON.stringify({
+      schemaVersion: 1,
+      generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
+      modelMappings: { x: "x" },
+      trainerMappings: { x: "x" },
+      workerCapabilities: ["gpu", "image_generate", "lora_train_execute"],
+      snapshot: {
+        backend,
+        generator_capabilities: narrow
+          ? [{ id: "x" }]
+          : [
+              {
+                id: "x",
+                conditioning: ["reference"],
+                supported_quants: ["q4"],
+                supports_lora: true,
+                supports_lokr: false,
+              },
+            ],
+        trainer_capabilities: [{ id: "x", supports_lora: true }],
+      },
+    });
+  const fixture = ({
+    audio = true,
+    runtime = true,
+    revision = SHA,
+    runtimeRevision = SHA,
+    narrowRuntime = false,
+    swapped = false,
+  } = {}) => {
     const root = mkdtempSync(join(tmpdir(), "bump-inference-facts-"));
     mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
     writeFileSync(
@@ -614,6 +688,15 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
         join(dir, "audio/capabilities.candle.json"),
         factsFile("candle", revision, swapped ? {} : { registry: "audio" }),
       );
+    }
+    if (runtime) {
+      mkdirSync(join(dir, "runtime"), { recursive: true });
+      for (const backend of ["candle", "mlx"]) {
+        writeFileSync(
+          join(dir, `runtime/capabilities.${backend}.json`),
+          runtimeFactsFile(backend, runtimeRevision, narrowRuntime),
+        );
+      }
     }
     return root;
   };
@@ -647,6 +730,21 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   check(
     "a stale audio dump is reported, named by its subdirectory path",
     !!staleAudio && /audio\/capabilities\.candle\.json/.test(staleAudio),
+  );
+  const missingRuntime = verifyFacts({ runtime: false });
+  check(
+    "a missing rich runtime descriptor dump fails coverage",
+    !!missingRuntime && /rich runtime descriptor facts are missing/.test(missingRuntime),
+  );
+  const staleRuntime = verifyFacts({ runtimeRevision: "b".repeat(40) });
+  check(
+    "a stale rich runtime descriptor dump is reported by exact path",
+    !!staleRuntime && /runtime\/capabilities\.candle\.json/.test(staleRuntime),
+  );
+  const narrowRuntime = verifyFacts({ narrowRuntime: true });
+  check(
+    "a narrow runtime projection without parity axes is refused",
+    !!narrowRuntime && /omits conditioning, adapter, quant, trainer, or worker/.test(narrowRuntime),
   );
   // Both dumps carry `backend: "candle"`, so swapping the two directories is invisible to a check
   // that reads `backend` alone — it would count an audio file as media coverage and vice versa, and
