@@ -24,7 +24,8 @@ export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const FEATURE_RE = /^feature\/sc-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 export const STORY_BRANCH_RE =
   /^story\/sc-([1-9][0-9]*)-epic-([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
-export const SYNC_BRANCH_RE = /^sync\/sc-([1-9][0-9]*)-main-(\d{4}-\d{2}-\d{2})$/;
+export const SYNC_BRANCH_RE =
+  /^sync\/sc-([1-9][0-9]*)-main-(\d{4}-\d{2}-\d{2})(?:-([1-9][0-9]*))?$/;
 export const EPIC_STORY_PREFIX_RE = /^story\/sc-[1-9][0-9]*-epic(?:-|$)/;
 export const PRECANONICAL_STORY_BRANCH_RE =
   /^story\/(sc-[1-9][0-9]*)-(?!epic(?:-|$))[a-z0-9]+(?:-[a-z0-9]+)*$/;

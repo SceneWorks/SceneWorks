@@ -44,7 +44,7 @@ release is a separate process and is not defined here.
 | `main` | Completed features and normal development | Permanent, protected |
 | `feature/sc-<epic-id>-<epic-slug>` | Combined implementation of one epic | Epic start through verified main merge |
 | `story/sc-<story-id>-epic-<epic-id>-<epic-slug>` | One story in the epic | Story start through verified feature-branch merge |
-| `sync/sc-<epic-id>-main-<date>` | Reviewed synchronization of `main` into a feature branch | Delete after merge |
+| `sync/sc-<epic-id>-main-<date>[-<sequence>]` | Reviewed synchronization of `main` into a feature branch | Delete after merge |
 | `release/next` | Candidate for the next release | Governed by `RELEASING.md` |
 
 Use lower-case kebab-case slugs. The epic id in every story branch makes the
@@ -727,7 +727,7 @@ It enforces these topology rules without relying on a mutable epic database:
 
 - `story/sc-<story-id>-epic-<epic-id>-<slug>` targets exactly
   `feature/sc-<epic-id>-<slug>`;
-- `sync/sc-<epic-id>-main-<date>` targets a feature branch with that epic id;
+- `sync/sc-<epic-id>-main-<date>[-<sequence>]` targets a feature branch with that epic id; use the positive sequence suffix when more than one sync is required on the same date;
 - `feature/sc-<epic-id>-<slug>` targets `main` only;
 - feature-train PR heads come from the same repository; and
 - protected PRs and feature-target merge groups resolve exactly one live

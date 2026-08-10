@@ -2453,6 +2453,13 @@ test("PR topology enforces the epic-bearing train and leaves ordinary PRs alone"
     classifyPullRequest("sync/sc-18304-main-2026-08-10", "feature/sc-18304-feature-automation").kind,
     "sync",
   );
+  assert.equal(
+    classifyPullRequest(
+      "sync/sc-18304-main-2026-08-10-2",
+      "feature/sc-18304-feature-automation",
+    ).kind,
+    "sync",
+  );
   assert.equal(classifyPullRequest("feature/sc-18304-feature-automation", "main").kind, "final");
   assert.equal(classifyPullRequest("fix/an-ordinary-bug", "main").kind, "ordinary");
   assert.equal(classifyPullRequest("story/sc-18419-ordinary-fix", "main").kind, "ordinary");
