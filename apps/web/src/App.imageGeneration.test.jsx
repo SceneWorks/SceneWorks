@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { withAppContext, withImageStudioContext, FakeEventSource, response, settle, field, changeField } from "./main.testSupport.jsx";
+import { EDIT_PROMPT_TEMPLATES } from "./data/editPromptTemplates.js";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -1755,6 +1756,53 @@ describe("SceneWorks app shell", () => {
     // Suggestions swap to the variation-oriented set in character mode.
     const characterSuggestions = [...document.body.querySelectorAll(".suggestion")].map((button) => button.textContent).join("|");
     expect(characterSuggestions).not.toBe(sceneSuggestions);
+  });
+
+  it("swaps the scene suggestions for the built-in edit instructions in edit mode", async () => {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withImageStudioContext({
+          activeProject: { id: "project-1", name: "Noir" },
+          assets: [{ id: "image-1", type: "image", displayName: "Frame One" }],
+          characters: [],
+          createImageJob: () => {},
+          deleteAsset: () => {},
+          gpuOptions: ["auto"],
+          imageModels: [
+            { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image", capabilities: ["text_to_image", "edit_image"] },
+          ],
+          latestAssets: [],
+          loras: [],
+          onPreview: () => {},
+          purgeAsset: () => {},
+          requestedGpu: "auto",
+          selectedAsset: { id: "image-1", type: "image", displayName: "Frame One" },
+          setRequestedGpu: () => {},
+          updateAssetStatus: () => {},
+        }),
+      );
+    });
+    await settle();
+
+    // Text mode keeps the scene-description pills.
+    const sceneLabels = [...document.body.querySelectorAll(".suggestion")].map((button) => button.textContent);
+    expect(sceneLabels).not.toContain("Deblur");
+
+    await act(async () => {
+      [...document.body.querySelectorAll(".mode-tabs button")].find((button) => button.textContent === "Edit").click();
+    });
+    await settle();
+
+    const editLabels = [...document.body.querySelectorAll(".suggestion")].map((button) => button.textContent);
+    expect(editLabels).toEqual(EDIT_PROMPT_TEMPLATES.map((template) => template.label));
+
+    // Clicking one fills the prompt with the INSTRUCTION, not the pill's short label.
+    await act(async () => {
+      [...document.body.querySelectorAll(".suggestion")].find((button) => button.textContent === "Deblur").click();
+    });
+    const promptBox = document.body.querySelector("textarea.prompt-input");
+    expect(promptBox.value).toBe("deblur this image");
   });
 
   it("seeds a character-aware default prompt from the character's notes", async () => {

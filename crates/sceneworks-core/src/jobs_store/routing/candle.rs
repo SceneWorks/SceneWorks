@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_family_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
-    CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
+    imported_image_request_family_eligible, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS,
+    CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
     CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
     CANDLE_VIDEO_VACE_MODELS,
 };
@@ -280,7 +280,12 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
     }
     let model = job.payload.get("model").and_then(Value::as_str)?;
 
-    if imported_image_request_family_eligible(model, &job.payload, CANDLE_ROUTED_FAMILIES, false) {
+    if imported_image_request_family_eligible(
+        model,
+        &job.payload,
+        CANDLE_ROUTED_FAMILIES,
+        CANDLE_IMPORTED_CAPS,
+    ) {
         return Some(CandleImageLane::ImportedFamily);
     }
 

@@ -18,6 +18,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
+import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import StructuredPromptBuilder from "../components/StructuredPromptBuilder.jsx";
 import ReferenceCaptionPicker from "../components/ReferenceCaptionPicker.jsx";
@@ -2828,8 +2829,13 @@ export function ImageStudio() {
           ) : null}
 
           {/* Scene suggestions sit directly under the prompt (UI-refinement 4a). Free-text
-              prompts only; structured models get the builder + (later) magic-prompt. */}
-          {structuredPromptModel ? null : (
+              prompts only; structured models get the builder + (later) magic-prompt.
+              Edit mode swaps them for the built-in edit instructions: a scene description
+              ("Fox watching from the edge of a snowy forest") is not an instruction, so the
+              generation pills are actively misleading on the Edit tab. */}
+          {structuredPromptModel ? null : mode === "edit_image" ? (
+            <EditPromptTemplates onApply={setPromptFromUser} variant="studio" />
+          ) : (
             <div className="suggestion-row">
               <span className="suggestion-row-label">Try:</span>
               {suggestions.map((suggestion) => (

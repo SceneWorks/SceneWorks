@@ -233,10 +233,18 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     } == expected_mlx_flux2_runtime
     assert all(run["semantics"] == "current" for run in mlx_flux2_runtime)
     assert all(run["binding"]["eligible"] for run in mlx_flux2_runtime)
+    live_closures = json.loads(
+        (ROOT / "config/inference-provider-closures.json").read_text(encoding="utf-8")
+    )["providers"]
     for run in mlx_flux2_runtime:
         record = evidence_by_id[run["record"]["id"]]
         tier, width = expected_mlx_flux2_runtime[record["id"]]
-        assert record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
+        assert record["repositories"]["inference"]["revision"] == (
+            "10831e4ca5b8bf780319a8ee7f21427175075448"
+        )
+        assert record["repositories"]["inference"]["closureDigest"] == live_closures[
+            "mlx:flux2_dev"
+        ]["digest"]
         assert record["status"] == "runtime_complete"
         assert record["loadShape"] == "eager_materialization"
         assert record["calibrationFingerprint"] == (
@@ -319,7 +327,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ]
     # Three independent sources of "current", kept separate so one lane cannot mask another:
     #
-    #   - records measured AT the live pin (SC-18218's four MLX FLUX.2 rows);
+    #   - records measured at the live pin (empty at this post-capture pin);
     #   - records whose captured provider closure still matches the live provider closure
     #     (SC-18237's two Qwen q8 rows);
     #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
@@ -328,17 +336,22 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for record in calibration["records"]
         if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
     }
-    # This set is derived from the PIN only to inventory what SC-18218 captured. SC-17774 correctly
-    # uses the provider compile closure for currency, so the older Qwen rows below can remain current
-    # even though their repository revision is no longer the live pin.
-    # SC-18218 captured exactly the four Resident-only MLX FLUX.2 q4/q8 geometry cells at this pin.
-    # Exact ids make an accidental extra promotion visible.
-    assert measured_at_live_pin == {
-        "imc-747f54e1be89e30da943",
-        "imc-9b235419ecbe0710da06",
-        "imc-b6537074420d51413b38",
-        "imc-f3badcb841c8707fd971",
-    }
+    # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of the
+    # provider's compile closure. The two coincided while nothing had moved; they no longer do.
+    #
+    # SC-18237 recaptured exactly the two production-deferred Qwen q8 records at 40fa7583, and while
+    # that WAS the live pin this read those two ids. The 014134e3 bump moved the pin past them, so
+    # the pin-derived set is empty again — the state this assertion held before sc-16915, and the
+    # reason every assertion below it is phrased to survive an empty set.
+    #
+    # Empty here is NOT a demotion, and the distinction is the whole point of sc-17774: those two
+    # records captured closure `9930aa538259` for `mlx:qwen_image`, which is still exactly the live
+    # digest in `config/inference-provider-closures.json` at this pin — the bump touched
+    # `mlx-gen-krea` (and, via main, `mlx-gen-z-image`), not the Qwen closure. So both records remain
+    # CURRENT by the term that decides currency; they are merely no longer measured at the pin. Were
+    # this assertion instead re-pointed at the new pin's ids, that would be claiming a re-measurement
+    # nobody ran.
+    assert measured_at_live_pin == set()
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
     # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
     # with nothing measured at the live pin there is nothing to classify, and the moment a record
@@ -359,23 +372,28 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
-    # Zero because this live-pin capture contains only unparameterized Resident rows; the historical
-    # off-point bounded-decode sweep remains in the bundle but outside the intersection.
+    # Zero because no retained record was measured at this live pin; historical off-point
+    # bounded-decode sweeps remain in the bundle but outside the intersection.
     assert len(unbound_decode_edges) == 0
-    # SC-18237's two q8 Qwen records were measured at the prior pin, but remain current because their
-    # captured provider closure still exactly matches the live `mlx:qwen_image` closure.
-    closure_compatible_qwen = {
-        "imc-56c1f11bd03822d9c241",
-        "imc-a21d2ea9e2d95cf48e82",
+    # Currency is the provider's COMPILE CLOSURE, not the pin (sc-17774). While nothing had moved the
+    # two coincided and this assertion could be written off `measured_at_live_pin`; a pin bump that
+    # leaves a provider's closure untouched separates them, which is exactly what the 014134e3 bump
+    # does — it moves `mlx-gen-krea` (and, via main, `mlx-gen-z-image`) and leaves `mlx:qwen_image`
+    # byte-identical. So derive the expectation from the closure the same way the generator does,
+    # rather than from the pin: a record is current when the digest it captured is still the live
+    # digest for ITS provider lane. Written this way it keeps falling away on its own the next time a
+    # closure genuinely moves, instead of needing a hand-edit per bump.
+    current_by_closure = {
+        record["id"]
+        for record in calibration["records"]
+        if live_closures.get(
+            f"{record['backend']}:{record['target']['provider']}", {}
+        ).get("digest")
+        == record["repositories"]["inference"]["closureDigest"]
     }
-    assert all(
-        run["semantics"] == "current" and run["binding"]["eligible"]
-        for run in matrix["calibrationRuns"]
-        if run["record"]["id"] in closure_compatible_qwen
-    )
     assert {run["record"]["id"] for run in current_eligible} == (
-        measured_at_live_pin - unbound_decode_edges
-    ) | closure_compatible_qwen | (
+        current_by_closure - unbound_decode_edges
+    ) | (
         set(expected_candle_flux2_runtime) if within_audited_window else set()
     )
     # The four records that WERE runtime-current before the pin moved are still present and still

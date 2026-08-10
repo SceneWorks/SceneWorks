@@ -431,6 +431,7 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         "image_jobs/kolors_control.rs",
         "image_jobs/krea_control.rs",
         "image_jobs/krea_control_candle.rs",
+        "image_jobs/krea_imported.rs",
         "image_jobs/qwen.rs",
         "image_jobs/qwen_control.rs",
         "image_jobs/zimage.rs",
@@ -447,10 +448,27 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         f"added={sorted(actual_consumers - expected_consumers)}, "
         f"removed={sorted(expected_consumers - actual_consumers)}"
     )
+    # The invariant is that the centrally-authorized tuple resolves ONLY through
+    # `snapshots/<revision>`, never a mutable repo cache root. Two seams satisfy it, and a consumer
+    # must use one of them:
+    #
+    #   * `huggingface_pinned_snapshot_dir` directly — the download-on-first-use lanes;
+    #   * `resolve_hf_component_file` — the shared CACHE-ONLY resolver epic 17625 (AC9) requires of
+    #     any lane added since, which itself dispatches a pinned revision to
+    #     `huggingface_pinned_snapshot_dir`.
+    #
+    # Accepting the shared seam is not a loosening: membership in this inventory is defined by
+    # calling `trusted_control_weight_revision`, and that function returns either a shipped
+    # artifact's pinned revision or a catalog-authorized one it validates as 40 lowercase hex — the
+    # exact form `is_pinned_hf_revision` admits. So a consumer in this set always hands
+    # `resolve_hf_component_file` a pinned revision, and the mutable-root branch is unreachable
+    # from here.
+    pinned_resolution_seams = ("huggingface_pinned_snapshot_dir", "resolve_hf_component_file")
     for path in expected_consumers:
-        assert "huggingface_pinned_snapshot_dir" in sources[path], (
+        assert any(seam in sources[path] for seam in pinned_resolution_seams), (
             f"{path}: central tuple must resolve only through snapshots/<revision>, "
-            "never a mutable repo cache root"
+            "never a mutable repo cache root — use `huggingface_pinned_snapshot_dir` or the "
+            "shared cache-only `resolve_hf_component_file`"
         )
 
     strict_control = sources["image_jobs/strict_control.rs"]

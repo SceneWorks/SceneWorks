@@ -203,6 +203,32 @@ foreign reserve to the live host while preserving the measured peak, stale margi
 process ceiling. The user-visible 48 GB narrowing described by this historical SC-18101 run is no
 longer the production behavior.
 
+### Product decision: keep proportional foreign-reserve scaling (SC-18352)
+
+On 2026-08-09 Michael explicitly chose to keep SC-18237's proportional scaling. The captured
+foreign reserve is the capture host size minus the minimum of its host size, MLX memory limit, and
+wired limit. It is a host-policy fraction, not a fixed cost of the request; the wired limit happens
+to be the limiting value in the current corpus. Carrying a 128 GiB capture host's absolute 46.93 GiB
+reserve onto every smaller Mac therefore applies the capture host's policy unchanged. Scaling the
+same fraction to the live host matches the chosen interpretation of that reserve while retaining
+the measured request peak, stale-evidence margin, and absolute MLX process ceiling.
+
+This is an admission-policy decision, not new measurement evidence. The regenerated matrix changed
+18 of 20 published `requiredHostBytes` values, with reductions ranging from roughly 9 to 85 percent
+depending on the cell, without re-running those captures. The more permissive small-host boundary
+therefore remains OOM-sensitive: MLX allocation failure terminates the worker instead of returning
+a recoverable error. UTM runs across several configured memory sizes will be used to compare
+observed admission and OOM boundaries with
+`required_host_bytes_for`. A UTM result may update the evidence corpus only if the guest exposes
+authentic memory counters and runs the exact production MLX/Metal path; otherwise it is supporting
+emulation evidence rather than a physical calibration record.
+
+**Release-note callout:** MLX minimum-memory requirements derived from captured evidence now scale
+the capture host's foreign-reserve fraction to the live Mac instead of adding the capture host's
+fixed reserve. This removes refusals caused solely by carrying that fixed capture-host reserve onto
+smaller Macs; it does not weaken the measured peak, stale-evidence margin, or absolute MLX process
+ceiling.
+
 ### The fix
 
 `crates/sceneworks-worker/src/mlx_fit_gate.rs`: on the Evidence route, filter out candidates the

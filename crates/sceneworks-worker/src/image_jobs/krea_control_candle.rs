@@ -761,7 +761,9 @@ pub(super) async fn generate_candle_krea_control_stream(
         height: request.height,
         batch: 1,
         frames: 1,
-        reference_count: 0,
+        // The separately supplied pose image is one reference in the provider's own authoritative
+        // evidence probe. A zero here makes a current measured cell structurally ineligible.
+        reference_count: crate::krea_control_fit::KREA_CONTROL_REFERENCE_COUNT,
     };
     let runtime_evidence_verified = adapter_bytes == 0
         && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);
