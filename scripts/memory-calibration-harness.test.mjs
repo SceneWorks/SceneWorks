@@ -254,6 +254,134 @@ test("complete final-output quality may attest identical inputs without claiming
   assert.throws(() => validateRecord(record), /identical latents or identical inputs/);
 });
 
+test("the Krea adapter's complete fragment shape passes the real harness with singleton axes", async () => {
+  const adapter = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  const kreaArm = adapter.slice(
+    adapter.indexOf("fn run_krea_base(request:"),
+    adapter.indexOf("fn run_krea_control", adapter.indexOf("fn run_krea_base(request:")),
+  );
+  assert.match(kreaArm, /"status": "complete"/);
+  assert.match(kreaArm, /"sweep": krea_base_complete_sweep\(request\)\?/);
+  assert.match(kreaArm, /"negativeMutation": \{/);
+
+  const record = qwenPositiveComplete();
+  record.target = {
+    modelId: "krea_2_turbo", provider: "krea_2_turbo", tier: "q4",
+    mode: "text_to_image", overlay: "none",
+    geometry: { width: 768, height: 768, batch: 1, frames: 1 },
+  };
+  record.fixture = "krea-base-mlx-q4-768-seed18377-step2";
+  record.calibrationFingerprint =
+    "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
+  record.strategy = {
+    rung: "bounded_transformer_residency",
+    engagedRungs: [
+      "resident", "staged_residency", "bounded_decode", "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+    parameters: {
+      decodeTileEdge: 512,
+      decodeOverlap: 64,
+      attentionChunkSize: 67_108_864,
+      transformerWindowSize: 1,
+    },
+  };
+  record.sweep = {
+    axes: Object.entries(record.strategy.parameters).map(([parameter, value]) => ({
+      parameter,
+      testedValues: [value],
+    })),
+    cases: [{ parameters: structuredClone(record.strategy.parameters), result: "passed" }],
+    rangeVerified: true,
+  };
+  record.negativeMutation.parameters = structuredClone(record.strategy.parameters);
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+
+  const oldEmptySweep = structuredClone(record);
+  oldEmptySweep.sweep.axes = [];
+  assert.throws(
+    () => validateRecord(oldEmptySweep),
+    /parameterized complete strategy must sweep at least one axis/,
+  );
+});
+
+test("the SDXL adapter's runtime-complete fragment passes the real harness without inventing lifecycle coverage", async () => {
+  const adapter = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  const start = adapter.indexOf("fn run_sdxl(request:");
+  const sdxlArm = adapter.slice(start, adapter.indexOf("fn run_krea_control", start));
+  assert.match(sdxlArm, /"status": "runtime_complete"/);
+  assert.match(sdxlArm, /"sweep": sdxl_runtime_complete_sweep\(request\)\?/);
+  assert.match(sdxlArm, /"warm_repeat", "result": "not_run"/);
+  assert.match(sdxlArm, /"cancel", "result": "not_run"/);
+  assert.match(sdxlArm, /"error", "result": "not_run"/);
+  assert.match(sdxlArm, /"negativeMutation": null/);
+  assert.match(sdxlArm, /"rootMeanSquareError": rms_error/);
+  assert.match(sdxlArm, /negativeMutationRootMeanSquareErrorPer255/);
+
+  const record = runtimeComplete();
+  record.backend = "mlx";
+  record.loadShape = "deferred_materialization";
+  record.hardware = {
+    probe: "fixture sysctl and MLX allocator probe",
+    memoryBytes: 128 * 1024 ** 3,
+    model: "Mac16,5",
+    chip: "Apple M4 Max",
+    osVersion: "macOS 26.0",
+    metalDevice: "Apple M4 Max",
+    mlxMemoryLimitBytes: 96 * 1024 ** 3,
+    wiredLimitBytes: 64 * 1024 ** 3,
+  };
+  record.artifact = {
+    repository: "SceneWorks/sdxl-base-mlx",
+    resolvedRevision: "d".repeat(40),
+    variant: "q4",
+  };
+  record.target = {
+    modelId: "sdxl", provider: "sdxl", tier: "q4",
+    mode: "text_to_image", overlay: "none",
+    geometry: { width: 768, height: 768, batch: 1, frames: 1 },
+  };
+  record.fixture = "sdxl-base-mlx-q4-768-seed18379-step2";
+  record.calibrationFingerprint = "sdxl-mlx-unet-shared-ladder-v3";
+  record.strategy = {
+    rung: "bounded_transformer_residency",
+    engagedRungs: ["resident", "staged_residency", "bounded_transformer_residency"],
+    parameters: { transformerWindowSize: 1, transformerWindowComponent: "dit" },
+  };
+  record.sweep = {
+    axes: [{ parameter: "transformerWindowSize", testedValues: [1] }],
+    cases: [{ parameters: structuredClone(record.strategy.parameters), result: "passed" }],
+    rangeVerified: true,
+  };
+  record.predictedPeakBytes = { conditioning: 100, denoise: 200, decode: 150, overall: 200 };
+  record.observedMemory = {
+    conditioning: phase(100), denoise: phase(200), decode: phase(150), overall: phase(200),
+  };
+  record.loadability = {
+    result: "passed",
+    resolvedPathFingerprint: `SceneWorks/sdxl-base-mlx@${"d".repeat(40)}:q4`,
+  };
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
+
+  const stringAxis = structuredClone(record);
+  stringAxis.sweep.axes.push({ parameter: "transformerWindowComponent", testedValues: ["dit"] });
+  assert.throws(
+    () => validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [stringAxis] }),
+    /schema validation failed/,
+  );
+});
+
 test("complete status fails closed on scenario, quality, mutation, memory and loadability mutations", () => {
   const mutations = [
     [(r) => (r.scenarios.find((x) => x.name === "warm_repeat").result = "not_run"), /warm_repeat/],
@@ -638,6 +766,184 @@ test("Qwen plan covers the BF16 ladder plus Q4/Q8 rung-3-versus-rung-4 pairs", a
     );
     assert.ok(packed.every((item) => item.fixture === `qwen-image-${tier}-seed16353-step2`));
   }
+});
+
+test("FLUX.2-dev MLX plan is the reference-free T2I q4/q8 resident matrix", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const flux2 = expandPlan(config).filter(
+    (item) => item.backend === "mlx" && item.target.provider === "flux2_dev",
+  );
+
+  assert.equal(flux2.length, 4);
+  assert.deepEqual(
+    flux2.map((item) => [
+      item.target.tier,
+      item.target.geometry.width,
+      item.target.geometry.height,
+      item.strategy.rung,
+    ]).sort(),
+    [
+      ["q4", 768, 768, "resident"],
+      ["q4", 1024, 1024, "resident"],
+      ["q8", 768, 768, "resident"],
+      ["q8", 1024, 1024, "resident"],
+    ].sort(),
+  );
+  assert.ok(flux2.every((item) =>
+    item.evidenceScope === "authoritative" &&
+    item.loadShape === "eager_materialization" &&
+    item.target.modelId === "flux2_dev" &&
+    item.target.mode === "text_to_image" &&
+    item.target.overlay === "none" &&
+    item.target.geometry.batch === 1 &&
+    item.target.geometry.frames === 1 &&
+    item.strategy.engagedRungs.length === 1 &&
+    item.strategy.engagedRungs[0] === "resident" &&
+    Object.keys(item.strategy.parameters).length === 0 &&
+    item.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+  ));
+  assert.ok(flux2.every((item) =>
+    item.fixture ===
+      `flux2-dev-mlx-${item.target.tier}-${item.target.geometry.width}-seed18218-step2`
+  ));
+});
+
+test("plain MLX Krea plan covers q4, q8, and bf16 across the exact five-rung contract", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const expectedRungs = [
+    "resident",
+    "staged_residency",
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const expectedCompositions = {
+    resident: ["resident"],
+    staged_residency: ["resident", "staged_residency"],
+    bounded_decode: ["resident", "bounded_decode"],
+    bounded_attention: ["resident", "bounded_decode", "bounded_attention"],
+    bounded_transformer_residency: [
+      "resident",
+      "staged_residency",
+      "bounded_decode",
+      "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+  };
+  const assertPlan = (candidate) => {
+    const krea = expandPlan(candidate).filter(
+      (item) => item.backend === "mlx" && item.target.provider === "krea_2_turbo",
+    );
+    assert.equal(krea.length, 15, "three tiers must each publish exactly five planned rungs");
+    for (const [tier, edge] of [["q4", 768], ["q8", 1024], ["bf16", 1024]]) {
+      const cases = krea.filter((item) => item.target.tier === tier);
+      assert.deepEqual(cases.map((item) => item.strategy.rung).sort(), [...expectedRungs].sort());
+      assert.ok(cases.every((item) =>
+        item.evidenceScope === "authoritative" &&
+        item.loadShape === "deferred_materialization" &&
+        item.target.modelId === "krea_2_turbo" &&
+        item.target.mode === "text_to_image" &&
+        item.target.overlay === "none" &&
+        item.target.geometry.width === edge &&
+        item.target.geometry.height === edge &&
+        item.target.geometry.batch === 1 &&
+        item.target.geometry.frames === 1 &&
+        item.calibrationFingerprint ===
+          "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3" &&
+        item.fixture === `krea-base-mlx-${tier}-${edge}-seed18377-step2` &&
+        JSON.stringify(item.strategy.engagedRungs) ===
+          JSON.stringify(expectedCompositions[item.strategy.rung])
+      ), `${tier} plain Krea entries must preserve the exact capture tuple and composition`);
+    }
+  };
+  assertPlan(config);
+
+  const missingTierRung = structuredClone(config);
+  missingTierRung.providers = missingTierRung.providers.filter(
+    (provider) => provider.name !== "mlx-krea-base-q8-bounded-transformer-1024",
+  );
+  assert.throws(() => assertPlan(missingTierRung), /exactly five/);
+
+  const wrongSurface = structuredClone(config);
+  wrongSurface.providers.find(
+    (provider) => provider.name === "mlx-krea-base-q4-resident-768",
+  ).target.overlay = "control:1";
+  assert.throws(() => assertPlan(wrongSurface), /plain Krea entries/);
+});
+
+test("plain MLX SDXL plan covers every shipped tier without inventing measured-Missing rungs", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const expectedRungs = ["resident", "staged_residency", "bounded_transformer_residency"];
+  const expectedCompositions = {
+    resident: ["resident"],
+    staged_residency: ["resident", "staged_residency"],
+    bounded_transformer_residency: [
+      "resident", "staged_residency", "bounded_transformer_residency",
+    ],
+  };
+  const assertPlan = (candidate) => {
+    const sdxl = expandPlan(candidate).filter(
+      (item) => item.backend === "mlx" && item.target.provider === "sdxl",
+    );
+    assert.equal(sdxl.length, 18, "three tiers must each publish two base rungs plus four window cases");
+    for (const [tier, edge] of [["q4", 768], ["q8", 1024], ["bf16", 1024]]) {
+      const cases = sdxl.filter((item) => item.target.tier === tier);
+      assert.equal(cases.length, 6, `${tier} must carry Resident, Staged, and four window cases`);
+      assert.deepEqual(
+        [...new Set(cases.map((item) => item.strategy.rung))].sort(),
+        [...expectedRungs].sort(),
+      );
+      assert.ok(cases.every((item) =>
+        item.evidenceScope === "authoritative" &&
+        item.loadShape === "deferred_materialization" &&
+        item.target.modelId === "sdxl" &&
+        item.target.mode === "text_to_image" &&
+        item.target.overlay === "none" &&
+        item.target.geometry.width === edge &&
+        item.target.geometry.height === edge &&
+        item.target.geometry.batch === 1 &&
+        item.target.geometry.frames === 1 &&
+        item.calibrationFingerprint === "sdxl-mlx-unet-shared-ladder-v3" &&
+        item.fixture === `sdxl-base-mlx-${tier}-${edge}-seed18379-step2` &&
+        JSON.stringify(item.strategy.engagedRungs) ===
+          JSON.stringify(expectedCompositions[item.strategy.rung]) &&
+        (item.strategy.rung !== "bounded_transformer_residency" ||
+          ([1, 2, 5, 10].includes(item.strategy.parameters.transformerWindowSize) &&
+            item.strategy.parameters.transformerWindowComponent === "dit"))
+      ), `${tier} SDXL entries must preserve the exact base T2I capture tuple`);
+      assert.deepEqual(
+        cases
+          .filter((item) => item.strategy.rung === "bounded_transformer_residency")
+          .map((item) => item.strategy.parameters.transformerWindowSize)
+          .sort((left, right) => left - right),
+        [1, 2, 5, 10],
+        `${tier} must schedule every provider-implemented SDXL cadence`,
+      );
+      assert.ok(
+        cases.every((item) => !["bounded_decode", "bounded_attention"].includes(item.strategy.rung)),
+        `${tier} must not plan measured-Missing SDXL rungs`,
+      );
+    }
+  };
+  assertPlan(config);
+
+  const missingRung = structuredClone(config);
+  missingRung.providers = missingRung.providers.filter(
+    (provider) => provider.name !== "mlx-sdxl-base-q8-bounded-transformer-window5-1024",
+  );
+  assert.throws(() => assertPlan(missingRung), /four window cases|every provider-implemented/);
+
+  const inventedRung = structuredClone(config);
+  inventedRung.providers.find(
+    (provider) => provider.name === "mlx-sdxl-base-q4-resident-768",
+  ).rung = "bounded_decode";
+  assert.throws(() => assertPlan(inventedRung));
 });
 
 test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {

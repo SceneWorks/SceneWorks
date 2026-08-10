@@ -43,12 +43,29 @@ const QWEN_MEAN_THRESHOLD: f64 = 0.5 / 255.0;
 // pass on the maximum alone.
 const Z_IMAGE_MAX_THRESHOLD: f64 = 56.0 / 255.0;
 const Z_IMAGE_MEAN_THRESHOLD: f64 = 4.0 / 255.0;
+/// Plain, reference-free Krea 2 Turbo text-to-image. This is a distinct calibration lane from the
+/// pose-control provider below even though both providers live in `mlx-gen-krea`.
+const KREA_BASE_PROVIDER: &str = "krea_2_turbo";
+const KREA_BASE_CALIBRATION_FINGERPRINT: &str =
+    "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
+const KREA_BASE_SEED: u64 = 18377;
+/// Recommended, reference-free SDXL base text-to-image. Rungs 2 and 3 are measured Missing at the
+/// pinned provider, so this apparatus intentionally exposes only Resident, Staged, and rung 4.
+const SDXL_PROVIDER: &str = "sdxl";
+const SDXL_CALIBRATION_FINGERPRINT: &str = "sdxl-mlx-unet-shared-ladder-v3";
+const SDXL_SEED: u64 = 18379;
+// RMS is bounded by the same per-pixel envelope as maximum absolute error. This avoids inventing a
+// tighter SDXL-specific tolerance before the first physical campaign while still making the real
+// harness's runtime-complete quality contract explicit and mutation-sensitive.
+const SDXL_RMS_THRESHOLD: f64 = MAX_THRESHOLD;
+const SDXL_PLAIN_EXECUTION_PATH: &str = "the MLX SDXL base-only text-to-image path";
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
 const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
 const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
+const KREA_PLAIN_EXECUTION_PATH: &str = "the MLX Krea base-only text-to-image path";
 /// The gated VAE probe reaches `load_vae` directly, with no `LoadSpec` and therefore no deferred
 /// block schedule: it bulk-materializes the VAE, which is eager materialization.
 const QWEN_VAE_PROBE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
@@ -57,6 +74,20 @@ const QWEN_PLAIN_EXECUTION_PATH: &str = "the MLX Qwen VAE-only path";
 const QWEN_PROVIDER_EXECUTION_PATH: &str = "the pinned MLX Qwen base provider path";
 const Z_IMAGE_PROVIDER: &str = "z_image_turbo";
 const Z_IMAGE_PLAIN_EXECUTION_PATH: &str = "the MLX Z-Image base-only text-to-image path";
+/// The `mlx:flux2_dev` lane: the FLUX.2-dev text-to-image provider the measured renders load.
+const FLUX2_PROVIDER: &str = "flux2_dev";
+const FLUX2_CALIBRATION_FINGERPRINT: &str = "sc-18218-flux2-dev-t2i-resident-evidence-v1";
+const FLUX2_PLAIN_EXECUTION_PATH: &str = "the MLX FLUX.2-dev base-only text-to-image path";
+/// FLUX.2-dev quality here is repeat determinism on one loaded provider: the resident rung selects
+/// no alternate code path, so the cold measured render and its warm unscoped repeats must agree to
+/// within Metal allocator jitter. 3/255 max and 1/255 mean sit far above observed same-process
+/// fp jitter and far below the mandatory +64/255 broad-bias mutation, which must breach both.
+const FLUX2_MAX_THRESHOLD: f64 = 3.0 / 255.0;
+const FLUX2_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
+const FLUX2_RMS_THRESHOLD: f64 = 1.5 / 255.0;
+/// One fixed seed for every q4/q8 `mlx:flux2_dev` fixture
+/// (`flux2-dev-mlx-<tier>-<edge>-seed18218-step2`).
+const FLUX2_SEED: u64 = 18218;
 const MIB: u64 = 1024 * 1024;
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
@@ -313,7 +344,9 @@ mod tests {
     /// vocabulary appears, which is what distinguishes a dispatch refusal from a misroute.
     #[test]
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
-        for provider in ["flux2_dev", "flux2_dev_edit", "krea_2_turbo", "sana"] {
+        // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
+        // contract provider is not a dispatchable lane.
+        for provider in ["flux2_klein_9b", "flux2_dev_edit", "sana"] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request).expect_err("unimplemented provider must not dispatch");
             assert_eq!(
@@ -345,7 +378,14 @@ mod tests {
     /// weight load, so the assertion is on WHICH complaint comes back, not on success.
     #[test]
     fn every_implemented_provider_still_reaches_its_own_arm_through_dispatch() {
-        for provider in ["qwen_image", "z_image_turbo", "krea_2_turbo_control"] {
+        for provider in [
+            "qwen_image",
+            "z_image_turbo",
+            "krea_2_turbo",
+            "sdxl",
+            "krea_2_turbo_control",
+            "flux2_dev",
+        ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
                 .expect_err("the minimal request is incomplete, so every arm must complain");
@@ -356,7 +396,10 @@ mod tests {
         }
         assert_eq!(QWEN_PROVIDER, "qwen_image");
         assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
+        assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
+        assert_eq!(SDXL_PROVIDER, "sdxl");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
+        assert_eq!(FLUX2_PROVIDER, "flux2_dev");
     }
 
     #[test]
@@ -959,7 +1002,7 @@ struct PhaseMemory {
     cache: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AllocatorState {
     active: u64,
     cache: u64,
@@ -1100,7 +1143,25 @@ fn planned_qwen_seed(request: &Value, tier: &str) -> Result<u64, String> {
 
 fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
     let strategy = planned_memory_strategy(request)?;
+    let parameters = protocol::strategy_parameters(request)?;
     let transformer_window_size = protocol::optional_parameter(request, "transformerWindowSize")?;
+    let transformer_window_component = match parameters.get("transformerWindowComponent") {
+        None if transformer_window_size.is_none() => None,
+        None => Some(TransformerComponent::Dit),
+        Some(value) if transformer_window_size.is_none() => {
+            return Err(format!(
+                "planned.strategy.parameters.transformerWindowComponent requires transformerWindowSize, got {value}"
+            ));
+        }
+        Some(value) => match value.as_str() {
+            Some("dit") => Some(TransformerComponent::Dit),
+            _ => {
+                return Err(format!(
+                    "planned.strategy.parameters.transformerWindowComponent must be \"dit\" for the implemented MLX adapter arms, got {value}"
+                ));
+            }
+        },
+    };
     let (precision, quant) = match planned_qwen_tier(request)? {
         "bf16" => (Precision::Bf16, None),
         "q4" => (Precision::Bf16, Some(Quant::Q4)),
@@ -1114,8 +1175,7 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
             decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
             attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
             transformer_window_size,
-            transformer_window_component: transformer_window_size
-                .map(|_| TransformerComponent::Dit),
+            transformer_window_component,
         },
         tier: MemoryNumericTier {
             precision,
@@ -1685,6 +1745,500 @@ fn run_z_image_reference(request: &Value) -> Result<Value, String> {
     )
 }
 
+/// Maximum, mean, and root-mean-square absolute error between two images, in [0,1] units. The
+/// runtime_complete quality shape requires the RMS metric alongside max/mean
+/// (`memory-calibration-harness.mjs#validateRuntimeComplete`), which is why this exists next to
+/// `image_max_mean_abs` instead of replacing it.
+fn image_max_mean_rms_abs(left: &Image, right: &Image) -> Result<(f64, f64, f64), String> {
+    let (maximum, mean) = image_max_mean_abs(left, right)?;
+    let mut sum_squares = 0.0_f64;
+    for (&left, &right) in left.pixels.iter().zip(&right.pixels) {
+        let difference = (f64::from(left) - f64::from(right)).abs() / 255.0;
+        sum_squares += difference * difference;
+    }
+    Ok((
+        maximum,
+        mean,
+        (sum_squares / left.pixels.len() as f64).sqrt(),
+    ))
+}
+
+fn flux2_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= FLUX2_MAX_THRESHOLD && mean <= FLUX2_MEAN_THRESHOLD && rms <= FLUX2_RMS_THRESHOLD
+}
+
+/// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
+/// (sc-18104): `run` dispatches by name today, but this arm hardcodes the FLUX.2-dev contract, so a
+/// future caller must be refused by name here rather than misrouted into that contract.
+fn validate_flux2_target(request: &Value) -> Result<(), String> {
+    let provider = protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != FLUX2_PROVIDER {
+        return Err(format!(
+            "MLX FLUX.2-dev calibration does not implement provider {provider:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Bind the fixture to the planned tier AND geometry edge, deriving the seed — the same
+/// fixture-to-plan binding `planned_qwen_seed` enforces, extended to the edge because this lane's
+/// plan carries each of its q4 and q8 tiers at two geometries (768² and 1024²).
+fn planned_flux2_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("flux2-dev-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse FLUX.2-dev fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse FLUX.2-dev fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn flux2_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a lighthouse on a rocky coastline at golden hour, photorealistic".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        // The first Step callback closes the conditioning envelope; the second supplies a real
+        // denoise-only interval before Decoding — the z_image/qwen phase-boundary pattern.
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+/// Resolve and validate the `SCENEWORKS_FLUX2_*` environment family into a tier-exact load spec.
+/// The tier is DERIVED from `/target/tier` and threads through the per-tier ROOT suffix check and
+/// `spec.quantize` — never hardcoded (sc-17097 fixed exactly that hardcoding on the Candle side).
+fn flux2_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, LoadSpec), String> {
+    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
+    let repository = protocol::required_env("SCENEWORKS_FLUX2_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_FLUX2_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::FLUX2_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_FLUX2_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_FLUX2_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::FLUX2_REPOSITORY,
+    )?;
+    Ok((repository, revision, flux2_spec(root, selection)))
+}
+
+/// The tier-exact FLUX.2-dev load spec: resident offload, eager materialization (the contract's
+/// calibrated load shape), and the quant DERIVED from the planned selection.
+fn flux2_spec(root: PathBuf, selection: &MemorySelection) -> LoadSpec {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization);
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    spec
+}
+
+/// The admission context for the FLUX.2-dev safety scenarios. It exactly describes the base
+/// text-to-image route: `MemoryMode::TextToImage`, no reference, and `reference_count == 0`.
+/// `overlay` stays `None` because this authoritative lane is base-only.
+fn flux2_admission_context(
+    selection: &MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection: *selection,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
+        // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18218@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn flux2_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact resident tuple per plan row; marking it range-verified promotes no sibling tuple
+    // (the generated matrix still requires a matching manifest binding per cell).
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// The `mlx:flux2_dev` arm (sc-18218) — RESIDENT ONLY, deliberately.
+///
+/// At the interim inference PR #531 head, `flux2_dev` owns a distinct reference-free T2I contract.
+/// Every non-Resident strategy remains `Missing`; this arm refuses those rungs, reads the registry
+/// contract under the exact T2I provider id, and then proves that the loaded generator exposes the
+/// byte-for-byte same contract before measuring it. No edit-provider declaration or edit-shaped
+/// context participates in this lane.
+fn run_flux2_dev(request: &Value) -> Result<Value, String> {
+    validate_flux2_target(request)?;
+    protocol::validate_plain_overlay_target(request, FLUX2_PLAIN_EXECUTION_PATH)?;
+    let rung = protocol::planned_rung(request)?;
+    if rung != "resident" {
+        return Err(format!(
+            "the pinned MLX FLUX.2-dev provider implements only the resident strategy (every other \
+             strategy is declared Missing at the pin); rung {rung:?} is not capturable"
+        ));
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+    if !matches!(tier, "q4" | "q8") {
+        return Err(format!(
+            "the authoritative MLX FLUX.2-dev plan supports only q4 and q8; tier {tier:?} is not capturable"
+        ));
+    }
+    let (width, height) = protocol::target_geometry(request)?;
+    let seed = planned_flux2_seed(request, tier, width)?;
+    let (repository, revision, spec) = flux2_load_spec(request, tier, &selection)?;
+    let registry = mlx_gen_flux2::provider_registry()
+        .map_err(|error| format!("build FLUX.2 registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(FLUX2_PROVIDER, &spec)
+        .map_err(|error| format!("read {FLUX2_PROVIDER} T2I memory-strategy contract: {error}"))?
+        .ok_or_else(|| {
+            format!("{FLUX2_PROVIDER} has no T2I memory-strategy contract at the pin")
+        })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned FLUX.2-dev contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned FLUX.2-dev contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != FLUX2_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned FLUX.2-dev T2I contract fingerprint changed: expected {FLUX2_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if seed != FLUX2_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the FLUX.2-dev calibration seed {FLUX2_SEED}"
+        ));
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+            &spec,
+            &contract,
+            &flux2_admission_context(
+                &selection,
+                calibration,
+                fingerprint,
+                width,
+                height,
+                total_bytes,
+                predicted,
+            ),
+        )
+    };
+    // Admission mutation hygiene BEFORE the expensive load: the gate must accept a fitting
+    // request (so the two rejections below cannot pass via a blanket refusal), reject an
+    // unknown/zero budget, and reject a mutated calibration fingerprint.
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "FLUX.2-dev admission rejected a fitting probe budget; the scenario rejections below \
+             would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("FLUX.2-dev admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-flux2-dev-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("FLUX.2-dev admission accepted stale calibration evidence".to_owned());
+    }
+
+    let generator = registry
+        .load(FLUX2_PROVIDER, &spec)
+        .map_err(|error| format!("load real FLUX.2-dev {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded FLUX.2-dev generator exposed no T2I memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded FLUX.2-dev generator contract differs from the registry contract".to_owned(),
+        );
+    }
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(
+        generator
+            .generate(
+                &flux2_request(width, height, seed),
+                &mut |progress| match progress {
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured FLUX.2-dev render: {error}"))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized FLUX.2-dev lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let exact_fit = flux2_admission_context(
+        &selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        predicted,
+        predicted,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact_fit),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("FLUX.2-dev admission rejected an exact-fit calibrated budget".to_owned());
+    }
+
+    // Warm repeat determinism + cleanup bounds on this exact loaded provider. The scoped
+    // lifecycle scenarios cannot run (no request scope, no injection site), so the unscoped
+    // repeats gate quality and the allocator bounds gate cleanup instead.
+    clear_cache();
+    reset_peak_memory();
+    let baseline = one_image(
+        generator
+            .generate(&flux2_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm FLUX.2-dev control: {error}"))?,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "FLUX.2-dev warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    reset_peak_memory();
+    let warm = one_image(
+        generator
+            .generate(&flux2_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm FLUX.2-dev repeat: {error}"))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "FLUX.2-dev warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "FLUX.2-dev warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+            cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = image_max_mean_rms_abs(&selected, &warm)?;
+    if !flux2_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err("FLUX.2-dev second warm repeat changed the deterministic output".to_owned());
+    }
+
+    // Arm-internal negative-mutation falsifiability check. A runtime_complete record must keep
+    // `negativeMutation` null (`memory-calibration-harness.mjs#validateRuntimeComplete`), so the
+    // breach is verified here — the capture fails if the envelope cannot be breached — and the
+    // measured numbers land in diagnostics rather than in the record field.
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(
+            "FLUX.2-dev output mutation did not breach the determinism envelope".to_owned(),
+        );
+    }
+
+    let lifecycle_blocker = concat!(
+        "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev ",
+        "variants and has no calibration fault-injection site, so the scoped lifecycle scenario ",
+        "cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in ",
+        "quality and diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": flux2_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:flux2-dev-resident",
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", 0),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, FLUX2_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
 fn validate_z_image_batch(request: &Value) -> Result<&[Value], String> {
     let planned = request
         .get("planned")
@@ -1827,6 +2381,1152 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
         "calibrationIdentities": actual_identities,
         "evidence": "pinned provider contracts for eager and deferred load specs",
     }))
+}
+
+fn validate_krea_base_target(request: &Value) -> Result<(), String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != KREA_BASE_PROVIDER {
+        return Err(format!(
+            "MLX Krea base calibration does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != KREA_BASE_PROVIDER {
+        return Err(format!(
+            "MLX Krea base calibration requires modelId {KREA_BASE_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_image" {
+        return Err(format!(
+            "MLX Krea base calibration requires reference-free text_to_image mode, got {mode:?}"
+        ));
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
+        let actual = geometry
+            .get(axis)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
+        if actual != expected {
+            return Err(format!(
+                "MLX Krea base calibration requires geometry.{axis} == {expected}, got {actual}"
+            ));
+        }
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "MLX Krea base calibration requires {field} == 0 when declared"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "MLX Krea base calibration requires {field} == false when declared"
+                ));
+            }
+        }
+    }
+    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)
+}
+
+fn planned_krea_base_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("krea-base-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Krea fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Krea fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn krea_base_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // Each Krea plan row executes exactly one production parameter tuple. The singleton axes are
+    // derived from that tuple, so a parameterized `complete` receipt satisfies the harness without
+    // claiming any sibling value was exercised.
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+fn krea_base_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "an editorial photograph of a glass sculpture in a sunlit studio".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        // Two steps produce distinct conditioning/denoise/decode boundaries while keeping the
+        // future physical capture bounded. This story adds no records or manifest bindings.
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+fn krea_base_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, LoadSpec), String> {
+    validate_krea_base_target(request)?;
+    let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_KREA_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_KREA_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::KREA_REPOSITORY,
+    )?;
+    let offload = if selection.strategy == MemoryStrategy::Resident {
+        OffloadPolicy::Resident
+    } else {
+        OffloadPolicy::Sequential
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(offload)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok((repository, revision, spec))
+}
+
+fn krea_base_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18377@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct KreaBaseLifecycleMetrics {
+    clean_warm_peak: u64,
+    clean_post_cleanup: AllocatorState,
+    max_fault_post_cleanup: AllocatorState,
+    max_recovery_peak: u64,
+    max_recovery_post_cleanup: AllocatorState,
+}
+
+fn verify_krea_base_lifecycle(
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    selected: &Image,
+    width: u32,
+    height: u32,
+    seed: u64,
+) -> Result<KreaBaseLifecycleMetrics, String> {
+    clear_cache();
+    reset_peak_memory();
+    let clean_warm = one_image(scoped_generate(
+        generator,
+        krea_base_request(width, height, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let bounds = LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (warm_maximum, warm_mean) = image_max_mean_abs(selected, &clean_warm)?;
+    if warm_maximum > KREA_MAX_THRESHOLD || warm_mean > KREA_MEAN_THRESHOLD {
+        return Err("Krea base clean warm control changed the deterministic output".to_owned());
+    }
+
+    let mut metrics = KreaBaseLifecycleMetrics {
+        clean_warm_peak,
+        clean_post_cleanup,
+        ..Default::default()
+    };
+    for phase in [
+        MemoryPhase::Conditioning,
+        MemoryPhase::Denoise,
+        MemoryPhase::Decode,
+    ] {
+        let cancel = mlx_gen::CancelFlag::new();
+        if phase == MemoryPhase::Conditioning {
+            cancel.cancel();
+        }
+        let mut cancelled = krea_base_request(width, height, seed);
+        cancelled.cancel = cancel.clone();
+        let result = scoped_generate(generator, cancelled, context, None, &mut |progress| {
+            if (phase == MemoryPhase::Denoise
+                && matches!(progress, Progress::Step { current: 1, .. }))
+                || (phase == MemoryPhase::Decode && matches!(progress, Progress::Decoding))
+            {
+                cancel.cancel();
+            }
+        });
+        match result {
+            Err(error) if error.to_ascii_lowercase().contains("cancel") => {}
+            Err(error) => {
+                return Err(format!(
+                    "Krea base {phase:?} cancellation returned the wrong error: {error}"
+                ));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "Krea base {phase:?} cancellation returned images instead of the typed cancellation path"
+                ));
+            }
+        }
+        clear_cache();
+        let fault_cleanup = AllocatorState::capture_current();
+        metrics.max_fault_post_cleanup.active = metrics
+            .max_fault_post_cleanup
+            .active
+            .max(fault_cleanup.active);
+        metrics.max_fault_post_cleanup.cache = metrics
+            .max_fault_post_cleanup
+            .cache
+            .max(fault_cleanup.cache);
+        if !bounds.allows_retained(fault_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        reset_peak_memory();
+        let recovery = one_image(scoped_generate(
+            generator,
+            krea_base_request(width, height, seed),
+            context,
+            None,
+            &mut |_| {},
+        )?)?;
+        let recovery_peak = get_peak_memory() as u64;
+        metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
+        if !bounds.allows_warm_peak(recovery_peak) {
+            return Err(format!(
+                "Krea base {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+            ));
+        }
+        clear_cache();
+        let recovery_cleanup = AllocatorState::capture_current();
+        metrics.max_recovery_post_cleanup.active = metrics
+            .max_recovery_post_cleanup
+            .active
+            .max(recovery_cleanup.active);
+        metrics.max_recovery_post_cleanup.cache = metrics
+            .max_recovery_post_cleanup
+            .cache
+            .max(recovery_cleanup.cache);
+        if !bounds.allows_retained(recovery_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
+        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
+            return Err(format!(
+                "Krea base {phase:?} cancellation cleanup changed the warm follow-up"
+            ));
+        }
+    }
+
+    for phase in [
+        MemoryPhase::Conditioning,
+        MemoryPhase::Denoise,
+        MemoryPhase::Decode,
+    ] {
+        let result = scoped_generate(
+            generator,
+            krea_base_request(width, height, seed),
+            context,
+            Some(phase),
+            &mut |_| {},
+        );
+        match result {
+            Err(error) if error.contains("injected memory-strategy calibration error") => {}
+            Err(error) => {
+                return Err(format!(
+                    "Krea base {phase:?} error injection returned the wrong error: {error}"
+                ));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "Krea base {phase:?} error injection returned images instead of failing at its physical boundary"
+                ));
+            }
+        }
+        clear_cache();
+        let fault_cleanup = AllocatorState::capture_current();
+        metrics.max_fault_post_cleanup.active = metrics
+            .max_fault_post_cleanup
+            .active
+            .max(fault_cleanup.active);
+        metrics.max_fault_post_cleanup.cache = metrics
+            .max_fault_post_cleanup
+            .cache
+            .max(fault_cleanup.cache);
+        if !bounds.allows_retained(fault_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        reset_peak_memory();
+        let recovery = one_image(scoped_generate(
+            generator,
+            krea_base_request(width, height, seed),
+            context,
+            None,
+            &mut |_| {},
+        )?)?;
+        let recovery_peak = get_peak_memory() as u64;
+        metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
+        if !bounds.allows_warm_peak(recovery_peak) {
+            return Err(format!(
+                "Krea base {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+            ));
+        }
+        clear_cache();
+        let recovery_cleanup = AllocatorState::capture_current();
+        metrics.max_recovery_post_cleanup.active = metrics
+            .max_recovery_post_cleanup
+            .active
+            .max(recovery_cleanup.active);
+        metrics.max_recovery_post_cleanup.cache = metrics
+            .max_recovery_post_cleanup
+            .cache
+            .max(recovery_cleanup.cache);
+        if !bounds.allows_retained(recovery_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
+        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
+            return Err(format!(
+                "Krea base {phase:?} error cleanup changed the warm follow-up"
+            ));
+        }
+    }
+    Ok(metrics)
+}
+
+/// Capture arm for the shipped, reference-free `mlx:krea_2_turbo` lane. The pose-control arm is
+/// intentionally separate: its overlay, geometry and provider fingerprint are not interchangeable.
+fn run_krea_base(request: &Value) -> Result<Value, String> {
+    validate_krea_base_target(request)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::DeferredMaterialization {
+        return Err(
+            "plain Krea calibration must use the production deferred_materialization load shape"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    let seed = planned_krea_base_seed(request, tier, width)?;
+    if seed != KREA_BASE_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the Krea base calibration seed {KREA_BASE_SEED}"
+        ));
+    }
+    let (repository, revision, spec) = krea_base_load_spec(request, tier, &selection)?;
+    let registry = mlx_gen_krea::provider_registry()
+        .map_err(|error| format!("build Krea registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(KREA_BASE_PROVIDER, &spec)
+        .map_err(|error| format!("read {KREA_BASE_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| {
+            format!("{KREA_BASE_PROVIDER} has no memory-strategy contract at the pin")
+        })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned Krea base contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Krea base contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != KREA_BASE_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned Krea base fingerprint changed: expected {KREA_BASE_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let generator = registry
+        .load(KREA_BASE_PROVIDER, &spec)
+        .map_err(|error| format!("load real Krea base {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded Krea base generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded Krea base generator contract differs from the registry contract".to_owned(),
+        );
+    }
+    let context = krea_base_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        krea_base_request(width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Krea base lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Krea base provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Krea base provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-krea-base-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Krea base provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&krea_base_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected Krea base reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if maximum_error > KREA_MAX_THRESHOLD || mean_error > KREA_MEAN_THRESHOLD {
+        return Err(format!(
+            "Krea base selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let lifecycle =
+        verify_krea_base_lifecycle(generator.as_ref(), &context, &selected, width, height, seed)?;
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if mutated_maximum <= KREA_MAX_THRESHOLD && mutated_mean <= KREA_MEAN_THRESHOLD {
+        return Err("Krea base output mutation did not breach the parity envelope".to_owned());
+    }
+
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": krea_base_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "reason": "conditioning, denoise, and decode cancellation returned typed cancellation; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps and tier; selected Krea rung versus unselected request",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": KREA_MAX_THRESHOLD,
+            "meanErrorThreshold": KREA_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:krea-base-shared-ladder",
+            "executed",
+            [],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", lifecycle.clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", lifecycle.clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", lifecycle.clean_post_cleanup.cache),
+                ("lifecycleMaximumFaultPostCleanupActive", "bytes", lifecycle.max_fault_post_cleanup.active),
+                ("lifecycleMaximumFaultPostCleanupCache", "bytes", lifecycle.max_fault_post_cleanup.cache),
+                ("lifecycleMaximumRecoveryPeak", "bytes", lifecycle.max_recovery_peak),
+                ("lifecycleMaximumRecoveryPostCleanupActive", "bytes", lifecycle.max_recovery_post_cleanup.active),
+                ("lifecycleMaximumRecoveryPostCleanupCache", "bytes", lifecycle.max_recovery_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
+fn validate_sdxl_target(request: &Value) -> Result<(), String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != SDXL_PROVIDER {
+        return Err(format!(
+            "MLX SDXL base calibration does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != SDXL_PROVIDER {
+        return Err(format!(
+            "MLX SDXL base calibration requires modelId {SDXL_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_image" {
+        return Err(format!(
+            "MLX SDXL base calibration requires reference-free text_to_image mode, got {mode:?}"
+        ));
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
+        let actual = geometry
+            .get(axis)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
+        if actual != expected {
+            return Err(format!(
+                "MLX SDXL base calibration requires geometry.{axis} == {expected}, got {actual}"
+            ));
+        }
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "MLX SDXL base calibration requires {field} == 0 when declared"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "MLX SDXL base calibration requires {field} == false when declared"
+                ));
+            }
+        }
+    }
+    protocol::validate_plain_overlay_target(request, SDXL_PLAIN_EXECUTION_PATH)
+}
+
+fn validate_sdxl_selection_parameters(
+    request: &Value,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    let parameters = protocol::strategy_parameters(request)?;
+    match selection.strategy {
+        MemoryStrategy::Resident | MemoryStrategy::StagedResidency => {
+            if !parameters.is_empty() {
+                return Err(format!(
+                    "MLX SDXL {:?} calibration requires no strategy parameters, got {parameters:?}",
+                    selection.strategy
+                ));
+            }
+        }
+        MemoryStrategy::BoundedTransformerResidency => {
+            let mut keys = parameters.keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            if keys != ["transformerWindowComponent", "transformerWindowSize"] {
+                return Err(format!(
+                    "MLX SDXL bounded transformer calibration requires exactly transformerWindowSize and transformerWindowComponent, got {keys:?}"
+                ));
+            }
+            if selection.parameters.transformer_window_size.is_none()
+                || selection.parameters.transformer_window_component
+                    != Some(TransformerComponent::Dit)
+            {
+                return Err(
+                    "MLX SDXL bounded transformer calibration requires an explicit Dit window"
+                        .to_owned(),
+                );
+            }
+        }
+        MemoryStrategy::BoundedDecode | MemoryStrategy::BoundedAttention => {
+            return Err(format!(
+                "MLX SDXL {:?} is measured Missing at the pinned provider and is not capturable",
+                selection.strategy
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn planned_sdxl_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("sdxl-base-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse SDXL fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse SDXL fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn sdxl_runtime_complete_sweep(request: &Value) -> Result<Value, String> {
+    let parameters = protocol::strategy_parameters(request)?;
+    let axes = parameters
+        .iter()
+        .filter_map(|(name, value)| value.as_u64().map(|value| (name, value)))
+        .map(|(name, value)| json!({ "parameter": name, "testedValues": [value] }))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "axes": axes,
+        "cases": [{ "parameters": parameters, "result": "passed" }],
+        "rangeVerified": true,
+    }))
+}
+
+fn sdxl_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "an editorial photograph of a glass sculpture in a sunlit studio".to_owned(),
+        negative_prompt: Some("low quality, blurry, distorted".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(2),
+        guidance: Some(7.0),
+        ..Default::default()
+    }
+}
+
+fn sdxl_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, LoadSpec), String> {
+    validate_sdxl_target(request)?;
+    let repository = protocol::required_env("SCENEWORKS_SDXL_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_SDXL_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::SDXL_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_SDXL_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_SDXL_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::SDXL_REPOSITORY,
+    )?;
+    let offload = if selection.strategy == MemoryStrategy::Resident {
+        OffloadPolicy::Resident
+    } else {
+        OffloadPolicy::Sequential
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(offload)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok((repository, revision, spec))
+}
+
+fn sdxl_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18379@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// Real capture arm for the exact recommended `mlx:sdxl` base T2I identity. It deliberately does
+/// not expose SDXL edit/reference/adapter surfaces or the provider's measured-Missing rungs 2/3.
+fn run_sdxl(request: &Value) -> Result<Value, String> {
+    validate_sdxl_target(request)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::DeferredMaterialization {
+        return Err(
+            "plain SDXL calibration must use the production deferred_materialization load shape"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    validate_sdxl_selection_parameters(request, &selection)?;
+    let tier = planned_qwen_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    let seed = planned_sdxl_seed(request, tier, width)?;
+    if seed != SDXL_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the SDXL calibration seed {SDXL_SEED}"
+        ));
+    }
+    let (repository, revision, spec) = sdxl_load_spec(request, tier, &selection)?;
+    let registry = mlx_gen_sdxl::provider_registry()
+        .map_err(|error| format!("build SDXL registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(SDXL_PROVIDER, &spec)
+        .map_err(|error| format!("read {SDXL_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| format!("{SDXL_PROVIDER} has no memory-strategy contract at the pin"))?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned SDXL contract rejected planned selection: {error}"))?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned SDXL contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != SDXL_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned SDXL fingerprint changed: expected {SDXL_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let generator = registry
+        .load(SDXL_PROVIDER, &spec)
+        .map_err(|error| format!("load real SDXL {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded SDXL generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err("loaded SDXL generator contract differs from the registry contract".to_owned());
+    }
+    let context = sdxl_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        sdxl_request(width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err("a synchronized SDXL lifecycle phase reported a zero active peak".to_owned());
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("SDXL provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("SDXL provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-sdxl-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("SDXL provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&sdxl_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected SDXL reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if maximum_error > MAX_THRESHOLD
+        || mean_error > MEAN_THRESHOLD
+        || rms_error > SDXL_RMS_THRESHOLD
+    {
+        return Err(format!(
+            "SDXL selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if mutated_maximum <= MAX_THRESHOLD
+        && mutated_mean <= MEAN_THRESHOLD
+        && mutated_rms <= SDXL_RMS_THRESHOLD
+    {
+        return Err("SDXL output mutation did not breach the parity envelope".to_owned());
+    }
+
+    // The pinned SDXL provider exposes synchronized request scopes and phase telemetry, but not the
+    // exhaustive lifecycle hooks required for `complete`: it never reads the calibration error
+    // authorization, and its plain untiled VAE decode does not consult the request cancel flag.
+    // Preserve the real phase/quality/admission measurements as `runtime_complete`, keep the formal
+    // lifecycle scenarios explicitly not_run, and record the internally verified mutation only as
+    // diagnostics (the runtime-complete schema requires `negativeMutation: null`).
+    let lifecycle_blocker = concat!(
+        "the pinned mlx-gen-sdxl provider does not implement calibration error injection and its ",
+        "plain untiled VAE decode does not consult the cancellation flag, so exhaustive warm/cancel/",
+        "error lifecycle certification cannot execute; synchronized phase telemetry, selected-versus-",
+        "unselected parity, and the internal negative discriminator are attested separately"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": sdxl_runtime_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, negative prompt, guidance, seed, geometry, steps and tier; selected SDXL rung versus unselected request",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": MAX_THRESHOLD,
+            "meanErrorThreshold": MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": SDXL_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:sdxl-shared-ladder",
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, SDXL_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
 }
 
 fn run_krea_control(request: &Value) -> Result<Value, String> {
@@ -2883,8 +4583,11 @@ fn run(request: &Value) -> Result<Value, String> {
     // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
     match provider {
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
+        KREA_BASE_PROVIDER => run_krea_base(request),
+        SDXL_PROVIDER => run_sdxl(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
+        FLUX2_PROVIDER => run_flux2_dev(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -3001,6 +4704,822 @@ mod z_image_reuse_tests {
             error,
             "Z-Image rung batch must contain exactly 5 cases, got 3"
         );
+    }
+}
+
+#[cfg(test)]
+mod flux2_tests {
+    use super::*;
+    use mlx_gen::gen_core::MemoryStrategySupport;
+
+    fn minimal_request(provider: &str, rung: &str) -> Value {
+        json!({
+            "planned": {
+                "target": { "provider": provider, "overlay": "none" },
+                "strategy": { "rung": rung, "parameters": {} }
+            }
+        })
+    }
+
+    /// The per-arm twin of `validate_z_image_batch`'s provider guard (sc-18104): dispatch routes by
+    /// name today, but this arm hardcodes the FLUX.2-dev contract, so a misrouted target must be
+    /// refused by name INSIDE the arm, and the refusal must not read like a missing-field complaint.
+    #[test]
+    fn the_flux2_arm_refuses_a_foreign_provider_by_name() {
+        for provider in [
+            "z_image_turbo",
+            "qwen_image",
+            "flux2_dev_edit",
+            "flux2_klein_9b",
+        ] {
+            let error = run_flux2_dev(&minimal_request(provider, "resident"))
+                .expect_err("a foreign provider must not reach the FLUX.2-dev contract");
+            assert_eq!(
+                error,
+                format!("MLX FLUX.2-dev calibration does not implement provider {provider:?}")
+            );
+            assert!(
+                !error.contains("must be a string") && !error.contains("fingerprint"),
+                "refusal came from deeper in the arm, so the guard let it through: {error}"
+            );
+        }
+    }
+
+    /// sc-18218's scope correction (story comment activity-18225): at the pin, mlx-gen-flux2 marks
+    /// every non-Resident strategy `Missing`, so the arm is resident-only BY REFUSAL, not by
+    /// accident of the plan. Each of the other four rungs must be named back.
+    #[test]
+    fn the_flux2_arm_is_resident_only_by_refusal() {
+        for rung in [
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+        ] {
+            let error = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, rung))
+                .expect_err("a non-resident rung must be refused");
+            assert!(
+                error.contains(rung) && error.contains("resident"),
+                "refusal must name the rung and the resident-only contract: {error}"
+            );
+        }
+        let resident = run_flux2_dev(&minimal_request(FLUX2_PROVIDER, "resident"))
+            .expect_err("the minimal resident request is still incomplete");
+        assert!(
+            !resident.contains("not capturable"),
+            "the resident rung itself must pass the rung gate: {resident}"
+        );
+    }
+
+    #[test]
+    fn flux2_fixture_is_bound_to_tier_geometry_and_step_count() {
+        let request = json!({
+            "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step2" }
+        });
+        assert_eq!(planned_flux2_seed(&request, "q4", 768).unwrap(), 18218);
+        assert!(planned_flux2_seed(&request, "q8", 768)
+            .unwrap_err()
+            .contains("must start with"));
+        assert!(planned_flux2_seed(&request, "q4", 1024)
+            .unwrap_err()
+            .contains("must start with"));
+        let three_step = json!({
+            "planned": { "fixture": "flux2-dev-mlx-q4-768-seed18218-step3" }
+        });
+        assert!(planned_flux2_seed(&three_step, "q4", 768)
+            .unwrap_err()
+            .contains("two-step"));
+    }
+
+    /// sc-17097's lesson applied to this arm: the tier is derived from the planned target and each
+    /// declared authoritative tier maps to its own quant, never a hardcoded q4.
+    #[test]
+    fn flux2_load_spec_preserves_every_planned_numeric_tier() {
+        for (tier, expected_quant) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+            let request = json!({
+                "planned": {
+                    "strategy": { "rung": "resident", "parameters": {} },
+                    "target": { "tier": tier }
+                }
+            });
+            let selection = planned_selection(&request).unwrap();
+            let spec = flux2_spec(PathBuf::from(format!("/tmp/flux2-dev-{tier}")), &selection);
+            assert_eq!(spec.quantize, Some(expected_quant), "numeric tier {tier}");
+        }
+    }
+
+    #[test]
+    fn flux2_admission_context_is_reference_free_text_to_image() {
+        let contract = mlx_gen_flux2::memory_strategy::registered_dev_t2i_contract(
+            &weights_free_spec(Some(Quant::Q4)),
+        )
+        .unwrap();
+        let calibration = contract.calibration.as_ref().unwrap();
+        let context = flux2_admission_context(
+            &resident_selection(Some(Quant::Q4)),
+            calibration,
+            &calibration.fingerprint,
+            768,
+            768,
+            1_000_000,
+            1_000_000,
+        );
+        assert_eq!(context.mode, MemoryMode::TextToImage);
+        assert!(!context.has_reference);
+        assert_eq!(context.geometry.reference_count, 0);
+        assert!(context.overlay.is_none());
+    }
+
+    #[test]
+    fn flux2_repeat_envelope_accepts_jitter_and_rejects_the_mandatory_mutation() {
+        assert!(flux2_quality_passes(2.0 / 255.0, 0.5 / 255.0, 1.0 / 255.0));
+        assert!(!flux2_quality_passes(4.0 / 255.0, 0.5 / 255.0, 1.0 / 255.0));
+        assert!(!flux2_quality_passes(2.0 / 255.0, 1.5 / 255.0, 1.0 / 255.0));
+        assert!(!flux2_quality_passes(2.0 / 255.0, 0.5 / 255.0, 2.0 / 255.0));
+
+        let baseline = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 63, 127, 128, 191, 255],
+        };
+        let mutated = qwen_negative_mutation(&baseline);
+        let (maximum, mean, rms) = image_max_mean_rms_abs(&mutated, &baseline).unwrap();
+        assert!(maximum >= 64.0 / 255.0);
+        assert!(mean >= 64.0 / 255.0);
+        assert!(rms >= 64.0 / 255.0);
+        assert!(!flux2_quality_passes(maximum, mean, rms));
+    }
+
+    #[test]
+    fn rms_is_measured_from_the_same_pixels_as_max_and_mean() {
+        let left = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 0, 0, 0, 0, 0],
+        };
+        let right = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![51, 0, 0, 0, 0, 0],
+        };
+        let (maximum, mean, rms) = image_max_mean_rms_abs(&left, &right).unwrap();
+        assert!((maximum - 0.2).abs() < 1e-9);
+        assert!((mean - 0.2 / 6.0).abs() < 1e-9);
+        assert!((rms - 0.2 / 6.0_f64.sqrt()).abs() < 1e-9);
+    }
+
+    fn weights_free_spec(quant: Option<Quant>) -> LoadSpec {
+        let mut spec = LoadSpec::new(WeightsSource::Dir("/nonexistent".into()))
+            .with_offload_policy(OffloadPolicy::Resident)
+            .with_load_shape(LoadShape::EagerMaterialization);
+        if let Some(quant) = quant {
+            spec = spec.with_quant(quant);
+        }
+        spec
+    }
+
+    fn resident_selection(quant: Option<Quant>) -> MemorySelection {
+        MemorySelection {
+            strategy: MemoryStrategy::Resident,
+            parameters: MemoryStrategyParameters::default(),
+            tier: MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant,
+                component_precision_floors: &[],
+            },
+        }
+    }
+
+    /// Pins the arm's load-bearing premises to the PINNED provider crate, weights-free:
+    ///
+    ///   1. `flux2_dev` directly registers its own T2I contract;
+    ///   2. that T2I contract is resident-only (every other strategy `Missing`) — the reason the arm
+    ///      and the plan carry a single rung;
+    ///   3. its calibration fingerprint is the exact string the plan entries pin.
+    ///
+    /// If a pin bump changes any of these, this test reds and the arm must be revisited rather
+    /// than silently measuring under a different contract.
+    #[test]
+    fn the_pinned_flux2_t2i_contract_is_direct_resident_only_and_plan_exact() {
+        let registry = mlx_gen_flux2::provider_registry().unwrap();
+        let spec = weights_free_spec(Some(Quant::Q4));
+        let contract = registry
+            .memory_strategy_contract(FLUX2_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned FLUX.2-dev T2I contract");
+        assert_eq!(contract.provider_id, FLUX2_PROVIDER);
+        for capability in &contract.strategies {
+            if capability.strategy == MemoryStrategy::Resident {
+                assert!(
+                    !matches!(capability.support, MemoryStrategySupport::Missing),
+                    "the resident strategy must be supported"
+                );
+            } else {
+                assert!(
+                    matches!(capability.support, MemoryStrategySupport::Missing),
+                    "{:?} is no longer Missing at the pin; the resident-only arm is stale",
+                    capability.strategy
+                );
+            }
+        }
+        assert_eq!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            FLUX2_CALIBRATION_FINGERPRINT,
+            "the plan entries pin this fingerprint; regenerate them with the provider"
+        );
+        // The plan's `engagedRungs: ["resident"]` must equal the provider's engaged composition,
+        // or `attested_strategy` fails every capture at plan/measured comparison time.
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::Resident),
+            vec![MemoryStrategy::Resident],
+            "the plan entries pin engagedRungs [\"resident\"]; regenerate them with the provider"
+        );
+    }
+
+    /// The admission-scenario legs the capture will run, exercised weights-free through the SAME
+    /// registered function the loaded T2I generator delegates to. Mutation-verified in both
+    /// directions: the accept leg proves the two rejects are not a blanket refusal, and the
+    /// route-gate leg proves the accept is not a blanket accept.
+    #[test]
+    fn flux2_admission_scenarios_accept_exact_fit_and_reject_unknown_stale_and_foreign_routes() {
+        let registry = mlx_gen_flux2::provider_registry().unwrap();
+        let spec = weights_free_spec(Some(Quant::Q4));
+        let contract = registry
+            .memory_strategy_contract(FLUX2_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned FLUX.2-dev T2I contract");
+        let calibration = contract.calibration.as_ref().unwrap();
+        let selection = resident_selection(Some(Quant::Q4));
+        let check = |context: &MemoryRunContext| {
+            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+                &spec, &contract, context,
+            )
+        };
+
+        let exact = flux2_admission_context(
+            &selection,
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1_000_000,
+            1_000_000,
+        );
+        assert!(
+            matches!(check(&exact), MemorySafetyDecision::Accept),
+            "exact-fit admission must accept: {:?}",
+            check(&exact)
+        );
+
+        let unknown = flux2_admission_context(
+            &selection,
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            0,
+            1,
+        );
+        assert!(matches!(
+            check(&unknown),
+            MemorySafetyDecision::Reject { .. }
+        ));
+
+        let stale = flux2_admission_context(
+            &selection,
+            calibration,
+            "stale-flux2-dev-fingerprint",
+            1024,
+            1024,
+            1_000_000,
+            1,
+        );
+        assert!(matches!(check(&stale), MemorySafetyDecision::Reject { .. }));
+
+        // The route-gate mutation: the same fitting budget in an edit shape must be refused — the
+        // T2I contract admits only reference-free text-to-image.
+        let mut edit_shaped = flux2_admission_context(
+            &selection,
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1_000_000,
+            1_000_000,
+        );
+        edit_shaped.mode = MemoryMode::Edit;
+        edit_shaped.has_reference = true;
+        edit_shaped.geometry.reference_count = 2;
+        assert!(matches!(
+            check(&edit_shaped),
+            MemorySafetyDecision::Reject { .. }
+        ));
+
+        // NVFP4 is the one tier the route gate refuses by name.
+        let nvfp4_spec = weights_free_spec(Some(Quant::Nvfp4));
+        let nvfp4 = flux2_admission_context(
+            &resident_selection(Some(Quant::Nvfp4)),
+            calibration,
+            &calibration.fingerprint,
+            1024,
+            1024,
+            1_000_000,
+            1_000_000,
+        );
+        assert!(matches!(
+            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+                &nvfp4_spec,
+                &contract,
+                &nvfp4
+            ),
+            MemorySafetyDecision::Reject { .. }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod krea_base_tests {
+    use super::*;
+    use mlx_gen::gen_core::MemoryStrategySupport;
+
+    fn minimal_request(provider: &str, rung: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": "krea_2_turbo",
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
+                "strategy": { "rung": rung, "engagedRungs": ["resident"], "parameters": {} }
+            }
+        })
+    }
+
+    fn fixture_spec(root: &std::path::Path) -> LoadSpec {
+        for component in ["text_encoder", "transformer", "vae"] {
+            let directory = root.join(component);
+            std::fs::create_dir_all(&directory).unwrap();
+            let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&0_f32.to_le_bytes());
+            std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+        }
+        for component in ["text_encoder", "transformer"] {
+            std::fs::write(
+                root.join(component).join("config.json"),
+                r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )
+            .unwrap();
+        }
+        LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+            .with_quant(Quant::Q4)
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization)
+    }
+
+    #[test]
+    fn the_base_arm_refuses_a_foreign_provider_before_environment_or_weight_work() {
+        for provider in ["krea_2_turbo_edit", "krea_2_turbo_control", "qwen_image"] {
+            let error = run_krea_base(&minimal_request(provider, "resident"))
+                .expect_err("a foreign provider must not reach the Krea base arm");
+            assert_eq!(
+                error,
+                format!("MLX Krea base calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn the_base_arm_fails_closed_on_a_non_plain_target_before_weight_work() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/target/modelId",
+                json!("krea_2_turbo_edit"),
+                "requires modelId",
+            ),
+            (
+                "/planned/target/mode",
+                json!("edit_image"),
+                "requires reference-free text_to_image mode",
+            ),
+            (
+                "/planned/target/geometry/batch",
+                json!(2),
+                "requires geometry.batch == 1",
+            ),
+            (
+                "/planned/target/geometry/frames",
+                json!(2),
+                "requires geometry.frames == 1",
+            ),
+        ] {
+            let mut request = minimal_request(KREA_BASE_PROVIDER, "resident");
+            *request.pointer_mut(pointer).unwrap() = value;
+            let error = run_krea_base(&request)
+                .expect_err("a non-plain Krea target must fail before environment or weights");
+            assert!(error.contains(expected), "{pointer}: {error}");
+        }
+
+        for (field, value) in [("referenceCount", json!(1)), ("hasReference", json!(true))] {
+            let mut request = minimal_request(KREA_BASE_PROVIDER, "resident");
+            request["planned"]["target"][field] = value;
+            let error = run_krea_base(&request)
+                .expect_err("a referenced Krea target must fail before environment or weights");
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn complete_sweep_attests_only_the_exact_executed_krea_parameters() {
+        let request = json!({
+            "planned": {
+                "strategy": {
+                    "parameters": {
+                        "decodeTileEdge": 512,
+                        "decodeOverlap": 64,
+                        "attentionChunkSize": 67_108_864,
+                        "transformerWindowSize": 1
+                    }
+                }
+            }
+        });
+        let sweep = krea_base_complete_sweep(&request).unwrap();
+        assert_eq!(sweep["rangeVerified"], true);
+        assert_eq!(sweep["cases"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sweep["cases"][0]["parameters"],
+            request["planned"]["strategy"]["parameters"]
+        );
+        for (parameter, expected) in [
+            ("decodeTileEdge", json!([512])),
+            ("decodeOverlap", json!([64])),
+            ("attentionChunkSize", json!([67_108_864])),
+            ("transformerWindowSize", json!([1])),
+        ] {
+            assert!(sweep["axes"].as_array().unwrap().iter().any(|axis| {
+                axis["parameter"] == parameter && axis["testedValues"] == expected
+            }));
+        }
+    }
+
+    #[test]
+    fn base_admission_context_is_reference_free_text_to_image() {
+        let calibration = MemoryCalibrationIdentity::new(
+            KREA_BASE_CALIBRATION_FINGERPRINT,
+            LoadShape::DeferredMaterialization,
+        );
+        let context = krea_base_context(
+            MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: Some(Quant::Q4),
+                    component_precision_floors: &[],
+                },
+            },
+            &calibration,
+            &calibration.fingerprint,
+            768,
+            768,
+            1,
+            1,
+        );
+        assert_eq!(context.mode, MemoryMode::TextToImage);
+        assert!(!context.has_reference);
+        assert_eq!(context.geometry.reference_count, 0);
+        assert!(context.overlay.is_none());
+        assert!(!context.use_pid);
+    }
+
+    #[test]
+    fn pinned_base_contract_exposes_the_exact_declared_full_ladder() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sc-18377-krea-contract-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let spec = fixture_spec(&root);
+        let contract = mlx_gen_krea::provider_registry()
+            .unwrap()
+            .memory_strategy_contract(KREA_BASE_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned Krea base provider contract");
+        assert_eq!(contract.provider_id, KREA_BASE_PROVIDER);
+        assert_eq!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            KREA_BASE_CALIBRATION_FINGERPRINT
+        );
+        for strategy in [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            assert_eq!(
+                contract.capability(strategy).unwrap().support,
+                MemoryStrategySupport::Implemented,
+                "{strategy:?}"
+            );
+        }
+        let decode = contract.capability(MemoryStrategy::BoundedDecode).unwrap();
+        assert!(decode.parameters.decode_tile_edges.contains(&512));
+        assert!(decode.parameters.decode_overlaps.contains(&64));
+        let routes = contract
+            .pid_decode_routes
+            .as_ref()
+            .expect("Krea distinguishes native and PiD decode domains");
+        assert_eq!(routes.native.tile_edges, vec![512]);
+        assert_eq!(routes.native.tile_overlap, 64);
+        let attention = contract
+            .capability(MemoryStrategy::BoundedAttention)
+            .unwrap();
+        assert_eq!(attention.parameters.attention_chunk_sizes, vec![67_108_864]);
+        let transformer = contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .unwrap();
+        assert_eq!(transformer.parameters.transformer_window_sizes, vec![1]);
+        assert_eq!(
+            transformer.parameters.transformer_window_components,
+            vec![TransformerComponent::Dit]
+        );
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedTransformerResidency),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
+                MemoryStrategy::BoundedTransformerResidency,
+            ]
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod sdxl_tests {
+    use super::*;
+    use mlx_gen::gen_core::MemoryStrategySupport;
+
+    fn minimal_request(provider: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": "sdxl",
+                    "tier": "q4",
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
+                "loadShape": "deferred_materialization",
+                "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} }
+            }
+        })
+    }
+
+    fn fixture_spec(root: &std::path::Path) -> LoadSpec {
+        for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
+            let directory = root.join(component);
+            std::fs::create_dir_all(&directory).unwrap();
+            let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&0_f32.to_le_bytes());
+            std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+        }
+        std::fs::write(
+            root.join("unet").join("config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .unwrap();
+        LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+            .with_quant(Quant::Q4)
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization)
+    }
+
+    #[test]
+    fn sdxl_arm_refuses_a_foreign_provider_before_environment_or_weight_work() {
+        for provider in ["realvisxl", "sdxl_control", "qwen_image"] {
+            let error = run_sdxl(&minimal_request(provider))
+                .expect_err("a foreign provider must not reach the SDXL arm");
+            assert_eq!(
+                error,
+                format!("MLX SDXL base calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn sdxl_admission_context_is_reference_free_text_to_image() {
+        let calibration = MemoryCalibrationIdentity::new(
+            SDXL_CALIBRATION_FINGERPRINT,
+            LoadShape::DeferredMaterialization,
+        );
+        let context = sdxl_context(
+            MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: Some(Quant::Q4),
+                    component_precision_floors: &[],
+                },
+            },
+            &calibration,
+            &calibration.fingerprint,
+            768,
+            768,
+            1,
+            1,
+        );
+        assert_eq!(context.mode, MemoryMode::TextToImage);
+        assert!(!context.has_reference);
+        assert_eq!(context.geometry.reference_count, 0);
+        assert!(context.overlay.is_none());
+        assert!(!context.use_pid);
+    }
+
+    #[test]
+    fn sdxl_arm_rejects_every_non_base_target_axis_before_weight_work() {
+        let base = minimal_request(SDXL_PROVIDER);
+        assert!(validate_sdxl_target(&base).is_ok());
+        for (pointer, value) in [
+            ("/planned/target/modelId", json!("realvisxl")),
+            ("/planned/target/mode", json!("image_to_image")),
+            ("/planned/target/geometry/batch", json!(2)),
+            ("/planned/target/geometry/frames", json!(2)),
+        ] {
+            let mut request = base.clone();
+            *request.pointer_mut(pointer).unwrap_or_else(|| {
+                panic!("test mutation path must exist before assignment: {pointer}")
+            }) = value;
+            assert!(
+                validate_sdxl_target(&request).is_err(),
+                "SDXL target mutation {pointer} must fail closed"
+            );
+        }
+
+        for (field, value) in [("referenceCount", json!(1)), ("hasReference", json!(true))] {
+            let mut request = base.clone();
+            request["planned"]["target"][field] = value;
+            assert!(
+                validate_sdxl_target(&request).is_err(),
+                "SDXL target mutation {field} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn sdxl_selection_rejects_a_non_dit_or_detached_window_component() {
+        let mut request = minimal_request(SDXL_PROVIDER);
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_transformer_residency",
+            "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "dit" }
+        });
+        assert_eq!(
+            planned_selection(&request)
+                .unwrap()
+                .parameters
+                .transformer_window_component,
+            Some(TransformerComponent::Dit)
+        );
+
+        for component in ["text_encoder", "both", "unknown"] {
+            request["planned"]["strategy"]["parameters"]["transformerWindowComponent"] =
+                json!(component);
+            assert!(
+                planned_selection(&request).is_err(),
+                "component {component:?} must not execute as Dit"
+            );
+        }
+        request["planned"]["strategy"]["parameters"] =
+            json!({ "transformerWindowComponent": "dit" });
+        assert!(planned_selection(&request).is_err());
+
+        request["planned"]["strategy"] = json!({
+            "rung": "resident",
+            "engagedRungs": ["resident"],
+            "parameters": { "unknownParameter": 1 }
+        });
+        let selection = planned_selection(&request).unwrap();
+        assert!(validate_sdxl_selection_parameters(&request, &selection).is_err());
+
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_decode",
+            "engagedRungs": ["resident", "bounded_decode"],
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+        });
+        let selection = planned_selection(&request).unwrap();
+        assert!(validate_sdxl_selection_parameters(&request, &selection).is_err());
+    }
+
+    #[test]
+    fn sdxl_runtime_complete_sweep_attests_the_exact_tuple_without_a_string_axis() {
+        let mut request = minimal_request(SDXL_PROVIDER);
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_transformer_residency",
+            "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+            "parameters": { "transformerWindowSize": 5, "transformerWindowComponent": "dit" }
+        });
+        assert_eq!(
+            sdxl_runtime_complete_sweep(&request).unwrap(),
+            json!({
+                "axes": [{ "parameter": "transformerWindowSize", "testedValues": [5] }],
+                "cases": [{
+                    "parameters": {
+                        "transformerWindowSize": 5,
+                        "transformerWindowComponent": "dit"
+                    },
+                    "result": "passed"
+                }],
+                "rangeVerified": true
+            })
+        );
+
+        request["planned"]["strategy"] =
+            json!({ "rung": "resident", "engagedRungs": ["resident"], "parameters": {} });
+        assert_eq!(
+            sdxl_runtime_complete_sweep(&request).unwrap()["axes"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn pinned_sdxl_contract_exposes_only_the_three_implemented_rungs() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sc-18379-sdxl-contract-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let spec = fixture_spec(&root);
+        let contract = mlx_gen_sdxl::provider_registry()
+            .unwrap()
+            .memory_strategy_contract(SDXL_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned SDXL provider contract");
+        assert_eq!(contract.provider_id, SDXL_PROVIDER);
+        assert_eq!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            SDXL_CALIBRATION_FINGERPRINT
+        );
+        for strategy in [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            assert_eq!(
+                contract.capability(strategy).unwrap().support,
+                MemoryStrategySupport::Implemented,
+                "{strategy:?}"
+            );
+        }
+        for strategy in [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+        ] {
+            assert_eq!(
+                contract.capability(strategy).unwrap().support,
+                MemoryStrategySupport::Missing,
+                "{strategy:?} must stay withheld"
+            );
+        }
+        let transformer = contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .unwrap();
+        assert_eq!(
+            transformer.parameters.transformer_window_sizes,
+            vec![1, 2, 5, 10]
+        );
+        assert_eq!(
+            transformer.parameters.transformer_window_components,
+            vec![TransformerComponent::Dit]
+        );
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedTransformerResidency),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedTransformerResidency,
+            ]
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 }
 

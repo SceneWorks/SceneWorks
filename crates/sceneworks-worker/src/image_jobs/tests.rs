@@ -71,6 +71,10 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
 struct HiresProbeGenerator {
     descriptor: gen_core::ModelDescriptor,
     requests: std::sync::Mutex<Vec<GenerationRequest>>,
+    /// The memory-run context each pass opened, in pass order. Recorded so a test can grade the
+    /// DECLARED geometry of every pass against the request that pass actually sent — the exact
+    /// agreement the backend request scopes enforce.
+    contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
 }
 
 #[cfg(any(
@@ -90,6 +94,7 @@ impl HiresProbeGenerator {
                 required_components: &[],
             },
             requests: Default::default(),
+            contexts: Default::default(),
         }
     }
 }
@@ -105,6 +110,14 @@ impl Generator for HiresProbeGenerator {
 
     fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
         Ok(())
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        self.contexts.lock().unwrap().push(context.clone());
+        Ok(None)
     }
 
     fn generate(
@@ -126,6 +139,114 @@ impl Generator for HiresProbeGenerator {
             height: req.height,
             pixels: vec![pass; (req.width * req.height * 3) as usize],
         }]))
+    }
+}
+
+/// A provider-facing Krea fixture that rejects any attempt to open an optimized request scope.
+/// Hires must stay on the established fallback because candle-gen-krea does not support the
+/// img2img refinement request under its memory-strategy scope.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct StrictKreaHiresFallbackGenerator {
+    probe: HiresProbeGenerator,
+    memory_scope_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl StrictKreaHiresFallbackGenerator {
+    fn new() -> Self {
+        let mut probe = HiresProbeGenerator::new();
+        probe.descriptor.id = "krea_2_turbo";
+        probe.descriptor.family = "krea_2";
+        probe.descriptor.backend = "candle";
+        Self {
+            probe,
+            memory_scope_attempts: Default::default(),
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Generator for StrictKreaHiresFallbackGenerator {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.probe.descriptor()
+    }
+
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::MemorySafetyDecision::Accept
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        self.memory_scope_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(gen_core::Error::Unsupported(
+            "Krea hires fallback must not open a memory-strategy request scope".to_owned(),
+        ))
+    }
+
+    fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn generate(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        if req.memory.is_some() {
+            return Err(gen_core::Error::Unsupported(
+                "Krea hires fallback must not carry optimized request memory".to_owned(),
+            ));
+        }
+        self.probe.generate(req, on_progress)
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::MemoryRunContext {
+    gen_core::MemoryRunContext {
+        selection,
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: "test".to_owned(),
+        load_shape: gen_core::LoadShape::EagerMaterialization,
+        mode: gen_core::MemoryMode::TextToImage,
+        has_reference: true,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width: 8,
+            height: 8,
+            batch: 1,
+            frames: 1,
+            reference_count: hires_fix_reference_count(),
+        },
+        overlay: None,
+        budget: gen_core::MemoryBudget {
+            total_bytes: 1 << 40,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes: 1 << 20,
+        cache_state: gen_core::MemoryCacheState::Cold,
+        evidence_revision: "test".to_owned(),
     }
 }
 
@@ -205,6 +326,289 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             .filter(|event| matches!(event, Progress::Decoding))
             .count(),
         1
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scope() {
+    let generator = StrictKreaHiresFallbackGenerator::new();
+    let cancel = CancelFlag::new();
+    let hires_fix = HiresFixPlan {
+        width: 8,
+        height: 8,
+        steps: 3,
+        guidance: None,
+        true_cfg: None,
+        provider_reference_strength: 0.3,
+    };
+    let optimized_context = hires_memory_context(gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+        parameters: gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            transformer_window_component: Some(gen_core::TransformerComponent::Dit),
+            ..Default::default()
+        },
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Q8),
+            component_precision_floors: &[],
+        },
+    });
+    let optimized_route = krea_turbo_memory_route(
+        "krea_2_turbo",
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+    );
+    let production_route = include_str!("base.rs")
+        .split_once("let krea_turbo_ladder = krea_turbo_memory_route(")
+        .expect("production Krea ladder route call")
+        .1
+        .split_once(");")
+        .expect("end of production Krea ladder route call")
+        .0;
+    assert!(
+        production_route.contains("hires_fix.is_some()"),
+        "the production route must pass the live hires decision into the exclusion predicate"
+    );
+    let context = optimized_route.then_some(&optimized_context);
+
+    let output = generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        context,
+        &PromptEnhance::default(),
+        Some(hires_fix),
+        gen_core::PreviewSink::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("Krea hires fallback completes without an optimized request scope");
+
+    assert!(
+        !optimized_route,
+        "hires must not mint a Krea ladder context"
+    );
+    assert_eq!((output.0, output.1), (8, 8));
+    assert!(output.2.iter().all(|pixel| *pixel == 2));
+    assert_eq!(generator.probe.requests.lock().unwrap().len(), 2);
+    assert_eq!(
+        generator
+            .memory_scope_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "neither fallback pass may call begin_memory_strategy_request"
+    );
+}
+
+/// An admitted memory geometry that a pass's own request does not match is not a bookkeeping slip:
+/// the backend request scopes (`mlx-gen`'s `MlxRequestScopeCore::configure_request` and its candle
+/// twin) re-derive width/height/`image_reference_count` from the LIVE request and refuse anything
+/// that differs from the admitted geometry, and gen-core's shared safety check rejects a
+/// `has_reference` disagreeing with `reference_count > 0`.
+///
+/// Hires fix runs TWO passes under ONE admission: the base-size first pass, then the upscaled
+/// refinement. Admission describes the upscaled pass (it sets the memory ceiling), so running the
+/// first pass under that same context declared the WRONG width/height (and, with no request
+/// reference, the wrong count) and refused the first pass of every hires render on a scope-adopting
+/// provider. This grades what each pass DECLARED against what that same pass SENT, so neither side
+/// can be restated wrongly without the test failing.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    // The admission the lane makes for a hires job: the FINAL pass's geometry.
+    let admitted = hires_memory_context(gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        },
+    });
+
+    generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        // A plain text-to-image job: the FIRST pass carries no conditioning at all, while the
+        // admitted (final) geometry carries one reference. This is the case the old single-context
+        // wiring got wrong on both axes.
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        Some(&admitted),
+        &PromptEnhance::default(),
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("two-pass generation");
+
+    let requests = generator.requests.lock().unwrap();
+    let contexts = generator.contexts.lock().unwrap();
+    assert_eq!(requests.len(), 2, "hires fix runs exactly two passes");
+    assert_eq!(
+        contexts.len(),
+        requests.len(),
+        "every pass must open its own request scope"
+    );
+    for (pass, (request, context)) in requests.iter().zip(contexts.iter()).enumerate() {
+        assert_eq!(
+            (context.geometry.width, context.geometry.height),
+            (request.width, request.height),
+            "pass {} declared {}x{} but rendered {}x{}",
+            pass + 1,
+            context.geometry.width,
+            context.geometry.height,
+            request.width,
+            request.height
+        );
+        assert_eq!(
+            context.geometry.reference_count,
+            request.image_reference_count(),
+            "pass {} declared references={} but sent references={}",
+            pass + 1,
+            context.geometry.reference_count,
+            request.image_reference_count()
+        );
+        assert_eq!(
+            context.has_reference,
+            context.geometry.reference_count > 0,
+            "pass {}: gen-core rejects a has_reference/reference_count disagreement",
+            pass + 1
+        );
+        assert_eq!(
+            context.selection.strategy,
+            admitted.selection.strategy,
+            "pass {}: only the geometry identity may differ from the admitted selection",
+            pass + 1
+        );
+    }
+    // The final pass is the one admission was made for, and it is unchanged.
+    assert_eq!(contexts[1].geometry, admitted.geometry);
+}
+
+/// The generic lane's declared reference count must equal the count gen-core derives from the
+/// conditioning that lane really builds, for every shape it can build.
+///
+/// The old formula (`edit_refs.len().max(reference || mask || hires)`) treated a mask as an
+/// ALTERNATIVE to the source reference rather than an addition, so an Ideogram 4 inpaint/outpaint
+/// edit declared one reference and sent two. That is inert only for as long as its provider has not
+/// adopted the shared request scope; the moment it does, the render is refused.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn lane_reference_count_matches_the_conditioning_the_lane_builds() {
+    // Built inline rather than with the macOS-gated `control_fixture`: this gate must hold on the
+    // candle lane too, which compiles without it.
+    let image = Image {
+        width: 4,
+        height: 4,
+        pixels: vec![7; 4 * 4 * 3],
+    };
+    let reference = (image.clone(), 0.5);
+    /// `(single reference, multi-references, edit mask)` — one shape the lane can build.
+    type LaneCase<'a> = (Option<&'a (Image, f32)>, &'a [Image], Option<&'a Image>);
+    let cases: [LaneCase; 6] = [
+        // Plain text-to-image.
+        (None, &[], None),
+        // img2img / IP-Adapter init.
+        (Some(&reference), &[], None),
+        // Ideogram 4 edit: the source reference AND the inpaint / outpaint mask.
+        (Some(&reference), &[], Some(&image)),
+        // Boogu instruction edit, one and many.
+        (None, std::slice::from_ref(&image), None),
+        (None, &[image.clone(), image.clone(), image.clone()], None),
+        // A masked multi-reference edit — no family builds this today, but the count must hold.
+        (
+            None,
+            &[image.clone(), image.clone(), image.clone()],
+            Some(&image),
+        ),
+    ];
+
+    for (reference, multi_references, edit_mask) in cases {
+        let conditioning = build_lane_conditioning(reference, multi_references, edit_mask);
+        let request = GenerationRequest {
+            conditioning,
+            ..Default::default()
+        };
+        assert_eq!(
+            lane_reference_count(
+                reference.is_some(),
+                multi_references.len(),
+                edit_mask.is_some()
+            ),
+            request.image_reference_count(),
+            "declared count drifted from the conditioning (reference={}, multi={}, mask={})",
+            reference.is_some(),
+            multi_references.len(),
+            edit_mask.is_some()
+        );
+    }
+
+    // The hires refinement pass sends exactly one reference — the upscaled first-pass render.
+    assert_eq!(
+        lane_reference_count(true, 0, false),
+        GenerationRequest {
+            conditioning: build_lane_conditioning(Some(&reference), &[], None),
+            ..Default::default()
+        }
+        .image_reference_count()
     );
 }
 
@@ -11002,6 +11406,83 @@ fn build_control_conditioning_matches_legacy_shape() {
     );
 }
 
+/// The MLX Krea pose-control lane's DECLARED request geometry must equal the geometry gen-core
+/// derives from the request that lane actually sends.
+///
+/// The declaration is not advisory: gen-core's shared memory-strategy safety check rejects
+/// `has_reference != (reference_count > 0)`, and the MLX request scope re-derives
+/// `GenerationRequest::image_reference_count()` at `configure_request` and refuses anything that
+/// differs from the admitted geometry. Declaring `references=0` while sending the pose
+/// `Conditioning::Control` (which gen-core charges as one image reference) failed EVERY pose render
+/// with `krea_2_turbo_control: request geometry 1024x1024x1 references=1 does not fit admitted
+/// 1024x1024x1 references=0`. Grading the declaration against `image_reference_count()` — rather than
+/// against a second hand-written constant — is what keeps the two from drifting apart again.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request() {
+    let inputs = krea_control_memory_inputs(1024, 1024, "character_image", 0);
+
+    // The conditioning the lane builds for one pose: the pose `Control`, no identity init.
+    let conditioning = build_control_conditioning(
+        control_fixture(8, 8, [1, 2, 3]),
+        ControlKind::Pose,
+        KREA_CONTROL_DEFAULT_SCALE,
+        None,
+    );
+    let request = gen_core::GenerationRequest {
+        width: 1024,
+        height: 1024,
+        count: 1,
+        conditioning,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        inputs.reference_count,
+        request.image_reference_count(),
+        "the admitted reference count must equal what the MLX request scope re-derives from the \
+         pose request"
+    );
+    assert_eq!(
+        inputs.has_reference,
+        inputs.reference_count > 0,
+        "gen-core's shared safety check rejects a has_reference/reference_count disagreement"
+    );
+    assert_eq!(
+        (inputs.width, inputs.height, inputs.count),
+        (request.width, request.height, request.count),
+        "the admitted frame geometry must be the geometry the lane renders at"
+    );
+    assert_eq!(
+        (inputs.mode.as_str(), inputs.overlay.as_deref()),
+        ("text_to_image", Some("control:1")),
+        "Character Studio's `character_image` source label must normalize to the exact measured \
+         Krea pose-control calibration identity"
+    );
+
+    let image_studio_inputs = krea_control_memory_inputs(1024, 1024, "image_generation", 0);
+    assert_eq!(
+        image_studio_inputs.mode, inputs.mode,
+        "both product entry points execute the same noise-to-image pose-control provider"
+    );
+
+    // PR #2218 added the imported-checkpoint pose route after this builtin guard was written. Pin
+    // that second call site to the same constructor: otherwise it can compile with a duplicate
+    // hand-built declaration and reintroduce the live references=0/references=1 refusal depending
+    // on merge order.
+    let imported_source = include_str!("krea_imported.rs");
+    assert!(
+        imported_source
+            .contains("krea_control_memory_inputs(width, height, &request.mode, adapter_count)"),
+        "the imported-checkpoint pose route must use the shared Krea control geometry constructor"
+    );
+    assert!(
+        !imported_source.contains("has_reference: false")
+            && !imported_source.contains("reference_count: 0"),
+        "the imported-checkpoint pose route must not redeclare the known-bad zero-reference geometry"
+    );
+}
+
 /// sc-4410 strict-control pose scoring: a pose-library job that carries NO character identity
 /// `referenceAssetId` resolves to `None` for the likeness source — so the strict-control streams build
 /// no scorer and the `faceLikeness` field is omitted (honest — there is no identity to compare against,
@@ -13884,11 +14365,60 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "an edit with no conditioning image is rejected"
     );
 
-    // Bare-transformer guards stay rejected on EVERY backend: pose, mask, character, multi-phase, a
+    // A strict-pose set follows the backend's pose-control capability, the same shape the LoRA/edit
+    // surfaces follow above: MLX assembles the trained pose branch around the file-loaded imported
+    // DiT (`load_control_from_native_dit_file`), candle's single-file path has no control parameter.
+    let pose = request(json!({
+        "projectId": "p", "model": "kreamania_variant4",
+        "advanced": { "poses": [{ "id": "a" }] },
+        "modelManifestEntry": base.clone()
+    }));
+    if KREA_IMPORTED_SUPPORTS_POSE_CONTROL {
+        assert!(
+            krea_imported_available(&pose, &settings),
+            "a pose set is served on the pose-control-capable backend"
+        );
+        // `krea_imported_control_available` (the route-claim predicate) exists only on the
+        // pose-control-capable build, so probe it under its own cfg rather than the const — the
+        // candle lane compiles this same test file and would not resolve the name.
+        #[cfg(target_os = "macos")]
+        assert!(
+            krea_imported_control_available(&pose, &settings),
+            "...and it is claimed by the pose-control route, not the plain per-image one"
+        );
+    } else {
+        assert!(
+            !krea_imported_available(&pose, &settings),
+            "a pose set is rejected on a backend without pose-control support"
+        );
+    }
+
+    // Bare-transformer guards stay rejected on EVERY backend: mask, character, multi-phase, a
     // NON-edit two-reference SET (the edit surface, only valid in edit mode), and a bare non-edit
     // `sourceAssetId` (the img2img resolve reads only `referenceAssetId`, so it would silently drop it).
+    // A pose set combined with any of them is likewise rejected — the pose render loop reads none of
+    // these fields, so admitting the combination would silently drop the extra conditioning.
     for (label, extra) in [
-        ("pose", json!({ "advanced": { "poses": [{ "id": "a" }] } })),
+        (
+            "pose + non-edit two-ref set",
+            json!({ "referenceAssetIds": ["a", "b"], "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
+        (
+            "pose + bare source",
+            json!({ "sourceAssetId": "s", "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
+        (
+            "pose + edit mode",
+            json!({
+                "mode": "edit_image",
+                "sourceAssetId": "s",
+                "advanced": { "poses": [{ "id": "a" }] },
+            }),
+        ),
+        (
+            "pose + mask",
+            json!({ "maskAssetId": "m", "advanced": { "poses": [{ "id": "a" }] } }),
+        ),
         ("mask", json!({ "maskAssetId": "m" })),
         ("character", json!({ "characterId": "c" })),
         (
@@ -14239,6 +14769,311 @@ fn krea_imported_mlx_gpu_smoke() {
         png_a.display(),
         png_b.display()
     );
+}
+
+/// Real-weight MLX GPU smoke for the imported-checkpoint **pose ControlNet** lane — the control
+/// sibling of [`krea_imported_mlx_gpu_smoke`], and the end-to-end proof that the trained pose branch
+/// composes with a FILE-LOADED community DiT rather than only the builtin base.
+///
+/// It exercises the same four stages the `KreaImportedControl` arm runs, in order:
+///   1. `resolve_image_route` → [`ImageRoute::KreaImportedControl`] for an imported `krea_2` job
+///      carrying `advanced.poses` — the deterministic ROUTE EVIDENCE that a pose set takes the
+///      pose-control lane (one image per pose) and not the plain per-image imported t2i arm.
+///   2. `resolve_imported_krea_dit` + `resolve_krea_imported_base_tier` → the in-place single-file
+///      DiT (symlinked, no copy) + the resident dense `bf16/` tier supplying TE/VAE/tokenizer/config.
+///   3. `resolve_krea_imported_control_overlay` → the installed pose overlay, CACHE-ONLY.
+///   4. `load_control_from_native_dit_file` → the branch folded onto the imported DiT, then a real
+///      Metal pose-conditioned render driven by a `Conditioning::Control` skeleton.
+///
+/// Two NEGATIVE CONTROLS make the assertion discriminating, because a coherent image alone would
+/// also be produced by a lane that silently dropped the pose:
+///   * **control_scale = 0** renders the same prompt+seed+skeleton with the branch scaled to zero —
+///     the engine-proven bit-exact base passthrough. A pose-locked render must differ from it; a
+///     near-zero delta means the branch contributed nothing (an inert or unloaded overlay).
+///   * **a DIFFERENT skeleton** at the same prompt+seed must also differ, which is the property a
+///     scale-0-only check cannot establish: it proves the output tracks the POSE INPUT, not merely
+///     that some residual perturbed the render.
+///
+/// Loads run sequentially with `clear_cache()` between them to stay under the MLX wired ceiling.
+/// ```text
+/// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
+/// # optional: KREA_STEPS=8 KREA_W=1024 KREA_H=1024 KREA_SEED=42 KREA_CONTROL_SCALE=0.6
+/// cargo test -p sceneworks-worker --release krea_imported_control_mlx_gpu_smoke -- --ignored --nocapture
+/// ```
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "real-weight MLX smoke; needs the imported Krea 2 DiT + the krea-2-turbo-mlx bf16 base + the pose overlay cached + an Apple-Silicon Mac"]
+fn krea_imported_control_mlx_gpu_smoke() {
+    use crate::smoke_support::{
+        env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
+    };
+
+    let home = std::env::var("HOME").expect("HOME");
+    let dit_src = PathBuf::from(env_or(
+        "KREA_IMPORTED_DIT",
+        &format!("{home}/models/kreamania_variant5.safetensors"),
+    ));
+    assert!(
+        dit_src.is_file(),
+        "imported DiT not found at {} — download it or set KREA_IMPORTED_DIT",
+        dit_src.display()
+    );
+
+    // Register the checkpoint the S0c way: an app-managed install dir holding ONLY the checkpoint.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let install_dir = data_dir
+        .path()
+        .join("models")
+        .join("imports")
+        .join("kreamania_v5");
+    std::fs::create_dir_all(&install_dir).expect("install dir");
+    let dit_link = install_dir.join("kreamania_variant5.safetensors");
+    std::os::unix::fs::symlink(&dit_src, &dit_link).expect("symlink DiT into app-managed dir");
+
+    let real_hub = PathBuf::from(format!("{home}/.cache/huggingface/hub"));
+    let _hf = isolate_hf_hub_cache_to(&real_hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+
+    let steps: u32 = env_or("KREA_STEPS", "8").parse().expect("KREA_STEPS");
+    let w: u32 = env_or("KREA_W", "1024").parse().expect("KREA_W");
+    let h: u32 = env_or("KREA_H", "1024").parse().expect("KREA_H");
+    let seed: u64 = env_or("KREA_SEED", "42").parse().expect("KREA_SEED");
+    let control_scale: f32 = env_or("KREA_CONTROL_SCALE", "0.6")
+        .parse()
+        .expect("KREA_CONTROL_SCALE");
+    let prompt = env_or(
+        "KREA_PROMPT",
+        "a photorealistic full-body portrait of a woman in a red jacket, studio lighting, \
+         sharp focus",
+    );
+    let out_dir = PathBuf::from(env_or("KREA_OUT_DIR", "/tmp/krea_imported_control_smoke"));
+    std::fs::create_dir_all(&out_dir).expect("out dir");
+
+    // Two GENUINELY different 18-point OpenPose skeletons (the `advanced.poses` entries the pose
+    // library sends). `parse_poses` reads the `keypoints` array — an entry carrying only an `id`
+    // would normalize to `vec![None; 18]`, i.e. a BLANK control image, which would make the two
+    // "different pose" renders identical and turn the pose-tracking assertion below into a
+    // guaranteed failure. So both skeletons are spelled out: `arms_down` is a neutral standing
+    // pose, `arms_up` raises both forearms and widens the stance — a large, unmistakable change in
+    // the wrists/elbows/ankles the branch conditions on.
+    let arms_down = json!([
+        [0.50, 0.20],
+        [0.50, 0.35],
+        [0.42, 0.35],
+        [0.40, 0.50],
+        [0.40, 0.65],
+        [0.58, 0.35],
+        [0.60, 0.50],
+        [0.60, 0.65],
+        [0.45, 0.60],
+        [0.45, 0.80],
+        [0.45, 0.95],
+        [0.55, 0.60],
+        [0.55, 0.80],
+        [0.55, 0.95],
+        [0.48, 0.18],
+        [0.52, 0.18],
+        [0.46, 0.20],
+        [0.54, 0.20]
+    ]);
+    let arms_up = json!([
+        [0.50, 0.20],
+        [0.50, 0.35],
+        [0.42, 0.35],
+        [0.34, 0.26],
+        [0.30, 0.12],
+        [0.58, 0.35],
+        [0.66, 0.26],
+        [0.70, 0.12],
+        [0.45, 0.60],
+        [0.40, 0.80],
+        [0.36, 0.95],
+        [0.55, 0.60],
+        [0.60, 0.80],
+        [0.64, 0.95],
+        [0.48, 0.18],
+        [0.52, 0.18],
+        [0.46, 0.20],
+        [0.54, 0.20]
+    ]);
+
+    // ---- 1. ROUTE EVIDENCE: a pose set on an imported krea_2 takes the pose-control lane ----
+    let pose_payload = |poses: Value| {
+        json!({
+            "projectId": "p",
+            "model": "imported_kreamania_v5",
+            "prompt": prompt,
+            "width": w, "height": h,
+            "advanced": { "poses": poses, "controlScale": control_scale, "steps": steps },
+            "modelManifestEntry": {
+                "catalogScope": "user",
+                "family": "krea_2",
+                "paths": { "model": install_dir.to_str().unwrap() }
+            }
+        })
+    };
+    let req = request(pose_payload(
+        json!([{ "id": "arms_down", "keypoints": arms_down }]),
+    ));
+    let route = resolve_image_route(&req, &settings);
+    assert_eq!(
+        route,
+        Some(ImageRoute::KreaImportedControl),
+        "ROUTE EVIDENCE: an imported krea_2 job with a pose set must take the pose-control lane"
+    );
+    assert_eq!(
+        ImageRoute::KreaImportedControl.image_count(&req, &settings),
+        1,
+        "the pose-control lane renders one image PER POSE"
+    );
+    eprintln!("[route] resolve_image_route(imported + poses) = {route:?}");
+
+    // ---- 2 + 3. The three resolves the arm makes before any compute ----
+    let dit = resolve_imported_krea_dit(&req, &settings)
+        .expect("resolve ok")
+        .expect("imported single-file Krea 2 DiT resolves");
+    let base =
+        resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base tier");
+    let overlay = resolve_krea_imported_control_overlay(&settings, &req)
+        .expect("installed Krea 2 pose control overlay (cache-only)");
+    eprintln!(
+        "[route] load_control_from_native_dit_file(dit={}, base={}, control={})",
+        dit.display(),
+        base.display(),
+        overlay.display()
+    );
+
+    // ---- 4. Load the branch onto the IMPORTED DiT, then render three variants ----
+    let t0 = std::time::Instant::now();
+    let model = runtime_macos::providers::krea::load_control_from_native_dit_file(
+        &dit,
+        &base,
+        &overlay,
+        &[],
+    )
+    .expect("load the pose control branch onto the imported Krea 2 DiT");
+    eprintln!("[load] assembled in {:.1}s", t0.elapsed().as_secs_f64());
+    assert_eq!(
+        model.descriptor().id,
+        "krea_2_turbo_control",
+        "the imported control assembly keeps the builtin provider identity"
+    );
+
+    // Two DIFFERENT skeletons rendered at the same size as the output. `draw_wholebody` is the same
+    // renderer the lane (and training) uses, so these are real conditioning inputs, not noise.
+    let stickwidth = crate::openpose_skeleton::body_stickwidth(w, h);
+    let skeleton = |pose_id: &str, keypoints: &Value| {
+        let pose = parse_poses(&request(pose_payload(
+            json!([{ "id": pose_id, "keypoints": keypoints }]),
+        )))
+        .into_iter()
+        .next()
+        .expect("one pose entry");
+        assert!(
+            pose.keypoints.iter().filter(|kp| kp.is_some()).count() >= 14,
+            "{pose_id} must carry real keypoints — a blank skeleton would make the pose-tracking \
+             assertion below vacuous"
+        );
+        preprocess_control_entry(
+            &ControlKind::Pose,
+            None,
+            Some(&pose),
+            None,
+            w,
+            h,
+            stickwidth,
+            None,
+        )
+        .expect("render the DWPose skeleton for the pose entry")
+    };
+    let render = |label: &str, control: Image, scale: f32| {
+        let request = GenerationRequest {
+            prompt: prompt.clone(),
+            width: w,
+            height: h,
+            count: 1,
+            seed: Some(seed),
+            steps: Some(steps),
+            guidance: None,
+            conditioning: vec![Conditioning::Control {
+                image: control,
+                kind: ControlKind::Pose,
+                scale: Some(scale),
+            }],
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let mut last = String::new();
+        let out = model
+            .generate(&request, &mut |p| {
+                let s = format!("{p:?}");
+                if s != last {
+                    eprintln!("[{label}] {s}");
+                    last = s;
+                }
+            })
+            .unwrap_or_else(|error| panic!("{label} generate: {error}"));
+        let image = match out {
+            GenerationOutput::Images(mut images) => images.pop().expect("one image"),
+            other => panic!("expected Images, got {other:?}"),
+        };
+        let std = image_std(&image);
+        let png = out_dir.join(format!("{label}.png"));
+        save_png(&image, &png);
+        eprintln!(
+            "[{label}] {}x{} std {std:.2} scale {scale} in {:.1}s -> {}",
+            image.width,
+            image.height,
+            started.elapsed().as_secs_f64(),
+            png.display()
+        );
+        assert_eq!((image.width, image.height), (w, h), "{label} wrong size");
+        assert!(
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
+            "{label} render looks degenerate (std {std:.2}) — NaN / all-black / flat decode"
+        );
+        image
+    };
+
+    // The two skeletons must genuinely differ as IMAGES before either render runs — otherwise the
+    // pose-tracking assertion below could pass or fail for reasons that have nothing to do with the
+    // branch. This is the cheap, weights-free precondition for that assertion.
+    let arms_down_map = skeleton("arms_down", &arms_down);
+    let arms_up_map = skeleton("arms_up", &arms_up);
+    let skeleton_delta = mean_abs_frame_delta(&arms_down_map, &arms_up_map);
+    eprintln!("[input] mean_abs_pixel_delta(arms_down_map, arms_up_map) = {skeleton_delta:.3}");
+    assert!(
+        skeleton_delta > 0.5,
+        "the two control maps must differ ({skeleton_delta:.3}) or the pose-tracking assertion is \
+         vacuous"
+    );
+
+    let posed = render("arms_down_locked", arms_down_map.clone(), control_scale);
+    let passthrough = render("arms_down_scale0", arms_down_map, 0.0);
+    let other_pose = render("arms_up_locked", arms_up_map, control_scale);
+
+    drop(model);
+    mlx_rs::memory::clear_cache();
+
+    // ---- DIFFER 1: the branch actually contributes (vs the bit-exact scale-0 base passthrough) ----
+    let branch_delta = mean_abs_frame_delta(&posed, &passthrough);
+    eprintln!("[differ] mean_abs_pixel_delta(pose_locked, scale0_passthrough) = {branch_delta:.3}");
+    assert!(
+        branch_delta > 2.0,
+        "the pose branch must change the render against its own scale-0 passthrough — a near-zero \
+         delta ({branch_delta:.3}) means the overlay contributed nothing on the imported DiT"
+    );
+
+    // ---- DIFFER 2: the render tracks the POSE INPUT, not merely 'some residual fired' ----
+    let pose_delta = mean_abs_frame_delta(&posed, &other_pose);
+    eprintln!("[differ] mean_abs_pixel_delta(arms_down, arms_up) = {pose_delta:.3}");
+    assert!(
+        pose_delta > 2.0,
+        "two different skeletons at the same prompt+seed must produce different images — a \
+         near-zero delta ({pose_delta:.3}) means the pose input is not reaching the branch"
+    );
+    eprintln!("[DONE] KreaImportedControl lane validated on real weights.");
 }
 
 /// Settings + a complete fine-tuned Mage transformer component dir under the app data root

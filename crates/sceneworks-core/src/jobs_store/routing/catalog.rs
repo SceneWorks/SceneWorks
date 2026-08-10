@@ -103,16 +103,50 @@ pub(crate) fn image_model_mac_support(model: &str, family: Option<&str>) -> Mode
         // routing is never altered — a builtin always short-circuits on `MLX_ROUTED_MODELS` above (or,
         // if some future builtin is candle-only, keeps its id-keyed not-supported verdict here).
         if !is_builtin_image_model(model) && family.is_some_and(image_family_is_mlx_routed) {
+            // Probe the SHARED imported-family claim gate with a synthetic manifest entry (the
+            // declared family + a placeholder install path), so the pose affordance below can never
+            // drift from what the scheduler actually admits — the same one-dispatch-table
+            // discipline the builtin probes at the bottom of this function follow.
+            let imported_probe = |extra: &[(&str, Value)]| {
+                let mut payload = probe_payload(model, extra);
+                payload.insert(
+                    "modelManifestEntry".to_owned(),
+                    json!({ "family": family, "paths": { "model": "probe" } }),
+                );
+                payload
+            };
+            // Strict pose: admitted for the `krea_2` family on MLX (the native control entrypoint
+            // assembles the pose branch around the file-loaded DiT), refused for every other
+            // imported family — derived from the gate itself, mirroring the builtin pose probe's
+            // two shapes (a plain pose set, and a Character-Studio pose set with a reference).
+            let pose = imported_image_request_family_eligible(
+                model,
+                &imported_probe(&[("advanced", json!({ "poses": [{}] }))]),
+                MLX_ROUTED_FAMILIES,
+                MLX_IMPORTED_CAPS,
+            ) || imported_image_request_family_eligible(
+                model,
+                &imported_probe(&[
+                    ("mode", json!("character_image")),
+                    ("referenceAssetId", json!("probe")),
+                    ("advanced", json!({ "poses": [{}] })),
+                ]),
+                MLX_ROUTED_FAMILIES,
+                MLX_IMPORTED_CAPS,
+            );
             return ModelMacSupport {
                 supported: true,
                 reason: None,
                 // The imported single-file checkpoint is a bare diffusion transformer paired with a
                 // resident base tier. On MLX its native loader takes adapters (inference #211), so the
                 // lane serves job LoRAs (`lycoris`, sc-14111) AND the Kontext edit surface (`edit`,
-                // sc-14119). `pose`/`reference` (IP-Adapter / character identity) stay false — those
-                // need base-tier control/identity components this lane does not stage; img2img is
-                // surfaced separately via the `ui.img2img` manifest flag, not `reference`.
+                // sc-14119). `pose` lights per-family from the claim-gate probe above (the Krea pose
+                // control branch composes with a file-loaded same-shape DiT); `reference`
+                // (IP-Adapter / character identity) stays false — identity conditioning needs
+                // base-tier components this lane does not stage; img2img is surfaced separately via
+                // the `ui.img2img` manifest flag, not `reference`.
                 features: ModelMacFeatures {
+                    pose,
                     edit: true,
                     lycoris: true,
                     ..ModelMacFeatures::default()
@@ -989,23 +1023,54 @@ pub(crate) fn is_builtin_image_model(id: &str) -> bool {
     IMAGE_MODEL_CAPS.iter().any(|caps| caps.id == id)
 }
 
+/// Per-backend capabilities of the native single-file (imported) lane, the axis
+/// [`imported_image_request_family_eligible`] keys request-shape admission on. One named struct —
+/// not positional bools — so the mlx.rs / candle.rs call sites and the worker's mirrored
+/// `KREA_IMPORTED_SUPPORTS_*` constants cannot silently transpose capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ImportedImageBackendCaps {
+    /// The backend's native single-file loader takes an `adapters` slice: the MLX entrypoint
+    /// (`mlx_gen_krea::load_from_native_dit_file`, inference #211) does, so it serves LoRAs
+    /// (sc-14111) AND the Kontext edit surface (sc-14119, whose required `krea2_identity_edit`
+    /// LoRA IS an adapter); the candle entrypoint takes no adapters yet (sc-14135), so the candle
+    /// imported lane stays **t2i / img2img only**.
+    pub(crate) adapters: bool,
+    /// The backend can assemble the Krea pose ControlNet branch around a FILE-LOADED DiT: the MLX
+    /// runtime's `load_control_from_native_dit_file` folds the trained `Krea2ControlBranch` (a
+    /// `control_scale`-scaled residual, architecturally independent of the DiT's weights) onto the
+    /// imported transformer, so a same-shape fine-tune serves strict-pose sets; the candle
+    /// single-file path has no control parameter, so candle keeps rejecting pose.
+    pub(crate) pose_control: bool,
+}
+
+/// The MLX backend's imported-lane capabilities (mlx.rs / the Mac worker's macOS constants).
+pub(crate) const MLX_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageBackendCaps {
+    adapters: true,
+    pose_control: true,
+};
+
+/// The candle backend's imported-lane capabilities (candle.rs / the worker's candle constants):
+/// no adapters (sc-14135), no pose control — its native single-file entrypoint threads neither.
+pub(crate) const CANDLE_IMPORTED_CAPS: ImportedImageBackendCaps = ImportedImageBackendCaps {
+    adapters: false,
+    pose_control: false,
+};
+
 /// Shared fail-closed request-shape gate for a non-builtin imported image id that reuses a native
 /// engine by family. The worker owns filesystem confinement and verifies that the recorded path
 /// resolves to exactly one safetensors file; the scheduler only admits the matching family, a
 /// non-empty installed path hint, and a request shape the imported-family handlers implement.
 ///
-/// `adapters_supported` is the selected backend's native single-file loader capability: the MLX
-/// entrypoint (`mlx_gen_krea::load_from_native_dit_file`) takes an `adapters` slice (inference #211),
-/// so it serves LoRAs (sc-14111) AND the Kontext edit surface (sc-14119, whose required
-/// `krea2_identity_edit` LoRA IS an adapter); the candle entrypoint takes no adapters yet
-/// (sc-14135), so `false` keeps the candle imported lane **t2i / img2img only**. img2img (a single
+/// `caps` is the selected backend's native single-file loader capability surface
+/// ([`MLX_IMPORTED_CAPS`] / [`CANDLE_IMPORTED_CAPS`]): `adapters` admits LoRAs + the Kontext edit
+/// surface, `pose_control` admits a strict-pose set on the `krea_2` family. img2img (a single
 /// `referenceAssetId` on a non-edit mode, resolved by the worker's `resolve_img2img_init_generic`)
-/// needs no adapter, so it is admitted on **both** backends (mlx.rs `true` / candle.rs `false`).
+/// needs no capability, so it is admitted on **both** backends.
 pub(crate) fn imported_image_request_family_eligible(
     model: &str,
     payload: &Map<String, Value>,
     routed_families: &[&str],
-    adapters_supported: bool,
+    caps: ImportedImageBackendCaps,
 ) -> bool {
     if is_builtin_image_model(model) {
         return false;
@@ -1075,28 +1140,46 @@ pub(crate) fn imported_image_request_family_eligible(
             && !has_nonempty_string(payload, "characterLookId");
     }
 
-    // Never on this bare-transformer lane, on any backend: strict pose, multi-phase, inpaint mask,
-    // and character / look identity conditioning (all need base-tier components it does not stage).
-    if has_poses
-        || has_phases
+    // Never on this bare-transformer lane, on any backend: multi-phase, inpaint mask, and
+    // character / look identity conditioning (all need base-tier components it does not stage).
+    if has_phases
         || has_nonempty_string(payload, "maskAssetId")
         || has_nonempty_string(payload, "characterId")
         || has_nonempty_string(payload, "characterLookId")
     {
         return false;
     }
+    let is_edit = payload.get("mode").and_then(Value::as_str).map(str::trim) == Some("edit_image");
+
+    // Strict pose (a non-empty `advanced.poses`): the imported pose-control surface. The trained
+    // Krea pose branch is a `control_scale`-scaled residual folded onto the frozen DiT at load —
+    // architecturally independent of the DiT's weights — so it composes with a same-shape imported
+    // fine-tune exactly as with the builtin base. Admitted only where the worker can actually
+    // assemble it: the `krea_2` family on a pose-control-capable backend (`caps.pose_control`),
+    // outside edit mode, without the plural reference set / bare `sourceAssetId` the pose render
+    // loop would silently drop (a single `referenceAssetId` is the identity-likeness scoring
+    // source, the builtin `krea_control_available` semantics). LoRAs ride the adapter path on the
+    // imported DiT under the branch. Mirrors the worker's `krea_imported_available` pose arm.
+    if has_poses {
+        return family == Some("krea_2")
+            && caps.pose_control
+            && !is_edit
+            && !has_reference_list
+            && !has_nonempty_string(payload, "sourceAssetId")
+            && (!has_loras || caps.adapters);
+    }
     // LoRAs ride the native single-file loader's adapter path — MLX only today (sc-14135 is the
     // candle follow-up), so reject them on a backend without adapter support.
-    if has_loras && !adapters_supported {
+    if has_loras && !caps.adapters {
         return false;
     }
 
-    if payload.get("mode").and_then(Value::as_str).map(str::trim) == Some("edit_image") {
+    if is_edit {
         // Kontext-style edit (sc-14119): the adapter-capable backend + a conditioning image, which
         // can arrive as the singular `referenceAssetId`, the plural scene+person set, or a
         // `sourceAssetId` — the same priority the worker's `edit_reference_ids` resolves. The
         // required `krea2_identity_edit` LoRA is enforced worker-side.
-        return adapters_supported
+        return caps.adapters
             && (has_reference_list
                 || has_nonempty_string(payload, "referenceAssetId")
                 || has_nonempty_string(payload, "sourceAssetId"));
@@ -1110,6 +1193,77 @@ pub(crate) fn imported_image_request_family_eligible(
         return false;
     }
     true
+}
+
+/// Minimal probe payload for a non-builtin image request of `family` at `model`, carrying exactly
+/// the fields [`imported_image_request_family_eligible`] reads: the manifest entry (family + a
+/// non-empty installed path) and, when `with_lora`, a single job LoRA. Everything else is absent, so
+/// the probe is the PLAIN t2i shape — the surface every imported lane claims — plus/minus adapters.
+fn imported_image_lora_probe(model: &str, family: &str, with_lora: bool) -> Map<String, Value> {
+    let mut payload = json!({
+        "model": model,
+        "modelManifestEntry": {
+            "id": model,
+            "family": family,
+            "paths": { "model": "/probe" }
+        }
+    });
+    if with_lora {
+        payload
+            .as_object_mut()
+            .expect("probe payload is an object")
+            .insert("loras".to_owned(), json!([{ "id": "probe" }]));
+    }
+    payload
+        .as_object()
+        .expect("probe payload is an object")
+        .clone()
+}
+
+/// Whether a non-builtin (imported / fine-tuned) image model may ADVERTISE LoRA compatibility on a
+/// deployment offering the given native lanes — the advertisement-side twin of
+/// [`imported_image_request_family_eligible`] (sc-14135 follow-up; the class sc-15328 named).
+///
+/// * `None` — the family is not served by the route-by-family path at all, so this oracle has no
+///   opinion and the entry must be left exactly as-is (its problem, if any, is that it renders
+///   nothing, not that it over-advertises adapters).
+/// * `Some(true)` — some available lane claims the model WITH a LoRA attached.
+/// * `Some(false)` — some available lane claims the plain t2i shape but NONE claims it with a LoRA.
+///   Advertising `loraCompatibility` here is the exact hang: the API accepts the submission and no
+///   worker ever claims it, so the job sits on "Waiting for an available GPU worker" forever.
+///
+/// 🔴 Derived by asking the REAL gate — the same function the scheduler calls, with the same
+/// per-lane capability surfaces the two routers pass ([`MLX_IMPORTED_CAPS`] from `mlx.rs` /
+/// [`CANDLE_IMPORTED_CAPS`] from `candle.rs`). Restating the per-family verdict as its own table
+/// here is precisely how the advertisement and the gate drift apart again, so it is computed,
+/// never copied.
+pub fn imported_image_model_lora_advertisement(
+    model: &str,
+    family: &str,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> Option<bool> {
+    let claims = |with_lora: bool| {
+        let payload = imported_image_lora_probe(model, family, with_lora);
+        (mlx_lane_available
+            && imported_image_request_family_eligible(
+                model,
+                &payload,
+                MLX_ROUTED_FAMILIES,
+                MLX_IMPORTED_CAPS,
+            ))
+            || (candle_lane_available
+                && imported_image_request_family_eligible(
+                    model,
+                    &payload,
+                    CANDLE_ROUTED_FAMILIES,
+                    CANDLE_IMPORTED_CAPS,
+                ))
+    };
+    if !claims(false) {
+        return None;
+    }
+    Some(claims(true))
 }
 
 derive_model_list! {
@@ -1286,12 +1440,13 @@ mod tests {
 
     use super::{
         image_family_is_mlx_routed, image_model_mac_support,
-        imported_image_request_family_eligible, is_builtin_image_model, CANDLE_LORA_MODELS,
-        CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
-        CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS,
-        CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS,
-        MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
-        MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
+        imported_image_model_lora_advertisement, imported_image_request_family_eligible,
+        is_builtin_image_model, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
+        CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
+        CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
+        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
+        MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS,
+        VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS,
     };
 
     /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
@@ -1795,13 +1950,15 @@ mod tests {
             "an imported krea_2-family model should route via the family path"
         );
         assert!(support.reason.is_none());
-        // The MLX imported lane now serves job LoRAs (sc-14111) and the Kontext edit surface
-        // (sc-14119) via the native single-file loader's adapter path, so `lycoris` + `edit` are
-        // advertised. Pose + IP-Adapter/character `reference` stay unclaimed (base-tier-only shapes;
+        // The MLX imported lane serves job LoRAs (sc-14111) and the Kontext edit surface (sc-14119)
+        // via the native single-file loader's adapter path, plus strict-pose sets via the native
+        // control entrypoint (the trained pose branch folds onto the file-loaded DiT), so
+        // `lycoris` + `edit` + `pose` are advertised. IP-Adapter/character `reference` stays
+        // unclaimed (identity conditioning needs base-tier components this lane does not stage;
         // img2img is a separate `ui.img2img` flag, not `reference`).
         assert!(support.features.lycoris);
         assert!(support.features.edit);
-        assert!(!support.features.pose);
+        assert!(support.features.pose);
         assert!(!support.features.reference);
     }
 
@@ -1853,10 +2010,20 @@ mod tests {
             base.as_object().unwrap().clone()
         };
         let mlx = |p: &serde_json::Map<String, serde_json::Value>| {
-            imported_image_request_family_eligible(imported_id, p, MLX_ROUTED_FAMILIES, true)
+            imported_image_request_family_eligible(
+                imported_id,
+                p,
+                MLX_ROUTED_FAMILIES,
+                MLX_IMPORTED_CAPS,
+            )
         };
         let candle = |p: &serde_json::Map<String, serde_json::Value>| {
-            imported_image_request_family_eligible(imported_id, p, CANDLE_ROUTED_FAMILIES, false)
+            imported_image_request_family_eligible(
+                imported_id,
+                p,
+                CANDLE_ROUTED_FAMILIES,
+                CANDLE_IMPORTED_CAPS,
+            )
         };
 
         // Plain t2i + non-edit img2img: eligible on BOTH backends (no adapter needed).
@@ -1880,9 +2047,91 @@ mod tests {
         assert!(mlx(&edit), "edit eligible on MLX");
         assert!(!candle(&edit), "edit NOT eligible on candle (sc-14135)");
 
-        // Base-tier-only shapes stay rejected on both regardless of adapter support.
+        // Strict pose: the imported pose-control surface — MLX assembles the pose branch around the
+        // file-loaded DiT (`load_control_from_native_dit_file`), candle has no control parameter on
+        // its single-file path, so the pose set stays candle-rejected (a candle-required deployment
+        // fails it terminally via the `candle_unsupported` sweep rather than stranding it queued).
         let pose = payload(serde_json::json!({ "advanced": { "poses": [{}] } }));
-        assert!(!mlx(&pose) && !candle(&pose), "pose rejected on both");
+        assert!(mlx(&pose), "pose eligible on MLX (imported pose control)");
+        assert!(!candle(&pose), "pose NOT eligible on candle");
+
+        // Pose + a single reference: the Character-Studio pose-library shape (the reference is the
+        // identity-likeness scoring source, the builtin `krea_control_available` semantics).
+        let pose_with_reference = payload(serde_json::json!({
+            "mode": "character_image",
+            "referenceAssetId": "asset-1",
+            "advanced": { "poses": [{}] },
+        }));
+        assert!(
+            mlx(&pose_with_reference),
+            "pose + likeness reference on MLX"
+        );
+        assert!(!candle(&pose_with_reference), "still candle-rejected");
+
+        // Pose + LoRAs: adapters install on the imported DiT under the branch (MLX only).
+        let pose_with_lora = payload(serde_json::json!({
+            "loras": [{ "id": "style" }],
+            "advanced": { "poses": [{}] },
+        }));
+        assert!(mlx(&pose_with_lora), "pose + LoRA on MLX");
+        assert!(!candle(&pose_with_lora), "pose + LoRA candle-rejected");
+
+        // Shapes the pose render loop would silently drop stay rejected on EVERY backend: the
+        // plural reference set, a bare source, edit mode, and the base-tier identity shapes.
+        for (label, extra) in [
+            (
+                "pose + reference list",
+                serde_json::json!({ "referenceAssetIds": ["a"], "advanced": { "poses": [{}] } }),
+            ),
+            (
+                "pose + source",
+                serde_json::json!({ "sourceAssetId": "s", "advanced": { "poses": [{}] } }),
+            ),
+            (
+                "pose + edit mode",
+                serde_json::json!({
+                    "mode": "edit_image",
+                    "sourceAssetId": "s",
+                    "advanced": { "poses": [{}] },
+                }),
+            ),
+            (
+                "pose + mask",
+                serde_json::json!({ "maskAssetId": "m", "advanced": { "poses": [{}] } }),
+            ),
+            (
+                "pose + character",
+                serde_json::json!({ "characterId": "c", "advanced": { "poses": [{}] } }),
+            ),
+            (
+                "pose + phases",
+                serde_json::json!({ "advanced": { "poses": [{}], "phases": [{}] } }),
+            ),
+        ] {
+            let p = payload(extra);
+            assert!(!mlx(&p) && !candle(&p), "{label} rejected on both");
+        }
+    }
+
+    /// The imported model's Mac-support badge derives its pose affordance from the SAME claim gate
+    /// the scheduler runs (never a hardcoded feature flag): a `krea_2`-family import lights the pose
+    /// picker (the MLX native control entrypoint assembles the branch around the file-loaded DiT);
+    /// an `sdxl`- or `mage-flow`-family import keeps it dark (no control lane composes with those).
+    #[test]
+    fn imported_family_badge_pose_follows_the_claim_gate() {
+        let krea = image_model_mac_support("user_kreamania_variant5", Some("krea_2"));
+        assert!(krea.supported);
+        assert!(krea.features.pose, "krea_2 import lights the pose picker");
+        assert!(krea.features.edit && krea.features.lycoris);
+
+        for family in ["sdxl", "mage-flow"] {
+            let support = image_model_mac_support("user_other_import", Some(family));
+            assert!(support.supported);
+            assert!(
+                !support.features.pose,
+                "{family} import must keep the pose picker dark"
+            );
+        }
     }
 
     /// sc-15036 (epic 14034 F6) — a full base fine-tune's catalog entry must be Mac-routable and
@@ -1915,7 +2164,12 @@ mod tests {
             value.as_object().unwrap().clone()
         };
         let mlx = |p: &serde_json::Map<String, serde_json::Value>| {
-            imported_image_request_family_eligible(finetune_id, p, MLX_ROUTED_FAMILIES, true)
+            imported_image_request_family_eligible(
+                finetune_id,
+                p,
+                MLX_ROUTED_FAMILIES,
+                MLX_IMPORTED_CAPS,
+            )
         };
 
         // The novel id is in NO routing table; the family path is what makes it Mac-routable.
@@ -1976,7 +2230,7 @@ mod tests {
             finetune_id,
             &payload(serde_json::json!({ "mode": "text_to_image" })),
             CANDLE_ROUTED_FAMILIES,
-            false
+            CANDLE_IMPORTED_CAPS
         ));
 
         // A BUILTIN Mage id keeps its id-keyed routing — the family path applies only to
@@ -1985,7 +2239,7 @@ mod tests {
             "mage_flow_base",
             &payload(serde_json::json!({ "mode": "text_to_image" })),
             MLX_ROUTED_FAMILIES,
-            true
+            MLX_IMPORTED_CAPS
         ));
     }
 
@@ -2009,12 +2263,17 @@ mod tests {
         };
         let eligible = |p: &serde_json::Map<String, serde_json::Value>| {
             (
-                imported_image_request_family_eligible(imported_id, p, MLX_ROUTED_FAMILIES, true),
+                imported_image_request_family_eligible(
+                    imported_id,
+                    p,
+                    MLX_ROUTED_FAMILIES,
+                    MLX_IMPORTED_CAPS,
+                ),
                 imported_image_request_family_eligible(
                     imported_id,
                     p,
                     CANDLE_ROUTED_FAMILIES,
-                    false,
+                    CANDLE_IMPORTED_CAPS,
                 ),
             )
         };
@@ -2054,6 +2313,66 @@ mod tests {
             .filter(|m| m.get("type").and_then(serde_json::Value::as_str) == Some("image"))
             .cloned()
             .collect()
+    }
+
+    /// The IMPORTED-side half of the class guard below, which reads `builtin.models.jsonc` and so
+    /// can only ever see BUILTIN rows. A non-builtin (imported / fine-tuned) entry has no manifest
+    /// row to read: its `loraCompatibility` is SYNTHESIZED from the family token by
+    /// `lora_family::apply_model_manifest_defaults`, which is why the class escaped that guard
+    /// entirely and shipped three separate hangs.
+    ///
+    /// This pins the real matrix [`imported_image_model_lora_advertisement`] computes off the gate,
+    /// so a gate change that silently flips a family's adapter verdict lands here rather than in a
+    /// queue that never drains. `mlx` = a macOS deployment (MLX lane only), `candle` = Windows/Linux
+    /// (candle lane only) — the two shipped topologies.
+    #[test]
+    fn imported_lora_advertisement_tracks_which_lane_can_claim_an_adapter() {
+        let mlx = |family: &str| {
+            imported_image_model_lora_advertisement("user_import", family, true, false)
+        };
+        let candle = |family: &str| {
+            imported_image_model_lora_advertisement("user_import", family, false, true)
+        };
+
+        // krea_2 — THE REPORTED BUG. The MLX single-file entrypoint takes adapters (inference #211);
+        // the candle one does not yet (sc-14135), so a candle-only host must not advertise them.
+        assert_eq!(mlx("krea_2"), Some(true));
+        assert_eq!(
+            candle("krea_2"),
+            Some(false),
+            "an imported Krea 2 checkpoint renders t2i on candle but CANNOT take a LoRA — \
+             advertising one is the hang this oracle exists to prevent"
+        );
+
+        // sdxl — a fused checkpoint; both native loaders accept UNet adapters, so the
+        // advertisement is honest on both lanes and must be left alone.
+        assert_eq!(mlx("sdxl"), Some(true));
+        assert_eq!(candle("sdxl"), Some(true));
+
+        // mage-flow — adapters refused on EVERY backend (`mlx_gen_mage::load_finetuned`), and there
+        // is no candle Mage engine at all, so it is not even routable there.
+        assert_eq!(
+            mlx("mage-flow"),
+            Some(false),
+            "a Mage fine-tune renders t2i on MLX but refuses adapters on every backend"
+        );
+        assert_eq!(
+            candle("mage-flow"),
+            None,
+            "mage-flow is absent from CANDLE_ROUTED_FAMILIES — not routable, so no opinion"
+        );
+
+        // A family the route-by-family path does not serve at all: no opinion, entry untouched.
+        assert_eq!(mlx("flux"), None);
+        assert_eq!(candle("z-image"), None);
+
+        // A BUILTIN id keeps its id-keyed routing and is never touched by this oracle, whatever
+        // family token it carries — otherwise the projection would rewrite shipped manifest rows.
+        assert_eq!(
+            imported_image_model_lora_advertisement("krea_2_turbo", "krea_2", true, false),
+            None,
+            "builtins route by id; the advertisement oracle must have no opinion on them"
+        );
     }
 
     /// **THE CLASS GUARD (sc-15328).** If a model advertises LoRA compatibility, then some backend

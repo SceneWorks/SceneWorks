@@ -199,6 +199,16 @@ export function loraHasResolvableFamily(lora) {
 }
 
 export function loraMatchesModel(lora, model) {
+  // The API WITHDREW this model's synthesized LoRA advertisement because no backend lane on this
+  // deployment can honour it — an imported Krea 2 checkpoint on a candle host (the candle
+  // single-file entrypoint takes no adapters, sc-14135), or a Mage-Flow fine-tune on any host.
+  // Fail CLOSED, and check this BEFORE the family test: the withdrawal also empties
+  // `loraCompatibility.families`, which would otherwise fall into the "cannot gate" permissive
+  // branch below and keep offering every LoRA — a selection the API now 400s on. The models the
+  // backend CAN serve adapters for are untouched and keep their families.
+  if (model?.loraCompatibility?.supported === false) {
+    return false;
+  }
   // The model's DECLARED families plus its extra-compatible ones, so the picker matches the
   // backend's `accepted_lora_families` rather than being stricter than it (sc-15017 — Krea
   // Realtime 14B declares `krea-realtime` and additionally loads `wan-video` LoRAs). The

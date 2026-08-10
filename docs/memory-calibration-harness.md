@@ -309,6 +309,47 @@ when they breach the unchanged production thresholds. Positive records remain `g
 Qwen VAE seam does not expose synchronized full-pipeline conditioning/denoise
 device/wired/reclaimable phase telemetry or all required lifecycle injections.
 
+The plain MLX Krea adapter uses a separate reference-free lane from Krea pose control and requires:
+
+```text
+SCENEWORKS_KREA_ROOT=/absolute/path/to/krea-2-turbo-snapshot/<tier>
+SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
+SCENEWORKS_KREA_REVISION=<resolved immutable artifact revision>
+```
+
+The selected plan target derives `bf16`, `q4`, or `q8`; the adapter canonicalizes the root and
+requires the matching fixed
+`/models--SceneWorks--krea-2-turbo-mlx/snapshots/<exact-revision>/<tier>` suffix. It refuses a
+reference, control, edit, adapter, overlay, or PiD surface before loading weights and performs no
+network fetch. The checked-in plan covers all five implemented rungs across the three shipped tiers
+at the 768 and 1024 production geometries, using the production deferred-materialization route and
+the exact native 512/64 decode, 67108864 attention, and DiT window-1 domains. The arm validates the
+pinned registry contract, runs synchronized phase peaks, parity and negative-mutation checks, and
+proves cancellation/error cleanup with warm recovery. SC-18377 deliberately publishes no Krea
+evidence record or manifest binding; only a later real Apple-Silicon capture may do that.
+
+The recommended plain MLX SDXL lane requires:
+
+```text
+SCENEWORKS_SDXL_ROOT=/absolute/path/to/sdxl-base-snapshot/<tier>
+SCENEWORKS_SDXL_REPOSITORY=SceneWorks/sdxl-base-mlx
+SCENEWORKS_SDXL_REVISION=<resolved immutable artifact revision>
+```
+
+The adapter validates the exact immutable snapshot, pinned registry contract and
+`sdxl-mlx-unet-shared-ladder-v3` fingerprint before loading. It accepts only reference-free,
+overlay-free `text_to_image`; q4, q8 and bf16 are planned at 768 and 1024 with the production
+deferred-materialization shape. Each tier includes only Resident, Staged, and bounded-transformer
+residency across cadence `1, 2, 5, 10` (`Dit`): SDXL's bounded decode and bounded attention were measured `Missing`
+and are not invented here. The arm records synchronized conditioning/denoise/decode peaks, exact-fit,
+unknown-budget and stale-evidence behavior, selected-versus-unselected parity, and a required failing
+output mutation. The pinned SDXL provider does not read the calibration error hook, and its plain
+untiled VAE decode does not consult the cancellation flag, so the adapter truthfully emits
+`runtime_complete`: formal warm/cancel/error lifecycle scenarios remain `not_run`, the mutation is
+kept in diagnostics, and neither is promoted into full lifecycle coverage. SC-18379 publishes
+apparatus only—no physical capture, evidence record, or manifest
+binding—so production remains estimate-backed until a real Apple-Silicon capture is reviewed.
+
 The Candle adapter requires:
 
 ```text

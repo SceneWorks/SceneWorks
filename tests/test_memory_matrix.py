@@ -45,7 +45,9 @@ def test_generated_memory_matrix_is_current_and_schema_valid():
 def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     matrix = load_matrix()
     assert matrix["summary"]["imageModels"] == 53
-    assert matrix["summary"]["mlxStagedStaticCoverage"] == 39
+    # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, so its former
+    # generic staged-route claim is intentionally absent from this census.
+    assert matrix["summary"]["mlxStagedStaticCoverage"] == 38
     assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == 53
     assert len(matrix["models"]) == len(matrix["modelSlices"]) == 53
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
@@ -127,12 +129,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ).validate(calibration)
     matrix = load_matrix()
     evidence_ids = {record["id"] for record in calibration["records"]}
+    evidence_by_id = {record["id"]: record for record in calibration["records"]}
     records_by_status = Counter(record["status"] for record in calibration["records"])
     # sc-16915 added seventeen Full-complete MLX records (qwen_image x15,
     # krea_2_turbo_control x2) measured at the current pin: complete 33 -> 50. The
-    # base-only runtime-complete FLUX population is untouched. SC-18237 adds the two
-    # production-deferred q8 records: complete 50 -> 52.
-    assert records_by_status == {"complete": 52, "runtime_complete": 15}
+    # base-only runtime-complete FLUX population was initially untouched. SC-18237 adds the two
+    # production-deferred q8 records: complete 50 -> 52. SC-18218 then adds four real-weight,
+    # Resident-only MLX FLUX.2 records (q4/q8 at 768/1024): runtime-complete 15 -> 19.
+    assert records_by_status == {"complete": 52, "runtime_complete": 19}
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -185,27 +189,106 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     # family's promotion mask another's demotion.
     assert {run["semantics"] for run in full_runs} == {"current", "historical"}
     assert sum(1 for run in full_runs if run["semantics"] == "current") == 2
-    expected_flux2_runtime = {
+    expected_candle_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
         "imc-b62adbfca64f277414e1": "bounded_decode",
         "imc-bfb890dff959eaf09183": "staged_residency",
         "imc-f5c3d06f30ebf3723f13": "bounded_transformer_residency",
     }
-    flux2_runtime = [
+    expected_mlx_flux2_runtime = {
+        "imc-747f54e1be89e30da943": ("q8", 768),
+        "imc-9b235419ecbe0710da06": ("q8", 1024),
+        "imc-b6537074420d51413b38": ("q4", 1024),
+        "imc-f3badcb841c8707fd971": ("q4", 768),
+    }
+    candle_flux2_runtime = [
         run
         for run in runtime_complete_runs
         if run["record"]["target"]["modelId"] == "flux2_dev"
+        and run["record"]["backend"] == "candle"
     ]
     assert {
         run["record"]["id"]: run["record"]["strategy"]["rung"]
-        for run in flux2_runtime
-    } == expected_flux2_runtime
-    assert {run["semantics"] for run in flux2_runtime} == expected_flux2_semantics
+        for run in candle_flux2_runtime
+    } == expected_candle_flux2_runtime
+    assert {run["semantics"] for run in candle_flux2_runtime} == expected_flux2_semantics
     assert {
         run["record"]["repositories"]["inference"]["revision"]
-        for run in flux2_runtime
+        for run in candle_flux2_runtime
     } == {"5ffd7612e7de4e76b6db00a7148ed3d9c15b4c0d"}
+
+    mlx_flux2_runtime = [
+        run
+        for run in runtime_complete_runs
+        if run["record"]["target"]["modelId"] == "flux2_dev"
+        and run["record"]["backend"] == "mlx"
+    ]
+    assert {
+        run["record"]["id"]: (
+            run["record"]["target"]["tier"],
+            run["record"]["target"]["geometry"]["width"],
+        )
+        for run in mlx_flux2_runtime
+    } == expected_mlx_flux2_runtime
+    assert all(run["semantics"] == "current" for run in mlx_flux2_runtime)
+    assert all(run["binding"]["eligible"] for run in mlx_flux2_runtime)
+    live_closures = json.loads(
+        (ROOT / "config/inference-provider-closures.json").read_text(encoding="utf-8")
+    )["providers"]
+    for run in mlx_flux2_runtime:
+        record = evidence_by_id[run["record"]["id"]]
+        tier, width = expected_mlx_flux2_runtime[record["id"]]
+        assert record["repositories"]["inference"]["revision"] == (
+            "10831e4ca5b8bf780319a8ee7f21427175075448"
+        )
+        assert record["repositories"]["inference"]["closureDigest"] == live_closures[
+            "mlx:flux2_dev"
+        ]["digest"]
+        assert record["status"] == "runtime_complete"
+        assert record["loadShape"] == "eager_materialization"
+        assert record["calibrationFingerprint"] == (
+            "sc-18218-flux2-dev-t2i-resident-evidence-v1"
+        )
+        assert record["target"] == {
+            "provider": "flux2_dev",
+            "modelId": "flux2_dev",
+            "tier": tier,
+            "mode": "text_to_image",
+            "overlay": "none",
+            "geometry": {
+                "width": width,
+                "height": width,
+                "batch": 1,
+                "frames": 1,
+            },
+        }
+        assert record["strategy"] == {
+            "rung": "resident",
+            "parameters": {},
+            "engagedRungs": ["resident"],
+        }
+        assert record["artifact"] == {
+            "repository": "SceneWorks/flux2-dev-mlx",
+            "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+            "variant": tier,
+        }
+        assert record["quality"]["result"] == "passed"
+        assert record["loadability"]["result"] == "passed"
+        assert record["observedMemory"]["overall"]["allocatorBytes"] <= record[
+            "predictedPeakBytes"
+        ]["overall"]
+        scenarios = {scenario["name"]: scenario for scenario in record["scenarios"]}
+        assert {
+            scenarios[name]["result"]
+            for name in ("exact_fit", "unknown_budget", "stale_evidence", "loadability")
+        } == {"passed"}
+        assert {scenarios[name]["result"] for name in ("warm_repeat", "cancel", "error")} == {
+            "not_run"
+        }
+        assert scenarios["overlay"]["result"] == "not_applicable"
+
+    flux2_runtime = candle_flux2_runtime + mlx_flux2_runtime
 
     historical_flux1_runtime = [
         run
@@ -233,41 +316,42 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert len(runtime_complete_runs) == len(flux2_runtime) + len(
         historical_flux1_runtime
     )
-    # Inside the audited window the runtime-complete population is mixed (FLUX.2 current, FLUX.1
-    # historical); outside it every record is historical. `eligible` is unaffected either way —
-    # ageing past the window re-dates a record, it does not reject it.
-    assert {run["semantics"] for run in runtime_complete_runs} == (
-        {"current", "historical"} if within_audited_window else {"historical"}
-    )
+    # The new MLX FLUX.2 records are current at the live pin while the older FLUX.1 records remain
+    # historical. The Candle FLUX.2 window independently becomes current only at its audited pin.
+    assert {run["semantics"] for run in runtime_complete_runs} == {"current", "historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
         run
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    # Two independent sources of "current", kept separate and both DERIVED from the live pin rather
-    # than hardcoded, so a pin bump makes each fall away on its own instead of making this wrong:
+    # Three independent sources of "current", kept separate so one lane cannot mask another:
     #
-    #   - records measured AT the live pin (sc-16915's MLX re-collection);
+    #   - records measured at the live pin (empty at this post-capture pin);
+    #   - records whose captured provider closure still matches the live provider closure
+    #     (SC-18237's two Qwen q8 rows);
     #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
-    #
-    # Before sc-16915 the first set was empty, so this read `set()` outside the window.
     measured_at_live_pin = {
         record["id"]
         for record in calibration["records"]
         if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
     }
     # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of the
-    # provider's compile closure. The two coincided while nothing had moved; they no longer do. All
-    # three MLX closures moved in this pin's window because two commits touched the shared
-    # `crates/media/mlx-gen` crate, a first-party dependency of every MLX provider's closure.
+    # provider's compile closure. The two coincided while nothing had moved; they no longer do.
     #
-    # SC-18237 recaptured exactly the two production-deferred Qwen q8 records at this pin. Krea and
-    # the older Qwen tiers remain historical. Exact ids make an accidental extra promotion visible.
-    assert measured_at_live_pin == {
-        "imc-56c1f11bd03822d9c241",
-        "imc-a21d2ea9e2d95cf48e82",
-    }
+    # SC-18237 recaptured exactly the two production-deferred Qwen q8 records at 40fa7583, and while
+    # that WAS the live pin this read those two ids. The 014134e3 bump moved the pin past them, so
+    # the pin-derived set is empty again — the state this assertion held before sc-16915, and the
+    # reason every assertion below it is phrased to survive an empty set.
+    #
+    # Empty here is NOT a demotion, and the distinction is the whole point of sc-17774: those two
+    # records captured closure `9930aa538259` for `mlx:qwen_image`, which is still exactly the live
+    # digest in `config/inference-provider-closures.json` at this pin — the bump touched
+    # `mlx-gen-krea` (and, via main, `mlx-gen-z-image`), not the Qwen closure. So both records remain
+    # CURRENT by the term that decides currency; they are merely no longer measured at the pin. Were
+    # this assertion instead re-pointed at the new pin's ids, that would be claiming a re-measurement
+    # nobody ran.
+    assert measured_at_live_pin == set()
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
     # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
     # with nothing measured at the live pin there is nothing to classify, and the moment a record
@@ -288,12 +372,30 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
-    # Zero because this live-pin recapture contains bounded-attention and transformer-residency only;
-    # the historical off-point bounded-decode sweep remains in the bundle but outside the intersection.
+    # Zero because no retained record was measured at this live pin; historical off-point
+    # bounded-decode sweeps remain in the bundle but outside the intersection.
     assert len(unbound_decode_edges) == 0
+    # Currency is the provider's COMPILE CLOSURE, not the pin (sc-17774). While nothing had moved the
+    # two coincided and this assertion could be written off `measured_at_live_pin`; a pin bump that
+    # leaves a provider's closure untouched separates them, which is exactly what the 014134e3 bump
+    # does — it moves `mlx-gen-krea` (and, via main, `mlx-gen-z-image`) and leaves `mlx:qwen_image`
+    # byte-identical. So derive the expectation from the closure the same way the generator does,
+    # rather than from the pin: a record is current when the digest it captured is still the live
+    # digest for ITS provider lane. Written this way it keeps falling away on its own the next time a
+    # closure genuinely moves, instead of needing a hand-edit per bump.
+    current_by_closure = {
+        record["id"]
+        for record in calibration["records"]
+        if live_closures.get(
+            f"{record['backend']}:{record['target']['provider']}", {}
+        ).get("digest")
+        == record["repositories"]["inference"]["closureDigest"]
+    }
     assert {run["record"]["id"] for run in current_eligible} == (
-        measured_at_live_pin - unbound_decode_edges
-    ) | (set(expected_flux2_runtime) if within_audited_window else set())
+        current_by_closure - unbound_decode_edges
+    ) | (
+        set(expected_candle_flux2_runtime) if within_audited_window else set()
+    )
     # The four records that WERE runtime-current before the pin moved are still present and still
     # bind cleanly — superseded by revision, not rejected. Anything else would mean the bump damaged
     # the bundle rather than re-dating it.

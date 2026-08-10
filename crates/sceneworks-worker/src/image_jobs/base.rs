@@ -113,6 +113,14 @@ enum ImageRoute {
     /// `resolve_imported_krea_dit` returns `None` for it, so the snapshot-dir Krea path is untouched.
     /// txt2img only (a bare imported DiT carries no conditioning components).
     KreaImported,
+    /// An imported/user single-file Krea 2 checkpoint carrying a **strict-pose set** (a non-empty
+    /// `advanced.poses` outside edit mode): the trained pose control-branch overlay rides the
+    /// FILE-LOADED imported DiT via the MLX native control entrypoint
+    /// (`load_control_from_native_dit_file`), one image per pose — the imported twin of
+    /// [`ImageRoute::KreaControl`]. Claimed BEFORE the plain [`ImageRoute::KreaImported`] arm so a
+    /// pose set gets the per-pose count + control render instead of per-image t2i. MLX-only
+    /// (`KREA_IMPORTED_SUPPORTS_POSE_CONTROL`); the candle imported lane has no control path.
+    KreaImportedControl,
     /// A fused SDXL LDM/A1111 single-file checkpoint. The file carries the UNet, both text encoders,
     /// and VAE; tokenizer assets are borrowed from the installed SDXL base turnkey.
     SdxlImported,
@@ -244,6 +252,12 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
         // sibling of the `krea_edit_available` arm above.
         Some(ImageRoute::KreaTurboOnRaw)
+    } else if krea_imported_control_available(request, settings) {
+        // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch
+        // rides the file-loaded imported DiT (the imported twin of the `KreaControl` arm above).
+        // Checked BEFORE the plain imported arm so a pose set renders one pose-locked image per
+        // pose instead of falling into per-image t2i (which would silently drop the poses).
+        Some(ImageRoute::KreaImportedControl)
     } else if krea_imported_available(request, settings) {
         // An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
         // `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
@@ -323,6 +337,7 @@ impl ImageRoute {
                 | ImageRoute::KreaTurboOnRaw
                 | ImageRoute::KreaMultiPhase
                 | ImageRoute::KreaImported
+                | ImageRoute::KreaImportedControl
                 | ImageRoute::SdxlImported
                 | ImageRoute::InstantId
                 | ImageRoute::SdxlAdvanced
@@ -338,7 +353,9 @@ impl ImageRoute {
             | ImageRoute::KolorsControl
             | ImageRoute::KreaControl
             | ImageRoute::Flux1DevControl
-            | ImageRoute::Flux2DevControl => pose_entries(request).len() as u32,
+            | ImageRoute::Flux2DevControl
+            // The imported strict-pose lane renders one image per pose, like every control lane.
+            | ImageRoute::KreaImportedControl => pose_entries(request).len() as u32,
             ImageRoute::Flux2Edit | ImageRoute::QwenEdit => grouped_edit_image_count(request),
             ImageRoute::InstantId => instantid_image_count(request, settings),
             ImageRoute::SensenovaEdit => match edit_grouping(request) {
@@ -381,7 +398,7 @@ impl ImageRoute {
     fn adapter_label(self, request: &ImageRequest) -> &'static str {
         match self {
             ImageRoute::KreaControl => KREA_CONTROL_ENGINE_ID,
-            ImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
+            ImageRoute::KreaImported | ImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             ImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             ImageRoute::InstantId => INSTANTID_ENGINE,
@@ -2820,13 +2837,21 @@ fn candle_base_memory_request_mode<'a>(engine_id: &str, request_mode: &'a str) -
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn shared_image_reference_count(edit_reference_count: usize, has_single_reference: bool) -> u32 {
-    let count = if edit_reference_count == 0 {
-        usize::from(has_single_reference)
+fn shared_image_reference_count(
+    edit_reference_count: usize,
+    has_single_reference: bool,
+    has_edit_mask: bool,
+    has_hires_fix: bool,
+) -> u32 {
+    if has_hires_fix {
+        hires_fix_reference_count()
     } else {
-        edit_reference_count
-    };
-    u32::try_from(count).unwrap_or(u32::MAX)
+        lane_reference_count(
+            has_single_reference,
+            edit_reference_count,
+            has_edit_mask,
+        )
+    }
 }
 
 #[cfg(any(
@@ -3565,10 +3590,13 @@ mod candle_image_load_shape_tests {
 
     #[test]
     fn shared_reference_count_preserves_mage_multi_reference_geometry() {
-        assert_eq!(shared_image_reference_count(0, false), 0);
-        assert_eq!(shared_image_reference_count(0, true), 1);
-        assert_eq!(shared_image_reference_count(1, true), 1);
-        assert_eq!(shared_image_reference_count(8, true), 8);
+        assert_eq!(shared_image_reference_count(0, false, false, false), 0);
+        assert_eq!(shared_image_reference_count(0, true, false, false), 1);
+        assert_eq!(shared_image_reference_count(1, true, false, false), 1);
+        assert_eq!(shared_image_reference_count(8, true, false, false), 8);
+        assert_eq!(shared_image_reference_count(0, true, true, false), 2);
+        assert_eq!(shared_image_reference_count(8, false, true, false), 9);
+        assert_eq!(shared_image_reference_count(8, true, true, true), 1);
     }
 
     #[test]
@@ -3765,8 +3793,19 @@ mod candle_image_load_shape_tests {
 /// measured identities at the current provider pin: base Lens Q4 exposes the full ladder, while
 /// Lens-Turbo BF16 retains its legacy text-encoder-only rung. Qwen base/edit also cover Q4/Q8 and
 /// forward-time adapters because the block stream replays packed quantization and captured residuals.
+/// Request-aware callers use the private helper below so Krea and SDXL base calibration is never
+/// applied to reference, edit, or Hires.fix surfaces that share the same engine and weight shape.
 #[cfg(target_os = "macos")]
 pub(crate) fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    apply_measured_mlx_load_shape_for_request(engine_id, spec, true)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_measured_mlx_load_shape_for_request(
+    engine_id: &str,
+    spec: LoadSpec,
+    plain_text_to_image: bool,
+) -> LoadSpec {
     let directory_native = matches!(&spec.weights, WeightsSource::Dir(_))
         && spec.precision == gen_core::Precision::Bf16;
     let lens_native = directory_native
@@ -3783,7 +3822,23 @@ pub(crate) fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> 
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.pid.is_none();
-    if lens_native || qwen_native {
+    let krea_native = directory_native
+        && engine_id == "krea_2_turbo"
+        && plain_text_to_image
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.adapters.is_empty()
+        && spec.pid.is_none();
+    let sdxl_native = directory_native
+        && engine_id == "sdxl"
+        && plain_text_to_image
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.adapters.is_empty()
+        && spec.pid.is_none();
+    if lens_native || qwen_native || krea_native || sdxl_native {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3988,6 +4043,180 @@ mod measured_mlx_load_shape_tests {
             gen_core::LoadShape::EagerMaterialization,
             "the unbounded five-block control side branch is not advertised as rung 4"
         );
+    }
+
+    #[test]
+    fn worker_plain_krea_specs_reach_the_full_ladder_without_admitting_other_surfaces() {
+        for (tier, quant_bits, quant) in [
+            ("bf16", None, None),
+            ("q4", Some(4), Some(Quant::Q4)),
+            ("q8", Some(8), Some(Quant::Q8)),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut spec = fixture_spec(root.path(), quant_bits);
+            if let Some(quant) = quant {
+                spec = spec.with_quant(quant);
+            }
+            let shaped =
+                apply_measured_mlx_load_shape_for_request("krea_2_turbo", spec, true);
+            assert_eq!(
+                shaped.load_shape,
+                gen_core::LoadShape::DeferredMaterialization,
+                "plain Krea {tier} must use the production deferred load shape"
+            );
+            let resident_contract = crate::inference_runtime::media()
+                .memory_strategy_contract(
+                    "krea_2_turbo",
+                    &shaped.clone().with_offload_policy(OffloadPolicy::Resident),
+                )
+                .unwrap()
+                .expect("plain Krea registers a resident/deferred memory-strategy contract");
+            assert_eq!(
+                resident_contract
+                    .capability(MemoryStrategy::Resident)
+                    .unwrap()
+                    .support,
+                MemoryStrategySupport::Implemented,
+                "plain Krea {tier} must remain reachable on a roomy resident host"
+            );
+
+            let sequential_contract = crate::inference_runtime::media()
+                .memory_strategy_contract(
+                    "krea_2_turbo",
+                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
+                )
+                .unwrap()
+                .expect("plain Krea registers a sequential/deferred memory-strategy contract");
+            let rung = sequential_contract
+                .capability(MemoryStrategy::BoundedTransformerResidency)
+                .expect("Krea compatibility contract contains rung 4");
+            assert_eq!(rung.support, MemoryStrategySupport::Implemented, "{tier}");
+            assert_eq!(rung.parameters.transformer_window_sizes, vec![1]);
+            assert_eq!(
+                rung.parameters.transformer_window_components,
+                vec![TransformerComponent::Dit]
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let base = fixture_spec(root.path(), Some(4)).with_quant(Quant::Q4);
+        assert_eq!(
+            apply_measured_mlx_load_shape_for_request("krea_2_turbo", base.clone(), false)
+                .load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "a reference/edit/hires request is outside the plain Krea T2I apparatus even when its \
+             weight spec is otherwise clean"
+        );
+        let adapter = AdapterSpec::new(
+            root.path().join("adapter.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        for (engine, spec) in [
+            ("krea_2_turbo_edit", base.clone()),
+            ("krea_2_turbo_control", base.clone()),
+            ("krea_2_turbo", base.clone().with_adapters(vec![adapter])),
+            (
+                "krea_2_turbo",
+                base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
+            ),
+        ] {
+            assert_eq!(
+                apply_measured_mlx_load_shape_for_request(engine, spec, true).load_shape,
+                gen_core::LoadShape::EagerMaterialization,
+                "{engine} overlay/edit/control surface is outside the base calibration identity"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_plain_sdxl_specs_reach_only_the_pinned_three_rung_contract() {
+        fn sdxl_spec(root: &std::path::Path, quant_bits: Option<u8>, quant: Option<Quant>) -> LoadSpec {
+            for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
+                let directory = root.join(component);
+                std::fs::create_dir_all(&directory).unwrap();
+                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+                bytes.extend_from_slice(header);
+                bytes.extend_from_slice(&0_f32.to_le_bytes());
+                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+            }
+            if let Some(bits) = quant_bits {
+                std::fs::write(
+                    root.join("unet").join("config.json"),
+                    format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+                )
+                .unwrap();
+            }
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root.to_owned()));
+            if let Some(quant) = quant {
+                spec = spec.with_quant(quant);
+            }
+            spec
+        }
+
+        for (tier, quant_bits, quant) in [
+            ("bf16", None, None),
+            ("q4", Some(4), Some(Quant::Q4)),
+            ("q8", Some(8), Some(Quant::Q8)),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let shaped = apply_measured_mlx_load_shape_for_request(
+                "sdxl",
+                sdxl_spec(root.path(), quant_bits, quant),
+                true,
+            );
+            assert_eq!(
+                shaped.load_shape,
+                gen_core::LoadShape::DeferredMaterialization,
+                "plain SDXL {tier} must use the production deferred load shape"
+            );
+            let contract = crate::inference_runtime::media()
+                .memory_strategy_contract(
+                    "sdxl",
+                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
+                )
+                .unwrap()
+                .expect("plain SDXL must resolve its pinned provider contract before GPU work");
+            assert_eq!(
+                contract
+                    .capability(MemoryStrategy::BoundedTransformerResidency)
+                    .unwrap()
+                    .support,
+                MemoryStrategySupport::Implemented,
+                "{tier}"
+            );
+            for missing in [MemoryStrategy::BoundedDecode, MemoryStrategy::BoundedAttention] {
+                assert_eq!(
+                    contract.capability(missing).unwrap().support,
+                    MemoryStrategySupport::Missing,
+                    "SDXL {tier} must not invent measured-Missing rungs"
+                );
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let base = sdxl_spec(root.path(), Some(4), Some(Quant::Q4));
+        assert_eq!(
+            apply_measured_mlx_load_shape_for_request("sdxl", base.clone(), false).load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "SDXL edit/reference/Hires.fix requests are outside the base T2I apparatus"
+        );
+        let adapter = AdapterSpec::new(
+            root.path().join("adapter.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        for spec in [
+            base.clone().with_adapters(vec![adapter]),
+            base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
+        ] {
+            assert_eq!(
+                apply_measured_mlx_load_shape_for_request("sdxl", spec, true).load_shape,
+                gen_core::LoadShape::EagerMaterialization,
+                "SDXL adapter/control surfaces must not borrow the base calibration identity"
+            );
+        }
     }
 }
 
@@ -4619,28 +4848,7 @@ fn generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
-    // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
-    // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
-    let mut conditioning = if !multi_references.is_empty() {
-        build_reference_conditioning(multi_references)
-    } else {
-        match reference {
-            Some((image, strength)) => vec![Conditioning::Reference {
-                image: image.clone(),
-                strength: Some(*strength),
-            }],
-            None => Vec::new(),
-        }
-    };
-    // Inpaint / outpaint mask (Ideogram 4 edit, sc-6303): a `Conditioning::Mask` (white = repaint)
-    // alongside the source `Reference`. Only the Ideogram edit path supplies one today; every other
-    // base-path family passes `None`.
-    if let Some(mask) = edit_mask {
-        conditioning.push(Conditioning::Mask {
-            image: mask.clone(),
-        });
-    }
+    let conditioning = build_lane_conditioning(reference, multi_references, edit_mask);
     let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
@@ -4727,6 +4935,99 @@ fn resolve_hires_fix_plan(
     })
 }
 
+/// The conditioning one generic-lane render carries. Split out of [`generate_one`] so
+/// [`lane_reference_count`] — the count the backend request scope grades the request against — can be
+/// tested against the conditioning this lane REALLY sends rather than against a restatement of it.
+fn build_lane_conditioning(
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+) -> Vec<Conditioning> {
+    // `multi_references` (Boogu instruction edit, sc-7645) takes precedence when present: one image →
+    // `Reference` (byte-identical to the single-reference path); 2–5 → `MultiReference`. Every other
+    // family passes `&[]` and keeps the single `reference` (img2img init / IP-Adapter) path unchanged.
+    let mut conditioning = if !multi_references.is_empty() {
+        build_reference_conditioning(multi_references)
+    } else {
+        match reference {
+            Some((image, strength)) => vec![Conditioning::Reference {
+                image: image.clone(),
+                strength: Some(*strength),
+            }],
+            None => Vec::new(),
+        }
+    };
+    // Inpaint / outpaint mask (Ideogram 4 edit, sc-6303): a `Conditioning::Mask` (white = repaint)
+    // alongside the source `Reference`. Only the Ideogram edit path supplies one today; every other
+    // base-path family passes `None`.
+    if let Some(mask) = edit_mask {
+        conditioning.push(Conditioning::Mask {
+            image: mask.clone(),
+        });
+    }
+    conditioning
+}
+
+/// The image-conditioning count gen-core derives from the request [`generate_one`] builds for these
+/// lane inputs — the SAME rule as `GenerationRequest::image_reference_count`: multi-reference
+/// carriers contribute their image count, a single reference contributes one, and an edit mask
+/// contributes one MORE (it is a `Conditioning::Mask` alongside the source `Reference`, not a
+/// replacement for it).
+///
+/// This is not bookkeeping. The admitted geometry is re-derived from the live request by the
+/// backend request scopes (`mlx-gen`'s `MlxRequestScopeCore::configure_request` and its candle twin),
+/// which refuse any request whose geometry differs from the one admitted, and gen-core's shared
+/// safety check rejects a `has_reference` that disagrees with `reference_count > 0`. Declaring a
+/// count the request does not carry fails the render outright. The old formula
+/// (`edit_refs.len().max(reference || mask)`) undercounted every reference+mask edit by one.
+fn lane_reference_count(
+    has_identity_init: bool,
+    multi_reference_count: usize,
+    has_edit_mask: bool,
+) -> u32 {
+    let references = if multi_reference_count > 0 {
+        multi_reference_count
+    } else {
+        usize::from(has_identity_init)
+    };
+    u32::try_from(references.saturating_add(usize::from(has_edit_mask))).unwrap_or(u32::MAX)
+}
+
+/// The hires-fix refinement pass conditions on exactly one image: the upscaled first-pass render,
+/// passed as the single `Conditioning::Reference` (no multi-reference, no mask). Derived through
+/// [`lane_reference_count`] rather than written as a literal so it cannot drift from the rule the
+/// request scope grades against.
+///
+/// Shared by the MLX and Candle admission declarations so both backends describe the same final-pass
+/// request identity.
+fn hires_fix_reference_count() -> u32 {
+    lane_reference_count(true, 0, false)
+}
+
+/// The request-scope identity of the hires FIRST pass, derived from the admitted (final-pass)
+/// context.
+///
+/// Admission describes the heaviest pass — the upscaled refinement — because that is what sets the
+/// memory ceiling. The first pass renders at the BASE size with the caller's own conditioning, so
+/// running it under the admitted context hands the backend request scope a geometry the request does
+/// not match, and the scope refuses it (`request geometry … does not fit admitted …`) — which failed
+/// the first pass of every hires render on a scope-adopting provider. Only the geometry identity
+/// moves: the memory SELECTION is reused verbatim, since a strategy chosen for the larger pass is
+/// the conservative choice for the smaller one.
+fn hires_first_pass_context(
+    admitted: &gen_core::MemoryRunContext,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+) -> gen_core::MemoryRunContext {
+    let mut context = admitted.clone();
+    context.geometry.width = width;
+    context.geometry.height = height;
+    context.geometry.reference_count = reference_count;
+    context.has_reference = reference_count > 0;
+    context
+}
+
 /// Run the normal first pass followed by an optional high-resolution img2img refinement while
 /// keeping progress monotonic across both denoise schedules.
 #[allow(clippy::too_many_arguments)]
@@ -4786,6 +5087,14 @@ fn generate_one_with_hires(
         );
     };
 
+    let first_pass_context = memory_strategy_context.map(|context| {
+        hires_first_pass_context(
+            context,
+            width,
+            height,
+            lane_reference_count(reference.is_some(), multi_references.len(), edit_mask.is_some()),
+        )
+    });
     let combined_steps = steps.saturating_add(hires.steps);
     let mut first_progress = |progress| match progress {
         Progress::Step { current, .. } => on_progress(Progress::Step {
@@ -4816,7 +5125,7 @@ fn generate_one_with_hires(
         use_pid,
         text_style_gain,
         memory,
-        memory_strategy_context,
+        first_pass_context.as_ref(),
         enhance,
         preview.clone(),
         cancel,
@@ -6177,6 +6486,11 @@ async fn generate_stream(
     // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Admission describes the heaviest pass. Hires fix renders the first pass at `width`/`height`
+    // and the refinement at the plan dimensions, so every memory fit and request scope must use the
+    // latter. `generate_one_with_hires` derives a base-pass scope from this final-pass identity.
+    let (memory_width, memory_height) =
+        hires_fix.map_or((width, height), |plan| (plan.width, plan.height));
     // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
     let text_style_gain = resolve_text_style_gain(request);
     let calibration_opt_in = request
@@ -6207,7 +6521,12 @@ async fn generate_stream(
     // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
     // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
     spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
-    spec = apply_measured_mlx_load_shape(engine_id, spec);
+    let plain_text_to_image = matches!(request.mode.as_str(), "image_generation" | "text_to_image")
+        && identity_init.is_none()
+        && edit_refs.is_empty()
+        && ideogram_edit_mask.is_none()
+        && hires_fix.is_none();
+    spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
     let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         engine_id,
         &request.model,
@@ -6217,9 +6536,19 @@ async fn generate_stream(
     );
     let has_request_reference =
         identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
-    let reference_count = edit_refs.len().max(usize::from(
-        identity_init.is_some() || ideogram_edit_mask.is_some() || hires_fix.is_some(),
-    ));
+    // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
+    // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
+    // first hires pass renders at the base size with the caller's own conditioning and gets its own
+    // request-scope identity inside `generate_one_with_hires`.
+    let reference_count = if hires_fix.is_some() {
+        hires_fix_reference_count()
+    } else {
+        lane_reference_count(
+            identity_init.is_some(),
+            edit_refs.len(),
+            ideogram_edit_mask.is_some(),
+        )
+    };
     let mut memory_overlays = Vec::new();
     if has_request_reference {
         memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
@@ -6243,14 +6572,14 @@ async fn generate_stream(
         memory_overlays.push("pid".to_owned());
     }
     let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
-        width: hires_fix.map_or(width, |plan| plan.width),
-        height: hires_fix.map_or(height, |plan| plan.height),
+        width: memory_width,
+        height: memory_height,
         count: request.count,
         mode: request.mode.clone(),
         overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
         adapter_count,
-        has_reference: has_request_reference || hires_fix.is_some(),
-        reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
+        has_reference: reference_count > 0,
+        reference_count,
         use_pid,
         has_phases: false,
     };
@@ -6937,7 +7266,11 @@ mod candle_request_residency_tests {
 
 /// Whether a candle job may use Krea Turbo's request-scoped, quality-preserving memory ladder.
 /// Keep every exclusion explicit: these surfaces have distinct component graphs or denoise contracts.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
 fn krea_turbo_memory_route(
     engine_id: &str,
     has_convrot: bool,
@@ -6945,6 +7278,7 @@ fn krea_turbo_memory_route(
     has_img2img_reference: bool,
     has_edit_references: bool,
     has_edit_mask: bool,
+    has_hires_fix: bool,
     use_pid: bool,
 ) -> bool {
     engine_id == "krea_2_turbo"
@@ -6953,6 +7287,7 @@ fn krea_turbo_memory_route(
         && !has_img2img_reference
         && !has_edit_references
         && !has_edit_mask
+        && !has_hires_fix
         && !use_pid
 }
 
@@ -7127,10 +7462,11 @@ mod krea_turbo_memory_route_tests {
             false,
             false,
             false,
+            false,
             false
         ));
-        for excluded_surface in 0..6 {
-            let mut flags = [false; 6];
+        for excluded_surface in 0..7 {
+            let mut flags = [false; 7];
             flags[excluded_surface] = true;
             assert!(
                 !krea_turbo_memory_route(
@@ -7141,13 +7477,14 @@ mod krea_turbo_memory_route_tests {
                     flags[3],
                     flags[4],
                     flags[5],
+                    flags[6],
                 ),
                 "surface flag {excluded_surface} must retain its established route"
             );
         }
         for engine in ["krea_2_raw", "krea_2_turbo_edit", "krea_2_turbo_control"] {
             assert!(!krea_turbo_memory_route(
-                engine, false, false, false, false, false, false
+                engine, false, false, false, false, false, false, false
             ));
         }
     }
@@ -7751,6 +8088,11 @@ async fn generate_candle_stream(
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
+    // Admission describes the heaviest pass. Hires fix renders the first pass at `width`/`height`
+    // and the refinement at the plan dimensions, so every memory fit and request scope must use the
+    // latter. `generate_one_with_hires` derives a base-pass scope from this final-pass identity.
+    let (memory_width, memory_height) =
+        hires_fix.map_or((width, height), |plan| (plan.width, plan.height));
     // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
     let text_style_gain = resolve_text_style_gain(request);
     // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
@@ -7811,9 +8153,11 @@ async fn generate_candle_stream(
     // capability downtier and the resident/sequential decision.
     let sequential_capable = crate::mlx_fit_gate::engine_supports_sequential(engine_id);
     // SC-15117: the deeper, request-scoped Krea Turbo ladder is intentionally limited to the stock
-    // ordinary txt2img route implemented by candle-gen-krea. Reference/edit/PiD/ConvRot surfaces keep
-    // their established paths. Adapter jobs have no calibrated evidence cells and therefore fail
-    // closed to resident-or-reject; evidence from ordinary text-to-image never transfers to them.
+    // ordinary single-pass txt2img route implemented by candle-gen-krea. Reference/edit/hires/PiD/
+    // ConvRot surfaces keep their established paths. Hires is deliberately excluded: its refinement
+    // is img2img, which the Krea request scope does not implement. Adapter jobs have no calibrated
+    // evidence cells and therefore fail closed to resident-or-reject; evidence from ordinary
+    // text-to-image never transfers to them.
     let krea_turbo_ladder = krea_turbo_memory_route(
         engine_id,
         convrot.is_some(),
@@ -7821,6 +8165,7 @@ async fn generate_candle_stream(
         img2img_reference.is_some(),
         !edit_refs.is_empty(),
         edit_mask.is_some(),
+        hires_fix.is_some(),
         use_pid,
     );
     let (krea_allow_streamed_blocks, krea_adapter_bytes) =
@@ -7878,8 +8223,8 @@ async fn generate_candle_stream(
                         match crate::vram_gate::krea_turbo_fit_with_runtime(
                             &request.model_manifest_entry,
                             candidate,
-                            width,
-                            height,
+                            memory_width,
+                            memory_height,
                             budget,
                             krea_allow_streamed_blocks,
                             candidate_runtime.as_ref(),
@@ -7978,8 +8323,8 @@ async fn generate_candle_stream(
                     let lower_resolution = crate::vram_gate::krea_turbo_smaller_fit_with_runtime(
                         &request.model_manifest_entry,
                         smallest,
-                        width,
-                        height,
+                        memory_width,
+                        memory_height,
                         budget,
                         krea_allow_streamed_blocks,
                         smallest_runtime.as_ref(),
@@ -7999,8 +8344,8 @@ async fn generate_candle_stream(
                                         crate::vram_gate::krea_turbo_fit_with_runtime(
                                             &request.model_manifest_entry,
                                             candidate,
-                                            width,
-                                            height,
+                                            memory_width,
+                                            memory_height,
                                             budget,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
@@ -8079,6 +8424,8 @@ async fn generate_candle_stream(
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
         edit_reference.is_some() || img2img_reference.is_some(),
+        edit_mask.is_some(),
+        hires_fix.is_some(),
     );
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
@@ -8096,8 +8443,8 @@ async fn generate_candle_stream(
         shared_request_mode,
         (adapter_count > 0).then_some("lora"),
         gen_core::MemoryGeometry {
-            width,
-            height,
+            width: memory_width,
+            height: memory_height,
             batch: 1,
             frames: 1,
             reference_count,
@@ -8131,8 +8478,8 @@ async fn generate_candle_stream(
             crate::vram_gate::krea_turbo_fit_with_runtime(
                 &request.model_manifest_entry,
                 tier,
-                width,
-                height,
+                memory_width,
+                memory_height,
                 budget,
                 krea_allow_streamed_blocks,
                 krea_runtime_context.as_ref(),
@@ -8281,8 +8628,8 @@ async fn generate_candle_stream(
                                                 crate::vram_gate::krea_turbo_fit_with_runtime(
                                                     &request.model_manifest_entry,
                                                     candidate,
-                                                    width,
-                                                    height,
+                                                    memory_width,
+                                                    memory_height,
                                                     budget,
                                                     krea_allow_streamed_blocks,
                                                     candidate_runtime.as_ref(),
@@ -8298,8 +8645,8 @@ async fn generate_candle_stream(
                                 crate::vram_gate::krea_turbo_smaller_fit_with_runtime(
                                 &request.model_manifest_entry,
                                 tier,
-                                width,
-                                height,
+                                memory_width,
+                                memory_height,
                                 budget,
                                 krea_allow_streamed_blocks,
                                 krea_runtime_context.as_ref(),
@@ -8440,8 +8787,8 @@ async fn generate_candle_stream(
                                         crate::vram_gate::krea_turbo_fit_with_runtime(
                                             &request.model_manifest_entry,
                                             candidate,
-                                            width,
-                                            height,
+                                            memory_width,
+                                            memory_height,
                                             budget,
                                             krea_allow_streamed_blocks,
                                             candidate_runtime.as_ref(),
@@ -8522,15 +8869,15 @@ async fn generate_candle_stream(
             calibration_fingerprint,
             load_shape,
             mode: gen_core::MemoryMode::TextToImage,
-            has_reference: false,
+            has_reference: reference_count > 0,
             use_pid: false,
             has_phases: false,
             geometry: gen_core::MemoryGeometry {
-                width,
-                height,
+                width: memory_width,
+                height: memory_height,
                 batch: 1,
                 frames: 1,
-                reference_count: 0,
+                reference_count,
             },
             overlay: None,
             budget: gen_core::MemoryBudget {

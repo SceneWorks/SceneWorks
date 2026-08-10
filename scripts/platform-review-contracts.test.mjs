@@ -1319,3 +1319,27 @@ test("the FLUX.2 composition audit still runs, and is still wired into a lane", 
     "an undeclared module is compiled by no lane, so the composition check would vanish in silence",
   );
 });
+
+test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T2I contract", async () => {
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+  const context = adapter.slice(
+    adapter.indexOf("fn flux2_admission_context("),
+    adapter.indexOf("fn flux2_complete_sweep("),
+  );
+  const arm = adapter.slice(
+    adapter.indexOf("fn run_flux2_dev("),
+    adapter.indexOf("fn validate_z_image_batch("),
+  );
+
+  assert.ok(context.length > 0 && arm.length > 0, "FLUX.2-dev adapter seams must exist");
+  assert.match(context, /mode: MemoryMode::TextToImage/);
+  assert.match(context, /has_reference: false/);
+  assert.match(context, /reference_count: 0/);
+  assert.doesNotMatch(context, /MemoryMode::Edit|reference_count: 2/);
+
+  assert.match(arm, /memory_strategy_contract\(FLUX2_PROVIDER, &spec\)/);
+  assert.match(arm, /registered_dev_t2i_safety_check\(/);
+  assert.match(arm, /generator\s*\.memory_strategy_contract\(\)/);
+  assert.match(arm, /loaded_contract != &contract/);
+  assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
+});

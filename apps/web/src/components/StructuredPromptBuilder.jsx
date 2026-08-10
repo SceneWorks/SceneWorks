@@ -106,6 +106,9 @@ export default function StructuredPromptBuilder({
   // reference image so the parent can auto-preset the generation resolution to the
   // nearest aspect (the caption's bboxes are normalized 0–1000 to the frame).
   onReferenceImageLoaded,
+  // The parent's resolution-option set as a value (sc-18255) — passed straight through to the
+  // shared picker, which dedupes the aspect snap per (reference, key) pair.
+  referenceSnapKey = "",
   // Reference-image → JSON caption (epic 8102, sc-8108). When `onImageCaption` is supplied
   // (Ideogram 4 + text-to-image only — the parent gates it), the Plain-text tab also offers a
   // reference-image picker + "Generate JSON from image" button. `onImageCaption(assetId)` runs
@@ -399,6 +402,7 @@ export default function StructuredPromptBuilder({
               onCaption={onImageCaption}
               onApply={applyImageCaption}
               onReferenceImageLoaded={onReferenceImageLoaded}
+              referenceSnapKey={referenceSnapKey}
               referenceAssets={referenceAssets}
               referenceCharacters={referenceCharacters}
               importAsset={importAsset}

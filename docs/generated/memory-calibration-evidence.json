@@ -5723,6 +5723,258 @@
     },
     {
       "artifact": {
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "capturedAt": "2026-08-09T20:05:18Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:flux2-dev-resident",
+        "blockers": [
+          "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 4
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 1239072
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 55972784168
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 61364269776
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 87658551484
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 61367375580
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 52860712588
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 1227347511
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 61367375580
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 52860712588
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 86
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-mlx-q8-768-seed18218-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-747f54e1be89e30da943",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-53d922925ef691fd6144",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1239072,
+          "allocatorBytes": 1241120,
+          "deviceBytes": 1241120,
+          "reclaimableBytes": 2048,
+          "wiredBytes": 1241120
+        },
+        "decode": {
+          "activeBytes": 61364269776,
+          "allocatorBytes": 87658551484,
+          "deviceBytes": 87658551484,
+          "reclaimableBytes": 26294281708,
+          "wiredBytes": 87658551484
+        },
+        "denoise": {
+          "activeBytes": 55972784168,
+          "allocatorBytes": 61714037240,
+          "deviceBytes": 61714037240,
+          "reclaimableBytes": 5741253072,
+          "wiredBytes": 61714037240
+        },
+        "overall": {
+          "activeBytes": 61364269776,
+          "allocatorBytes": 87658551484,
+          "deviceBytes": 87658551484,
+          "reclaimableBytes": 26294281708,
+          "wiredBytes": 87658551484
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 92073361408,
+        "denoise": 64827162624,
+        "overall": 92073361408
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "dirty": false,
+          "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+          "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 92073361408,
+          "name": "exact_fit",
+          "predictedBytes": 92073361408,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX FLUX.2-dev base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"
@@ -8863,6 +9115,258 @@
     },
     {
       "artifact": {
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "capturedAt": "2026-08-09T20:07:29Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:flux2-dev-resident",
+        "blockers": [
+          "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 4
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 1255456
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 57009505872
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 67965431504
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 113048802492
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 67968537308
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 52860711564
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 1359370746
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 67968537308
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 52860711564
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 86
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-mlx-q8-1024-seed18218-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-9b235419ecbe0710da06",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-b01b729f29e5464c48c3",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1255456,
+          "allocatorBytes": 1257504,
+          "deviceBytes": 1257504,
+          "reclaimableBytes": 2048,
+          "wiredBytes": 1257504
+        },
+        "decode": {
+          "activeBytes": 67965431504,
+          "allocatorBytes": 113048802492,
+          "deviceBytes": 113048802492,
+          "reclaimableBytes": 45083370988,
+          "wiredBytes": 113048802492
+        },
+        "denoise": {
+          "activeBytes": 57009505872,
+          "allocatorBytes": 65161287712,
+          "deviceBytes": 65161287712,
+          "reclaimableBytes": 8151781840,
+          "wiredBytes": 65161287712
+        },
+        "overall": {
+          "activeBytes": 67965431504,
+          "allocatorBytes": 113048802492,
+          "deviceBytes": 113048802492,
+          "reclaimableBytes": 45083370988,
+          "wiredBytes": 113048802492
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 118715580416,
+        "denoise": 68451041280,
+        "overall": 118715580416
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "dirty": false,
+          "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+          "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 118715580416,
+          "name": "exact_fit",
+          "predictedBytes": 118715580416,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX FLUX.2-dev base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"
@@ -10816,6 +11320,258 @@
               "decodeOverlap": 1,
               "decodeTileEdge": 1024
             },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q4"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "capturedAt": "2026-08-09T20:03:46Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:flux2-dev-resident",
+        "blockers": [
+          "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 4
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 1255456
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 32226149968
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 43181584080
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 88797205692
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 43184689884
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 28076864140
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 863693797
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 43184689884
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 28076864140
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 87
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-mlx-q4-1024-seed18218-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-b6537074420d51413b38",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-980a2db4dede761df8d9",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1255456,
+          "allocatorBytes": 1257504,
+          "deviceBytes": 1257504,
+          "reclaimableBytes": 2048,
+          "wiredBytes": 1257504
+        },
+        "decode": {
+          "activeBytes": 43181584080,
+          "allocatorBytes": 88797205692,
+          "deviceBytes": 88797205692,
+          "reclaimableBytes": 45615621612,
+          "wiredBytes": 88797205692
+        },
+        "denoise": {
+          "activeBytes": 32226149968,
+          "allocatorBytes": 40910608416,
+          "deviceBytes": 40910608416,
+          "reclaimableBytes": 8684458448,
+          "wiredBytes": 40910608416
+        },
+        "overall": {
+          "activeBytes": 43181584080,
+          "allocatorBytes": 88797205692,
+          "deviceBytes": 88797205692,
+          "reclaimableBytes": 45615621612,
+          "wiredBytes": 88797205692
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 93281320960,
+        "denoise": 43016781824,
+        "overall": 93281320960
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "dirty": false,
+          "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+          "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 93281320960,
+          "name": "exact_fit",
+          "predictedBytes": 93281320960,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX FLUX.2-dev base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
             "result": "passed"
           }
         ],
@@ -13864,6 +14620,258 @@
         "overlay": "none",
         "provider": "qwen_image",
         "tier": "bf16"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "q4"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "capturedAt": "2026-08-09T20:01:20Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:flux2-dev-resident",
+        "blockers": [
+          "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 4
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 1239072
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 31189428264
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 36580422352
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 62976891068
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 36583544540
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 28076881548
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 731670890
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 36583544540
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 28076881548
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 86
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux2-dev-mlx-q4-768-seed18218-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-f3badcb841c8707fd971",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-1e346e4acb2654ccc10e",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1239072,
+          "allocatorBytes": 1241120,
+          "deviceBytes": 1241120,
+          "reclaimableBytes": 2048,
+          "wiredBytes": 1241120
+        },
+        "decode": {
+          "activeBytes": 36580422352,
+          "allocatorBytes": 62976891068,
+          "deviceBytes": 62976891068,
+          "reclaimableBytes": 26396468716,
+          "wiredBytes": 62976891068
+        },
+        "denoise": {
+          "activeBytes": 31189428264,
+          "allocatorBytes": 37100812792,
+          "deviceBytes": 37100812792,
+          "reclaimableBytes": 5911384528,
+          "wiredBytes": 37100812792
+        },
+        "overall": {
+          "activeBytes": 36580422352,
+          "allocatorBytes": 62976891068,
+          "deviceBytes": 62976891068,
+          "reclaimableBytes": 26396468716,
+          "wiredBytes": 62976891068
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 66169339904,
+        "denoise": 38990249984,
+        "overall": 66169339904
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+          "dirty": false,
+          "revision": "10831e4ca5b8bf780319a8ee7f21427175075448"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+          "revision": "b1055ad192369ea0aa0352965755269baa7d8031"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 66169339904,
+          "name": "exact_fit",
+          "predictedBytes": 66169339904,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the registered FLUX.2-dev admission check rejected a zero/unknown budget before load",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the registered FLUX.2-dev admission check rejected a mutated calibration fingerprint before load",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-flux2 crate opens no memory-strategy request scope for the dev variants and has no calibration fault-injection site, so the scoped lifecycle scenario cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX FLUX.2-dev base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "q4"
       }
     },
     {
