@@ -254,6 +254,62 @@ test("complete final-output quality may attest identical inputs without claiming
   assert.throws(() => validateRecord(record), /identical latents or identical inputs/);
 });
 
+test("the Krea adapter's complete fragment shape passes the real harness with singleton axes", async () => {
+  const adapter = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  const kreaArm = adapter.slice(
+    adapter.indexOf("fn run_krea_base(request:"),
+    adapter.indexOf("fn run_krea_control", adapter.indexOf("fn run_krea_base(request:")),
+  );
+  assert.match(kreaArm, /"status": "complete"/);
+  assert.match(kreaArm, /"sweep": krea_base_complete_sweep\(request\)\?/);
+  assert.match(kreaArm, /"negativeMutation": \{/);
+
+  const record = qwenPositiveComplete();
+  record.target = {
+    modelId: "krea_2_turbo", provider: "krea_2_turbo", tier: "q4",
+    mode: "text_to_image", overlay: "none",
+    geometry: { width: 768, height: 768, batch: 1, frames: 1 },
+  };
+  record.fixture = "krea-base-mlx-q4-768-seed18377-step2";
+  record.calibrationFingerprint =
+    "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
+  record.strategy = {
+    rung: "bounded_transformer_residency",
+    engagedRungs: [
+      "resident", "staged_residency", "bounded_decode", "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+    parameters: {
+      decodeTileEdge: 512,
+      decodeOverlap: 64,
+      attentionChunkSize: 67_108_864,
+      transformerWindowSize: 1,
+    },
+  };
+  record.sweep = {
+    axes: Object.entries(record.strategy.parameters).map(([parameter, value]) => ({
+      parameter,
+      testedValues: [value],
+    })),
+    cases: [{ parameters: structuredClone(record.strategy.parameters), result: "passed" }],
+    rangeVerified: true,
+  };
+  record.negativeMutation.parameters = structuredClone(record.strategy.parameters);
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+
+  const oldEmptySweep = structuredClone(record);
+  oldEmptySweep.sweep.axes = [];
+  assert.throws(
+    () => validateRecord(oldEmptySweep),
+    /parameterized complete strategy must sweep at least one axis/,
+  );
+});
+
 test("complete status fails closed on scenario, quality, mutation, memory and loadability mutations", () => {
   const mutations = [
     [(r) => (r.scenarios.find((x) => x.name === "warm_repeat").result = "not_run"), /warm_repeat/],

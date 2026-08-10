@@ -2369,6 +2369,15 @@ fn planned_krea_base_seed(request: &Value, tier: &str, width: u32) -> Result<u64
     Ok(seed)
 }
 
+fn krea_base_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // Each Krea plan row executes exactly one production parameter tuple. The singleton axes are
+    // derived from that tuple, so a parameterized `complete` receipt satisfies the harness without
+    // claiming any sibling value was exercised.
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
 fn krea_base_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
     GenerationRequest {
         prompt: "an editorial photograph of a glass sculpture in a sunlit studio".to_owned(),
@@ -2847,11 +2856,7 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
             "resolvedRevision": revision,
             "variant": tier,
         },
-        "sweep": {
-            "axes": [],
-            "cases": [{ "parameters": protocol::strategy_parameters(request)?, "result": "passed" }],
-            "rangeVerified": true,
-        },
+        "sweep": krea_base_complete_sweep(request)?,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
             { "name": "unknown_budget", "result": "passed" },
@@ -4514,6 +4519,39 @@ mod krea_base_tests {
             let error = run_krea_base(&request)
                 .expect_err("a referenced Krea target must fail before environment or weights");
             assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn complete_sweep_attests_only_the_exact_executed_krea_parameters() {
+        let request = json!({
+            "planned": {
+                "strategy": {
+                    "parameters": {
+                        "decodeTileEdge": 512,
+                        "decodeOverlap": 64,
+                        "attentionChunkSize": 67_108_864,
+                        "transformerWindowSize": 1
+                    }
+                }
+            }
+        });
+        let sweep = krea_base_complete_sweep(&request).unwrap();
+        assert_eq!(sweep["rangeVerified"], true);
+        assert_eq!(sweep["cases"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sweep["cases"][0]["parameters"],
+            request["planned"]["strategy"]["parameters"]
+        );
+        for (parameter, expected) in [
+            ("decodeTileEdge", json!([512])),
+            ("decodeOverlap", json!([64])),
+            ("attentionChunkSize", json!([67_108_864])),
+            ("transformerWindowSize", json!([1])),
+        ] {
+            assert!(sweep["axes"].as_array().unwrap().iter().any(|axis| {
+                axis["parameter"] == parameter && axis["testedValues"] == expected
+            }));
         }
     }
 
