@@ -552,6 +552,23 @@ jobs:
       # is what turns it from an argument into a measurement. Costs nothing either side: the same
       # `dump-engine-capabilities` run already writes it. If this half fails while the mlx half
       # passes, lane-independence is what broke, not the dump.
+      # Proof-only export for sc-18419. This branch is never merged; it makes the owning lane's
+      # generated files retrievable instead of asking an operator to transcribe a failed diff.
+      - name: Dump sc-18419 MLX capability evidence
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/sc-18419-mlx-capabilities"
+          rm -rf "$evidence"
+          cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$evidence"
+      - name: Upload sc-18419 MLX capability evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-18419-mlx-capabilities
+          path: ${{ runner.temp }}/sc-18419-mlx-capabilities
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify capabilities.mlx.json is a real dump, not a restamp
         run: |
           set -euo pipefail

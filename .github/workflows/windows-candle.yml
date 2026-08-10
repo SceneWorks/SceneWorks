@@ -543,6 +543,25 @@ jobs:
       # since a platform-branched string there would make the two lanes flip one line back and forth
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
+      # Proof-only export for sc-18419. This branch is never merged; it makes the owning lane's
+      # generated files retrievable instead of asking an operator to transcribe a failed diff.
+      - name: Dump sc-18419 Candle capability evidence
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          set "evidence=%RUNNER_TEMP%\sc-18419-candle-capabilities"
+          rmdir /s /q "%evidence%" 2>nul
+          cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle -- "%evidence%" || exit /b 1
+      - name: Upload sc-18419 Candle capability evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-18419-candle-capabilities
+          path: ${{ runner.temp }}\sc-18419-candle-capabilities
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify capabilities.candle.json is a real dump, not a restamp
         shell: cmd
         run: |
