@@ -78,8 +78,9 @@ Do not create an epic branch as a substitute for incomplete requirements.
 Use current remote state and a clean checkout. Before creating either ref,
 install the exact-branch merge-queue ruleset described below; GitHub rejects a
 merge-queue rule whose condition is the wildcard `feature/*`. The bootstrap
-command must treat the two exact queue rulesets and the two refs as one durable,
-recoverable operation.
+command must treat the applicable exact queue ruleset and ref as one durable,
+recoverable operation; when inference is in scope, that transaction covers both
+repositories' queue rulesets and refs.
 
 For each repository, capture the current `origin/main` SHA and verify every
 configured required context on that exact commit is terminal `success`,
