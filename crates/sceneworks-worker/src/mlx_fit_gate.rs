@@ -4124,7 +4124,21 @@ mod tests {
         assert!(rungs_for("q4").is_empty());
     }
 
+    /// sc-18408: the audited-model set is DERIVED from the manifest — every model declaring
+    /// `mlx.calibrations` is audited, so a new declaration (flux2_dev arrived via PR #2221 while
+    /// the old hand list silently ignored it) is covered the moment it ships. Each binding's
+    /// expected shape is COMPUTED by calling the production shaping functions for that lane —
+    /// `image_jobs::apply_measured_mlx_load_shape` (the entry shaping that opts Qwen/Lens/plain
+    /// Krea/plain SDXL into the deferred load-exact contract), then either
+    /// `apply_residency_policy` (the generator-cache cold-load Resident branch; the fixture path
+    /// has unmeasurable weights, which always admits Resident and leaves the spec unchanged) or
+    /// `with_selected_sequential_shape` (the Sequential branch that couples Z-Image's deferred
+    /// shape to rung 4). No arm hand-writes a shape or leans on the `LoadSpec` struct default, so
+    /// a flipped production route reds here instead of staying green against a stale literal.
+    /// macOS-only because the entry shaping IS the macOS MLX route; off-Mac there is no MLX
+    /// cold-load path for a binding to describe.
     #[test]
+    #[cfg(target_os = "macos")]
     fn every_shipped_audited_mlx_binding_has_a_producible_production_load_shape() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
@@ -4132,49 +4146,78 @@ mod tests {
                 .expect("builtin model manifest parses");
         let models = manifest["models"].as_array().expect("models array");
 
-        let eager = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")));
-        let qwen_shape = apply_residency_policy(
-            eager
-                .clone()
-                .with_load_shape(gen_core::LoadShape::DeferredMaterialization),
-            "qwen_image",
-        )
-        .expect("production Qwen load policy")
-        .load_shape;
-        let z_resident_shape = eager.load_shape;
-        let z_sequential_shape =
-            with_selected_sequential_shape("z_image_turbo", eager.clone()).load_shape;
-        let krea_shape = eager.load_shape;
-
-        for model_id in ["qwen_image", "z_image_turbo", "krea_2_turbo"] {
-            let model = models
-                .iter()
-                .find(|model| model["id"] == model_id)
-                .and_then(Value::as_object)
-                .unwrap_or_else(|| panic!("shipped {model_id} manifest entry"));
-            let bindings = MlxCalibrationBinding::from_manifest(model)
+        let mut audited: Vec<String> = Vec::new();
+        for model in models {
+            let model = model.as_object().expect("model entry is an object");
+            let model_id = model["id"].as_str().expect("model id");
+            let Some(bindings) = MlxCalibrationBinding::from_manifest(model)
                 .unwrap_or_else(|error| panic!("{model_id} bindings parse: {error}"))
-                .unwrap_or_else(|| panic!("{model_id} declares audited MLX bindings"));
+            else {
+                continue;
+            };
+            audited.push(model_id.to_owned());
             for binding in bindings {
-                let actual =
-                    crate::memory_strategy::load_shape_from_receipt(binding.query.load_shape);
-                let expected = match (binding.provider.as_str(), binding.rung) {
-                    ("qwen_image", _) => qwen_shape,
-                    ("z_image_turbo", StrategyRung::BoundedTransformerResidency) => {
-                        z_sequential_shape
+                let provider = binding.provider.clone();
+                let control_lane = provider == format!("{model_id}_control");
+                assert!(
+                    control_lane || provider == model_id,
+                    "{model_id} declares an mlx.calibrations binding for provider {provider}, \
+                     which this audit cannot map to a production lane of the model (base or \
+                     `_control`) — teach the audit that lane's production route before shipping \
+                     the binding, or its load shape goes unchecked"
+                );
+
+                // The lane's entry spec, characterized the way the production route builds it:
+                // a directory-native load at the binding's tier, with the control overlay set for
+                // a `_control` provider (which is exactly what keeps the entry shaping from
+                // opting the base model's plain-text-to-image deferred contract into this lane).
+                let mut spec =
+                    LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")));
+                spec = match binding.tier.as_str() {
+                    "q4" => spec.with_quant(gen_core::Quant::Q4),
+                    "q8" => spec.with_quant(gen_core::Quant::Q8),
+                    "bf16" => spec,
+                    other => panic!("{model_id} binding names unaudited tier {other}"),
+                };
+                if control_lane {
+                    spec = spec.with_control(WeightsSource::File(std::path::PathBuf::from(
+                        "fixture-control",
+                    )));
+                }
+                let entry = crate::image_jobs::apply_measured_mlx_load_shape(&provider, spec);
+                let expected = match binding.rung {
+                    // Rung 4 is reached through the cold-load branch that selects Sequential
+                    // residency; every lower rung rides the Resident branch.
+                    StrategyRung::BoundedTransformerResidency => {
+                        with_selected_sequential_shape(&provider, entry).load_shape
                     }
-                    ("z_image_turbo", _) => z_resident_shape,
-                    ("krea_2_turbo_control", _) => krea_shape,
-                    (provider, rung) => {
-                        panic!("audited model exposed unexpected binding {provider}:{rung:?}")
+                    _ => {
+                        apply_residency_policy(entry, &provider)
+                            .expect("unmeasurable fixture weights always admit Resident")
+                            .load_shape
                     }
                 };
+                let actual =
+                    crate::memory_strategy::load_shape_from_receipt(binding.query.load_shape);
                 assert_eq!(
                     actual, expected,
-                    "{model_id} {:?} binding names a shape no production cold-load branch produces",
+                    "{model_id} {provider} {:?} binding names a shape no production cold-load \
+                     branch produces",
                     binding.rung
                 );
             }
+        }
+
+        // A FLOOR, not a ceiling: new `mlx.calibrations` declarations are audited automatically
+        // by the loop above. This guards the derivation itself — if the manifest loader ever
+        // broke and reported "no bindings" for everything, the loop would audit nothing and pass
+        // vacuously.
+        for known in ["qwen_image", "z_image_turbo", "krea_2_turbo", "flux2_dev"] {
+            assert!(
+                audited.iter().any(|id| id == known),
+                "{known} ships mlx.calibrations but the derived audit missed it — the manifest \
+                 loader stopped seeing its bindings"
+            );
         }
     }
 
