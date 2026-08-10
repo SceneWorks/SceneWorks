@@ -49,6 +49,12 @@ const KREA_BASE_PROVIDER: &str = "krea_2_turbo";
 const KREA_BASE_CALIBRATION_FINGERPRINT: &str =
     "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
 const KREA_BASE_SEED: u64 = 18377;
+/// Recommended, reference-free SDXL base text-to-image. Rungs 2 and 3 are measured Missing at the
+/// pinned provider, so this apparatus intentionally exposes only Resident, Staged, and rung 4.
+const SDXL_PROVIDER: &str = "sdxl";
+const SDXL_CALIBRATION_FINGERPRINT: &str = "sdxl-mlx-unet-shared-ladder-v3";
+const SDXL_SEED: u64 = 18379;
+const SDXL_PLAIN_EXECUTION_PATH: &str = "the MLX SDXL base-only text-to-image path";
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
@@ -372,6 +378,7 @@ mod tests {
             "qwen_image",
             "z_image_turbo",
             "krea_2_turbo",
+            "sdxl",
             "krea_2_turbo_control",
             "flux2_dev",
         ] {
@@ -386,6 +393,7 @@ mod tests {
         assert_eq!(QWEN_PROVIDER, "qwen_image");
         assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
         assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
+        assert_eq!(SDXL_PROVIDER, "sdxl");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
     }
@@ -2929,6 +2937,373 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+fn validate_sdxl_target(request: &Value) -> Result<(), String> {
+    let provider = protocol::planned(request)?
+        .pointer("/target/provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != SDXL_PROVIDER {
+        return Err(format!(
+            "MLX SDXL base calibration does not implement provider {provider:?}"
+        ));
+    }
+    protocol::validate_plain_overlay_target(request, SDXL_PLAIN_EXECUTION_PATH)
+}
+
+fn planned_sdxl_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("sdxl-base-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse SDXL fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse SDXL fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn sdxl_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "an editorial photograph of a glass sculpture in a sunlit studio".to_owned(),
+        negative_prompt: Some("low quality, blurry, distorted".to_owned()),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        steps: Some(2),
+        guidance: Some(7.0),
+        ..Default::default()
+    }
+}
+
+fn sdxl_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, LoadSpec), String> {
+    validate_sdxl_target(request)?;
+    let repository = protocol::required_env("SCENEWORKS_SDXL_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_SDXL_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::SDXL_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_SDXL_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_SDXL_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::SDXL_REPOSITORY,
+    )?;
+    let offload = if selection.strategy == MemoryStrategy::Resident {
+        OffloadPolicy::Resident
+    } else {
+        OffloadPolicy::Sequential
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(offload)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok((repository, revision, spec))
+}
+
+fn sdxl_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18379@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+/// Real capture arm for the exact recommended `mlx:sdxl` base T2I identity. It deliberately does
+/// not expose SDXL edit/reference/adapter surfaces or the provider's measured-Missing rungs 2/3.
+fn run_sdxl(request: &Value) -> Result<Value, String> {
+    validate_sdxl_target(request)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::DeferredMaterialization {
+        return Err(
+            "plain SDXL calibration must use the production deferred_materialization load shape"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    let seed = planned_sdxl_seed(request, tier, width)?;
+    if seed != SDXL_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the SDXL calibration seed {SDXL_SEED}"
+        ));
+    }
+    let (repository, revision, spec) = sdxl_load_spec(request, tier, &selection)?;
+    let registry = mlx_gen_sdxl::provider_registry()
+        .map_err(|error| format!("build SDXL registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(SDXL_PROVIDER, &spec)
+        .map_err(|error| format!("read {SDXL_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| format!("{SDXL_PROVIDER} has no memory-strategy contract at the pin"))?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned SDXL contract rejected planned selection: {error}"))?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned SDXL contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != SDXL_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned SDXL fingerprint changed: expected {SDXL_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let generator = registry
+        .load(SDXL_PROVIDER, &spec)
+        .map_err(|error| format!("load real SDXL {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded SDXL generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err("loaded SDXL generator contract differs from the registry contract".to_owned());
+    }
+    let context = sdxl_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        sdxl_request(width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err("a synchronized SDXL lifecycle phase reported a zero active peak".to_owned());
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("SDXL provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("SDXL provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-sdxl-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("SDXL provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&sdxl_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected SDXL reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if maximum_error > MAX_THRESHOLD || mean_error > MEAN_THRESHOLD {
+        return Err(format!(
+            "SDXL selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if mutated_maximum <= MAX_THRESHOLD && mutated_mean <= MEAN_THRESHOLD {
+        return Err("SDXL output mutation did not breach the parity envelope".to_owned());
+    }
+
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": {
+            "axes": [],
+            "cases": [{ "parameters": protocol::strategy_parameters(request)?, "result": "passed" }],
+            "rangeVerified": true,
+        },
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, negative prompt, guidance, seed, geometry, steps and tier; selected SDXL rung versus unselected request",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": MAX_THRESHOLD,
+            "meanErrorThreshold": MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:sdxl-shared-ladder",
+            "executed",
+            [],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, SDXL_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
 fn run_krea_control(request: &Value) -> Result<Value, String> {
     protocol::validate_exact_overlay_target(request, "control:1", KREA_CONTROL_EXECUTION_PATH)?;
     let parameters = protocol::strategy_parameters(request)?;
@@ -3975,6 +4350,7 @@ fn run(request: &Value) -> Result<Value, String> {
     match provider {
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
         KREA_BASE_PROVIDER => run_krea_base(request),
+        SDXL_PROVIDER => run_sdxl(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
         FLUX2_PROVIDER => run_flux2_dev(request),
@@ -4648,6 +5024,149 @@ mod krea_base_tests {
                 MemoryStrategy::StagedResidency,
                 MemoryStrategy::BoundedDecode,
                 MemoryStrategy::BoundedAttention,
+                MemoryStrategy::BoundedTransformerResidency,
+            ]
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod sdxl_tests {
+    use super::*;
+    use mlx_gen::gen_core::MemoryStrategySupport;
+
+    fn minimal_request(provider: &str) -> Value {
+        json!({
+            "planned": {
+                "target": { "provider": provider, "mode": "text_to_image", "overlay": "none" },
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} }
+            }
+        })
+    }
+
+    fn fixture_spec(root: &std::path::Path) -> LoadSpec {
+        for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
+            let directory = root.join(component);
+            std::fs::create_dir_all(&directory).unwrap();
+            let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&0_f32.to_le_bytes());
+            std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+        }
+        std::fs::write(
+            root.join("unet").join("config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .unwrap();
+        LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+            .with_quant(Quant::Q4)
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization)
+    }
+
+    #[test]
+    fn sdxl_arm_refuses_a_foreign_provider_before_environment_or_weight_work() {
+        for provider in ["realvisxl", "sdxl_control", "qwen_image"] {
+            let error = run_sdxl(&minimal_request(provider))
+                .expect_err("a foreign provider must not reach the SDXL arm");
+            assert_eq!(
+                error,
+                format!("MLX SDXL base calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn sdxl_admission_context_is_reference_free_text_to_image() {
+        let calibration = MemoryCalibrationIdentity::new(
+            SDXL_CALIBRATION_FINGERPRINT,
+            LoadShape::DeferredMaterialization,
+        );
+        let context = sdxl_context(
+            MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: Some(Quant::Q4),
+                    component_precision_floors: &[],
+                },
+            },
+            &calibration,
+            &calibration.fingerprint,
+            768,
+            768,
+            1,
+            1,
+        );
+        assert_eq!(context.mode, MemoryMode::TextToImage);
+        assert!(!context.has_reference);
+        assert_eq!(context.geometry.reference_count, 0);
+        assert!(context.overlay.is_none());
+        assert!(!context.use_pid);
+    }
+
+    #[test]
+    fn pinned_sdxl_contract_exposes_only_the_three_implemented_rungs() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sc-18379-sdxl-contract-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let spec = fixture_spec(&root);
+        let contract = mlx_gen_sdxl::provider_registry()
+            .unwrap()
+            .memory_strategy_contract(SDXL_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned SDXL provider contract");
+        assert_eq!(contract.provider_id, SDXL_PROVIDER);
+        assert_eq!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            SDXL_CALIBRATION_FINGERPRINT
+        );
+        for strategy in [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            assert_eq!(
+                contract.capability(strategy).unwrap().support,
+                MemoryStrategySupport::Implemented,
+                "{strategy:?}"
+            );
+        }
+        for strategy in [
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+        ] {
+            assert_eq!(
+                contract.capability(strategy).unwrap().support,
+                MemoryStrategySupport::Missing,
+                "{strategy:?} must stay withheld"
+            );
+        }
+        let transformer = contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .unwrap();
+        assert_eq!(
+            transformer.parameters.transformer_window_sizes,
+            vec![1, 2, 5, 10]
+        );
+        assert_eq!(
+            transformer.parameters.transformer_window_components,
+            vec![TransformerComponent::Dit]
+        );
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedTransformerResidency),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
                 MemoryStrategy::BoundedTransformerResidency,
             ]
         );

@@ -464,6 +464,16 @@ test("the real corpus report is internally consistent, whatever the corpus curre
       .map((lane) => lane.lane),
     "the real flagship omission list must be derived from the same three gates",
   );
+  assert.deepEqual(
+    report.flagshipApparatusCoverage.lanes.map((lane) => lane.lane),
+    ["mlx:krea_2_turbo", "mlx:sdxl", "mlx:z_image_turbo"],
+    "the bounded recommended MLX T2I census must stay manifest-derived and complete",
+  );
+  assert.deepEqual(
+    report.flagshipApparatusCoverage.missingLanes,
+    [],
+    "all three recommended MLX T2I lanes must have closure, plan, and adapter apparatus",
+  );
   // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable");
   // measured armless lanes stay in the staleness partition and appear in `uncapturableLanes` as a
   // second, cross-cutting membership.

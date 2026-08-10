@@ -317,6 +317,24 @@ pinned registry contract, runs synchronized phase peaks, parity and negative-mut
 proves cancellation/error cleanup with warm recovery. SC-18377 deliberately publishes no Krea
 evidence record or manifest binding; only a later real Apple-Silicon capture may do that.
 
+The recommended plain MLX SDXL lane requires:
+
+```text
+SCENEWORKS_SDXL_ROOT=/absolute/path/to/sdxl-base-snapshot/<tier>
+SCENEWORKS_SDXL_REPOSITORY=SceneWorks/sdxl-base-mlx
+SCENEWORKS_SDXL_REVISION=<resolved immutable artifact revision>
+```
+
+The adapter validates the exact immutable snapshot, pinned registry contract and
+`sdxl-mlx-unet-shared-ladder-v3` fingerprint before loading. It accepts only reference-free,
+overlay-free `text_to_image`; q4, q8 and bf16 are planned at 768 and 1024 with the production
+deferred-materialization shape. Each tier includes only Resident, Staged, and bounded-transformer
+residency across cadence `1, 2, 5, 10` (`Dit`): SDXL's bounded decode and bounded attention were measured `Missing`
+and are not invented here. The arm records synchronized conditioning/denoise/decode peaks, exact-fit,
+unknown-budget and stale-evidence behavior, selected-versus-unselected parity, and a required failing
+output mutation. SC-18379 publishes apparatus only—no physical capture, evidence record, or manifest
+binding—so production remains estimate-backed until a real Apple-Silicon capture is reviewed.
+
 The Candle adapter requires:
 
 ```text

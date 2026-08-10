@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6632ba78dbdbdc25fb50168e9862cfb908216581a032fee6dac8695dcdb52e7c",
+    "sceneWorksRevision": "source-tree:6c9cb7b33cbe84be7a952a1f313a33d448526b21dd1c901793b49f7ef3624e62",
     "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071",
     "sources": {
       "manifest": {
@@ -26,11 +26,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "38b60e9b83e994175e61c22217a7c32624f0302fdfed8c694b0cc1545cb75f75"
+        "sha256": "9258bda1ae8b7e205f71a0d59158103d56eaf37f7c028ff043bc6b8b91caa10d"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "47d0a8d3d78c032d845fff445fc93c50ec5d668d991a5ae1d975105a912249bb"
+        "sha256": "51ac9d9a40f0bea2f10362acc3fc919cbafcb1a8d53874c00828764d0d0faa73"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -50,11 +50,11 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "9e2c3bed847ee48f5fea5226526be8edb50bee2133ad3012f4813d433d967c86"
+        "sha256": "42f4d32fb405a49c5c5b6abd25eaf71ca662ad80bccc747e6951edf684373d12"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "5d828a2a98ba0f69f7dacc1e2864b8e1018afeeb0056ee77cefac50041d07762"
+        "sha256": "b39f8e3a9af4dc643501e65905bd9cdeebbbe2f4e6699685efcd26d005ead4b2"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -129,11 +129,11 @@
   "summary": {
     "imageModels": 53,
     "cells": 9140,
-    "publishedCells": 199,
-    "elidedCells": 8941,
+    "publishedCells": 208,
+    "elidedCells": 8932,
     "elidedByState": {
-      "Implemented/unverified": 3082,
-      "Missing": 5859
+      "Implemented/unverified": 3075,
+      "Missing": 5857
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -11271,8 +11271,8 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 54,
-      "published": 0,
-      "elided": 54,
+      "published": 3,
+      "elided": 51,
       "implemented": 6,
       "states": {
         "Implemented/unverified": 6,
@@ -11304,8 +11304,8 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 54,
-      "published": 0,
-      "elided": 54,
+      "published": 3,
+      "elided": 51,
       "implemented": 54,
       "states": {
         "Implemented/unverified": 54
@@ -11316,8 +11316,8 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 54,
-      "published": 0,
-      "elided": 54,
+      "published": 3,
+      "elided": 51,
       "implemented": 54,
       "states": {
         "Implemented/unverified": 54
@@ -13659,6 +13659,120 @@
         {
           "repository": "SceneWorks/qwen-image-2512-fun-controlnet-union",
           "revision": "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
+          "variant": null
+        }
+      ]
+    },
+    "sdxl:mlx:bf16": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/minMemoryGb",
+          "tier": "bf16"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/quantize",
+          "tier": "bf16"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/standardTierLayout",
+          "tier": "bf16"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/sdxl-base-mlx",
+          "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+          "variant": "bf16"
+        },
+        {
+          "repository": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "variant": null
+        },
+        {
+          "repository": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "variant": null
+        },
+        {
+          "repository": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "variant": null
+        }
+      ]
+    },
+    "sdxl:mlx:q4": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/minMemoryGb",
+          "tier": "q4"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/quantize",
+          "tier": "q4"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/standardTierLayout",
+          "tier": "q4"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/sdxl-base-mlx",
+          "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+          "variant": "q4"
+        },
+        {
+          "repository": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "variant": null
+        },
+        {
+          "repository": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "variant": null
+        },
+        {
+          "repository": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "variant": null
+        }
+      ]
+    },
+    "sdxl:mlx:q8": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/minMemoryGb",
+          "tier": "q8"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/quantize",
+          "tier": "q8"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/sdxl/mlx/standardTierLayout",
+          "tier": "q8"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/sdxl-base-mlx",
+          "revision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+          "variant": "q8"
+        },
+        {
+          "repository": "openai/clip-vit-large-patch14",
+          "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+          "variant": null
+        },
+        {
+          "repository": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+          "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+          "variant": null
+        },
+        {
+          "repository": "madebyollin/sdxl-vae-fp16-fix",
+          "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
         }
       ]
@@ -21990,6 +22104,492 @@
         "strategyParameterVerification": [],
         "structural": [],
         "manifestScope": "qwen_image:mlx:q8"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "transformerWindowSize": 10,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "transformerWindowSizes": [
+            1,
+            2,
+            5,
+            10
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:bf16"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:bf16:text_to_image:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "9614df62c79429731eb5d1b78f3756f7b04068a48fd3bb295073cdf569eab4e7",
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:bf16"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:bf16:text_to_image:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "f2d9ef9ee10d7938193952e9ad835c4dc52f501b93629a45b1da2f6260298312",
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:bf16"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_transformer_residency"
+      ],
+      "state": "Missing",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": null,
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:q4"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:q4:text_to_image:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "0a1517d29564fcece22e7ad154fe72cd721de741d41735f4d7811043ef217311",
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:q4"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:q4:text_to_image:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "6e8a4bbda9a03e66364b1c317484bcf94fe79a0d8a186b5654cef3ab6bc8345b",
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:q4"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_transformer_residency"
+      ],
+      "state": "Missing",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": null,
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:q8"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:q8:text_to_image:none:resident",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "5052eb9cebbfe617ac17521d6a450b8edae2a73108c623705a22ebfca50f6ed6",
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:q8"
+      }
+    },
+    {
+      "id": "sdxl:sdxl:mlx:q8:text_to_image:none:staged_residency",
+      "modelId": "sdxl",
+      "resolvedRoute": "sdxl",
+      "provider": "sdxl",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "67077b5eefbacfe11f10c2108b511e3a407b6a8016a4f6c5ff43eca6406069fb",
+      "owningFamilyStory": 15525,
+      "owningModelStory": 15495,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "sdxl:mlx:q8"
       }
     },
     {
@@ -31528,7 +32128,17 @@
     "sd3_5_large": [],
     "sd3_5_large_turbo": [],
     "sd3_5_medium": [],
-    "sdxl": [],
+    "sdxl": [
+      "sdxl:sdxl:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "sdxl:sdxl:mlx:bf16:text_to_image:none:resident",
+      "sdxl:sdxl:mlx:bf16:text_to_image:none:staged_residency",
+      "sdxl:sdxl:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "sdxl:sdxl:mlx:q4:text_to_image:none:resident",
+      "sdxl:sdxl:mlx:q4:text_to_image:none:staged_residency",
+      "sdxl:sdxl:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "sdxl:sdxl:mlx:q8:text_to_image:none:resident",
+      "sdxl:sdxl:mlx:q8:text_to_image:none:staged_residency"
+    ],
     "sensenova_u1_8b": [],
     "sensenova_u1_8b_fast": [],
     "sensenova_u1_8b_infographic_v2": [],

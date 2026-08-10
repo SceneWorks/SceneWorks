@@ -746,6 +746,77 @@ test("plain MLX Krea plan covers q4, q8, and bf16 across the exact five-rung con
   assert.throws(() => assertPlan(wrongSurface), /plain Krea entries/);
 });
 
+test("plain MLX SDXL plan covers every shipped tier without inventing measured-Missing rungs", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const expectedRungs = ["resident", "staged_residency", "bounded_transformer_residency"];
+  const expectedCompositions = {
+    resident: ["resident"],
+    staged_residency: ["resident", "staged_residency"],
+    bounded_transformer_residency: [
+      "resident", "staged_residency", "bounded_transformer_residency",
+    ],
+  };
+  const assertPlan = (candidate) => {
+    const sdxl = expandPlan(candidate).filter(
+      (item) => item.backend === "mlx" && item.target.provider === "sdxl",
+    );
+    assert.equal(sdxl.length, 18, "three tiers must each publish two base rungs plus four window cases");
+    for (const [tier, edge] of [["q4", 768], ["q8", 1024], ["bf16", 1024]]) {
+      const cases = sdxl.filter((item) => item.target.tier === tier);
+      assert.equal(cases.length, 6, `${tier} must carry Resident, Staged, and four window cases`);
+      assert.deepEqual(
+        [...new Set(cases.map((item) => item.strategy.rung))].sort(),
+        [...expectedRungs].sort(),
+      );
+      assert.ok(cases.every((item) =>
+        item.evidenceScope === "authoritative" &&
+        item.loadShape === "deferred_materialization" &&
+        item.target.modelId === "sdxl" &&
+        item.target.mode === "text_to_image" &&
+        item.target.overlay === "none" &&
+        item.target.geometry.width === edge &&
+        item.target.geometry.height === edge &&
+        item.target.geometry.batch === 1 &&
+        item.target.geometry.frames === 1 &&
+        item.calibrationFingerprint === "sdxl-mlx-unet-shared-ladder-v3" &&
+        item.fixture === `sdxl-base-mlx-${tier}-${edge}-seed18379-step2` &&
+        JSON.stringify(item.strategy.engagedRungs) ===
+          JSON.stringify(expectedCompositions[item.strategy.rung]) &&
+        (item.strategy.rung !== "bounded_transformer_residency" ||
+          ([1, 2, 5, 10].includes(item.strategy.parameters.transformerWindowSize) &&
+            item.strategy.parameters.transformerWindowComponent === "dit"))
+      ), `${tier} SDXL entries must preserve the exact base T2I capture tuple`);
+      assert.deepEqual(
+        cases
+          .filter((item) => item.strategy.rung === "bounded_transformer_residency")
+          .map((item) => item.strategy.parameters.transformerWindowSize)
+          .sort((left, right) => left - right),
+        [1, 2, 5, 10],
+        `${tier} must schedule every provider-implemented SDXL cadence`,
+      );
+      assert.ok(
+        cases.every((item) => !["bounded_decode", "bounded_attention"].includes(item.strategy.rung)),
+        `${tier} must not plan measured-Missing SDXL rungs`,
+      );
+    }
+  };
+  assertPlan(config);
+
+  const missingRung = structuredClone(config);
+  missingRung.providers = missingRung.providers.filter(
+    (provider) => provider.name !== "mlx-sdxl-base-q8-bounded-transformer-window5-1024",
+  );
+  assert.throws(() => assertPlan(missingRung), /four window cases|every provider-implemented/);
+
+  const inventedRung = structuredClone(config);
+  inventedRung.providers.find(
+    (provider) => provider.name === "mlx-sdxl-base-q4-resident-768",
+  ).rung = "bounded_decode";
+  assert.throws(() => assertPlan(inventedRung));
+});
+
 test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const expectedRungs = [
