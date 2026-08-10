@@ -1,6 +1,13 @@
 {
   "schemaVersion": 2,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
+  "summary": {
+    "modelCount": 91,
+    "cellCount": 868,
+    "mlxOnlyCellCount": 216,
+    "candleOnlyCellCount": 37,
+    "exceptionCount": 0
+  },
   "sources": {
     "apiContractEntry": "12c73682cf9c4810e38e172953ae92787fa39b79ef06420bcedeb16b6e549fa0",
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
@@ -13,9 +20,9 @@
     "descriptorMlxRuntime": "29589d3ecddb7f486e0eab813d87aa1a3d8755cf746d5f26cb204bee25def7ce",
     "descriptorPreviewFacts": "52e4f18cfe7e7fcf7460844f9841f22da3eaee176de7a4a9a5ed810346360bec",
     "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
-    "manifest": "20bad682b1ab1e06b61e3c7f92609490a4712b1aa54d81f489db6a5baafd0f7a",
-    "routerCandle": "fc4cb5d7b4a4bbdb5a1ea93e87bb1b94277984133779be0a3039f74c04fd8217",
-    "routerCatalog": "4c3ec65a9cc76e3d99078fef743f595ed357a5de81de18df7fb2e6f92add3867",
+    "manifest": "6392ed544f40750ea399b7e7a10541a0525dd67613bc54c4836da883ef6a95d0",
+    "routerCandle": "4073e3cc947ad4e53c27320d56ae265a294c4f58256bf95c50bc8a53ac31f8ba",
+    "routerCatalog": "135bff1a323dd59e7318864f454e711e9a56253aeba9b148a36fdc816991e19a",
     "routerGaps": "f495497899b6b73b1884e7f703c9b356ac4690ee4d4ed1e8655890673d9db340",
     "routerMlx": "485f72eb161bdcad7dcd5891cb73e42db91b7af4da7f567db3a53c2c75296697",
     "scheduler": "1b05c5c9c33fe036276bffeb400637575dbcab309a2977e8b1702bfce669d52f",
@@ -396,32 +403,17 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "preview": {
@@ -488,32 +480,17 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18476",
-            "url": "https://app.shortcut.com/trefry/story/18476",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18476",
-            "url": "https://app.shortcut.com/trefry/story/18476",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18476",
-            "url": "https://app.shortcut.com/trefry/story/18476",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "preview": {
@@ -2875,12 +2852,7 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",
@@ -4374,12 +4346,7 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18476",
-            "url": "https://app.shortcut.com/trefry/story/18476",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",
@@ -4461,12 +4428,7 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18476",
-            "url": "https://app.shortcut.com/trefry/story/18476",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",
@@ -4606,32 +4568,19 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q4",

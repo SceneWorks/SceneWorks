@@ -12240,8 +12240,8 @@
           // image_jobs/bernini.rs; overridable via SCENEWORKS_CANDLE_BERNINI_DIR), independent of
           // `paths.model`, and the video lane reuses the same resolver. Without this entry the off-Mac
           // candle Bernini lane dead-ended with no way to install the snapshot. Shared by bernini +
-          // bernini_image (one repo, HF cache dedupes). Loads dense today (the off-Mac packed-tier select
-          // is a follow-up). Size is the bf16 tier estimate (candle loads the converted tree dense).
+          // bernini_image (one repo, HF cache dedupes). The worker selects the published bf16/q8/q4
+          // subdirectory from this whole-repo snapshot. Size remains the bf16 tier estimate.
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
           "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
@@ -12320,7 +12320,7 @@
       },
       "ui": {
         "label": "Bernini",
-        "description": "ByteDance Bernini full pipeline: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B text-to-video renderer. Highest-quality, planner-guided generation — but very large (≈179 GB) and slow (the 7B planner runs many passes per clip). macOS native MLX only; needs ample unified memory.",
+        "description": "ByteDance Bernini full pipeline: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B text-to-video renderer. Highest-quality, planner-guided generation — but very large (≈179 GB) and slow (the 7B planner runs many passes per clip). Native MLX on macOS and Candle on Windows/Linux; needs ample accelerator memory.",
         "recommendedFor": ["text_to_video"],
         "durationHint": "Heavy planner + dual 14B experts — keep clips at 5s or less. Generates at 16fps.",
         "promptGuide": {
@@ -12397,7 +12397,7 @@
           // download (empty files list); the candle worker's `resolve_candle_bernini_model_dir` resolves it
           // by string from the HF cache (`CANDLE_BERNINI_REPO`, image_jobs/bernini.rs; overridable via
           // SCENEWORKS_CANDLE_BERNINI_DIR), independent of `paths.model`. One repo shared with the video id
-          // (HF cache dedupes). Loads dense today (off-Mac packed-tier select is a follow-up).
+          // (HF cache dedupes). The worker selects the published bf16/q8/q4 subdirectory.
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
           "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
@@ -12448,7 +12448,7 @@
       },
       "ui": {
         "label": "Bernini (Image)",
-        "description": "ByteDance Bernini full pipeline as a still-image generator: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B renderer to produce a single image (text-to-image) or edit a source image (image-to-image). Highest-quality, planner-guided — but very large (≈179 GB) and slow (the 7B planner runs many passes per image). macOS native MLX only; needs ample unified memory. For everyday stills the fast native image models are recommended.",
+        "description": "ByteDance Bernini full pipeline as a still-image generator: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B renderer to produce a single image (text-to-image) or edit a source image (image-to-image). Highest-quality, planner-guided — but very large (≈179 GB) and slow (the 7B planner runs many passes per image). Native MLX on macOS and Candle on Windows/Linux; needs ample accelerator memory. For everyday stills the fast native image models are recommended.",
         "recommendedFor": ["text_to_image", "edit_image"],
         "promptGuide": {
           "title": "Bernini Image Prompt Guide",

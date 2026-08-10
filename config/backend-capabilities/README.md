@@ -24,6 +24,10 @@ capability advertisement. The focused Rust test regenerates and byte-compares th
 so drift at any of those seams
 requires an intentional matrix update.
 
+The generated top-level `summary` is the canonical source for review/PR counts; it mechanically
+counts every model, model-axis/preview cell, GPU job request, training row, MLX-only/Candle-only cell,
+and exception. Do not restate counts from a separate hand-written query.
+
 Every MLX-only cell names its Shortcut implementation obligation. `authority` identifies the
 specialist epic whose contract governs that cell where applicable. Candle-only cells are retained
 with `preservedCandleOnly: true` rather than normalized away.

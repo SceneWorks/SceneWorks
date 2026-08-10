@@ -99,11 +99,22 @@ const GENERATOR: &str = "cargo run -p sceneworks-core --bin dump-backend-capabil
 pub struct BackendCapabilityMatrix {
     pub schema_version: u32,
     pub generated_by: String,
+    pub summary: MatrixSummary,
     pub sources: BTreeMap<String, String>,
     pub models: Vec<ModelCapabilityRow>,
     pub gpu_job_types: Vec<JobCapabilityRow>,
     pub training_kernels: Vec<TrainingCapabilityRow>,
     pub exceptions: Vec<ExceptionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatrixSummary {
+    pub model_count: usize,
+    pub cell_count: usize,
+    pub mlx_only_cell_count: usize,
+    pub candle_only_cell_count: usize,
+    pub exception_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,16 +346,71 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
         &training_kernels,
         &exceptions.records,
     )?;
+    let summary = matrix_summary(
+        &models,
+        &gpu_job_types,
+        &training_kernels,
+        exceptions.records.len(),
+    );
 
     Ok(BackendCapabilityMatrix {
         schema_version: 2,
         generated_by: GENERATOR.to_owned(),
+        summary,
         sources: source_digests(),
         models,
         gpu_job_types,
         training_kernels,
         exceptions: exceptions.records,
     })
+}
+
+fn matrix_summary(
+    models: &[ModelCapabilityRow],
+    jobs: &[JobCapabilityRow],
+    training: &[TrainingCapabilityRow],
+    exception_count: usize,
+) -> MatrixSummary {
+    let mut cell_count = 0;
+    let mut mlx_only_cell_count = 0;
+    let mut candle_only_cell_count = 0;
+    let mut count = |cell: &CapabilityCell| {
+        cell_count += 1;
+        if cell.mlx == Some(true) && cell.candle != Some(true) {
+            mlx_only_cell_count += 1;
+        }
+        if cell.candle == Some(true) && cell.mlx != Some(true) {
+            candle_only_cell_count += 1;
+        }
+    };
+    for model in models {
+        for cells in [
+            model.operation_and_mode.as_slice(),
+            model.conditioning_shape.as_slice(),
+            model.user_adapters.as_slice(),
+            model.precision_tier.as_slice(),
+        ] {
+            for cell in cells {
+                count(cell);
+            }
+        }
+        count(&model.preview);
+    }
+    for job in jobs {
+        for cell in &job.requests {
+            count(cell);
+        }
+    }
+    for row in training {
+        count(&row.support);
+    }
+    MatrixSummary {
+        model_count: models.len(),
+        cell_count,
+        mlx_only_cell_count,
+        candle_only_cell_count,
+        exception_count,
+    }
 }
 
 fn model_row(
@@ -1177,31 +1243,47 @@ fn adapter_cell(
     mlx_facts: &RuntimeDescriptorFacts,
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<CapabilityCell, String> {
+    if model.model_type == "video" {
+        let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
+            for mode in VIDEO_UI_MODES {
+                let descriptor_supports =
+                    descriptor_supports_adapter(facts, &model.id, Some(mode), adapter);
+                if !descriptor_supports {
+                    continue;
+                }
+                let mut job = super::canonical_video_route_probe(&model.id, mode)?;
+                job.payload.insert(
+                    "loras".to_owned(),
+                    json!([{ "id": "probe", "networkType": adapter }]),
+                );
+                if backend_supports(&job, facts)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        return Ok(cell(
+            adapter.to_owned(),
+            supports(mlx_facts)?,
+            supports(candle_facts)?,
+            gap_for(&model.id, "video-adapter", adapter),
+        ));
+    }
+
     let modality = descriptor_modality(model, mlx_facts, candle_facts)?;
     let (job_type, mut payload) =
         canonical_model_request(model, modality, mlx_facts, candle_facts)?;
     payload["loras"] = json!([{ "id": "probe", "networkType": adapter }]);
     let job = probe_job(job_type, &model.id, payload)?;
-    let video_mode = (model.model_type == "video")
-        .then(|| job.payload.get("mode").and_then(Value::as_str))
-        .flatten();
-    let mlx = descriptor_supports_adapter(mlx_facts, &model.id, video_mode, adapter)
+    let mlx = descriptor_supports_adapter(mlx_facts, &model.id, None, adapter)
         && backend_supports(&job, mlx_facts)?;
-    let candle = descriptor_supports_adapter(candle_facts, &model.id, video_mode, adapter)
+    let candle = descriptor_supports_adapter(candle_facts, &model.id, None, adapter)
         && backend_supports(&job, candle_facts)?;
     Ok(cell(
         adapter.to_owned(),
         mlx,
         candle,
-        gap_for(
-            &model.id,
-            if model.model_type == "video" {
-                "video-adapter"
-            } else {
-                "adapter"
-            },
-            adapter,
-        ),
+        gap_for(&model.id, "adapter", adapter),
     ))
 }
 
@@ -1228,25 +1310,21 @@ fn precision_union(
     Ok(tiers.into_iter().collect())
 }
 
-fn manifest_tier_support(model: &ManifestModel, tier: &str, backend: &str) -> bool {
-    let matching: Vec<&ManifestDownload> = model
+fn manifest_artifact_tier_support(model: &ManifestModel, tier: &str, backend: &str) -> bool {
+    model
         .downloads
         .iter()
         .filter(|download| download.variant == tier)
-        .collect();
-    if matching.is_empty() {
-        return true;
-    }
-    matching.iter().any(|download| {
-        download.platforms.is_empty()
-            || download.platforms.iter().any(|platform| {
-                if backend == "mlx" {
-                    platform == "macos"
-                } else {
-                    matches!(platform.as_str(), "windows" | "linux")
-                }
-            })
-    })
+        .any(|download| {
+            download.platforms.is_empty()
+                || download.platforms.iter().any(|platform| {
+                    if backend == "mlx" {
+                        platform == "macos"
+                    } else {
+                        matches!(platform.as_str(), "windows" | "linux")
+                    }
+                })
+        })
 }
 
 fn descriptor_tier_support(
@@ -1308,11 +1386,11 @@ fn precision_cell(
     let support = |facts: &RuntimeDescriptorFacts| {
         let backend = facts.snapshot.backend.as_str();
         let descriptor = descriptor_tier_support(facts, &model.id, video_mode, tier);
-        let artifact_only = model
-            .downloads
-            .iter()
-            .any(|download| download.variant == tier);
-        manifest_tier_support(model, tier, backend) && (descriptor || artifact_only)
+        // Runtime descriptors and exact backend-specific manifest artifacts are independent
+        // authorities. A macOS-only exact tier must not veto a native Candle descriptor merely
+        // because Candle installs an unvarianted whole-repository snapshot (and vice versa).
+        // The production scheduler predicate below remains mandatory for either source of truth.
+        descriptor || manifest_artifact_tier_support(model, tier, backend)
     };
     let mlx = support(mlx_facts) && backend_supports(&job, mlx_facts)?;
     let candle = support(candle_facts) && backend_supports(&job, candle_facts)?;
@@ -2397,6 +2475,43 @@ mod tests {
     }
 
     #[test]
+    fn generated_summary_is_derived_from_every_matrix_section() {
+        let matrix = backend_capability_matrix().unwrap();
+        assert_eq!(
+            matrix.summary,
+            matrix_summary(
+                &matrix.models,
+                &matrix.gpu_job_types,
+                &matrix.training_kernels,
+                matrix.exceptions.len(),
+            )
+        );
+
+        let mut models = matrix.models.clone();
+        let both = models
+            .iter_mut()
+            .flat_map(|row| row.operation_and_mode.iter_mut())
+            .find(|cell| cell.mlx == Some(true) && cell.candle == Some(true))
+            .expect("matrix has a both-backend operation");
+        both.candle = Some(false);
+        let mutated = matrix_summary(
+            &models,
+            &matrix.gpu_job_types,
+            &matrix.training_kernels,
+            matrix.exceptions.len(),
+        );
+        assert_eq!(mutated.cell_count, matrix.summary.cell_count);
+        assert_eq!(
+            mutated.mlx_only_cell_count,
+            matrix.summary.mlx_only_cell_count + 1
+        );
+        assert_eq!(
+            mutated.candle_only_cell_count,
+            matrix.summary.candle_only_cell_count
+        );
+    }
+
+    #[test]
     fn every_gpu_job_type_is_in_the_matrix() {
         let known = known_job_types();
         let non_gpu: BTreeSet<&str> = crate::jobs_store::NON_GPU_JOB_TYPES
@@ -2585,6 +2700,66 @@ mod tests {
                 .find(|cell| cell.capability == shape)
                 .unwrap_or_else(|| panic!("Bernini descriptor axis {shape} is represented"));
             assert_eq!((cell.mlx, cell.candle), expected, "Bernini {shape}");
+        }
+
+        // Exact macOS bf16 downloads must not suppress an independently shipped Candle dense
+        // descriptor. Bernini additionally publishes q4/q8 inside its unvarianted Candle snapshot,
+        // and both production worker lanes resolve those tier subdirectories.
+        for model_id in [
+            "bernini",
+            "bernini_image",
+            "ltx_2_3",
+            "sana_1600m",
+            "sana_sprint_1600m",
+            "scail2_14b",
+        ] {
+            let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
+            let dense = row
+                .precision_tier
+                .iter()
+                .find(|cell| cell.capability == "bf16")
+                .unwrap_or_else(|| panic!("{model_id} dense precision is represented"));
+            assert_eq!(
+                (dense.mlx, dense.candle),
+                (Some(true), Some(true)),
+                "{model_id} dense precision follows both native descriptors"
+            );
+        }
+        for model_id in ["bernini", "bernini_image"] {
+            let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
+            for tier in ["q4", "q8"] {
+                let cell = row
+                    .precision_tier
+                    .iter()
+                    .find(|cell| cell.capability == tier)
+                    .unwrap_or_else(|| panic!("{model_id} {tier} precision is represented"));
+                assert_eq!(
+                    (cell.mlx, cell.candle),
+                    (Some(true), Some(true)),
+                    "{model_id} {tier} follows the descriptor and production tier resolver"
+                );
+            }
+        }
+
+        // SCAIL's first canonical route is replace_person, which deliberately rejects user LoRAs;
+        // animate_character accepts them on both engines. The model-level adapter axis is the union
+        // of descriptor-backed production modes, not an accident of mode ordering.
+        let scail = matrix
+            .models
+            .iter()
+            .find(|row| row.id == "scail2_14b")
+            .unwrap();
+        for adapter in ["lora", "lokr"] {
+            let cell = scail
+                .user_adapters
+                .iter()
+                .find(|cell| cell.capability == adapter)
+                .unwrap_or_else(|| panic!("SCAIL {adapter} axis is represented"));
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "SCAIL {adapter} is served through animate_character"
+            );
         }
 
         let krea = matrix
@@ -2834,6 +3009,62 @@ mod tests {
         let mutated_cell =
             operation_cell(flux2, "prompt_enhancement", &no_enhancement, &candle).unwrap();
         assert_eq!(mutated_cell.mlx, Some(false));
+
+        let sana = manifest
+            .models
+            .iter()
+            .find(|model| model.id == "sana_1600m")
+            .unwrap();
+        assert!(manifest_artifact_tier_support(sana, "bf16", "mlx"));
+        assert!(!manifest_artifact_tier_support(sana, "bf16", "candle"));
+        let dense = precision_cell(sana, "bf16", &original, &candle).unwrap();
+        assert_eq!((dense.mlx, dense.candle), (Some(true), Some(true)));
+
+        // Removing the Candle descriptor loses Candle dense support even though the manifest still
+        // contains a macOS bf16 artifact. Conversely, removing the MLX descriptor does not erase the
+        // exact macOS artifact. These mutations guard both independent sides of the union.
+        let mut no_candle_descriptor = candle.clone();
+        no_candle_descriptor.model_mappings.remove("sana_1600m");
+        no_candle_descriptor
+            .video_model_mappings
+            .retain(|mapping| mapping.model_id != "sana_1600m");
+        let dense = precision_cell(sana, "bf16", &original, &no_candle_descriptor).unwrap();
+        assert_eq!(dense.candle, Some(false));
+
+        let mut no_mlx_descriptor = original.clone();
+        no_mlx_descriptor.model_mappings.remove("sana_1600m");
+        no_mlx_descriptor
+            .video_model_mappings
+            .retain(|mapping| mapping.model_id != "sana_1600m");
+        let dense = precision_cell(sana, "bf16", &no_mlx_descriptor, &candle).unwrap();
+        assert_eq!(dense.mlx, Some(true));
+
+        // Neither authority bypasses production routing: a snapshot without image dispatch cannot
+        // claim the precision cell even when both its descriptor and manifest artifact remain.
+        let mut no_candle_dispatch = candle.clone();
+        no_candle_dispatch
+            .worker_capabilities
+            .retain(|capability| capability != "image_generate");
+        let dense = precision_cell(sana, "bf16", &original, &no_candle_dispatch).unwrap();
+        assert_eq!(dense.candle, Some(false));
+
+        let scail = manifest
+            .models
+            .iter()
+            .find(|model| model.id == "scail2_14b")
+            .unwrap();
+        let adapter = adapter_cell(scail, "lora", &original, &candle).unwrap();
+        assert_eq!((adapter.mlx, adapter.candle), (Some(true), Some(true)));
+        let mut no_candle_animation = candle.clone();
+        no_candle_animation.video_model_mappings.retain(|mapping| {
+            mapping.model_id != "scail2_14b" || mapping.mode != "animate_character"
+        });
+        let adapter = adapter_cell(scail, "lora", &original, &no_candle_animation).unwrap();
+        assert_eq!(
+            adapter.candle,
+            Some(false),
+            "replace_person alone must not falsely claim SCAIL LoRA support"
+        );
 
         let mut bad_mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
         let mut bad_candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
