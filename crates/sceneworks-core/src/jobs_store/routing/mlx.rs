@@ -665,6 +665,16 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     if model == "svd" {
         return mode == "image_to_video";
     }
+    // The two Wan2.2 14B MoE registrations are specialized descriptors, not interchangeable aliases:
+    // the T2V engine advertises no conditioning, while the I2V engine advertises Reference. Keeping
+    // this split in routing prevents a source image from reaching the text-only engine (or an empty
+    // request from reaching the reference-required engine).
+    if model == "wan_2_2_t2v_14b" {
+        return mode == "text_to_video";
+    }
+    if model == "wan_2_2_i2v_14b" {
+        return mode == "image_to_video";
+    }
     // Bernini's renderer is Wan2.2-T2V (text-conditioned) — it has no classic
     // still-image-to-video. Beyond `text_to_video` (sc-4707) it serves the planner's
     // editing + reference-driven video tasks (sc-4703): `video_to_video` (v2v — a

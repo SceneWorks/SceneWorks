@@ -2751,6 +2751,29 @@ mod tests {
                 }
             }
         }
+
+        for (model, supported_mode, rejected_mode, required_conditioning) in [
+            ("wan_2_2_t2v_14b", "text_to_video", "image_to_video", None),
+            (
+                "wan_2_2_i2v_14b",
+                "image_to_video",
+                "text_to_video",
+                Some("reference"),
+            ),
+        ] {
+            let supported =
+                super::super::canonical_video_route_probe(model, supported_mode).unwrap();
+            let rejected = super::super::canonical_video_route_probe(model, rejected_mode).unwrap();
+            assert!(backend_supports(&supported, &mlx).unwrap());
+            assert!(!backend_supports(&rejected, &mlx).unwrap());
+            let descriptors = native_video_route_descriptors(&mlx, model, supported_mode);
+            assert_eq!(descriptors.len(), 1);
+            if let Some(shape) = required_conditioning {
+                assert!(descriptors[0].conditioning.iter().any(|item| item == shape));
+            } else {
+                assert!(descriptors[0].conditioning.is_empty());
+            }
+        }
     }
 
     #[test]

@@ -625,12 +625,15 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     for model in VIDEO_MLX_ROUTED_MODELS {
         assert_eq!(
             video_mode_is_mlx_eligible(model, "image_to_video"),
-            *model != "bernini" && *model != "scail2_14b" && *model != "mochi_1",
+            *model != "wan_2_2_t2v_14b"
+                && *model != "bernini"
+                && *model != "scail2_14b"
+                && *model != "mochi_1",
             "image_to_video eligibility for {model}"
         );
         assert_eq!(
             video_mode_is_mlx_eligible(model, "text_to_video"),
-            *model != "svd" && *model != "scail2_14b",
+            *model != "wan_2_2_i2v_14b" && *model != "svd" && *model != "scail2_14b",
             "text_to_video eligibility for {model}"
         );
     }
