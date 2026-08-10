@@ -360,3 +360,49 @@ describe("mergeCustomizedConfigDraft (sc-11970)", () => {
     expect(seeded.steps).toBe("1000");
   });
 });
+
+// ControlNet preprocessor provisioning. A `control_branch` run renders its per-image condition with
+// a preprocessor whose resolver is cache-only since epic 17625, so a missing one is a job-time
+// failure — it has to gate Start training, not merely warn beside it.
+describe("configValidation — missing control preprocessor", () => {
+  const dataset = { id: "ds_1", items: [{ id: "i1" }] };
+  const controlTarget = { ...target, id: "krea_pose_control", outputKind: "control_branch" };
+  const draft = () => configDraftFromTarget(controlTarget, dataset, ["auto"]);
+  // Assert on THIS rule's issue rather than the whole summary's `ready`: readiness also depends on
+  // unrelated free-text fields, so a `ready === false` assertion would pass whether or not this rule
+  // fires. Every issue blocks Start training, so the issue's presence IS the block.
+  const preprocessorIssues = (missingControlModels) =>
+    configValidation(draft(), {
+      activeDataset: dataset,
+      selectedTarget: controlTarget,
+      missingControlModels,
+    }).filter((entry) => /to render this run's control condition/.test(entry.message));
+
+  it("blocks Start training and names the model", () => {
+    const issues = preprocessorIssues([{ id: "dwpose_pose_detector", name: "DWPose Pose Detector" }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("DWPose Pose Detector");
+    // An `error`, not a silent `requirement`: nothing on the form explains the dead button, so it
+    // earns a chip (the sc-10501 distinction). `summarize` surfaces errors and hides requirements.
+    expect(summarize(issues).surfaced).toHaveLength(1);
+  });
+
+  it("lists every missing model in one issue", () => {
+    const issues = preprocessorIssues([
+      { id: "person_detector", name: "YOLO11m Person Detector" },
+      { id: "dwpose_pose_detector", name: "DWPose Pose Detector" },
+    ]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("YOLO11m Person Detector and DWPose Pose Detector");
+  });
+
+  // The regression that matters: every LoRA run, and every ControlNet run on a provisioned box,
+  // passes an empty list (or nothing at all) and must be completely unaffected.
+  it("adds no issue when nothing is missing", () => {
+    expect(preprocessorIssues([])).toEqual([]);
+    expect(preprocessorIssues(undefined)).toEqual([]);
+    expect(
+      configValidation(draft(), { activeDataset: dataset, selectedTarget: controlTarget }),
+    ).toEqual(configValidation(draft(), { activeDataset: dataset, selectedTarget: controlTarget, missingControlModels: [] }));
+  });
+});

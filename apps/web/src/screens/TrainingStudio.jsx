@@ -6,7 +6,8 @@ import { API_BASE_URL, isAbortError } from "../api.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
-import { JOY_CAPTION_MODEL_ID, terminalStatuses } from "../constants.js";
+import { JOY_CAPTION_MODEL_ID, POSE_DETECT_MODEL_ID, terminalStatuses } from "../constants.js";
+import { missingRequiredModels } from "../modelEligibility.js";
 import {
   buildJoyCaptionPrompt,
   defaultCaptionSettings,
@@ -657,9 +658,29 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // why it may not, so the two cannot drift apart (epic 10644). Only broken values earn
   // a chip: an unfilled field is visible in the form, and the "Needs input" pill carries
   // it (sc-10492 → sc-10501).
+  // Preprocessor models a ControlNet run needs (epic 10159). Only `control_branch` targets render a
+  // condition at all, and only the pose kind needs DWPose — canny and depth are pure image math in
+  // the worker with no weights. Keyed off the target's own declared control type rather than a
+  // hardcoded assumption, so a target that later declares canny/depth asks for nothing.
+  //
+  // The resolver is cache-only since epic 17625, so "not installed" is a job-time failure rather
+  // than a mid-run download: it has to gate Start training, not merely warn.
+  const controlType =
+    selectedTarget?.defaults?.advanced?.controlType ?? selectedTarget?.limits?.controlTypes?.[0] ?? "pose";
+  const missingControlModels = useMemo(() => {
+    if (selectedTarget?.outputKind !== "control_branch" || controlType !== "pose") {
+      return [];
+    }
+    return missingRequiredModels(models, [POSE_DETECT_MODEL_ID]);
+  }, [models, selectedTarget?.outputKind, controlType]);
   const configContext = useMemo(
-    () => ({ activeDataset, selectedTarget, datasetNotReady: readinessBlocksTraining }),
-    [activeDataset, selectedTarget, readinessBlocksTraining],
+    () => ({
+      activeDataset,
+      selectedTarget,
+      datasetNotReady: readinessBlocksTraining,
+      missingControlModels,
+    }),
+    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
@@ -1804,6 +1825,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
               <>
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
+                  missingControlModels={missingControlModels}
+                  controlModelDownloadJobs={trainingDownloadJobs}
+                  onDownloadModel={createModelDownloadJob}
+                  onOpenModels={() => setActiveView("Models")}
+                  onOpenQueue={() => setActiveView("Queue")}
+                  onCancelJob={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   configValidity={configValidity}
                   trainingTargetsError={trainingTargetsError}
                   trainingPresetsError={trainingPresetsError}

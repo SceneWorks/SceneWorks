@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f04fa0476af278896c114c77975245f545bf96348f6a8b89bc8689a74b70a5d3",
+    "sceneWorksRevision": "source-tree:afb982b2104cd0553b1f87a94ae2c70289a2e7483941707013ed6b9c6939c58b",
     "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071",
     "sources": {
       "manifest": {
@@ -62,7 +62,7 @@
       },
       "cargo": {
         "path": "Cargo.toml",
-        "sha256": "d4881938a8995953cd3f83efad95e5c6d788ecc90300452c0edd1489c8c898b3"
+        "sha256": "e3c591dde0b592994a29e8c427c979eb88d78f464a7bd6779ee586a7cc3dfe72"
       }
     }
   },

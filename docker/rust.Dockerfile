@@ -239,8 +239,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # version-matched onnxruntime-gpu + its cuDNN-9 / cuFFT / nvJitLink / nvRTC deps from
 # PyPI, dlopened via ORT_DYLIB_PATH (the `ort` crate links load-dynamic).
 #
-# ubuntu24.04 (Python 3.12) on purpose: onnxruntime-gpu >= 1.24 (the `ort` rc.12 floor
-# / ORT API 24) ships no cp310 Linux wheel, so the 22.04 base's Python 3.10 caps at
+# ubuntu24.04 (Python 3.12) on purpose: onnxruntime-gpu >= 1.26 (the `ort` API floor —
+# see below) ships no cp310 Linux wheel, so the 22.04 base's Python 3.10 caps at
 # 1.23.2 and can't satisfy it; cp312 has 1.26.0. The builder stays on 22.04 (it needs
 # no Python) — its older-glibc binary runs fine on 24.04 (glibc is backward-compatible).
 FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle
@@ -256,8 +256,16 @@ RUN apt-get update \
 # onnxruntime-gpu + the CUDA-12 deps its providers_cuda needs that the CUDA-runtime
 # base doesn't ship — cuDNN-9 (incl. lazily-loaded sub-engines), cuFFT, nvJitLink,
 # nvRTC. onnxruntime-gpu does NOT declare these as hard deps (they sit behind its
-# `cuda`/`cudnn` extras), so request them explicitly (sc-6209). 1.26.0 matches the
-# `ort` crate rc.12 (ORT API 24); validated on RTX PRO 6000 with cuDNN-cu12 9.23.
+# `cuda`/`cudnn` extras), so request them explicitly (sc-6209). 1.26.0 matches the ORT
+# API version the `ort` crate requests (its `api-26` feature, pinned in the workspace
+# Cargo.toml); validated on RTX PRO 6000 with cuDNN-cu12 9.23. The two are bound at
+# COMPILE time by `PROVISIONED_ONNXRUNTIME_MINOR` in crates/sceneworks-worker/src/
+# pose_jobs.rs — the crate's floor is set by that api-N FEATURE, not by its rc version,
+# so re-read it after any `ort` bump rather than assuming a version maps to an API.
+#
+# Do not "just bump" this to 1.27+: that release moved the CUDA execution provider to
+# CUDA 13 (`nvidia-*-cu13`), which is incompatible with the CUDA 12.9 base and the
+# cu12 pins below.
 #
 # The four nvidia-*-cu12 versions below are PINNED to exactly match the desktop CUDA
 # provisioner (apps/desktop/src/cuda_provision.rs COMPONENTS table, REDIST_VERSION
