@@ -4242,8 +4242,9 @@ mod tests {
     /// weights-free provider contract. This is deliberately derived from the plan rather than a
     /// hand-maintained provider list: adding a planned lane without registering its contract must
     /// fail in CI before the calibration adapter reaches a physical capture. Provider-owned
-    /// contract fixtures avoid filesystem-shaped test doubles; SDXL's normal registration is
-    /// itself weights-free and is the intentional fixture-less fallback.
+    /// contract fixtures avoid filesystem-shaped test doubles where providers expose them;
+    /// SDXL and FLUX.2-dev intentionally fall back to their normal registrations, whose contract
+    /// builders are themselves weights-free.
     #[test]
     #[cfg(target_os = "macos")]
     fn every_planned_mlx_lane_resolves_a_weights_free_provider_contract() {
