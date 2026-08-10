@@ -188,6 +188,7 @@ const DEFERRED_MATERIALIZATION_ROUTES: &[&str] = &[
     "lens",
     "lens_turbo",
     "krea_2_turbo",
+    "sdxl",
 ];
 
 /// The resolved-artifact provenance for a subject, derived from the shipped binding that names its
