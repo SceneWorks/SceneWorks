@@ -1783,7 +1783,13 @@ button:focus-visible {
   margin-bottom: 30px;
 }
 
+/* Flex so a dismiss button can sit at the top-right of a message that wraps to several
+   lines. Notices rendered as a bare <p> (the access gate, screen-level errors) have a
+   single anonymous text item and lay out exactly as they did as a block. */
 .notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   padding: 10px 14px;
   border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border));
   border-radius: var(--r-md);
@@ -1796,6 +1802,41 @@ button:focus-visible {
 .notice.error {
   background: var(--danger-soft);
   border-color: color-mix(in oklch, var(--danger) 45%, transparent);
+}
+
+/* Worker panics carry unbroken Windows paths with no spaces to wrap at; without this
+   the message forces the whole band wider than the workspace. */
+.notice-message {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.notice-dismiss {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  /* Pull into the band's padding so the glyph lines up with the first text line. */
+  margin: -2px -6px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.notice-dismiss:hover {
+  background: color-mix(in oklch, var(--danger) 18%, transparent);
+  color: var(--text);
+}
+
+.notice-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* Remote-access blocker (sc-15102): the ONLY thing on screen until the host password
