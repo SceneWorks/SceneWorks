@@ -28,6 +28,12 @@
 //! made a `REDIST_VERSION` bump inert on precisely the installs it exists to update.
 //! An unmarked (or stale-marked) tree therefore falls through to the download loop,
 //! whose per-component retry-skip does check the version.
+//!
+//! A tree that positively names a DIFFERENT pin is REPLACED, not written over. Extraction
+//! writes per basename, so a bump that renames a DLL (CUDA 13 ships `cudart64_13.dll`)
+//! overwrites nothing and would leave both majors resolvable by name in a directory that is
+//! prepended to the worker's PATH. Linux gets this from `promote_component` renaming a
+//! staged dir over the destination; here `replace_foreign_runtime` does it explicitly.
 #![cfg(target_os = "windows")]
 
 use std::fs;
@@ -54,6 +60,11 @@ const REDIST_VERSION: &str = "cuda12.9-ort1.26.0-cudnn9.23-1";
 /// place and skips the multi-GB PyPI download entirely, so a disconnected machine can
 /// complete first run. See `docs/offline-install.md`.
 const GPU_RUNTIME_DIR_ENV: &str = "SCENEWORKS_GPU_RUNTIME_DIR";
+
+/// The CUDA runtime's sentinel prefix, shared by the `COMPONENTS` entry and the
+/// `cuda_dir_if_present` resolver probe so the two can't drift apart across a pin bump
+/// that renames the DLL (`cudart64_12` → `cudart64_13`).
+const CUDART_SENTINEL: &str = "cudart64_";
 
 /// Which provisioned subdir a component's DLLs land in. `Cuda` is the cudarc +
 /// onnxruntime CUDA-dep dir (cudart/cublas/curand/nvrtc + cuDNN/cuFFT/nvJitLink);
@@ -117,7 +128,7 @@ const COMPONENTS: &[Component] = &[
         sha256: "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891",
         dest: Dest::Cuda,
         dlls: None,
-        sentinels: &["cudart64_"],
+        sentinels: &[CUDART_SENTINEL],
     },
     Component {
         label: "cuBLAS",
@@ -245,13 +256,19 @@ pub(crate) fn onnxruntime_dll() -> PathBuf {
     onnxruntime_dir().join("onnxruntime.dll")
 }
 
-/// The provisioned CUDA dir, but only if the redist has actually been downloaded
-/// (probes `cudart64_12.dll`, the marker DLL the bundled resolver also probed). The
+/// The provisioned CUDA dir, but only if the redist has actually been downloaded (probes
+/// the CUDA runtime's sentinel, the marker DLL the bundled resolver also probed). The
 /// resolvers in setup.rs gate the candle worker / PATH / ORT wiring on this — before
 /// first-run provisioning completes it's None, exactly as the empty bundle dir was.
+///
+/// Probes the version-agnostic `CUDART_SENTINEL` prefix rather than a literal
+/// `cudart64_12.dll`: a pinned-version bump that renames the DLL (CUDA 13 ships
+/// `cudart64_13.dll`) would otherwise leave this resolver reporting "present" only while a
+/// STALE CUDA 12 file happened to survive beside the new set, and reporting absent once the
+/// runtime was correctly replaced. The sentinel is the same one `COMPONENTS` matches on.
 pub(crate) fn cuda_dir_if_present() -> Option<PathBuf> {
     let dir = cuda_dir();
-    dir.join("cudart64_12.dll").exists().then_some(dir)
+    dir_has_dll(&dir, CUDART_SENTINEL).then_some(dir)
 }
 
 /// The provisioned onnxruntime.dll, but only if it has actually been downloaded.
@@ -309,6 +326,84 @@ fn already_provisioned(root: &Path) -> bool {
 /// complete DLL set AND current-version marker evidence for it.
 fn adoptable(root: &Path) -> bool {
     is_staged_complete(&cuda_subdir(root), &ort_subdir(root)) && has_current_marker_evidence(root)
+}
+
+/// True when `root` carries marker evidence naming a redist OTHER than the current pin —
+/// i.e. a runtime provisioned by a different SceneWorks version is sitting in place.
+///
+/// Deliberately distinct from `!has_current_marker_evidence`: a root with NO markers at all
+/// (a fresh install, or a run purged and then interrupted) is unknown, not foreign, and
+/// must not trigger a purge. Only a marker that positively names a different version does.
+fn holds_foreign_runtime(root: &Path) -> bool {
+    let stale = |path: PathBuf| {
+        fs::read_to_string(path)
+            .map(|value| value.trim() != REDIST_VERSION)
+            .unwrap_or(false)
+    };
+    stale(root.join(".redist-marker"))
+        || COMPONENTS
+            .iter()
+            .any(|component| stale(root.join(format!(".component-{}.ok", component.slug))))
+}
+
+/// Windows refuses to delete a DLL that is mapped into a running process. Provisioning runs
+/// before this process spawns its worker, so the realistic cause is a SECOND SceneWorks
+/// instance holding the runtime — which a raw `os error 32` does not tell anyone. Translate
+/// it into the one action that resolves it.
+fn describe_removal_failure(path: &Path, error: &std::io::Error) -> String {
+    // 32 = ERROR_SHARING_VIOLATION (opened without FILE_SHARE_DELETE), 5 = ERROR_ACCESS_DENIED
+    // (what DeleteFile reports for a mapped image). Both mean "something has it open".
+    if matches!(error.raw_os_error(), Some(32) | Some(5)) {
+        return format!(
+            "cannot replace the existing GPU runtime at {} because its files are in use \
+             ({error}). Close any other running SceneWorks instance and relaunch.",
+            path.display()
+        );
+    }
+    format!("remove {}: {error}", path.display())
+}
+
+/// Delete a provisioned runtime dir outright, mapping an in-use failure to actionable text.
+fn remove_runtime_dir(dir: &Path) -> Result<(), String> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(describe_removal_failure(dir, &error)),
+    }
+}
+
+/// Drop every completion witness under `root`. Called before the first destructive step of a
+/// replacement so an interrupted purge can't leave markers vouching for a half-deleted tree
+/// (the same ordering `linux_cuda_provision::install_from_staged` relies on).
+fn invalidate_markers(root: &Path) {
+    let _ = fs::remove_file(root.join(".redist-marker"));
+    for component in COMPONENTS {
+        let _ = fs::remove_file(root.join(format!(".component-{}.ok", component.slug)));
+    }
+}
+
+/// Replace a runtime provisioned at a different pin: markers first, then both DLL dirs, then
+/// recreate them empty for the caller to repopulate.
+///
+/// Necessary because extraction writes per BASENAME. A pin bump that renames a DLL
+/// (`cudart64_12.dll` → `cudart64_13.dll` at CUDA 13) overwrites nothing, so the old file
+/// survives beside the new one in a directory that is PREPENDED to the worker's PATH —
+/// leaving two CUDA major versions resolvable by name in one search path, plus ~1.5 GB of
+/// dead weight. Linux gets this for free from `promote_component`, which renames a staged
+/// dir over the destination; the Windows path copies/extracts in place and must do it here.
+///
+/// Markers are invalidated FIRST and are not restored: if the purge or the download that
+/// follows dies partway, the next launch sees no evidence, cannot adopt, and re-provisions.
+/// That also stops the purge from repeating on every retry — the stale markers that trigger
+/// it are gone after the first pass, so a failure mid-download resumes via the per-component
+/// retry-skip instead of wiping the components that already landed (sc-13614).
+fn replace_foreign_runtime(root: &Path, cuda: &Path, ort: &Path) -> Result<(), String> {
+    invalidate_markers(root);
+    for dir in [cuda, ort] {
+        remove_runtime_dir(dir)?;
+        fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// True when two paths name the same directory, tolerating the case/separator/UNC
@@ -410,6 +505,13 @@ fn install_from_staged(source: &Path, root: &Path, cuda: &Path, ort: &Path) -> R
     // so accept it in place.
     if same_dir(source, root) {
         return Ok(());
+    }
+    // Replace rather than copy over the top. `copy_dlls` writes per basename, so installing a
+    // current bundle onto a runtime from an older pin would merge the two DLL sets in a
+    // PATH-prepended dir. The source is verified complete + pinned above, so a wholesale
+    // replacement is safe here in a way it would not be for an unvalidated stage.
+    if holds_foreign_runtime(root) {
+        replace_foreign_runtime(root, cuda, ort)?;
     }
     let copied_cuda = copy_dlls(&src_cuda, cuda)?;
     let copied_ort = copy_dlls(&src_ort, ort)?;
@@ -622,6 +724,22 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
             false,
         );
         return Ok(());
+    }
+
+    // 3. A runtime from a DIFFERENT pin is in the way. Clear it before downloading: the
+    //    extractor writes per basename, so a pin bump that renames a DLL (CUDA 13 ships
+    //    `cudart64_13.dll`) overwrites nothing and would leave both majors resolvable by
+    //    name in a dir that gets PREPENDED to the worker's PATH. Only reached with positive
+    //    evidence of a foreign version — an unmarked or partially-provisioned root falls
+    //    straight through to the retry-skip loop, which must keep what it already fetched.
+    if holds_foreign_runtime(&root) {
+        emit(
+            app,
+            "provision",
+            "Replacing a GPU runtime from an earlier SceneWorks version…",
+            false,
+        );
+        replace_foreign_runtime(&root, &cuda, &ort)?;
     }
 
     let tmp_dir = root.join(".download-tmp");
@@ -1080,6 +1198,146 @@ mod tests {
         install_from_staged(root, root, &cuda_subdir(root), &ort_subdir(root))
             .expect("a complete, pinned root installs from itself");
         assert!(is_staged_complete(&cuda_subdir(root), &ort_subdir(root)));
+    }
+
+    /// A purge is destructive and must fire on POSITIVE evidence of another pin only. The
+    /// two states that must never trigger it: an unmarked root (a fresh install, or a run
+    /// that purged and then died), and a partial run at the CURRENT version — wiping the
+    /// latter would discard components already downloaded and defeat the retry-skip
+    /// (sc-13614), turning any single-component failure back into a 2.7 GB re-download.
+    #[test]
+    fn foreign_runtime_detection_needs_positive_evidence_of_another_pin() {
+        let root_guard = scratch("foreign");
+        let root = root_guard.path();
+        stage_tree(root, PREVIOUS_REDIST_CUDA_DLLS);
+
+        // Old DLLs, no markers: unknown vintage, not provably foreign.
+        assert!(!holds_foreign_runtime(root));
+
+        // Fully marked at this pin.
+        mark_components(root, REDIST_VERSION);
+        write_marker(root).expect("current top marker");
+        assert!(!holds_foreign_runtime(root));
+
+        // A partial run at this pin: half the components marked, no top marker.
+        fs::remove_file(root.join(".redist-marker")).expect("drop top marker");
+        for component in COMPONENTS.iter().skip(4) {
+            fs::remove_file(root.join(format!(".component-{}.ok", component.slug)))
+                .expect("drop later component marker");
+        }
+        assert!(
+            !holds_foreign_runtime(root),
+            "a retry at the current version must not be purged"
+        );
+
+        // One component marker naming another pin is enough.
+        write_component_marker(root, COMPONENTS[0].slug, &previous_redist_version())
+            .expect("stale component marker");
+        assert!(holds_foreign_runtime(root));
+
+        // As is a stale top-level marker on its own.
+        mark_components(root, REDIST_VERSION);
+        assert!(!holds_foreign_runtime(root));
+        fs::write(root.join(".redist-marker"), previous_redist_version())
+            .expect("stale top marker");
+        assert!(holds_foreign_runtime(root));
+    }
+
+    /// The rename case this exists for: `cudart64_11.dll` is exactly the file a CUDA 13
+    /// extraction would NOT overwrite, so it has to be deleted outright. And the purge must
+    /// leave no evidence behind, or every retry after a mid-download failure would purge
+    /// again and re-fetch the components that already landed.
+    #[test]
+    fn replacing_a_foreign_runtime_removes_renamed_siblings_and_does_not_repeat() {
+        let root_guard = scratch("replace");
+        let root = root_guard.path();
+        let cuda = cuda_subdir(root);
+        let ort = ort_subdir(root);
+        stage_tree(root, PREVIOUS_REDIST_CUDA_DLLS);
+        mark_components(root, &previous_redist_version());
+        fs::write(root.join(".redist-marker"), previous_redist_version())
+            .expect("stale top marker");
+        assert!(holds_foreign_runtime(root));
+
+        replace_foreign_runtime(root, &cuda, &ort).expect("replace the foreign runtime");
+
+        assert!(!cuda.join("cudart64_11.dll").exists());
+        assert!(!cuda.join("cudnn64_8.dll").exists());
+        assert!(!ort.join("onnxruntime.dll").exists());
+        // The dirs survive, empty, ready for the download loop to repopulate.
+        assert!(cuda.is_dir() && ort.is_dir());
+        assert_eq!(fs::read_dir(&cuda).expect("read cuda").count(), 0);
+
+        assert!(!has_current_marker_evidence(root));
+        assert!(
+            !holds_foreign_runtime(root),
+            "the purge must not re-arm itself for the next launch"
+        );
+    }
+
+    /// The override path merges DLLs by basename too, so it needs the same replacement —
+    /// otherwise a current bundle installed over an older pin leaves both sets in place.
+    #[test]
+    fn install_from_staged_replaces_a_foreign_runtime_instead_of_merging() {
+        let src_guard = scratch("replace-src");
+        let src = src_guard.path();
+        stage_tree(src, STAGED_CUDA_DLLS);
+        write_marker(src).expect("pin the bundle");
+
+        let dest_guard = scratch("replace-dest");
+        let dest = dest_guard.path();
+        stage_tree(dest, PREVIOUS_REDIST_CUDA_DLLS);
+        fs::write(dest.join(".redist-marker"), previous_redist_version())
+            .expect("stale dest marker");
+
+        install_from_staged(src, dest, &cuda_subdir(dest), &ort_subdir(dest))
+            .expect("install over a foreign runtime");
+
+        let cuda = cuda_subdir(dest);
+        assert!(cuda.join("cudart64_12.dll").is_file(), "current set landed");
+        assert!(
+            !cuda.join("cudart64_11.dll").exists(),
+            "the older pin's DLLs must not survive alongside the new set"
+        );
+        assert!(all_component_markers_current(dest));
+    }
+
+    /// Windows refuses to delete a mapped DLL, and `os error 32` tells a user nothing. The
+    /// in-use codes must name the one action that fixes it; anything else keeps its raw
+    /// cause rather than blaming a phantom second instance.
+    #[test]
+    fn in_use_removal_failure_names_the_fix() {
+        let path = Path::new(r"C:\SceneWorks\gpu-runtime\cuda");
+        // 32 = ERROR_SHARING_VIOLATION, 5 = ERROR_ACCESS_DENIED (a mapped image).
+        for code in [32, 5] {
+            let message = describe_removal_failure(path, &std::io::Error::from_raw_os_error(code));
+            assert!(message.contains("in use"), "code {code}: {message}");
+            assert!(
+                message.contains("Close any other running SceneWorks instance"),
+                "code {code}: {message}"
+            );
+        }
+        // ERROR_DISK_FULL — a real, different cause.
+        let other = describe_removal_failure(path, &std::io::Error::from_raw_os_error(112));
+        assert!(!other.contains("Close any other"), "{other}");
+        assert!(other.contains("remove "), "{other}");
+    }
+
+    /// The resolver probe and the manifest share one needle, so a pin bump that renames the
+    /// DLL keeps resolving. A literal `cudart64_12.dll` probe would report absent exactly
+    /// when the runtime had been correctly replaced.
+    #[test]
+    fn cudart_sentinel_survives_a_dll_rename() {
+        let root_guard = scratch("cudart-sentinel");
+        let dir = root_guard.path();
+        touch(dir, &["cudart64_13.dll"]);
+        assert!(dir_has_dll(dir, CUDART_SENTINEL));
+        assert!(!dir.join("cudart64_12.dll").exists());
+        let runtime = COMPONENTS
+            .iter()
+            .find(|component| component.slug == "cuda-runtime")
+            .expect("CUDA runtime component present");
+        assert_eq!(runtime.sentinels, &[CUDART_SENTINEL]);
     }
 
     /// The offline guide tells operators to hand-write `.redist-marker` with the exact

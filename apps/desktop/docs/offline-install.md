@@ -238,6 +238,8 @@ Once installed, `SCENEWORKS_GPU_RUNTIME_DIR` is no longer consulted (the provisi
 copy is marked complete), so you can leave it set or remove it. It *is* consulted again
 after a SceneWorks upgrade that changes the pinned redist — rebuild the bundle and update
 its marker before rolling that upgrade out, or the upgraded app will try to download.
+When it installs over a runtime marked at an earlier pin, it deletes that runtime first
+rather than copying over it, so the two DLL sets never mix.
 
 Pointing the variable at `%APPDATA%\SceneWorks\gpu-runtime` itself is harmless: a
 complete, correctly marked runtime is accepted in place rather than copied onto itself.
@@ -249,22 +251,49 @@ complete, correctly marked runtime is accepted in place rather than copied onto 
 If you prefer not to set an environment variable, you can place the DLLs directly and
 let the app adopt them:
 
-1. Copy the bundle's `cuda\` and `onnxruntime\` folders into
+1. **Delete any existing `cuda\` and `onnxruntime\` folders** under
+   `%APPDATA%\SceneWorks\gpu-runtime\` before copying. Place the DLLs into an empty
+   runtime folder — see [Do not merge two redist sets](#do-not-merge-two-redist-sets).
+2. Copy the bundle's `cuda\` and `onnxruntime\` folders into
    `%APPDATA%\SceneWorks\gpu-runtime\` so you have
    `%APPDATA%\SceneWorks\gpu-runtime\cuda\...` and `...\onnxruntime\...`.
-2. Write the version marker next to them:
+3. Write the version marker next to them:
 
    ```powershell
    Set-Content -Path "$env:APPDATA\SceneWorks\gpu-runtime\.redist-marker" -Value "cuda12.9-ort1.26.0-cudnn9.23-1" -Encoding ascii
    ```
 
-3. Launch SceneWorks. It confirms the DLL set is complete, sees the marker, and skips the
+4. Launch SceneWorks. It confirms the DLL set is complete, sees the marker, and skips the
    download.
 
-Step 2 is **required**. Earlier releases adopted any complete-looking DLL set with no
+Step 3 is **required**. Earlier releases adopted any complete-looking DLL set with no
 marker; that made a pinned-version bump silently inert on machines that already had a
 runtime, so adoption is now marker-gated on every path. If you skip it, the app treats
 the folder as an unknown-vintage leftover and downloads the pinned set over it.
+
+### Do not merge two redist sets
+
+The app replaces a runtime it can *prove* came from a different pin: if
+`.redist-marker` (or the `.component-*.ok` files) name an earlier version, the `cuda\` and
+`onnxruntime\` folders are deleted and re-fetched rather than written over. That covers
+every runtime SceneWorks provisioned itself, and any bundle staged per Method 2.
+
+It cannot do that for an **unmarked** folder, because absence of a marker is not evidence
+of staleness — deleting a hand-placed set on a hunch would destroy exactly the bundle an
+air-gapped machine depends on. So an unmarked folder is downloaded over, not replaced,
+and DLLs from the older set that the new one does not happen to overwrite would survive
+beside it. Hence step 1: start from an empty folder, or write the marker so the app can
+manage the replacement itself.
+
+This matters because the DLLs are name-versioned. A future CUDA 13 runtime ships
+`cudart64_13.dll`, which does not overwrite `cudart64_12.dll` — and the runtime folder is
+prepended to the worker's library search path, so both majors would be resolvable by name
+in one directory.
+
+> **Close other SceneWorks instances before an upgrade that replaces the runtime.**
+> Windows will not delete a DLL that is mapped into a running process. If one is,
+> setup stops with "…its files are in use. Close any other running SceneWorks
+> instance and relaunch" rather than starting on a half-replaced runtime.
 
 ---
 
