@@ -440,6 +440,49 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
     }))));
 }
 
+/// A strict-pose set on an imported Krea 2 checkpoint is served on MLX (the pose control branch
+/// folds onto the file-loaded DiT) but NOT on candle, whose native single-file entrypoint threads
+/// no control overlay. This pins the shape of that asymmetry so the candle refusal stays a LOUD,
+/// terminal, named gap rather than a job that silently never routes:
+///   * `image_job_is_candle_eligible` is false, so no candle worker ever claims it — the claim gate
+///     and the worker's `KREA_IMPORTED_SUPPORTS_POSE_CONTROL` agree;
+///   * `candle_supported` returns `Err(reason)`, which is what makes the enforce sweep
+///     (`fail_unsupported_candle_jobs`) fail it terminally with a named feature instead of routing
+///     it to the grace-window "no candle worker yet" sweep, where it would sit queued forever.
+///
+/// The MLX half of the same payload is asserted alongside it, so a future change that quietly drops
+/// the imported pose surface on BOTH backends cannot pass this test by making the candle half green.
+#[test]
+fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
+    let pose = json!({
+        "projectId": "project_1",
+        "model": "kreamania_variant4",
+        "prompt": "a woman in a red jacket",
+        "advanced": { "poses": [{ "id": "pose_1" }] },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "paths": { "model": "C:\\SceneWorks\\models\\imports\\kreamania_variant4" }
+        }
+    });
+    let job = image_generate_job(pose);
+
+    assert!(
+        image_job_is_mlx_eligible(&job),
+        "MLX serves the imported pose set through the native control entrypoint"
+    );
+    assert!(
+        !image_job_is_candle_eligible(&job),
+        "candle's single-file entrypoint threads no control overlay, so it must not claim the job"
+    );
+
+    let reason = candle_supported(&job)
+        .expect_err("an imported pose set must be a NAMED candle gap, not a silent never-route");
+    assert!(
+        !reason.feature.trim().is_empty() && !reason.detail.trim().is_empty(),
+        "the terminal failure must name the feature and explain it: {reason:?}"
+    );
+}
+
 #[test]
 fn base_z_image_txt2img_is_candle_eligible_but_edit_shapes_are_not() {
     // sc-8679: base `z_image` plain txt2img rides the candle lane (the base sibling of z_image_turbo);

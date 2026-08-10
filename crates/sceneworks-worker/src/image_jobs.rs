@@ -526,6 +526,21 @@ pub(crate) async fn run_image_generate_job(
                 )
                 .await?;
             }
+            ImageRoute::KreaImportedControl => {
+                // Imported single-file Krea 2 checkpoint + strict-pose set: the trained pose
+                // control-branch overlay rides the file-loaded imported DiT (the imported twin of
+                // the `KreaControl` arm above), one pose-locked image per pose.
+                generate_krea_imported_control_stream(
+                    api,
+                    settings,
+                    job,
+                    &plan,
+                    &project_path,
+                    backend,
+                    &mut asset_writes,
+                )
+                .await?;
+            }
             ImageRoute::KreaImported => {
                 // Imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): pair the
                 // imported DiT with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and load via

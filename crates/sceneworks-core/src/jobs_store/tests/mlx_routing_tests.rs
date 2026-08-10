@@ -105,9 +105,22 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         );
     }
 
-    // A base-tier-only shape (pose) and a manifest entry with no installed path stay ineligible.
+    // A strict-pose set is now served too: the trained pose control branch folds onto the
+    // file-loaded imported DiT (`load_control_from_native_dit_file`), so a same-shape Krea
+    // fine-tune renders pose-locked sets exactly as the builtin Turbo base does.
+    assert!(image_job_is_mlx_eligible(&image_generate_job(json!({
+        "model": "kreamania_variant4",
+        "advanced": { "poses": [{ "id": "pose_1" }] },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        }
+    }))));
+    // A shape the pose render loop would silently drop (the plural edit reference set) and a
+    // manifest entry with no installed path stay ineligible.
     assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
         "model": "kreamania_variant4",
+        "referenceAssetIds": ["reference_1"],
         "advanced": { "poses": [{ "id": "pose_1" }] },
         "modelManifestEntry": {
             "family": "krea_2",

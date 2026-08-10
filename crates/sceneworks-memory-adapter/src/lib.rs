@@ -9,11 +9,11 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "10831e4ca5b8bf780319a8ee7f21427175075448";
+pub const INFERENCE_PIN: &str = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
+pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
-pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and
