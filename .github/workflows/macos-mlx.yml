@@ -166,6 +166,11 @@ on:
         description: "Exact 40-hex Z-Image artifact revision"
         required: false
         type: string
+      run_z_image_deferred_validation:
+        description: "Run the SC-18409 production Sequential/deferred Z-Image render"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
 # windows-candle.yml (sc-12399). This lane is the only thing in CI that runs
@@ -882,6 +887,27 @@ jobs:
             --output "$RUNNER_TEMP/sc-16059-mlx-fresh.json"
           node scripts/memory-calibration-harness.mjs check \
             --input "$RUNNER_TEMP/sc-16059-mlx-fresh.json"
+      - name: Validate production Z-Image Sequential deferred cold-load
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_z_image_deferred_validation }}
+        env:
+          SC18101_TAG: sc18409-nax
+          SC18101_OUT_DIR: ${{ runner.temp }}/sc18409-zimage-validation
+          SC18101_C1_REPO: models--SceneWorks--z-image-turbo-mlx
+          SC18101_C1_ENGINE: z_image_turbo
+          SC18101_C1_TIER: q4
+          SC18101_C1_W: "1024"
+          SC18101_C1_H: "1024"
+          SC18101_C1_CAP_GB: "12"
+          SC18101_C1_STEPS: "8"
+          RUST_TEST_THREADS: "1"
+        run: |
+          if [[ "${{ inputs.run_five_rung_reference }}" != "true" ]]; then
+            echo "run_z_image_deferred_validation requires run_five_rung_reference=true so the exact q4 artifact is provisioned and checked first" >&2
+            exit 1
+          fi
+          cargo test --release -p sceneworks-worker --lib -- \
+            --ignored --nocapture --test-threads=1 \
+            c1_unmeasured_cell_engages_a_deep_rung_and_renders
       - name: Upload raw schema-checked MLX five-rung reference
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -890,4 +916,11 @@ jobs:
           path: |
             ${{ runner.temp }}/sc-16059-mlx-fresh.json
             ${{ runner.temp }}/sc-16059-mlx-reuse-assessment.json
+          if-no-files-found: error
+      - name: Upload SC-18409 Z-Image deferred validation
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_z_image_deferred_validation }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-18409-z-image-deferred-${{ github.run_id }}
+          path: ${{ runner.temp }}/sc18409-zimage-validation
           if-no-files-found: error
