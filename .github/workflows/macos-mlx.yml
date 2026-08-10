@@ -901,10 +901,6 @@ jobs:
             echo "z_image_revision must be an exact lowercase 40-hex artifact revision" >&2
             exit 1
           fi
-          sleep 5 &
-          FOOTPRINT_PROBE_PID=$!
-          /usr/bin/footprint --pid "$FOOTPRINT_PROBE_PID" --format bytes --noCategories --wired
-          kill "$FOOTPRINT_PROBE_PID" 2>/dev/null || true
           cargo test --release -p sceneworks-worker --lib -- \
             --ignored --exact --nocapture --test-threads=1 \
             ladder_e2e_sc18409::z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling
