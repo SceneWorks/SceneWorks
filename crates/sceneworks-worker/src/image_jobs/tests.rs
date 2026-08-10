@@ -11420,7 +11420,7 @@ fn build_control_conditioning_matches_legacy_shape() {
 #[cfg(target_os = "macos")]
 #[test]
 fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request() {
-    let inputs = krea_control_memory_inputs(1024, 1024, "image_generation".to_owned(), 0);
+    let inputs = krea_control_memory_inputs(1024, 1024, "character_image", 0);
 
     // The conditioning the lane builds for one pose: the pose `Control`, no identity init.
     let conditioning = build_control_conditioning(
@@ -11452,6 +11452,18 @@ fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request()
         (inputs.width, inputs.height, inputs.count),
         (request.width, request.height, request.count),
         "the admitted frame geometry must be the geometry the lane renders at"
+    );
+    assert_eq!(
+        (inputs.mode.as_str(), inputs.overlay.as_deref()),
+        ("text_to_image", Some("control:1")),
+        "Character Studio's `character_image` source label must normalize to the exact measured \
+         Krea pose-control calibration identity"
+    );
+
+    let image_studio_inputs = krea_control_memory_inputs(1024, 1024, "image_generation", 0);
+    assert_eq!(
+        image_studio_inputs.mode, inputs.mode,
+        "both product entry points execute the same noise-to-image pose-control provider"
     );
 }
 

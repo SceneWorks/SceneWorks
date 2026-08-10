@@ -77,14 +77,25 @@ const KREA_CONTROL_REFERENCE_COUNT: u32 = 1;
 fn krea_control_memory_inputs(
     width: u32,
     height: u32,
-    mode: String,
+    source_mode: &str,
     adapter_count: usize,
 ) -> crate::mlx_fit_gate::MlxRequestInputs {
+    // Character Studio labels this job `character_image`, while the ordinary image route labels it
+    // `image_generation`. Neither label changes what this provider executes: Krea pose control
+    // starts from noise and carries one Control image, not an img2img init. The real measurements,
+    // promoted bindings, and calibration adapter therefore share the canonical `text_to_image` +
+    // `control:1` identity. Normalize the UI/source label here so the live Character Studio path can
+    // select those exact measured cells instead of silently falling back to estimate-backed
+    // admission under `image_to_image`.
+    debug_assert!(matches!(
+        source_mode,
+        "character_image" | "image_to_image" | "image_generation" | "text_to_image"
+    ));
     crate::mlx_fit_gate::MlxRequestInputs {
         width,
         height,
         count: 1,
-        mode,
+        mode: "text_to_image".to_owned(),
         overlay: Some("control:1".to_owned()),
         adapter_count,
         has_reference: KREA_CONTROL_REFERENCE_COUNT > 0,
@@ -549,8 +560,7 @@ async fn generate_krea_control_stream(
         Some(&request.model_manifest_entry),
         calibration_provenance,
     );
-    let memory_inputs =
-        krea_control_memory_inputs(width, height, request.mode.clone(), adapter_count);
+    let memory_inputs = krea_control_memory_inputs(width, height, &request.mode, adapter_count);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         KREA_CONTROL_ENGINE_ID,
