@@ -890,6 +890,11 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // Both are VACE-capable on candle.
     VideoModelCaps::new("wan_2_2_t2v_14b", true, true, false, true),
     VideoModelCaps::new("wan_2_2_i2v_14b", true, true, true, true),
+    // Wan2.2 VACE-Fun A14B (sc-3459 / sc-6604): the shipped dual-expert model is a dedicated
+    // MLX replace-person engine. The worker resolves it before the generic Wan-VACE fallback and
+    // fails loudly off-Mac, so only the MLX column is true; its sole admitted mode is pinned by
+    // `video_mode_is_mlx_eligible`.
+    VideoModelCaps::new("wan_2_2_vace_fun_14b", true, false, false, false),
     // SVD (`svd` → `svd_xt`, sc-3523 MLX; sc-5493 candle): image→video ONLY. Not a VACE model.
     VideoModelCaps::new("svd", true, true, true, false),
     // Bernini (epic 4699 / sc-4707 MLX; sc-10997 candle): Qwen2.5-VL planner + Wan2.2-T2V-A14B
@@ -1680,6 +1685,7 @@ mod tests {
         "wan_2_2",
         "wan_2_2_t2v_14b",
         "wan_2_2_i2v_14b",
+        "wan_2_2_vace_fun_14b",
         "svd",
         "bernini",
         "scail2_14b",

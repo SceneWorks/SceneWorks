@@ -80,11 +80,17 @@ const WEB_PREVIEW_GATING: &str = include_str!("../../../../../apps/web/src/previ
 const WEB_SIMPLE_JOBS: &str = include_str!("../../../../../apps/web/src/simple/simpleJobs.js");
 const WEB_SIMPLE_VIDEO: &str =
     include_str!("../../../../../apps/web/src/simple/SimpleVideoStudio.jsx");
+const WEB_VIDEO_VALIDATION: &str =
+    include_str!("../../../../../apps/web/src/videoStudioValidation.js");
 const WEB_VIDEO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx");
 const WEB_SIMPLE_AUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/simpleAudioParts.jsx");
+const WEB_SIMPLE_AUDIO_STUDIO: &str =
+    include_str!("../../../../../apps/web/src/simple/SimpleAudioStudio.jsx");
 const WEB_AUDIO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx");
 const WEB_UPSCALE_ENGINES: &str = include_str!("../../../../../apps/web/src/upscaleEngines.js");
+const WEB_VIDEO_UPSCALE: &str =
+    include_str!("../../../../../apps/web/src/screens/VideoUpscalePanel.jsx");
 
 const GENERATOR: &str = "cargo run -p sceneworks-core --bin dump-backend-capability-matrix";
 
@@ -413,7 +419,11 @@ fn model_row(
         mlx: mlx_preview,
         candle: candle_preview,
         parity_obligation: match (mlx_preview, candle_preview) {
-            (Some(true), Some(false) | None) => Some(gap_for(&model.id, "preview", "live_preview")),
+            (Some(true), Some(false) | None) => Some(gap_for(
+                &model.id,
+                if is_video { "video-preview" } else { "preview" },
+                "live_preview",
+            )),
             _ => None,
         },
         preserved_candle_only: matches!(
@@ -1162,7 +1172,15 @@ fn conditioning_cell(
         shape.to_owned(),
         mlx,
         candle,
-        gap_for(&model.id, "conditioning", shape),
+        gap_for(
+            &model.id,
+            if model.model_type == "video" {
+                "video-conditioning"
+            } else {
+                "conditioning"
+            },
+            shape,
+        ),
     ))
 }
 
@@ -1188,7 +1206,15 @@ fn adapter_cell(
         adapter.to_owned(),
         mlx,
         candle,
-        gap_for(&model.id, "adapter", adapter),
+        gap_for(
+            &model.id,
+            if model.model_type == "video" {
+                "video-adapter"
+            } else {
+                "adapter"
+            },
+            adapter,
+        ),
     ))
 }
 
@@ -1307,7 +1333,15 @@ fn precision_cell(
         tier.to_owned(),
         mlx,
         candle,
-        gap_for(&model.id, "precision", tier),
+        gap_for(
+            &model.id,
+            if model.model_type == "video" {
+                "video-precision"
+            } else {
+                "precision"
+            },
+            tier,
+        ),
     ))
 }
 
@@ -1480,7 +1514,10 @@ fn cell(
 fn gap_for(model: &str, category: &str, capability: &str) -> ParityObligation {
     let (work_item, authority) = match category {
         "adapter" => ("sc-18477", None),
-        "video" | "video-adapter" => {
+        "video-conditioning" => ("sc-18478", Some("epic-8588")),
+        "video-precision" => ("sc-18478", Some("epic-9083")),
+        "video-preview" => ("sc-18478", Some("epic-16948")),
+        category if category == "video" || category.starts_with("video-") => {
             let authority = (model == "krea_realtime_14b").then_some("epic-8433");
             ("sc-18478", authority)
         }
@@ -2337,10 +2374,13 @@ fn source_digests() -> BTreeMap<String, String> {
         ("webPreviewGating", WEB_PREVIEW_GATING),
         ("webSimpleJobs", WEB_SIMPLE_JOBS),
         ("webSimpleVideo", WEB_SIMPLE_VIDEO),
+        ("webVideoValidation", WEB_VIDEO_VALIDATION),
         ("webVideoStudio", WEB_VIDEO_STUDIO),
         ("webSimpleAudio", WEB_SIMPLE_AUDIO),
+        ("webSimpleAudioStudio", WEB_SIMPLE_AUDIO_STUDIO),
         ("webAudioStudio", WEB_AUDIO_STUDIO),
         ("webUpscaleEngines", WEB_UPSCALE_ENGINES),
+        ("webVideoUpscale", WEB_VIDEO_UPSCALE),
         ("exceptionRegister", EXCEPTIONS),
     ]
     .into_iter()
@@ -2472,6 +2512,34 @@ mod tests {
                 .as_ref()
                 .map(|item| item.work_item.as_str()),
             Some("sc-18474")
+        );
+
+        let mut video_mlx_only = 0;
+        for video in matrix.models.iter().filter(|row| row.model_type == "video") {
+            for cell in video
+                .operation_and_mode
+                .iter()
+                .chain(&video.conditioning_shape)
+                .chain(&video.user_adapters)
+                .chain(&video.precision_tier)
+                .chain(std::iter::once(&video.preview))
+                .filter(|cell| cell.mlx == Some(true) && cell.candle != Some(true))
+            {
+                video_mlx_only += 1;
+                assert_eq!(
+                    cell.parity_obligation
+                        .as_ref()
+                        .map(|item| item.work_item.as_str()),
+                    Some("sc-18478"),
+                    "video capability {}/{} must stay with the video parity story",
+                    video.id,
+                    cell.capability
+                );
+            }
+        }
+        assert!(
+            video_mlx_only > 0,
+            "the shipped matrix must retain explicit MLX-only video parity obligations"
         );
 
         let krea = matrix
@@ -2857,10 +2925,13 @@ mod tests {
             "workerUtilityDispatch",
             "webSimpleJobs",
             "webSimpleVideo",
+            "webVideoValidation",
             "webVideoStudio",
             "webSimpleAudio",
+            "webSimpleAudioStudio",
             "webAudioStudio",
             "webUpscaleEngines",
+            "webVideoUpscale",
         ] {
             assert!(
                 sources.contains_key(required),

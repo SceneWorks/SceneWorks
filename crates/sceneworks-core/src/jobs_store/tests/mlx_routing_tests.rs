@@ -628,12 +628,16 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
             *model != "wan_2_2_t2v_14b"
                 && *model != "bernini"
                 && *model != "scail2_14b"
-                && *model != "mochi_1",
+                && *model != "mochi_1"
+                && *model != "wan_2_2_vace_fun_14b",
             "image_to_video eligibility for {model}"
         );
         assert_eq!(
             video_mode_is_mlx_eligible(model, "text_to_video"),
-            *model != "wan_2_2_i2v_14b" && *model != "svd" && *model != "scail2_14b",
+            *model != "wan_2_2_i2v_14b"
+                && *model != "svd"
+                && *model != "scail2_14b"
+                && *model != "wan_2_2_vace_fun_14b",
             "text_to_video eligibility for {model}"
         );
     }
@@ -790,6 +794,25 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     assert!(video_mode_is_mlx_eligible("ltx_2_3", "replace_person"));
     assert!(video_mode_is_mlx_eligible("ltx_2_3_eros", "replace_person"));
     assert!(video_mode_is_mlx_eligible("wan_2_2", "replace_person"));
+    assert!(video_mode_is_mlx_eligible(
+        "wan_2_2_vace_fun_14b",
+        "replace_person"
+    ));
+    for mode in [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "video_to_video",
+        "animate_character",
+        "nonsense",
+    ] {
+        assert!(
+            !video_mode_is_mlx_eligible("wan_2_2_vace_fun_14b", mode),
+            "VACE-Fun is replace_person-only and should not serve {mode}"
+        );
+    }
     // Unknown modes are never eligible.
     assert!(!video_mode_is_mlx_eligible("ltx_2_3", "nonsense"));
 }
