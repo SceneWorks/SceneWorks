@@ -1,9 +1,9 @@
 use super::huggingface_snapshot_dir;
 use super::{
     admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
-    GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Quant,
-    Settings, Value, WorkerError, WorkerResult,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream, ApiClient,
+    GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
+    LoadSpec, Path, PathBuf, Quant, Settings, Value, WeightsSource, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -20,10 +20,8 @@ use serde_json::json;
 // `modelManifestEntry` carries `family:"flux2"`, `usable:true`, `quant:"fp8_inline_scale"`, and a
 // `components[]` list whose `transformer` entry is the DiT path.
 //
-// **Candle-only**, and a **bespoke provider** (like the Qwen-Image comfyui lane): the loaded generator
-// is not registry-resolvable (its DiT is a single in-place file, not a diffusers snapshot dir), so it is
-// loaded fresh per job through `start_gen_stream`. This file is a child module of the `image_jobs`
-// module, sharing its imports.
+// **Candle-only**, but the imported assembly now uses the registered `flux2_dev` provider and its
+// normal cache/fit/residency lifecycle (sc-18306).
 
 /// The adapter/engine id recorded on candle ComfyUI FLUX.2-dev assets + telemetry (distinct from the
 /// registry `candle` flux2 txt2img and the `flux2_dev` edit/control lanes).
@@ -63,9 +61,9 @@ struct ComfyuiFlux2Paths {
 /// `external_base_*` row. Returns `Ok(None)` when this is not a runnable ComfyUI FLUX.2-dev job (wrong
 /// family, not marked usable, no transformer component, or our FLUX.2-dev snapshot is not resident), so
 /// the router falls through rather than erroring. The DiT path is confined by
-/// `normalize_app_managed_model_path` (widened to admit the operator's external roots, sc-10668) — a
-/// payload can never point it outside a declared root (epic 4484). The snapshot dir is resolved from a
-/// fixed repo constant + our own cache (never payload-derived), so it needs no confinement.
+/// `normalize_app_managed_model_file_path`: its canonical target must stay within a declared root while
+/// the lexical entry survives for lstat-pinned re-opening (sc-18306). The snapshot dir is resolved from
+/// a fixed repo constant + our own cache (never payload-derived), so it needs no confinement.
 fn resolve_flux2_comfyui_paths(
     request: &ImageRequest,
     settings: &Settings,
@@ -110,7 +108,7 @@ fn resolve_flux2_comfyui_paths(
         return Ok(None);
     };
     Ok(Some(ComfyuiFlux2Paths {
-        transformer: crate::paths::normalize_app_managed_model_path(
+        transformer: crate::paths::normalize_app_managed_model_file_path(
             settings,
             transformer,
             "ComfyUI FLUX.2-dev transformer",
@@ -261,11 +259,9 @@ fn flux2_comfyui_raw_settings(
     raw
 }
 
-/// Real candle in-place ComfyUI FLUX.2-dev txt2img generation: resolve + confine the DiT path and
-/// resolve the snapshot tier on the async side, then `load_from_comfyui_dit` once + generate each image
-/// on the blocking thread. `request.count` images, each its own seed. FLUX.2-dev is guidance-distilled
-/// (embedded scalar, single forward — NO negative prompt / true-CFG pass). The loaded `Box<dyn
-/// Generator>` is bespoke (not registry-cached), driven like the Qwen-Image comfyui lane.
+/// Real candle in-place ComfyUI FLUX.2-dev txt2img generation through the registered `flux2_dev`
+/// provider. `request.count` images, each its own seed. FLUX.2-dev is guidance-distilled (embedded
+/// scalar, single forward — NO negative prompt / true-CFG pass).
 pub(super) async fn generate_candle_flux2_comfyui_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -282,6 +278,8 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                 .to_owned(),
         )
     })?;
+    // The companion snapshot supplies TE/VAE/tokenizer/config only. Its own transformer is replaced
+    // by the imported File and must not be recursively double-priced by admission.
     let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
     let snapshot_vae = paths.snapshot_dir.join("vae");
     admit_candle_base_floor(
@@ -295,13 +293,18 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         ],
     )
     .await?;
-
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
     let guidance = flux2_comfyui_guidance(request);
     let quant = flux2_comfyui_quant(request);
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
+    let spec = LoadSpec::new(WeightsSource::File(paths.transformer.clone()))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(paths.snapshot_dir.clone()),
+        )
+        .with_quant(quant);
 
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -309,25 +312,12 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        "flux2_comfyui",
+        "flux2_dev",
         0,
-        move || {
-            let ComfyuiFlux2Paths {
-                transformer,
-                snapshot_dir,
-            } = paths;
-            let model = runtime_cuda::providers::flux2::load_from_comfyui_dit(
-                transformer,
-                snapshot_dir,
-                Some(quant),
-            )
-            .map_err(|error| {
-                WorkerError::Engine(format!("ComfyUI FLUX.2-dev load failed: {error}"))
-            })?;
-            Ok(model)
-        },
+        spec,
+        "ComfyUI FLUX.2-dev load failed".to_owned(),
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,

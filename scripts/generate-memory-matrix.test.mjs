@@ -560,16 +560,12 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
-  // SC-18353 adds production-deferred physical MLX receipts for q4/bf16. Pinned as the SET, not a
-  // count: neither admitting an unbound sibling nor losing any current binding may read as green.
+  // Only retained q8 fixture records can be re-stamped synthetically: SC-18353's physical q4/bf16
+  // receipts are closure-bound to their validated source sessions and must remain historical rather
+  // than being forged current. Pinned as the SET, not a count, so no sibling can slip through.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
     ],
@@ -578,18 +574,12 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
-  // and also includes SC-18237's production-deferred pair. The new q4/bf16 cells carry one exact
-  // current record each. Exact counts keep both facts visible.
+  // and also includes SC-18237's production-deferred pair. Exact counts keep that fact visible.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 1,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
     },
@@ -671,11 +661,12 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async 
       .filter((cell) => cell.state !== "Missing")
       .every(
         (cell) =>
-          cell.state === "Runtime verified" &&
+          cell.state === "Implemented/unverified" &&
           cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
-          cell.evidence.currentEnvironmentVerification.length === 2,
+          cell.evidence.currentEnvironmentVerification.length === 0 &&
+          cell.evidence.historicalVerification.length === 2,
       ),
-    "each admitted cell must be backed by its exact 768 and 1024 current captures",
+    "the exact 768 and 1024 captures must remain historical after the provider closure moves",
   );
 });
 
@@ -2512,8 +2503,8 @@ async function currentManifestCalibrationFixture({
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
 /// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
 /// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
-/// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: SC-18353 now supplies
-/// their real production-deferred current captures.
+/// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: their physical source
+/// sessions bind the superseded closure and cannot truthfully be made current by a synthetic fixture.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
 const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({
@@ -2564,13 +2555,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(promotedQwen),
-    9,
-    "the retained q8 fixture plus the physical q4/bf16 captures must verify all nine bindings",
+    2,
+    "the retained q8 fixture must verify only its two exact rung-4 bindings",
   );
   assert.equal(
     verifiedQwen(shipped),
-    9,
-    "the shipped Qwen opt-in contains all nine production-deferred bindings",
+    0,
+    "the shipped Qwen captures must demote after their provider closure changes",
   );
 
   const evidenceOnlyZ = await buildMatrix({
@@ -2622,7 +2613,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(pinOnlyQwen),
-    9,
+    2,
     "a pin move that leaves Qwen's compile closure alone must NOT demote its retained measurements",
   );
 
@@ -2639,7 +2630,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(otherProviderMoved),
-    9,
+    2,
     "another model's code path moving must never demote retained Qwen evidence",
   );
 
@@ -2908,12 +2899,11 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, admits the nine current Qwen coordinates
-  // (SC-18237 q8 plus SC-18353 q4/bf16) and the SC-18218 FLUX.2 q4/q8 Resident coordinates at this
-  // pin. Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, currently admits no coordinates: the exact
+  // inference closure changed, so the Qwen SC-18237/SC-18353 and FLUX.2 SC-18218 captures are all
+  // historical at this pin. Two facts keep this assertion useful:
   //
-  //   1. It is exact: each listed Qwen and FLUX.2 cell was captured at its current provider closure;
-  //      no historical or sibling-rung row may join.
+  //   1. It is exact: no historical Qwen/FLUX.2 or sibling-rung row may join.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm being empty therefore cannot elide anything.
@@ -2925,20 +2915,8 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
       .map((cell) => cell.id)
       .sort(),
-    [
-      "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
-      "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:resident",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:staged_residency",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
-    ],
-    "only the SC-18237/SC-18353 Qwen cells and SC-18218 FLUX.2 Resident cells are current",
+    [],
+    "the superseded SC-18237/SC-18353 Qwen and SC-18218 FLUX.2 captures are historical",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),

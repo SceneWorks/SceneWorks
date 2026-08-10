@@ -13920,8 +13920,9 @@ fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf
 }
 
 /// `resolve_imported_krea_dit` returns the imported DiT only for a non-builtin `krea_2`-family model
-/// whose `modelPath` is a single `.safetensors` file — and returns `None` (leaving the existing
-/// snapshot-dir path untouched) for a builtin Krea id, a wrong family, or a directory `modelPath`.
+/// whose resolved weights location selects one `.safetensors` file — and returns `None` (leaving the
+/// existing snapshot-dir path untouched) for a builtin Krea id, a wrong family, or a snapshot/multi-file
+/// directory.
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_imported_krea_dit_claims_only_non_builtin_single_file_krea2() {
@@ -13939,7 +13940,7 @@ fn resolve_imported_krea_dit_claims_only_non_builtin_single_file_krea2() {
         .expect("imported single-file krea2 resolves its DiT");
     assert_eq!(
         resolved,
-        std::fs::canonicalize(&file).unwrap_or(file.clone())
+        crate::paths::normalize_absolute_path(&file).unwrap()
     );
 
     // A builtin Krea id (in MODEL_TABLE, mlx_model Some) with the SAME single-file modelPath → None:
@@ -13983,8 +13984,36 @@ fn resolve_imported_krea_dit_claims_only_non_builtin_single_file_krea2() {
         resolve_imported_krea_dit(&via_install_dir, &settings)
             .expect("resolve ok")
             .expect("install-dir single-file import resolves its DiT"),
-        std::fs::canonicalize(&file).unwrap_or(file.clone()),
+        crate::paths::normalize_absolute_path(&file).unwrap(),
         "the lone .safetensors inside the recorded install dir is the imported DiT"
+    );
+
+    // A confined install directory cannot smuggle in an escaping child symlink. The directory itself
+    // passes confinement, so the selected checkpoint entry must be checked independently.
+    let outside = tempfile::tempdir().unwrap();
+    let outside_checkpoint = outside.path().join("outside.safetensors");
+    std::fs::write(&outside_checkpoint, b"outside").unwrap();
+    let escape_dir = dir
+        .path()
+        .join("models")
+        .join("imported-krea")
+        .join("escape");
+    std::fs::create_dir_all(&escape_dir).unwrap();
+    std::os::unix::fs::symlink(&outside_checkpoint, escape_dir.join("escape.safetensors")).unwrap();
+    let escaping_install = request(json!({
+        "projectId": "p", "model": "kreamania_variant5",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "paths": { "model": escape_dir.to_str().unwrap() }
+        }
+    }));
+    let escape_error = resolve_imported_krea_dit(&escaping_install, &settings)
+        .expect_err("the selected checkpoint symlink must remain inside an app-managed root");
+    assert!(
+        escape_error
+            .to_string()
+            .contains("Imported Krea 2 checkpoint must be inside an app-managed directory"),
+        "unexpected confinement error: {escape_error}"
     );
 
     // A diffusers snapshot directory (a builtin turnkey tier: model_index.json marker) → None, even
@@ -14543,28 +14572,36 @@ fn krea_imported_conditioning_threads_the_img2img_reference() {
 ///      the S0c `krea_imported_available` gate) — the deterministic ROUTE EVIDENCE that the job takes
 ///      the bespoke in-place lane rather than the generic snapshot arm.
 ///   2. `resolve_imported_krea_dit` → the in-place single-file DiT (no 26 GB copy; the checkpoint is
-///      symlinked into the app-managed data dir so the `normalize_app_managed_model_path` confinement
-///      admits it, exactly the install-dir shape the import job records).
+///      symlinked into the app-managed data dir from an explicitly admitted operator model root, so
+///      `normalize_app_managed_model_file_path` retains the reopenable entry without weakening the
+///      canonical-target confinement check).
 ///   3. `resolve_krea_imported_base_tier` → the resident `SceneWorks/krea-2-turbo-mlx` dense `bf16/`
 ///      tier that supplies the shared Qwen3-VL text encoder, Qwen VAE, tokenizer, and arch config.
-///   4. `runtime_macos::providers::krea::load_from_native_dit_file(dit, base, &[], descriptor())` → the
-///      S0b MLX native single-file entrypoint (empty adapter slice for plain t2i), then a real Metal
-///      txt2img.
+///   4. `inference_runtime::load("krea_2_turbo", File + base component)` → the registry-native
+///      single-file provider (empty adapter list for plain t2i), then a real Metal txt2img.
 ///
-/// The NEGATIVE CONTROL (the sc-10539 with/without-adapter methodology) proves the imported DiT is
+/// The acceptance has two parity controls. First, the registry load must be byte-identical to the
+/// legacy `load_from_native_dit_file` shim at the same seed/settings. Second, a registry File load with
+/// `Sequential + DeferredMaterialization + transformer_window_size=1` must also be byte-identical while
+/// observing a lower MLX request peak. The successful windowed request is discriminating: Krea rejects
+/// `stream_transformer_blocks` unless the File source is reopenable and the load shape arms its native
+/// block window. Phase peaks plus the lower full-request peak prove that the requested path executed,
+/// rather than merely accepting a flag and retaining the whole 24 GiB transformer.
+///
+/// A final NEGATIVE CONTROL (the sc-10539 with/without-adapter methodology) proves the imported DiT is
 /// actually in the graph and not a silent fallback to the base: it renders the SAME prompt + SAME seed
 /// on the stock builtin `krea_2_turbo` loaded from the SAME dense `bf16/` dir, so the ONLY difference
 /// between the two renders is the transformer weights (variant5's imported DiT vs the base tier's own
 /// DiT). Everything else — TE, VAE, tokenizer, arch config, scheduler, quant (dense bf16), seed, steps,
 /// resolution — is byte-for-byte identical, so a non-trivial per-pixel delta isolates the imported
-/// weights as the cause (Metal matmul is ~1e-3 reduced precision, so identical weights would collapse
-/// the delta toward zero).
+/// weights as the cause.
 ///
-/// The two heavy loads run SEQUENTIALLY with an `mlx_rs::memory::clear_cache()` between them (the first
-/// generator is dropped first) to stay under the MLX wired ceiling and avoid the default OOM hard-exit.
+/// The four heavy loads run SEQUENTIALLY with an `mlx_rs::memory::clear_cache()` between them to stay
+/// under the MLX wired ceiling and avoid the default OOM hard-exit.
 /// ```text
 /// # optional: KREA_IMPORTED_DIT=$HOME/models/kreamania_variant5.safetensors
-/// # optional: KREA_STEPS=8 KREA_W=1024 KREA_H=1024 KREA_SEED=42 KREA_PROMPT="..." KREA_OUT_DIR=/tmp/krea_imported_smoke
+/// # acceptance defaults: KREA_STEPS=2 KREA_W=512 KREA_H=512 KREA_SEED=42
+/// # optional: KREA_PROMPT="..." KREA_OUT_DIR=/tmp/krea_imported_smoke
 /// cargo test -p sceneworks-worker --release krea_imported_mlx_gpu_smoke -- --ignored --nocapture
 /// ```
 #[cfg(target_os = "macos")]
@@ -14605,10 +14642,16 @@ fn krea_imported_mlx_gpu_smoke() {
     let _hf = isolate_hf_hub_cache_to(&real_hub);
     let mut settings = Settings::from_env();
     settings.data_dir = data_dir.path().to_path_buf();
+    settings.external_model_roots.push(
+        dit_src
+            .parent()
+            .expect("imported DiT has a parent directory")
+            .to_path_buf(),
+    );
 
-    let steps: u32 = env_or("KREA_STEPS", "8").parse().expect("KREA_STEPS");
-    let w: u32 = env_or("KREA_W", "1024").parse().expect("KREA_W");
-    let h: u32 = env_or("KREA_H", "1024").parse().expect("KREA_H");
+    let steps: u32 = env_or("KREA_STEPS", "2").parse().expect("KREA_STEPS");
+    let w: u32 = env_or("KREA_W", "512").parse().expect("KREA_W");
+    let h: u32 = env_or("KREA_H", "512").parse().expect("KREA_H");
     let seed: u64 = env_or("KREA_SEED", "42").parse().expect("KREA_SEED");
     let prompt = env_or(
         "KREA_PROMPT",
@@ -14647,7 +14690,7 @@ fn krea_imported_mlx_gpu_smoke() {
     let base =
         resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base tier");
     eprintln!(
-        "[route] load_from_native_dit_file(dit={}, base={})",
+        "[route] inference_runtime::load(krea_2_turbo, File dit={}, base={})",
         dit.display(),
         base.display()
     );
@@ -14664,96 +14707,276 @@ fn krea_imported_mlx_gpu_smoke() {
         ..Default::default()
     };
 
-    // ---- 4. RENDER A: the imported variant5 DiT via the S0b native single-file entrypoint ----
-    // Plain t2i → no adapters (the t2i/img2img path passes `&[]`; the LoRA/edit path threads a real
-    // stack, sc-14111 / sc-14119).
-    let descriptor = runtime_macos::providers::krea::descriptor();
-    let t0 = std::time::Instant::now();
-    let variant5 =
-        runtime_macos::providers::krea::load_from_native_dit_file(&dit, &base, &[], descriptor)
-            .expect("load imported Krea 2 DiT (variant5) paired with the bf16 base");
-    let mut last_a = String::new();
-    let out_a = variant5
-        .generate(&make_req(), &mut |p| {
-            let s = format!("{p:?}");
-            if s != last_a {
-                eprintln!("[variant5] {s}");
-                last_a = s;
-            }
-        })
-        .expect("variant5 generate");
-    let image_a = match out_a {
-        GenerationOutput::Images(mut images) => images.pop().expect("variant5 image"),
-        other => panic!("expected Images, got {other:?}"),
-    };
-    let secs_a = t0.elapsed().as_secs_f64();
-    let std_a = image_std(&image_a);
-    let png_a = out_dir.join("variant5.png");
-    save_png(&image_a, &png_a);
+    #[derive(Debug)]
+    struct RealRun {
+        image: Image,
+        pixel_sha256: String,
+        request_peak: usize,
+        first_step_peak: usize,
+        remaining_denoise_peak: usize,
+        decode_peak: usize,
+    }
+
+    fn render_real_krea(
+        label: &str,
+        out_dir: &Path,
+        expected_size: (u32, u32),
+        request: GenerationRequest,
+        load: impl FnOnce() -> gen_core::Result<Box<dyn Generator>>,
+    ) -> RealRun {
+        use sha2::{Digest, Sha256};
+
+        mlx_rs::memory::clear_cache();
+        mlx_rs::memory::reset_peak_memory();
+        let started = std::time::Instant::now();
+        let generator = load().unwrap_or_else(|error| panic!("[{label}] load: {error}"));
+        let load_seconds = started.elapsed().as_secs_f64();
+        let active_after_load = mlx_rs::memory::get_active_memory();
+        let mut first_step_peak = None;
+        let mut remaining_denoise_peak = None;
+        let mut last = String::new();
+        let output = generator
+            .generate(&request, &mut |progress| {
+                let rendered = format!("{progress:?}");
+                if rendered != last {
+                    eprintln!("[{label}] {rendered}");
+                    last = rendered;
+                }
+                match progress {
+                    Progress::Step { current: 1, .. } if first_step_peak.is_none() => {
+                        first_step_peak = Some(mlx_rs::memory::get_peak_memory());
+                        mlx_rs::memory::reset_peak_memory();
+                    }
+                    Progress::Decoding if remaining_denoise_peak.is_none() => {
+                        remaining_denoise_peak = Some(mlx_rs::memory::get_peak_memory());
+                        mlx_rs::memory::reset_peak_memory();
+                    }
+                    _ => {}
+                }
+            })
+            .unwrap_or_else(|error| panic!("[{label}] generate: {error}"));
+        let decode_peak = mlx_rs::memory::get_peak_memory();
+        let active_after_generate = mlx_rs::memory::get_active_memory();
+        let cache_after_generate = mlx_rs::memory::get_cache_memory();
+        let first_step_peak = first_step_peak.expect("generation emitted its first step");
+        let remaining_denoise_peak = remaining_denoise_peak.expect("generation entered decode");
+        let request_peak = first_step_peak.max(remaining_denoise_peak).max(decode_peak);
+        let image = match output {
+            GenerationOutput::Images(mut images) => images.pop().expect("one image"),
+            other => panic!("expected Images, got {other:?}"),
+        };
+        assert_eq!(
+            (image.width, image.height),
+            expected_size,
+            "[{label}] returned the wrong dimensions"
+        );
+        let std = image_std(&image);
+        assert!(
+            std > DEGENERATE_STD_FLOOR_DEFAULT,
+            "[{label}] render looks degenerate (std {std:.2})"
+        );
+        let pixel_sha256 = format!("{:x}", Sha256::digest(&image.pixels));
+        let png = out_dir.join(format!("{label}.png"));
+        save_png(&image, &png);
+        eprintln!(
+            "RESULT label={label} status=pass model=krea_2_turbo geometry={}x{} steps={} seed={} \
+             pixel_sha256={pixel_sha256} std={std:.3} load_seconds={load_seconds:.2} \
+             total_seconds={:.2} active_after_load={} first_step_peak={} \
+             remaining_denoise_peak={} decode_peak={} request_peak={} \
+             active_after_generate={} cache_after_generate={} output={}",
+            request.width,
+            request.height,
+            request.steps.unwrap_or_default(),
+            request.seed.unwrap_or_default(),
+            started.elapsed().as_secs_f64(),
+            active_after_load,
+            first_step_peak,
+            remaining_denoise_peak,
+            decode_peak,
+            request_peak,
+            active_after_generate,
+            cache_after_generate,
+            png.display(),
+        );
+        drop(generator);
+        mlx_rs::memory::clear_cache();
+        RealRun {
+            image,
+            pixel_sha256,
+            request_peak,
+            first_step_peak,
+            remaining_denoise_peak,
+            decode_peak,
+        }
+    }
+
+    let metadata = std::fs::metadata(&dit).expect("imported DiT metadata");
     eprintln!(
-        "[variant5] {}x{} std {:.2} in {:.1}s @ {} steps -> {}",
-        image_a.width,
-        image_a.height,
-        std_a,
-        secs_a,
+        "IDENTITY provider=krea_2_turbo imported_dit={} imported_dit_bytes={} base_snapshot={} \
+         geometry={}x{} steps={} seed={}",
+        dit.display(),
+        metadata.len(),
+        base.display(),
+        w,
+        h,
         steps,
-        png_a.display()
+        seed,
+    );
+    runtime_macos::providers::krea::reset_block_stream_diagnostics();
+
+    // ---- 4A. LEGACY SHIM: the pre-registry entrypoint retained as a compatibility control. ----
+    let legacy = render_real_krea("imported_legacy_shim", &out_dir, (w, h), make_req(), || {
+        Ok(runtime_macos::providers::krea::load_from_native_dit_file(
+            &dit,
+            &base,
+            &[],
+            runtime_macos::providers::krea::descriptor(),
+        )?)
+    });
+
+    // ---- 4B. REGISTRY RESIDENT: File primary + named base component. ----
+    let resident_spec = LoadSpec::new(WeightsSource::File(dit.clone())).with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(base.clone()),
+    );
+    let resident = render_real_krea(
+        "imported_registry_resident",
+        &out_dir,
+        (w, h),
+        make_req(),
+        || crate::inference_runtime::load("krea_2_turbo", &resident_spec),
+    );
+    let shim_delta = mean_abs_frame_delta(&legacy.image, &resident.image);
+    eprintln!(
+        "PARITY lhs=legacy_shim rhs=registry_resident byte_delta={} \
+         mean_abs_pixel_delta={shim_delta:.6} legacy_sha256={} registry_sha256={}",
+        legacy
+            .image
+            .pixels
+            .iter()
+            .zip(&resident.image.pixels)
+            .filter(|(left, right)| left != right)
+            .count(),
+        legacy.pixel_sha256,
+        resident.pixel_sha256,
     );
     assert_eq!(
-        (image_a.width, image_a.height),
+        &legacy.image.pixels, &resident.image.pixels,
+        "registry File load must be byte-identical to the legacy shim; delta={shim_delta:.6}, \
+         legacy_sha={}, registry_sha={}",
+        legacy.pixel_sha256, resident.pixel_sha256,
+    );
+    assert_eq!(shim_delta, 0.0, "registry-vs-shim pixel delta must be zero");
+    assert_eq!(
+        legacy.pixel_sha256, resident.pixel_sha256,
+        "registry-vs-shim pixel hashes must match"
+    );
+    assert_eq!(
+        runtime_macos::providers::krea::block_stream_diagnostics(),
+        runtime_macos::providers::krea::BlockStreamDiagnostics::default(),
+        "resident legacy/registry controls must not materialize block windows"
+    );
+
+    // ---- 4C. REGISTRY STREAMED: reopen the pinned File one transformer block at a time. ----
+    let streamed_spec = LoadSpec::new(WeightsSource::File(dit.clone()))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(base.clone()),
+        )
+        .with_offload_policy(gen_core::OffloadPolicy::Sequential)
+        .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+    let mut streamed_request = make_req();
+    streamed_request.memory = Some(gen_core::GenerationMemory {
+        stage_residency: true,
+        stream_transformer_blocks: true,
+        transformer_window_size: Some(1),
+        transformer_window_component: Some(gen_core::TransformerComponent::Dit),
+        ..Default::default()
+    });
+    runtime_macos::providers::krea::reset_block_stream_diagnostics();
+    let streamed = render_real_krea(
+        "imported_registry_streamed_window1",
+        &out_dir,
         (w, h),
-        "variant5 returned the wrong dimensions"
+        streamed_request,
+        || crate::inference_runtime::load("krea_2_turbo", &streamed_spec),
     );
-    assert!(
-        std_a > DEGENERATE_STD_FLOOR_DEFAULT,
-        "variant5 render looks degenerate (std {std_a:.2}) — NaN / all-black / flat decode"
-    );
-
-    // Evict variant5 before loading the control — bound peak memory under the MLX wired ceiling.
-    drop(variant5);
-    mlx_rs::memory::clear_cache();
-
-    // ---- NEGATIVE CONTROL: stock builtin krea_2_turbo from the SAME bf16 dir (only the DiT differs) --
-    let t1 = std::time::Instant::now();
-    let spec = LoadSpec::new(WeightsSource::Dir(base.clone()));
-    let stock = crate::inference_runtime::load("krea_2_turbo", &spec)
-        .expect("load stock krea_2_turbo from the bf16 base tier");
-    let mut last_b = String::new();
-    let out_b = stock
-        .generate(&make_req(), &mut |p| {
-            let s = format!("{p:?}");
-            if s != last_b {
-                eprintln!("[stock] {s}");
-                last_b = s;
-            }
-        })
-        .expect("stock krea_2_turbo generate");
-    let image_b = match out_b {
-        GenerationOutput::Images(mut images) => images.pop().expect("stock image"),
-        other => panic!("expected Images, got {other:?}"),
-    };
-    let secs_b = t1.elapsed().as_secs_f64();
-    let std_b = image_std(&image_b);
-    let png_b = out_dir.join("stock_krea_2_turbo_bf16.png");
-    save_png(&image_b, &png_b);
+    let stream_delta = mean_abs_frame_delta(&resident.image, &streamed.image);
+    let stream_diagnostics = runtime_macos::providers::krea::block_stream_diagnostics();
+    let expected_windows =
+        runtime_macos::providers::krea::Krea2Config::turbo().num_layers as u64 * u64::from(steps);
+    let stream_byte_delta = resident
+        .image
+        .pixels
+        .iter()
+        .zip(&streamed.image.pixels)
+        .filter(|(left, right)| left != right)
+        .count();
+    let peak_delta_bytes = resident.request_peak as i128 - streamed.request_peak as i128;
     eprintln!(
-        "[stock] {}x{} std {:.2} in {:.1}s -> {}",
-        image_b.width,
-        image_b.height,
-        std_b,
-        secs_b,
-        png_b.display()
+        "STREAMING status=observed source=file offload=sequential \
+         load_shape=deferred_materialization transformer_component=dit transformer_window_size=1 \
+         native_window_reopens={} block_materializations={} expected_windows={} byte_delta={} \
+         mean_abs_pixel_delta={stream_delta:.6} resident_sha256={} streamed_sha256={} \
+         resident_peak={} streamed_peak={} peak_delta_bytes={} \
+         resident_phases={}/{}/{} streamed_phases={}/{}/{}",
+        stream_diagnostics.native_window_reopens,
+        stream_diagnostics.block_materializations,
+        expected_windows,
+        stream_byte_delta,
+        resident.pixel_sha256,
+        streamed.pixel_sha256,
+        resident.request_peak,
+        streamed.request_peak,
+        peak_delta_bytes,
+        resident.first_step_peak,
+        resident.remaining_denoise_peak,
+        resident.decode_peak,
+        streamed.first_step_peak,
+        streamed.remaining_denoise_peak,
+        streamed.decode_peak,
+    );
+    assert_eq!(
+        stream_diagnostics.native_window_reopens, expected_windows,
+        "window=1 must reopen the pinned native File exactly once per block per denoise step"
+    );
+    assert_eq!(
+        stream_diagnostics.block_materializations, expected_windows,
+        "window=1 must materialize every Krea transformer block on every denoise step"
+    );
+    assert_eq!(
+        &resident.image.pixels, &streamed.image.pixels,
+        "streamed File load must be byte-identical to resident File load; delta={stream_delta:.6}, \
+         resident_sha={}, streamed_sha={}",
+        resident.pixel_sha256, streamed.pixel_sha256,
+    );
+    assert_eq!(
+        stream_delta, 0.0,
+        "resident-vs-streamed pixel delta must be zero"
+    );
+    assert_eq!(
+        resident.pixel_sha256, streamed.pixel_sha256,
+        "resident-vs-streamed pixel hashes must match"
     );
     assert!(
-        std_b > DEGENERATE_STD_FLOOR_DEFAULT,
-        "stock krea_2_turbo control render looks degenerate (std {std_b:.2})"
+        streamed.request_peak < resident.request_peak,
+        "window=1 must lower the observed request peak: streamed={} resident={}",
+        streamed.request_peak,
+        resident.request_peak,
     );
 
-    drop(stock);
-    mlx_rs::memory::clear_cache();
+    // ---- NEGATIVE CONTROL: stock base from the SAME bf16 dir (only the DiT differs). ----
+    let stock_spec = LoadSpec::new(WeightsSource::Dir(base.clone()));
+    let stock = render_real_krea(
+        "stock_krea_2_turbo_bf16",
+        &out_dir,
+        (w, h),
+        make_req(),
+        || crate::inference_runtime::load("krea_2_turbo", &stock_spec),
+    );
 
     // ---- DIFFER: the imported DiT is in the graph, not a silent fallback to the base transformer ----
-    let delta = mean_abs_frame_delta(&image_a, &image_b);
+    let delta = mean_abs_frame_delta(&resident.image, &stock.image);
     eprintln!(
         "[differ] mean_abs_pixel_delta(variant5, stock_bf16) = {delta:.3}  \
          (same prompt+seed+base TE/VAE/config; only the DiT differs)"
@@ -14764,10 +14987,9 @@ fn krea_imported_mlx_gpu_smoke() {
          ({delta:.3}) means the imported DiT was NOT loaded (silent fallback to the base transformer)"
     );
     eprintln!(
-        "[DONE] KreaImported lane validated: coherent variant5 render + negative control differs.  \
-         shasum -a 256 {} {}",
-        png_a.display(),
-        png_b.display()
+        "[DONE] KreaImported registry parity + File streaming + negative control validated; \
+         imported_sha256={} stock_sha256={}",
+        resident.pixel_sha256, stock.pixel_sha256,
     );
 }
 
@@ -14834,6 +15056,12 @@ fn krea_imported_control_mlx_gpu_smoke() {
     let _hf = isolate_hf_hub_cache_to(&real_hub);
     let mut settings = Settings::from_env();
     settings.data_dir = data_dir.path().to_path_buf();
+    settings.external_model_roots.push(
+        dit_src
+            .parent()
+            .expect("imported DiT has a parent directory")
+            .to_path_buf(),
+    );
 
     let steps: u32 = env_or("KREA_STEPS", "8").parse().expect("KREA_STEPS");
     let w: u32 = env_or("KREA_W", "1024").parse().expect("KREA_W");
@@ -14974,7 +15202,11 @@ fn krea_imported_control_mlx_gpu_smoke() {
     //
     // Built exactly as `generate_krea_imported_control_stream` builds them, so a drift in the lane's
     // spec or inputs surfaces here rather than in a user's refused pose set.
-    let mut estimation_spec = LoadSpec::new(WeightsSource::Dir(base.clone()))
+    let mut estimation_spec = LoadSpec::new(WeightsSource::File(dit.clone()))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(base.clone()),
+        )
         .with_control(WeightsSource::File(overlay.clone()));
     estimation_spec = estimation_spec.with_adapters(Vec::new());
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
@@ -15811,7 +16043,9 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
 
     // Every bespoke single-base route named by sc-16093, plus the already-correct Qwen Edit reference.
     // The marker is route-local live code: deleting/commenting any call turns this guard red. External
-    // checkpoints deliberately use the floor marker because no stable manifest tier exists for them.
+    // checkpoints deliberately use the consumed-path floor because no stable manifest tier exists for
+    // them. Their companion snapshot's transformer is replaced by the primary File and must not be
+    // double-priced; routing through the cache does not replace Candle's live-VRAM admission.
     const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
         (
             "SdxlEdit",
@@ -15850,16 +16084,16 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "admit_candle_base(",
         ),
         (
-            "KreaImported",
-            "krea_imported.rs",
-            include_str!("krea_imported.rs"),
-            "admit_candle_base_floor(",
-        ),
-        (
             "SdxlImported",
             "sdxl_imported.rs",
             include_str!("sdxl_imported.rs"),
             "admit_candle_load_spec_floor(",
+        ),
+        (
+            "KreaImported",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+            "admit_candle_base_floor(",
         ),
         (
             "ZimageComfyui",
@@ -15911,6 +16145,47 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             gate < handoff,
             "{route} ({file}) gates after allocation begins; base admission must be pre-load (sc-16093)"
         );
+    }
+
+    // Imported single-file lanes use the same provider registry and generator cache as snapshot-backed
+    // lanes. Their primary source must remain `File`, their companion snapshot must be explicit, and the
+    // live handoff must go through the cached loader. The gate above separately proves the Candle
+    // live-VRAM floor remains ahead of that handoff.
+    const REGISTRY_IMPORTED: &[(&str, &str, &str)] = &[
+        (
+            "KreaImported",
+            "krea_imported.rs",
+            include_str!("krea_imported.rs"),
+        ),
+        (
+            "ZimageComfyui",
+            "zimage_comfyui_candle.rs",
+            include_str!("zimage_comfyui_candle.rs"),
+        ),
+        (
+            "QwenImageComfyui",
+            "qwen_comfyui_candle.rs",
+            include_str!("qwen_comfyui_candle.rs"),
+        ),
+        (
+            "Flux2Comfyui",
+            "flux2_comfyui_candle.rs",
+            include_str!("flux2_comfyui_candle.rs"),
+        ),
+    ];
+    for (route, file, source) in REGISTRY_IMPORTED {
+        for marker in [
+            "LoadSpec::new(WeightsSource::File(",
+            "with_component(",
+            "start_cached_gen_stream",
+        ] {
+            assert!(
+                source
+                    .lines()
+                    .any(|line| line.contains(marker) && !line.trim_start().starts_with("//")),
+                "{route} ({file}) must keep live registry-backed imported-source marker `{marker}`"
+            );
+        }
     }
 
     // Every route the resolver can actually produce, read out of its source. `Some(CandleImageRoute::`

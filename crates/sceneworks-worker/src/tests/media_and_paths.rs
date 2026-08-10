@@ -394,6 +394,66 @@ fn model_paths_admit_operator_configured_external_roots() {
         .expect_err("a sibling of the external root is still rejected");
 }
 
+/// sc-18306: imported providers re-open the selected single-file DiT for streamed transformer
+/// windows. Confinement must therefore validate the canonical target but retain the lexical symlink
+/// entry, whose extension and lstat identity are part of the load contract.
+#[cfg(unix)]
+#[test]
+fn model_file_paths_keep_the_confined_symlink_entry() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    let blobs = data_dir.join("models").join("blobs");
+    let snapshot = data_dir
+        .join("models")
+        .join("snapshots")
+        .join("deadbeef");
+    std::fs::create_dir_all(&blobs).expect("blobs dir creates");
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    let blob = blobs.join("extensionless-content-addressed-object");
+    std::fs::write(&blob, b"weights").expect("blob writes");
+    let link = snapshot.join("imported-dit.safetensors");
+    std::os::unix::fs::symlink(&blob, &link).expect("snapshot symlink creates");
+
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.data_dir = data_dir;
+    let resolved = super::normalize_app_managed_model_file_path(
+        &settings,
+        &link.display().to_string(),
+        "Imported DiT",
+    )
+    .expect("confined model file accepted");
+
+    assert_eq!(resolved, link);
+    assert_eq!(
+        resolved.extension().and_then(|extension| extension.to_str()),
+        Some("safetensors")
+    );
+    assert_eq!(
+        resolved.canonicalize().expect("resolved canonicalizes"),
+        blob.canonicalize().expect("blob canonicalizes")
+    );
+
+    let outside = temp.path().join("outside.safetensors");
+    std::fs::write(&outside, b"outside weights").expect("outside fixture writes");
+    let escape = snapshot.join("escape.safetensors");
+    std::os::unix::fs::symlink(&outside, &escape).expect("escaping symlink creates");
+    super::normalize_app_managed_model_file_path(
+        &settings,
+        &escape.display().to_string(),
+        "Imported DiT",
+    )
+    .expect_err("a lexical model-file entry cannot admit a canonical target outside every root");
+
+    let outside_entry = temp.path().join("outside-entry.safetensors");
+    std::os::unix::fs::symlink(&blob, &outside_entry).expect("inward symlink creates");
+    super::normalize_app_managed_model_file_path(
+        &settings,
+        &outside_entry.display().to_string(),
+        "Imported DiT",
+    )
+    .expect_err("a model-file entry outside every root cannot be admitted by an inward target");
+}
+
 /// Configuring an external root must widen the allow-list to *that root only* — a
 /// sibling directory stays rejected. Without this, "point at my ComfyUI folder"
 /// would quietly become "read anything on the host", which is the arbitrary-file-read
