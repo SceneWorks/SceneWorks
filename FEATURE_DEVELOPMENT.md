@@ -291,9 +291,9 @@ dated baseline, not a substitute for current inspection.
 
 #### 1. Add feature-branch rulesets
 
-Create a `Feature integration` branch ruleset in each repository targeting
-`feature/*`. GitHub rulesets use `fnmatch`; this pattern intentionally matches
-the one-slash branch format defined above.
+Create two layered `Feature integration` branch rulesets in each repository,
+both targeting `feature/*`. GitHub rulesets use `fnmatch`; this pattern
+intentionally matches the one-slash branch format defined above.
 
 SceneWorks must require at least the same integration contexts currently
 required on `main`:
@@ -308,7 +308,8 @@ required on `main`:
 
 Inference must require `CI gate`.
 
-Both rulesets must:
+The core merge-policy ruleset in each repository must have no bypass actors and
+must:
 
 - require pull requests;
 - block force pushes and non-fast-forward updates;
@@ -316,10 +317,21 @@ Both rulesets must:
 - require current-head status checks;
 - use merge commits so story and synchronization provenance is retained;
 - use a merge queue after every required workflow supports `merge_group`;
-- use merge groups of one entry unless deliberate batch validation is accepted;
-  and
-- restrict deletion while giving only a maintainer team or cleanup automation a
-  narrow bypass for branch removal after verified epic completion.
+- use merge groups of one entry unless deliberate batch validation is accepted.
+
+The second ruleset must contain only the deletion rule and normally have no
+bypass actors. After a disposable ruleset proof succeeds, or after the
+post-merge checklist succeeds, an administrator may temporarily add one closed
+maintainer team or cleanup automation as its exact cleanup actor. If neither
+exists, one explicitly named repository administrator may be the temporary
+actor; record its immutable actor ID, the approved proof-or-completed branch
+names, and the start/end of the cleanup window. Delete only those branches and
+immediately restore the no-bypass deletion guard. Never leave deletion
+authority active during an epic. Bypass is ruleset-wide: never put the
+deletion rule and its cleanup bypass in the core merge-policy ruleset, because
+that would also let the cleanup actor bypass pull-request, status-check, and
+non-fast-forward protections. Matching rulesets aggregate, so the no-bypass
+core policy remains enforced during that bounded cleanup window.
 
 Start the rulesets in Evaluate mode if available, prove them with disposable
 branches, and activate them only after the check matrix is complete. GitHub's
@@ -330,8 +342,9 @@ ruleset pattern and bypass behavior is documented in
 
 At minimum:
 
-1. Extend `macos-mlx.yml` ordinary PR targeting from `main` to `main` plus
-   `feature/*`.
+1. Keep `macos-mlx.yml` ordinary PR targeting on both `main` and `feature/*`.
+   Repository contract tests must reject a required workflow whose base filter
+   would prevent its status from reporting on a feature-target PR.
 2. Audit every required workflow and job condition for assumptions about
    `main`, `pull_request.base.sha`, or `github.event.before`. A merge-group run
    must use `github.event.merge_group.base_sha` where a base is required.
@@ -351,15 +364,21 @@ separate property.
 
 #### 3. Decide the privileged runtime policy
 
-`windows-candle.yml` supplies real CUDA-linked runtime coverage but is not part
-of the current required-status set and is limited to PRs targeting `main`.
-Choose and document one policy before feature work begins:
+`windows-candle.yml` and `macos-mlx.yml`'s `nax-worker` supply authoritative
+CUDA-linked and Apple matrix-unit runtime coverage, but they run on scarce,
+self-hosted hardware and are not feature-branch required checks. Use this
+policy:
 
-- **Recommended:** extend its PR support to `feature/*`, add a merge-group-safe
-  change-selection pattern, and require the relevant successful job for changes
-  selected by its paths; or
-- require an operator-dispatched run at the final feature head and record its
-  URL in the epic before the final PR to `main`.
+- feature-target story and synchronization PRs run the required hosted checks,
+  including `macOS build, lint and workspace tests (hosted)`;
+- `nax-worker` does not auto-run for PRs targeting `feature/*` or for merge
+  groups; it continues to run for the final same-repo integration PR targeting
+  `main`;
+- `windows-candle.yml` remains limited to ordinary PRs targeting `main` and
+  stays out of the merge queue; and
+- at the frozen final feature head, explicitly dispatch both privileged
+  workflows and record their exact head SHA and successful run URLs in the epic
+  before opening the final PR to `main`.
 
 Apply the same rule to privileged inference real-weight lanes: ordinary CI may
 select their impact without having authority or hardware to execute them. An

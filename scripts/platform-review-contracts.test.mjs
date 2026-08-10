@@ -1098,6 +1098,353 @@ const REQUIRED_LANES = [
   { path: ".github/workflows/desktop-macos-check.yml", anchor: "desktop_macos_check_paths" },
 ];
 
+const REQUIRED_WORKFLOWS = [
+  ".github/workflows/check.yml",
+  ...REQUIRED_LANES.map(({ path }) => path),
+];
+
+function stripYamlComment(line) {
+  let quote;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (quote === '"' && char === "\\") {
+      i += 1;
+    } else if (quote === "'" && char === "'" && line[i + 1] === "'") {
+      i += 1;
+    } else if (quote && char === quote) {
+      quote = undefined;
+    } else if (!quote && (char === '"' || char === "'")) {
+      quote = char;
+    } else if (!quote && char === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+      return line.slice(0, i).trimEnd();
+    }
+  }
+  return line;
+}
+
+function yamlScalar(value, context) {
+  const scalar = value.trim();
+  assert.ok(scalar.length > 0, `${context}: empty branch pattern`);
+  if (scalar.startsWith('"')) {
+    assert.ok(scalar.endsWith('"'), `${context}: unterminated double-quoted branch pattern`);
+    return JSON.parse(scalar);
+  }
+  if (scalar.startsWith("'")) {
+    assert.ok(scalar.endsWith("'"), `${context}: unterminated single-quoted branch pattern`);
+    return scalar.slice(1, -1).replaceAll("''", "'");
+  }
+  assert.doesNotMatch(
+    scalar,
+    /[\[\]{},]/,
+    `${context}: unsupported branch-pattern syntax; refusing to assume feature PR coverage`,
+  );
+  return scalar;
+}
+
+function splitFlowItems(value, context) {
+  const items = [];
+  let quote;
+  let squareDepth = 0;
+  let curlyDepth = 0;
+  let start = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (quote === '"' && char === "\\") {
+      i += 1;
+    } else if (quote === "'" && char === "'" && value[i + 1] === "'") {
+      i += 1;
+    } else if (quote && char === quote) {
+      quote = undefined;
+    } else if (!quote && (char === '"' || char === "'")) {
+      quote = char;
+    } else if (!quote && char === "[") {
+      squareDepth += 1;
+    } else if (!quote && char === "]") {
+      squareDepth -= 1;
+    } else if (!quote && char === "{") {
+      curlyDepth += 1;
+    } else if (!quote && char === "}") {
+      curlyDepth -= 1;
+    } else if (!quote && char === "," && squareDepth === 0 && curlyDepth === 0) {
+      items.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+    assert.ok(squareDepth >= 0 && curlyDepth >= 0, `${context}: unbalanced flow collection`);
+  }
+  assert.ok(!quote && squareDepth === 0 && curlyDepth === 0, `${context}: unclosed flow collection`);
+  items.push(value.slice(start).trim());
+  return items.filter(Boolean);
+}
+
+function branchSequence(value, context) {
+  const sequence = value.trim();
+  assert.match(
+    sequence,
+    /^\[.*\]$/,
+    `${context}: branch filters must use an explicit sequence; refusing to guess`,
+  );
+  return splitFlowItems(sequence.slice(1, -1), context).map((item) => yamlScalar(item, context));
+}
+
+function flowPullRequestFilters(value, context) {
+  assert.match(
+    value,
+    /^\{.*\}$/,
+    `${context}: unsupported pull_request value; refusing to assume feature PR coverage`,
+  );
+  let branches;
+  let hasBranchesIgnore = false;
+  for (const item of splitFlowItems(value.slice(1, -1), context)) {
+    const separator = item.indexOf(":");
+    assert.ok(separator > 0, `${context}: malformed pull_request flow mapping`);
+    const key = yamlScalar(item.slice(0, separator), context);
+    const rawValue = item.slice(separator + 1);
+    if (key === "<<") {
+      assert.fail(`${context}: inherited pull_request filters cannot prove feature PR coverage`);
+    } else if (key === "branches") {
+      assert.equal(branches, undefined, `${context}: duplicate branches filter`);
+      branches = branchSequence(rawValue, `${context} branches`);
+    } else if (key === "branches-ignore") {
+      hasBranchesIgnore = true;
+    }
+  }
+  return { branches, hasBranchesIgnore };
+}
+
+// This is deliberately a narrow reader, not a general YAML parser. It accepts the block and
+// single-line flow forms used by Actions, strips real comments without stripping quoted `#`, and
+// throws on aliases or syntax it cannot prove safe. A required check must fail closed here: treating
+// an unknown shape as unfiltered could leave every feature-target PR permanently Pending.
+function pullRequestBranchFilters(workflow, context) {
+  const lines = workflow.split(/\r?\n/).map(stripYamlComment);
+  const onDeclarations = lines
+    .map((line, index) => (/^on\s*:/.test(line) ? index : -1))
+    .filter((index) => index >= 0);
+  assert.equal(
+    onDeclarations.length,
+    1,
+    `${context}: required workflow must declare one top-level on mapping`,
+  );
+  const [onAt] = onDeclarations;
+  const onDeclaration = /^on\s*:\s*(.*)$/.exec(lines[onAt]);
+  assert.equal(
+    onDeclaration[1].trim(),
+    "",
+    `${context}: flow-style top-level on mappings are unsupported; refusing to guess`,
+  );
+
+  let onEnd = lines.length;
+  for (let i = onAt + 1; i < lines.length; i += 1) {
+    if (lines[i].trim() && /^\S/.test(lines[i])) {
+      onEnd = i;
+      break;
+    }
+  }
+  const eventLines = lines.slice(onAt + 1, onEnd).filter((line) => line.trim());
+  assert.ok(eventLines.length > 0, `${context}: top-level on mapping is empty`);
+  const eventIndent = Math.min(...eventLines.map((line) => /^ */.exec(line)[0].length));
+  assert.ok(eventIndent > 0, `${context}: malformed top-level on mapping`);
+
+  const pullRequestDeclarations = [];
+  for (let i = onAt + 1; i < onEnd; i += 1) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const indent = /^ */.exec(line)[0].length;
+    assert.ok(indent >= eventIndent, `${context}: inconsistent event indentation`);
+    if (indent !== eventIndent) continue;
+    const declaration = /^\s*((?:"[^"]*"|'[^']*'|[A-Za-z0-9_-]+))\s*:\s*(.*)$/.exec(line);
+    assert.ok(declaration, `${context}: unrecognized event declaration: ${line.trim()}`);
+    if (yamlScalar(declaration[1], context) === "pull_request") {
+      pullRequestDeclarations.push({ index: i, inline: declaration[2].trim() });
+    }
+  }
+  assert.equal(
+    pullRequestDeclarations.length,
+    1,
+    `${context}: top-level on mapping must declare pull_request exactly once`,
+  );
+  const [{ index: pullRequestAt, inline }] = pullRequestDeclarations;
+  if (inline) return flowPullRequestFilters(inline, context);
+
+  let pullRequestEnd = onEnd;
+  for (let i = pullRequestAt + 1; i < onEnd; i += 1) {
+    if (!lines[i].trim()) continue;
+    const indent = /^ */.exec(lines[i])[0].length;
+    if (indent === eventIndent) {
+      pullRequestEnd = i;
+      break;
+    }
+    assert.ok(indent > eventIndent, `${context}: inconsistent pull_request indentation`);
+  }
+  const childLines = lines.slice(pullRequestAt + 1, pullRequestEnd).filter((line) => line.trim());
+  if (childLines.length === 0) return { branches: undefined, hasBranchesIgnore: false };
+  const childIndent = Math.min(...childLines.map((line) => /^ */.exec(line)[0].length));
+  assert.ok(childIndent > eventIndent, `${context}: malformed pull_request mapping`);
+
+  let branches;
+  let hasBranchesIgnore = false;
+  for (let i = pullRequestAt + 1; i < pullRequestEnd; i += 1) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const indent = /^ */.exec(line)[0].length;
+    assert.equal(
+      indent,
+      childIndent,
+      `${context}: unrecognized pull_request child line: ${line.trim()}`,
+    );
+    const keyMatch = /^((?:"[^"]*"|'[^']*'|[A-Za-z0-9_-]+|<<))\s*:\s*(.*)$/.exec(
+      line.slice(childIndent),
+    );
+    assert.ok(keyMatch, `${context}: unrecognized pull_request child line: ${line.trim()}`);
+    const key = yamlScalar(keyMatch[1], context);
+    if (key === "<<") {
+      assert.fail(`${context}: inherited pull_request filters cannot prove feature PR coverage`);
+    }
+
+    const values = [];
+    if (keyMatch[2].trim()) {
+      if (key === "branches" || key === "branches-ignore") {
+        values.push(...branchSequence(keyMatch[2], `${context} ${key}`));
+      }
+    } else {
+      let nestedIndent;
+      for (let j = i + 1; j < pullRequestEnd; j += 1) {
+        if (!lines[j].trim()) continue;
+        const indent = /^ */.exec(lines[j])[0].length;
+        if (indent <= childIndent) break;
+        nestedIndent ??= indent;
+        assert.equal(
+          indent,
+          nestedIndent,
+          `${context}: inconsistent indentation under pull_request ${key}`,
+        );
+        const item = /^-\s+(.+)$/.exec(lines[j].slice(nestedIndent));
+        assert.ok(item, `${context}: unrecognized value under pull_request ${key}`);
+        if (key === "branches" || key === "branches-ignore") {
+          values.push(yamlScalar(item[1], `${context} ${key}`));
+        }
+        i = j;
+      }
+    }
+
+    if (key === "branches") {
+      assert.equal(branches, undefined, `${context}: duplicate branches filter`);
+      branches = values;
+    } else if (key === "branches-ignore") {
+      hasBranchesIgnore = true;
+    }
+  }
+  return { branches, hasBranchesIgnore };
+}
+
+function assertFeaturePullRequestCoverage(workflow, context) {
+  const { branches, hasBranchesIgnore } = pullRequestBranchFilters(workflow, context);
+  assert.equal(
+    hasBranchesIgnore,
+    false,
+    `${context}: branches-ignore is not allowed on a required workflow because it can exclude ` +
+      "feature integration PRs",
+  );
+  if (!branches) return;
+  assert.ok(branches.includes("main"), `${context}: its PR base filter must retain main`);
+  assert.ok(
+    branches.includes("feature/*"),
+    `${context}: its PR base filter must include feature/* so the required check reports on ` +
+      "story PRs into a feature integration branch",
+  );
+  assert.equal(
+    branches.some((pattern) => pattern.startsWith("!")),
+    false,
+    `${context}: negative branch filters cannot prove coverage of every feature integration PR`,
+  );
+}
+
+test("every required workflow reports on feature-target pull requests", async () => {
+  for (const path of REQUIRED_WORKFLOWS) {
+    assertFeaturePullRequestCoverage(await source(path), path);
+  }
+});
+
+test("feature-target coverage rejects inline and multiline branches-ignore filters", () => {
+  for (const workflow of [
+    'on:\n  pull_request:\n    branches-ignore: ["feature/*"]\n',
+    'on:\n  pull_request:\n    branches-ignore:\n      - "feature/*"\n',
+    'on:\n  pull_request: { branches-ignore: ["feature/*"] }\n',
+  ]) {
+    assert.throws(
+      () => assertFeaturePullRequestCoverage(workflow, "mutated workflow"),
+      /branches-ignore/,
+    );
+  }
+});
+
+test("feature-target coverage ignores comments and rejects negative or main-only filters", () => {
+  for (const [workflow, error] of [
+    ['on:\n  pull_request:\n    branches: [main] # "feature/*"\n', /must include feature\/\*/],
+    [
+      'on:\n  pull_request:\n    # branches: [main, "feature/*"]\n    branches: [main]\n',
+      /must include feature\/\*/,
+    ],
+    [
+      'on:\n  pull_request:\n    branches: [main, "feature/*", "!feature/*"]\n',
+      /negative branch filters/,
+    ],
+    ['on:\n  pull_request: { branches: [main] } # "feature/*"\n', /must include feature\/\*/],
+  ]) {
+    assert.throws(() => assertFeaturePullRequestCoverage(workflow, "mutated workflow"), error);
+  }
+});
+
+test("feature-target coverage cannot be supplied by a job named pull_request", () => {
+  const workflow = [
+    "on:",
+    "  push:",
+    "jobs:",
+    "  pull_request:",
+    '    branches: [main, "feature/*"]',
+  ].join("\n");
+  assert.throws(
+    () => assertFeaturePullRequestCoverage(workflow, "mutated workflow"),
+    /top-level on mapping must declare pull_request exactly once/,
+  );
+});
+
+test("feature-target coverage parses arbitrary child indentation and rejects malformed children", () => {
+  assert.throws(
+    () =>
+      assertFeaturePullRequestCoverage(
+        "on:\n  pull_request:\n   branches: [main]\n",
+        "three-space mutation",
+      ),
+    /must include feature\/\*/,
+  );
+  assert.doesNotThrow(() =>
+    assertFeaturePullRequestCoverage(
+      'on:\n  pull_request:\n   branches: [main, "feature/*"]\n',
+      "three-space workflow",
+    ),
+  );
+  assert.throws(
+    () =>
+      assertFeaturePullRequestCoverage(
+        'on:\n  pull_request:\n   branches [main, "feature/*"]\n',
+        "malformed workflow",
+      ),
+    /unrecognized pull_request child line/,
+  );
+});
+
+test("feature-target coverage accepts unfiltered, block, and flow branch declarations", () => {
+  for (const workflow of [
+    "on:\n  pull_request:\n  push:\n    branches: [main]\n",
+    'on:\n  pull_request:\n    branches:\n      - main\n      - "feature/*"\n',
+    'on:\n  pull_request:\n    branches: [main, "feature/*"]\n    types: [opened, synchronize]\n',
+    'on:\n  pull_request: { branches: [main, "feature/*"], types: [opened] }\n',
+  ]) {
+    assert.doesNotThrow(() => assertFeaturePullRequestCoverage(workflow, "valid workflow"));
+  }
+});
+
 test("every required lane reports on the merge queue and drops its PR path filter", async () => {
   for (const { path } of REQUIRED_LANES) {
     const lane = await source(path);
@@ -1171,6 +1518,12 @@ test("dropping the PR path filter did not expose the self-hosted pools", async (
     "nax-worker must consult the `changes` gate — without it, every docs-only PR now wakes the " +
       "two-Mac nax pool, because the pull_request path filter that used to do this is gone.",
   );
+  assert.match(
+    naxCondition,
+    /github\.event\.pull_request\.base\.ref == 'main'/,
+    "nax-worker must not auto-run for story PRs targeting feature/*; capture NAX evidence with " +
+      "an explicit dispatch at the frozen feature head, then run it again on the final PR to main.",
+  );
 
   const desktop = await source(".github/workflows/desktop-windows.yml");
   // package-windows is main + dispatch only. Before merge_group existed, `!= 'pull_request'`
@@ -1196,11 +1549,26 @@ test("windows-candle stays out of the queue and out of the required set", async 
   // on the self-hosted `cuda` pool. Its merge-time stand-in is check.yml's hosted `candle`
   // typecheck. Making candle-worker required would force a merge_group: trigger here, and p90
   // queue wait (18m) + p90 run already reaches ~50m of the 60m budget.
+  const candle = await source(".github/workflows/windows-candle.yml");
   assert.doesNotMatch(
-    await source(".github/workflows/windows-candle.yml"),
+    candle,
     /^ {2}merge_group:$/m,
     "windows-candle.yml must stay out of the merge queue; check.yml's `candle` job is its " +
       "merge-time stand-in. See sc-17014 for the (A)/(B)/(C) decision if this changes.",
+  );
+  const prAt = candle.indexOf("\n  pull_request:");
+  assert.ok(prAt > 0, "windows-candle.yml must retain its pull_request trigger for final main PRs");
+  const prBlock = candle.slice(prAt + 1).split(/\n {2}(?=[a-z_]+:)/)[0];
+  assert.match(prBlock, /^ {4}branches: \[main\]$/m);
+  assert.doesNotMatch(
+    prBlock,
+    /feature\/\*/,
+    "windows-candle must not auto-run on feature story PRs; dispatch it at the frozen feature head.",
+  );
+  assert.match(
+    candle.slice(0, candle.indexOf("\njobs:")),
+    /^ {2}workflow_dispatch:$/m,
+    "windows-candle must remain dispatchable for authoritative final-head evidence.",
   );
 });
 
