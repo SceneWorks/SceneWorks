@@ -6,14 +6,19 @@
 //! evidence from qwen only. This scenario exercises that exact branch on real weights: it derives
 //! the cap boundary from the gate's own decision (no hand-copied numbers), asserts the deferred
 //! shape provably came from the Sequential branch, loads, admits a request through the real
-//! `evaluate_request` seam, renders, and compares the observed MLX peak to the admitted ceiling.
+//! `evaluate_request` seam, renders, and compares the observed Darwin physical-footprint delta to
+//! the admitted ceiling. The MLX allocator peak is recorded separately: deferred weights are
+//! mmap-backed and can sit outside MLX's active-memory counter, so that counter alone is not a
+//! valid headroom verdict.
 //!
 //! This is a VALIDATION harness, not a calibration capture: it writes logs and numbers under
 //! `~/SceneWorks/render-validation-sc18409/` and never touches evidence records or the closure
-//! table. Like the sc-18101 scenarios it samples process-global MLX peak counters, so run it in
+//! table. Like the sc-18101 scenarios it samples process-global MLX peak counters; it also reads
+//! this process's kernel-maintained `phys_footprint_peak` through macOS `footprint`, so run it in
 //! its own `cargo test` invocation.
 //!
 //! ```text
+//! SC18409_ARTIFACT_REVISION=<exact-40-hex-revision> \
 //! cargo test -p sceneworks-worker --release --lib -- --ignored --exact --nocapture \
 //!     ladder_e2e_sc18409::z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling
 //! ```
@@ -33,6 +38,85 @@ const REPO_DIR: &str = "models--SceneWorks--z-image-turbo-mlx";
 const ENGINE: &str = "z_image_turbo";
 const TIER: &str = "bf16";
 const SENTINEL: &str = "model_index.json";
+
+struct PhysicalFootprintSample {
+    current_bytes: u64,
+    lifetime_peak_bytes: u64,
+    output: String,
+}
+
+fn process_physical_footprint() -> Result<PhysicalFootprintSample, String> {
+    let output = std::process::Command::new("/usr/bin/footprint")
+        .args([
+            "--pid",
+            &std::process::id().to_string(),
+            "--format",
+            "bytes",
+            "--noCategories",
+            "--wired",
+        ])
+        .output()
+        .map_err(|error| format!("run /usr/bin/footprint: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "/usr/bin/footprint exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let output = String::from_utf8(output.stdout)
+        .map_err(|error| format!("footprint output is not UTF-8: {error}"))?;
+    let parse_field = |name: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(name))
+            .and_then(|value| value.trim().strip_suffix(" B"))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .ok_or_else(|| format!("footprint output has no integer `{name} <bytes> B` field"))
+    };
+    Ok(PhysicalFootprintSample {
+        current_bytes: parse_field("phys_footprint:")?,
+        lifetime_peak_bytes: parse_field("phys_footprint_peak:")?,
+        output,
+    })
+}
+
+/// Measures the process's full Darwin physical footprint across the complete load + render
+/// interval. `phys_footprint_peak` is maintained by the kernel for the process lifetime, so the
+/// post-render reading cannot miss a short-lived peak. It captures kernel-accounted dirty/wired
+/// memory, including GPU allocations that process RSS and MLX's active-memory gauge can omit;
+/// clean reclaimable file-backed pages are not necessarily billed. The safe subprocess boundary
+/// preserves `sceneworks-worker`'s crate-wide `forbid(unsafe_code)` policy.
+struct PhysicalFootprintMeasurement {
+    baseline_bytes: u64,
+}
+
+impl PhysicalFootprintMeasurement {
+    fn start() -> Self {
+        let sample = process_physical_footprint()
+            .expect("macOS footprint must expose this process's physical footprint");
+        write_log("physical-footprint-before", &sample.output);
+        Self {
+            baseline_bytes: sample.current_bytes,
+        }
+    }
+
+    fn finish(self) -> (u64, u64) {
+        let sample =
+            process_physical_footprint().expect("final macOS process physical-footprint sample");
+        write_log("physical-footprint-after", &sample.output);
+        assert!(
+            sample.lifetime_peak_bytes >= self.baseline_bytes,
+            "process lifetime physical-footprint peak precedes the test baseline; rerun this test in its own fresh process"
+        );
+        (
+            sample.lifetime_peak_bytes,
+            sample
+                .lifetime_peak_bytes
+                .saturating_sub(self.baseline_bytes),
+        )
+    }
+}
 
 fn out_dir() -> PathBuf {
     let dir = PathBuf::from(crate::smoke_support::env_or(
@@ -85,6 +169,19 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
     let Some((tier_dir, revision)) = cached_tier_dir(REPO_DIR, TIER, SENTINEL) else {
         panic!("SKIP-AS-FAILURE: no {REPO_DIR} {TIER} weights cached; sc-18409 cannot be validated without them");
     };
+    let expected_revision = std::env::var("SC18409_ARTIFACT_REVISION")
+        .expect("SC18409_ARTIFACT_REVISION must pin the exact Z-Image artifact");
+    assert!(
+        expected_revision.len() == 40
+            && expected_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "SC18409_ARTIFACT_REVISION must be exact lowercase 40-hex"
+    );
+    assert_eq!(
+        revision, expected_revision,
+        "the cached Z-Image artifact must match the exact requested revision"
+    );
     let entry = shipped_manifest_entry(ENGINE);
     // No shipped binding names the bf16 tier, so there is no provenance to prove — and if one ever
     // appears this scenario must start proving it (mirrors sc-18101's provenance discipline).
@@ -180,7 +277,13 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
         tier_dir.display()
     );
 
-    // Load with EXACTLY that spec and drive the real request seam under the same cap.
+    // Load with EXACTLY that spec and drive the real request seam under the same cap. Capture the
+    // kernel-maintained process physical footprint from immediately before load through the
+    // completed render: deferred allocations can sit outside MLX's active-memory counter, so use
+    // the kernel's dirty/wired pressure ledger (including GPU allocations) to grade the ceiling.
+    // Clean reclaimable file-backed pages are not necessarily billed by this ledger.
+    let footprint_measurement = PhysicalFootprintMeasurement::start();
+    let footprint_baseline_bytes = footprint_measurement.baseline_bytes;
     let width: u32 = crate::smoke_support::env_or("SC18409_W", "1024")
         .parse()
         .expect("SC18409_W");
@@ -252,7 +355,9 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
         other => panic!("expected images, got {other:?}"),
     };
     let elapsed = started.elapsed();
-    let observed_peak_bytes = mlx_rs::memory::get_peak_memory() as u64;
+    let mlx_allocator_peak_bytes = mlx_rs::memory::get_peak_memory() as u64;
+    let (physical_footprint_peak_bytes, physical_footprint_delta_bytes) =
+        footprint_measurement.finish();
     mlx_rs::memory::clear_cache();
     let resident_after = mlx_rs::memory::get_active_memory() as u64;
 
@@ -277,8 +382,15 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
         "admittedCeilingBytes": admitted_ceiling_bytes,
         "admittedCeilingGib": gib(admitted_ceiling_bytes),
         "ceilingIsWidened": widened.is_some(),
-        "observedPeakBytes": observed_peak_bytes,
-        "observedPeakGib": gib(observed_peak_bytes),
+        "observedPeakMetric": "darwin_phys_footprint_peak_delta_from_preload_baseline",
+        "observedPeakBytes": physical_footprint_delta_bytes,
+        "observedPeakGib": gib(physical_footprint_delta_bytes),
+        "physicalFootprintBaselineBytes": footprint_baseline_bytes,
+        "physicalFootprintBaselineGib": gib(footprint_baseline_bytes),
+        "physicalFootprintPeakBytes": physical_footprint_peak_bytes,
+        "physicalFootprintPeakGib": gib(physical_footprint_peak_bytes),
+        "mlxAllocatorPeakBytes": mlx_allocator_peak_bytes,
+        "mlxAllocatorPeakGib": gib(mlx_allocator_peak_bytes),
         "residentBeforeGib": gib(resident_before),
         "residentAfterGib": gib(resident_after),
         "renderSeconds": elapsed.as_secs_f64(),
@@ -297,10 +409,10 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
         "sc-18409: the render looks degenerate (std {std_dev:.2})"
     );
     assert!(
-        observed_peak_bytes <= admitted_ceiling_bytes,
-        "CEILING BREACH: observed peak {:.2} GiB EXCEEDS the admitted ceiling {:.2} GiB \
+        physical_footprint_delta_bytes <= admitted_ceiling_bytes,
+        "CEILING BREACH: observed Darwin physical-footprint delta {:.2} GiB EXCEEDS the admitted ceiling {:.2} GiB \
          (rung {strategy:?}, cap {cap_gb} GB). Do not tune anything to make this pass — report it.",
-        gib(observed_peak_bytes),
+        gib(physical_footprint_delta_bytes),
         gib(admitted_ceiling_bytes),
     );
 }
