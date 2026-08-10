@@ -70,7 +70,27 @@ guide covers how to **pre-stage** the runtime so first run completes fully offli
 | You are scripting an enterprise / MSI rollout | [Method 2](#method-2-stage-a-redist-bundle) with `SCENEWORKS_GPU_RUNTIME_DIR` |
 
 All methods land the same files in the same place. Under the hood the app skips the
-download whenever the runtime is already present (`apps/desktop/src/cuda_provision.rs`).
+download only when the runtime is both **complete** and **marked as this SceneWorks
+version's pinned redist** (`apps/desktop/src/cuda_provision.rs`).
+
+### The version marker is required
+
+Every skip-the-download path is gated on a `.redist-marker` file naming the exact pinned
+redist version:
+
+```text
+cuda12.9-ort1.26.0-cudnn9.23-1
+```
+
+The DLL filenames alone are not enough to prove which redist a folder came from —
+`cudart64_12.dll` and `onnxruntime.dll` are the same names in older releases — so a stage
+with no marker, or a marker from an older SceneWorks, is rejected and the app downloads
+instead. Methods 1 and 2 both produce that marker; the [manual
+fallback](#manual-fallback-place-the-dlls-yourself) has you write it.
+
+When a SceneWorks upgrade changes the pinned versions this string changes too, and every
+pre-staged bundle must be rebuilt from the new wheel set. The authoritative value is
+`REDIST_VERSION` in [`apps/desktop/src/cuda_provision.rs`](../src/cuda_provision.rs).
 
 ---
 
@@ -79,20 +99,25 @@ download whenever the runtime is already present (`apps/desktop/src/cuda_provisi
 If you have another Windows machine (same or newer NVIDIA driver) that can reach the
 internet:
 
-1. Install and launch SceneWorks on the **connected** machine and let first run
-   finish the GPU-runtime download.
+1. Install **the same SceneWorks version** on the **connected** machine, launch it, and
+   let first run finish the GPU-runtime download.
 2. Copy its entire runtime folder to the **offline** machine, to the same path:
 
    ```
    %APPDATA%\SceneWorks\gpu-runtime
    ```
 
-   That folder contains `cuda\`, `onnxruntime\`, and a `.redist-marker` file. Copy all
-   of it (the marker tells the app it is already provisioned).
+   That folder contains `cuda\`, `onnxruntime\`, `.redist-marker`, and a set of
+   `.component-*.ok` files. Copy **all** of it — the markers are what tell the app the
+   DLLs match its pinned redist.
 3. Install SceneWorks on the offline machine and launch it. First run detects the
    existing runtime and skips the download.
 
 That is the whole procedure — no environment variables needed.
+
+> Both machines must run the same SceneWorks version. A folder provisioned by an older
+> release carries an older marker; the offline machine rejects it and tries to download,
+> which fails with no network. Re-copy from a connected machine on the matching version.
 
 ---
 
@@ -135,6 +160,7 @@ A wheel is just a ZIP. Build a bundle folder with two subdirectories, `cuda` and
 gpu-runtime-bundle\
   cuda\           <- every *.dll from the 7 nvidia_*-cu12 wheels
   onnxruntime\    <- three DLLs from the onnxruntime_gpu wheel
+  .redist-marker  <- the pinned version string (see below)
 ```
 
 - From each of the **seven `nvidia_*-cu12`** wheels, copy **every `*.dll`** (they live
@@ -166,6 +192,24 @@ foreach ($whl in Get-ChildItem *.whl) {
 }
 ```
 
+### 2b-2. Mark the bundle with the pinned version
+
+The app refuses an unmarked bundle, because a folder of DLLs assembled from an older wheel
+set is indistinguishable by filename from one built at the current pin. Write the marker
+that says which redist you just assembled:
+
+```powershell
+Set-Content -Path "$bundle\.redist-marker" -Value "cuda12.9-ort1.26.0-cudnn9.23-1" -Encoding ascii
+```
+
+Use `-Encoding ascii` (or any BOM-free UTF-8 writer). A UTF-8 **byte-order mark** makes the
+file's first character invisible junk and the marker will not match.
+
+The value must equal `REDIST_VERSION` in
+[`apps/desktop/src/cuda_provision.rs`](../src/cuda_provision.rs) exactly. Only write it
+after assembling the bundle from the wheel table above — the marker asserts which wheels
+are inside, and the app trusts it.
+
 Sanity-check the bundle carries the key libraries: `cuda\` should contain
 `cudart64_12.dll`, `cublas64_12.dll`, `curand64_10.dll`, an `nvrtc64_*.dll`,
 `cudnn64_9.dll`, `cufft64_11.dll`, and an `nvJitLink_*.dll`; `onnxruntime\` should hold
@@ -184,17 +228,23 @@ setx SCENEWORKS_GPU_RUNTIME_DIR "C:\path\to\gpu-runtime-bundle"
 (`setx` persists it for future launches; open a new session for it to take effect. For
 a machine-wide rollout, set it as a system environment variable.)
 
-On first launch the app copies the bundle's DLLs into `%APPDATA%\SceneWorks\gpu-runtime`,
-verifies the set is complete, marks the runtime provisioned, and starts — with no network
-access. If the bundle is missing a subdirectory or a required DLL, setup stops with an
-actionable message rather than starting a broken worker.
+On first launch the app checks the bundle's marker, copies its DLLs into
+`%APPDATA%\SceneWorks\gpu-runtime`, verifies the set is complete, marks the runtime
+provisioned, and starts — with no network access. If the bundle is missing a
+subdirectory, a required DLL, or the version marker, setup stops with an actionable
+message rather than starting a broken worker.
 
 Once installed, `SCENEWORKS_GPU_RUNTIME_DIR` is no longer consulted (the provisioned
-copy is marked complete), so you can leave it set or remove it.
+copy is marked complete), so you can leave it set or remove it. It *is* consulted again
+after a SceneWorks upgrade that changes the pinned redist — rebuild the bundle and update
+its marker before rolling that upgrade out, or the upgraded app will try to download.
+
+Pointing the variable at `%APPDATA%\SceneWorks\gpu-runtime` itself is harmless: a
+complete, correctly marked runtime is accepted in place rather than copied onto itself.
 
 ---
 
-## Manual fallback (marker file)
+## Manual fallback (place the DLLs yourself)
 
 If you prefer not to set an environment variable, you can place the DLLs directly and
 let the app adopt them:
@@ -202,11 +252,19 @@ let the app adopt them:
 1. Copy the bundle's `cuda\` and `onnxruntime\` folders into
    `%APPDATA%\SceneWorks\gpu-runtime\` so you have
    `%APPDATA%\SceneWorks\gpu-runtime\cuda\...` and `...\onnxruntime\...`.
-2. Launch SceneWorks. It detects the complete DLL set and skips the download.
+2. Write the version marker next to them:
 
-You do **not** need to hand-write the `.redist-marker` file — the app writes it once it
-confirms the set is complete. (Older instructions that had you create the marker by hand
-still work, but the DLL detection above is the supported path.)
+   ```powershell
+   Set-Content -Path "$env:APPDATA\SceneWorks\gpu-runtime\.redist-marker" -Value "cuda12.9-ort1.26.0-cudnn9.23-1" -Encoding ascii
+   ```
+
+3. Launch SceneWorks. It confirms the DLL set is complete, sees the marker, and skips the
+   download.
+
+Step 2 is **required**. Earlier releases adopted any complete-looking DLL set with no
+marker; that made a pinned-version bump silently inert on machines that already had a
+runtime, so adoption is now marker-gated on every path. If you skip it, the app treats
+the folder as an unknown-vintage leftover and downloads the pinned set over it.
 
 ---
 
