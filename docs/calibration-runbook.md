@@ -496,7 +496,8 @@ session, and both RGB receipts must match that record's logical case and geometr
 directory therefore mirrors the repository-relative tree. Validation also reconstructs the full
 evidence record from the immutable provider response, request, and artifact input, requires every
 adapter-owned measurement/quality/sweep/scenario field to match, and re-derives the session ID from
-the response digest and capture provenance. Changing a log and merely updating `stdoutSha256` is not
+the response digest and capture provenance. Session repositories, capture time, hardware, and compact
+target/rung must exactly match the request and record. Changing a log and merely updating `stdoutSha256` is not
 valid provenance. The inventory command
 streams and hashes every artifact byte, including Hugging Face symlink targets.
 

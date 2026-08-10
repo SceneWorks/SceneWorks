@@ -1465,6 +1465,55 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
     /provider response measurements do not match the evidence record/,
   );
 
+  const repositoryTamper = structuredClone(result);
+  const repositorySession = repositoryTamper.sourceSessions[0];
+  const repositoryRecord = repositoryTamper.records[0];
+  // Capture construction reuses the same in-memory repository object for session and record; a
+  // serialized bundle does not preserve that alias, so split it before simulating an on-disk edit.
+  repositorySession.repositories = structuredClone(repositorySession.repositories);
+  repositorySession.repositories.inference.revision = "e".repeat(40);
+  repositorySession.repositories.inference.closureDigest = "f".repeat(64);
+  const repositorySessionId = physicalMlxSessionId({
+    kind: repositorySession.kind,
+    logicalCaseId: repositoryRecord.logicalCaseId,
+    capturedAt: repositorySession.capturedAt,
+    repositories: repositorySession.repositories,
+    hardware: repositorySession.hardware,
+    stdoutSha256: repositorySession.stdoutSha256,
+  });
+  const priorRepositorySessionId = repositorySession.id;
+  repositorySession.id = repositorySessionId;
+  repositorySession.sourcePath = repositorySession.sourcePath
+    .replace(priorRepositorySessionId, repositorySessionId);
+  const repositoryRequestOutput = repositorySession.outputs.find(({ role }) => role === "request");
+  repositoryRequestOutput.path = repositoryRequestOutput.path
+    .replace(priorRepositorySessionId, repositorySessionId);
+  for (const [claim, reference] of Object.entries(repositoryRecord.derivation)) {
+    if (claim !== "justification") reference.sourceSessionIds = [repositorySessionId];
+  }
+  await writeFile(path.join(rawLogDir, repositorySession.sourcePath), raw);
+  await writeFile(
+    path.join(rawLogDir, repositoryRequestOutput.path),
+    await readFile(path.join(rawLogDir, session.outputs.find(({ role }) => role === "request").path)),
+  );
+  await assert.rejects(
+    validateSourceSessionFiles(repositoryTamper, rawLogDir),
+    /request receipt provenance does not match its evidence record/,
+  );
+
+  const captureTimeTamper = structuredClone(result);
+  captureTimeTamper.sourceSessions[0].capturedAt = "2026-07-28T12:00:01Z";
+  await assert.rejects(
+    validateSourceSessionFiles(captureTimeTamper, rawLogDir),
+    /request receipt provenance does not match its evidence record/,
+  );
+  const targetTamper = structuredClone(result);
+  targetTamper.sourceSessions[0].target.mode = "image_to_image";
+  await assert.rejects(
+    validateSourceSessionFiles(targetTamper, rawLogDir),
+    /request receipt provenance does not match its evidence record/,
+  );
+
   const authoritative = structuredClone(result);
   const authoritativeRecord = authoritative.records[0];
   authoritativeRecord.evidenceScope = "authoritative";

@@ -934,9 +934,18 @@ export async function validateSourceSessionFiles(
         fail(`${session.id}: request receipt ${key} does not match its evidence record`);
       }
     }
+    const expectedSessionTarget = {
+      tier: request.planned.target.tier,
+      mode: request.planned.target.mode,
+      overlay: request.planned.target.overlay,
+      rung: request.planned.strategy.rung,
+    };
     if (!equal(request.repositories, record.repositories)
+        || !equal(session.repositories, record.repositories)
         || !equal(request.hardware, record.hardware)
-        || !equal(session.hardware, record.hardware)) {
+        || !equal(session.hardware, record.hardware)
+        || session.capturedAt !== record.capturedAt
+        || !equal(session.target, expectedSessionTarget)) {
       fail(`${session.id}: request receipt provenance does not match its evidence record`);
     }
     let providerResponse;
@@ -949,8 +958,9 @@ export async function validateSourceSessionFiles(
     object(providerResponse.sourceCapture, `${session.id}.providerResponse.sourceCapture`);
     if (providerResponse.sourceCapture.kind !== session.kind
         || !equal(providerResponse.sourceCapture.inputs, session.inputs)
-        || !equal(providerResponse.sourceCapture.claims, session.claims)) {
-      fail(`${session.id}: provider response source inputs or claims do not match the session receipt`);
+        || !equal(providerResponse.sourceCapture.claims, session.claims)
+        || providerResponse.capturedAt !== session.capturedAt) {
+      fail(`${session.id}: provider response source inputs, claims, or capture time do not match the session receipt`);
     }
     validateExactOutputReceipts(
       providerResponse?.sourceCapture?.outputs,
