@@ -562,18 +562,11 @@ async fn generate_krea_imported_control_stream(
         Some(&request.model_manifest_entry),
         None,
     );
-    let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
-        width,
-        height,
-        count: 1,
-        mode: request.mode.clone(),
-        overlay: Some("control:1".to_owned()),
-        adapter_count,
-        has_reference: false,
-        reference_count: 0,
-        use_pid: false,
-        has_phases: false,
-    };
+    // Imported and builtin Krea pose routes send the same one-Control request. Keep their admitted
+    // geometry and measured lane identity on the shared constructor so neither call site can drift
+    // back to declaring zero references while gen-core derives one from `Conditioning::Control`.
+    let memory_inputs =
+        krea_control_memory_inputs(width, height, &request.mode, adapter_count);
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),

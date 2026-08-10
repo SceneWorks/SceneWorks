@@ -93,6 +93,20 @@
       "sourceFileCount": 181,
       "lockedPackageCount": 240
     },
+    "mlx:flux2_dev": {
+      "crate": "crates/media/mlx-gen/mlx-gen-flux2",
+      "digest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/llm/mlx-llm",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-flux2",
+        "crates/media/mlx-gen/mlx-gen-pid"
+      ],
+      "sourceFileCount": 197,
+      "lockedPackageCount": 174
+    },
     "mlx:krea_2_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
       "digest": "196c62e5d01ccc542cd4e66a1c4eaf656161483ea9f8cf9d2aa782ce0899e0dc",

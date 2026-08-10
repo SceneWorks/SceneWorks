@@ -7219,7 +7219,85 @@
       // unified memory) with an actionable message instead of a silent OOM.
       "mlx": {
         "minMemoryGb": 96,
-        "quantize": 4
+        "quantize": 4,
+        // SC-18218: exact real-weight, reference-free T2I captures for the only strategy the
+        // pinned mlx-gen-flux2 provider implements. The four bindings are deliberately Resident
+        // only; every sibling rung and BF16 cell remains Missing until independently measured.
+        "calibrations": [
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+            "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+            "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q4",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+            "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "provider": "flux2_dev", "tier": "q8", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q8",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "eager_materialization",
+            "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+            "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
+            "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
+            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "provider": "flux2_dev", "tier": "q8", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/flux2-dev-mlx",
+            "artifactResolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d", "artifactVariant": "q8",
+            "resolvedPathFingerprint": "SceneWorks/flux2-dev-mlx@2868b1461b2b6e6e05d84e52534df3632b4c7d5d:q8",
+            "rung": "resident", "parameters": {}
+          }
+        ],
+        // This provider implements only eager, all-resident generation at the pinned inference
+        // revision. `exhaustive` prevents the matrix's generic route fallback from widening those
+        // real q4/q8 T2I captures into BF16, edit/reference/ControlNet, or staged claims.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux2_dev",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident",
+              "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the
       // candle-gen-flux2 offload A/B harness (flux2_dev_probed_generate_for_offload_ab, device-level

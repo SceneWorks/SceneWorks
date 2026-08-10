@@ -2500,6 +2500,8 @@ mod tests {
         // SC-15823 then adds ten base-only runtime-complete FLUX.1 records (eight eager, two
         // deferred) without promoting them to Full completion. SC-15833 adds five deferred FLUX.2
         // runtime records and seven physical sessions without replacing any prior source receipt.
+        // SC-18218 adds four eager MLX FLUX.2-dev runtime records across the q4/q8 tiers and
+        // 768/1024 geometries.
         // SC-16915 re-collects the MLX qwen_image and krea_2_turbo_control evidence at pin
         // a4f409ae under ABI 3, adding seventeen records (14 eager, 3 deferred) and leaving the
         // superseded 7fbcb4a2/1244b82f/96b13b66 rows in place as history — a receipt cannot be
@@ -2648,14 +2650,23 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(runtime_keys, expected_runtime_keys);
-        assert_eq!(bundle.records.len(), complete_count + runtime_keys.len());
+        let runtime_complete_count = bundle
+            .records
+            .iter()
+            .filter(|record| record.status == RecordStatus::RuntimeComplete)
+            .count();
+        assert_eq!(runtime_complete_count, 19);
+        assert_eq!(
+            bundle.records.len(),
+            complete_count + runtime_complete_count
+        );
         assert_eq!(
             bundle
                 .records
                 .iter()
                 .filter(|record| record.load_shape == LoadShapeKey::EagerMaterialization)
                 .count(),
-            50
+            54
         );
         assert_eq!(
             bundle
