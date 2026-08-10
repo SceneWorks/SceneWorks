@@ -585,7 +585,13 @@ async fn generate_krea_imported_control_stream(
         adapter_count,
         spec,
         "Krea 2 imported checkpoint pose-control load failed".to_owned(),
-        move |model, initial_cache_state, load_policy, external_committed_bytes, tx, cancel| {
+        move |model,
+              initial_cache_state,
+              loaded_policy,
+              _requested_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             // Build the per-job identity-likeness scorer ONCE on the generator-worker thread (the
@@ -618,7 +624,7 @@ async fn generate_krea_imported_control_stream(
                     &memory_plan,
                     &memory_inputs,
                     cache_state,
-                    load_policy,
+                    loaded_policy.offload_policy,
                     external_committed_bytes,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;

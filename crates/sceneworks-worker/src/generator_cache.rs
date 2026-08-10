@@ -1041,61 +1041,68 @@ mod tests {
         }
     }
 
-    fn fully_populated_load_spec() -> LoadSpec {
-        let mut spec = LoadSpec::new(WeightsSource::File(PathBuf::from("/load/base.safetensors")));
+    fn fully_populated_load_spec(root: &Path) -> LoadSpec {
+        for file in [
+            "base.safetensors",
+            "control.safetensors",
+            "control-2.safetensors",
+            "control-3.safetensors",
+            "ip-adapter.safetensors",
+            "adapter-a.safetensors",
+            "adapter-b.safetensors",
+            "pid.safetensors",
+            "identity.safetensors",
+            "eva.safetensors",
+            "vae.safetensors",
+        ] {
+            std::fs::write(root.join(file), file.as_bytes()).expect("write load fixture");
+        }
+        for dir in ["gemma", "face", "text-encoder", "tokenizer"] {
+            std::fs::create_dir(root.join(dir)).expect("create load fixture directory");
+        }
+
+        let mut spec = LoadSpec::new(WeightsSource::File(root.join("base.safetensors")));
         spec.quantize = Some(Quant::Q4);
         spec.precision = Precision::Bf16;
-        spec.control = Some(WeightsSource::File(PathBuf::from(
-            "/load/control.safetensors",
-        )));
+        spec.control = Some(WeightsSource::File(root.join("control.safetensors")));
         spec.extra_controls = vec![
-            WeightsSource::File(PathBuf::from("/load/control-2.safetensors")),
-            WeightsSource::File(PathBuf::from("/load/control-3.safetensors")),
+            WeightsSource::File(root.join("control-2.safetensors")),
+            WeightsSource::File(root.join("control-3.safetensors")),
         ];
-        spec.ip_adapter = Some(WeightsSource::File(PathBuf::from(
-            "/load/ip-adapter.safetensors",
-        )));
+        spec.ip_adapter = Some(WeightsSource::File(root.join("ip-adapter.safetensors")));
         spec.adapters = vec![
-            AdapterSpec::new(
-                PathBuf::from("/load/adapter-a.safetensors"),
-                0.75,
-                AdapterKind::Lora,
-            )
-            .with_pass_scales(vec![0.25, 0.75])
-            .with_moe_expert(MoeExpert::High),
-            AdapterSpec::new(
-                PathBuf::from("/load/adapter-b.safetensors"),
-                1.25,
-                AdapterKind::Lokr,
-            )
-            .with_moe_expert(MoeExpert::Low),
+            AdapterSpec::new(root.join("adapter-a.safetensors"), 0.75, AdapterKind::Lora)
+                .with_pass_scales(vec![0.25, 0.75])
+                .with_moe_expert(MoeExpert::High),
+            AdapterSpec::new(root.join("adapter-b.safetensors"), 1.25, AdapterKind::Lokr)
+                .with_moe_expert(MoeExpert::Low),
         ];
         spec.pid = Some(gen_core::PidWeights {
-            checkpoint: WeightsSource::File(PathBuf::from("/load/pid.safetensors")),
-            gemma: WeightsSource::Dir(PathBuf::from("/load/gemma")),
+            checkpoint: WeightsSource::File(root.join("pid.safetensors")),
+            gemma: WeightsSource::Dir(root.join("gemma")),
         });
         spec.identity = Some(gen_core::IdentityWeights {
-            encoder: Some(WeightsSource::File(PathBuf::from(
-                "/load/identity.safetensors",
-            ))),
-            eva: Some(WeightsSource::File(PathBuf::from("/load/eva.safetensors"))),
-            face_dir: Some(WeightsSource::Dir(PathBuf::from("/load/face"))),
+            encoder: Some(WeightsSource::File(root.join("identity.safetensors"))),
+            eva: Some(WeightsSource::File(root.join("eva.safetensors"))),
+            face_dir: Some(WeightsSource::Dir(root.join("face"))),
         });
-        spec.text_encoder = Some(WeightsSource::Dir(PathBuf::from("/load/text-encoder")));
+        spec.text_encoder = Some(WeightsSource::Dir(root.join("text-encoder")));
         spec.components.insert(
             "tokenizer".to_owned(),
-            WeightsSource::Dir(PathBuf::from("/load/tokenizer")),
+            WeightsSource::Dir(root.join("tokenizer")),
         );
         spec.components.insert(
             "vae".to_owned(),
-            WeightsSource::File(PathBuf::from("/load/vae.safetensors")),
+            WeightsSource::File(root.join("vae.safetensors")),
         );
         spec
     }
 
     #[test]
     fn every_load_affecting_field_discriminates_load_identity() {
-        let base = fully_populated_load_spec();
+        let load_dir = tempfile::tempdir().expect("load tempdir");
+        let load_root = load_dir.path();
+        let base = fully_populated_load_spec(load_root);
         let identity = LoadIdentity::from_load_spec("provider", &base);
 
         macro_rules! assert_field_changes_identity {
@@ -1451,6 +1458,9 @@ mod tests {
 
     #[test]
     fn load_identity_includes_identity_text_encoder_and_named_components() {
+        let component_dir = tempfile::tempdir().expect("component tempdir");
+        let vae_path = component_dir.path().join("model.safetensors");
+        std::fs::write(&vae_path, b"vae").expect("write vae component");
         let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
 
         let mut identity = base.clone();
@@ -1470,16 +1480,10 @@ mod tests {
         let components = base
             .clone()
             .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")))
-            .with_component(
-                "vae",
-                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
-            );
+            .with_component("vae", WeightsSource::File(vae_path.clone()));
         let components_reversed = base
             .clone()
-            .with_component(
-                "vae",
-                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
-            )
+            .with_component("vae", WeightsSource::File(vae_path))
             .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")));
 
         let base_identity = LoadIdentity::from_load_spec("provider", &base);
@@ -1541,14 +1545,14 @@ mod tests {
                 )
         };
 
-        let original = GeneratorCacheKey::from_load_spec("qwen_image", &make_spec());
+        let original = LoadIdentity::from_load_spec("qwen_image", &make_spec());
         assert_eq!(
             original,
-            GeneratorCacheKey::from_load_spec("qwen_image", &make_spec()),
+            LoadIdentity::from_load_spec("qwen_image", &make_spec()),
             "an unchanged imported assembly must hit the cache"
         );
         std::fs::write(&vae, b"vae-v2-with-different-size").expect("replace vae");
-        let companion_changed = GeneratorCacheKey::from_load_spec("qwen_image", &make_spec());
+        let companion_changed = LoadIdentity::from_load_spec("qwen_image", &make_spec());
         assert_ne!(
             original, companion_changed,
             "replacing a named companion must invalidate the imported generator"
@@ -1556,7 +1560,7 @@ mod tests {
         std::fs::write(&dit, b"dit-v2-with-different-size").expect("replace dit");
         assert_ne!(
             companion_changed,
-            GeneratorCacheKey::from_load_spec("qwen_image", &make_spec()),
+            LoadIdentity::from_load_spec("qwen_image", &make_spec()),
             "replacing the primary File must invalidate the imported generator"
         );
     }
@@ -1599,9 +1603,8 @@ mod tests {
             spec.adapters = vec![AdapterSpec::new(selected.clone(), 0.8, AdapterKind::Lora)];
             spec
         };
-        let first_file_key = GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_file_spec());
-        let first_adapter_key =
-            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_adapter_spec());
+        let first_file_key = LoadIdentity::from_load_spec("krea_2_turbo", &make_file_spec());
+        let first_adapter_key = LoadIdentity::from_load_spec("krea_2_turbo", &make_adapter_spec());
 
         std::fs::remove_file(&selected).expect("remove first link");
         symlink(&second, &selected).expect("link second blob");
@@ -1612,12 +1615,12 @@ mod tests {
         );
         assert_ne!(
             first_file_key,
-            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_file_spec()),
+            LoadIdentity::from_load_spec("krea_2_turbo", &make_file_spec()),
             "retargeting the lexical checkpoint link must invalidate the resident generator"
         );
         assert_ne!(
             first_adapter_key,
-            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_adapter_spec()),
+            LoadIdentity::from_load_spec("krea_2_turbo", &make_adapter_spec()),
             "retargeting an adapter link must invalidate the resident generator"
         );
     }
