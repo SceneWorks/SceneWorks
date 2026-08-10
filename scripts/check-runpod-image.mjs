@@ -21,6 +21,7 @@ function stage(name) {
   };
 }
 
+const ortBuilder = stage("ort-builder");
 const candleRuntime = stage("rust-worker-candle");
 const runpod = stage("runpod");
 
@@ -34,10 +35,37 @@ assert.equal(runpod.base, "rust-worker-candle", "combined image must inherit can
 for (const contract of [
   "ffmpeg",
   "COPY --from=candle-builder /out/sceneworks-rust-worker",
-  "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}",
+  "COPY --from=ort-builder ${ORT_PY_SITE} ${ORT_PY_SITE}",
 ]) {
   assert.ok(candleRuntime.body.includes(contract), `candle runtime is missing ${contract}`);
 }
+assert.ok(
+  ortBuilder.body.includes("onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}"),
+  "the ort staging stage must pin onnxruntime-gpu",
+);
+
+// The shipped worker image has no Python interpreter (epic 3482): pip is only the
+// delivery mechanism for onnxruntime's shared libraries, so the venv is built in
+// ort-builder and only its .so tree is copied forward. Re-adding python3/pip to a
+// runtime stage would put a dead interpreter back in every published RunPod image —
+// nothing in the container would ever invoke it. Matched against instructions only
+// (comments discuss the packages by name) and as whole apt tokens, so the venv's
+// hard-coded `python3.12` site-packages path is not a hit.
+const runtimePython = /(?:^|\s)(?:python3(?:-venv)?|pip)(?=\s|$)/m;
+function instructionsOnly(body) {
+  return body
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+assert.ok(
+  !runtimePython.test(instructionsOnly(candleRuntime.body)),
+  "candle runtime must stay Python-free — stage onnxruntime in ort-builder instead",
+);
+assert.ok(
+  !runtimePython.test(instructionsOnly(runpod.body)),
+  "combined RunPod runtime must stay Python-free",
+);
 for (const contract of [
   "COPY --from=embed-builder /out/sceneworks-rust-api",
   "COPY docker/runpod-entrypoint.sh",
