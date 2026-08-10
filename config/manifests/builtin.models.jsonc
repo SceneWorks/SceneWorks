@@ -2224,9 +2224,74 @@
         "minMemoryGb": 50,
         "quantize": 4,
         // Production native Qwen loads are deferred under both Resident and Sequential policies.
-        // Only exact records captured under that executable shape are shipped as bindings here. Historical eager BF16/Q4 rows
-        // remain in the evidence corpus as provenance, but cannot authorize this production route.
+        // SC-18353 recaptured BF16 and Q4 at the exact 1024-square production geometry under that
+        // executable shape; the historical eager rows remain in the evidence corpus as provenance.
         "calibrations": [
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
+            "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
+            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "resident", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
+            "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
+            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "staged_residency", "parameters": {}
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
+            "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
+            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "bounded_decode", "parameters": { "decodeOverlap": 64, "decodeTileEdge": 512 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
+            "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
+            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
+            "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
+            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "bf16",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:bf16",
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
+          },
           {
             "abi": 3, "loadShape": "deferred_materialization",
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
@@ -2251,6 +2316,32 @@
             "artifactRepository": "SceneWorks/qwen-image-mlx",
             "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q8",
             "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q8",
+            "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
+            "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
+            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q4",
+            "rung": "bounded_attention", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512 }
+          },
+          {
+            "abi": 3, "loadShape": "deferred_materialization",
+            "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+            "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
+            "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
+            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+            "artifactRepository": "SceneWorks/qwen-image-mlx",
+            "artifactResolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf", "artifactVariant": "q4",
+            "resolvedPathFingerprint": "SceneWorks/qwen-image-mlx@8080a4171f1c8b7fca6c30491eafbe6ffab754bf:q4",
             "rung": "bounded_transformer_residency", "parameters": { "attentionChunkSize": 67108864, "decodeOverlap": 64, "decodeTileEdge": 512, "transformerWindowSize": 1 }
           }
         ],
