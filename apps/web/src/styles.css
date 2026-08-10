@@ -7409,6 +7409,44 @@ details[open] > summary.lora-scope-group-heading::before,
   background: transparent;
 }
 
+/* Inline required-model notice (RequiredModelsNotice): the compact sibling of the gate above,
+   for one option on an otherwise usable screen rather than a whole Studio body. Sits inside an
+   existing form/section, so it stays a bordered block instead of a centered card. */
+.required-models-notice {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2, var(--surface-2));
+}
+
+.required-models-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.required-models-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.required-models-row > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.required-models-row small {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 .lora-row > span:first-child {
   display: grid;
   gap: 3px;

@@ -2,6 +2,7 @@ import React from "react";
 
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { Icon } from "../../components/Icons.jsx";
+import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
@@ -81,6 +82,17 @@ export function ConfigureJobPanel({
   // DatasetDoctorReadout below. Whether readiness blocks the run is now one of
   // `configValidity`'s issues (sc-10648), so there is no separate readiness prop.
   datasetDoctor,
+  // Preprocessor models this run needs but doesn't have (modelEligibility.missingRequiredModels).
+  // A pose control branch renders its condition with DWPose, whose resolver is cache-only since
+  // epic 17625 — so without it the run reaches the worker and dies there. The same list is folded
+  // into `configValidity` by the screen, which is what actually blocks Start training; this only
+  // renders the offer. Empty for every LoRA target.
+  missingControlModels = [],
+  controlModelDownloadJobs = [],
+  onDownloadModel,
+  onOpenModels,
+  onOpenQueue,
+  onCancelJob,
 }) {
   // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
   // per-image control condition from the selected dataset (the data source) and trains a control
@@ -263,6 +275,20 @@ export function ConfigureJobPanel({
               captioned dataset; bring-your-own prepared/annotated datasets are coming next.
             </p>
           ) : null}
+
+          {/* The condition above is rendered by a preprocessor, and a pose one needs DWPose. Offer
+              it here rather than letting the queued run fail at the worker with an install error
+              the Training Studio gives no way to act on. */}
+          <RequiredModelsNotice
+            detail="Preprocessing runs locally on the native worker, so the run would fail without it."
+            downloadJobs={controlModelDownloadJobs}
+            feature={`${controlType.charAt(0).toUpperCase()}${controlType.slice(1)} ControlNet training`}
+            models={missingControlModels}
+            onCancelJob={onCancelJob}
+            onDownload={onDownloadModel}
+            onOpenModels={onOpenModels}
+            onOpenQueue={onOpenQueue}
+          />
 
           <AdvancedSection
             hint="cleared values → preset default"
