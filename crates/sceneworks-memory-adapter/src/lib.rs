@@ -13,6 +13,7 @@ pub const INFERENCE_PIN: &str = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
+pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
 pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
@@ -872,6 +873,40 @@ mod tests {
             revision,
             "q4",
             KREA_REPOSITORY
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sdxl_identity_rejects_wrong_repository_revision_and_root() {
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let root = Path::new(
+            "/cache/models--SceneWorks--sdxl-base-mlx/snapshots/0123456789abcdef0123456789abcdef01234567/q8",
+        );
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            SDXL_REPOSITORY,
+            revision,
+            "q8",
+            SDXL_REPOSITORY
+        )
+        .is_ok());
+        assert!(validate_huggingface_snapshot_root(
+            root,
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            revision,
+            "q8",
+            SDXL_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            Path::new(
+                "/cache/models--SceneWorks--sdxl-base-mlx/snapshots/0123456789abcdef0123456789abcdef01234567/q4",
+            ),
+            SDXL_REPOSITORY,
+            revision,
+            "q8",
+            SDXL_REPOSITORY
         )
         .is_err());
     }

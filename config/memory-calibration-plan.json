@@ -1751,6 +1751,168 @@
       "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
     },
     {
+      "name": "mlx-sdxl-base-q4-resident-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q4-staged-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q4-bounded-transformer-window1-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q4-bounded-transformer-window2-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 2, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q4-bounded-transformer-window5-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 5, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q4-bounded-transformer-window10-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q4-768-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q8-resident-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q8-staged-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q8-bounded-transformer-window1-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q8-bounded-transformer-window2-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 2, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q8-bounded-transformer-window5-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 5, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-q8-bounded-transformer-window10-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-bf16-resident-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-bf16-1024-seed18379-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-bf16-staged-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-bf16-1024-seed18379-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-bf16-bounded-transformer-window1-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-bf16-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-bf16-bounded-transformer-window2-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-bf16-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 2, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-bf16-bounded-transformer-window5-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-bf16-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 5, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-sdxl-base-bf16-bounded-transformer-window10-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "sdxl", "modelId": "sdxl", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "fixture": "sdxl-base-mlx-bf16-1024-seed18379-step2",
+      "cases": [{ "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "dit" }, "expectedResult": "passed" }]
+    },
+    {
       "name": "mlx-krea-pose-control-q4-768",
       "evidenceScope": "authoritative",
       "backend": "mlx",

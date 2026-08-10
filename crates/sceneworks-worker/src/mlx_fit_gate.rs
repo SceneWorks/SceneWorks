@@ -6370,6 +6370,139 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path() {
+        fn fixture_spec(root: &std::path::Path, policy: OffloadPolicy) -> LoadSpec {
+            for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
+                let directory = root.join(component);
+                std::fs::create_dir_all(&directory).unwrap();
+                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+                bytes.extend_from_slice(header);
+                bytes.extend_from_slice(&0_f32.to_le_bytes());
+                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+            }
+            std::fs::write(
+                root.join("unet").join("config.json"),
+                r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )
+            .unwrap();
+            LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+                .with_quant(gen_core::Quant::Q4)
+                .with_offload_policy(policy)
+                .with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+        }
+
+        fn contract(root: &std::path::Path, policy: OffloadPolicy) -> MemoryProviderContract {
+            let mut contract = crate::inference_runtime::media()
+                .memory_strategy_contract("sdxl", &fixture_spec(root, policy))
+                .unwrap()
+                .expect("the shipped plain SDXL registry contract");
+            contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = 0;
+            contract
+        }
+
+        fn generator(contract: MemoryProviderContract) -> RequestGenerator {
+            RequestGenerator {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "sdxl",
+                    family: "sdxl",
+                    backend: "mlx",
+                    modality: gen_core::Modality::Image,
+                    capabilities: gen_core::Capabilities::default(),
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                contract: Some(contract),
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let plan = MlxRequestPlan {
+            engine_id: "sdxl",
+            model_id: "sdxl".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+                component_precision_floors: &[],
+            },
+            asset_bytes: gib_to_bytes(6.0),
+            folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
+            activation_headroom_bytes: gib_to_bytes(6.0),
+            fixed_reserve_bytes: gib_to_bytes(2.0),
+            calibration: MlxCalibrationConfig::Absent,
+        };
+        let inputs = fixture_inputs(1024, 1024);
+
+        let resident = evaluate_request_with_budget(
+            &generator(contract(root.path(), OffloadPolicy::Resident)),
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(20.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect("a roomy host must retain exact SDXL resident admission");
+        assert_eq!(
+            resident.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+
+        let constrained = evaluate_request_with_budget(
+            &generator(contract(root.path(), OffloadPolicy::Sequential)),
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Sequential,
+            fixture_budget(8.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect("unmeasured SDXL must reach its deepest implemented estimate rung");
+        assert_eq!(
+            constrained.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        assert_eq!(
+            constrained
+                .context
+                .selection
+                .parameters
+                .transformer_window_size,
+            Some(1),
+            "the current selector chooses the smallest-memory cadence from the provider domain"
+        );
+        assert!(constrained.memory.stage_residency);
+        assert!(constrained.memory.stream_transformer_blocks);
+        assert!(!constrained.memory.tile_vae_decode);
+        assert!(!constrained.memory.chunk_attention);
+        for evaluation in [&resident, &constrained] {
+            assert_eq!(evaluation.context.mode, MemoryMode::TextToImage);
+            assert!(!evaluation.context.has_reference);
+            assert_eq!(evaluation.context.geometry.reference_count, 0);
+            assert!(evaluation.context.overlay.is_none());
+            assert!(!evaluation.context.use_pid);
+            assert_eq!(
+                evaluation.context.load_shape,
+                gen_core::LoadShape::DeferredMaterialization
+            );
+            assert_eq!(
+                evaluation.context.evidence_revision,
+                REQUEST_EVIDENCE_REVISION
+            );
+            assert_eq!(evaluation.process_limit_bytes, None);
+        }
+    }
+
     /// sc-18094/sc-18096: `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` is honored at the
     /// synthesis seam. An extrapolation that moves the request peak onto a DIFFERENT phase than
     /// the measured cell's is rejected — the rung falls back to the no-measured-basis floor,

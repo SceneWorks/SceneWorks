@@ -140,7 +140,7 @@ ids they cover today:
 
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
-| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo`, `krea_2_turbo_control`, `flux2_dev` (sc-18218 — **resident rung only**; every other strategy is `Missing` on the pinned FLUX.2-dev contract, and the arm refuses a non-resident rung by name) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
+| `memory-mlx-adapter` | `qwen_image`, `z_image_turbo`, `krea_2_turbo`, `sdxl`, `krea_2_turbo_control`, `flux2_dev` (SDXL exposes only Resident, Staged, and bounded-transformer residency; its decode/attention rungs are measured `Missing`. FLUX.2-dev is **resident rung only**.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew) |
 | `memory-candle-adapter` | `qwen_image`, `krea_2_turbo` | `candle.rs:540-548` — `Candle five-rung calibration does not implement provider "<id>"` |
 
 Since sc-18212 the stale-lane report answers this gate for you: its `CAPTURE` column and
@@ -386,6 +386,11 @@ SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx       # fixed; validated 
 SCENEWORKS_KREA_REVISION=<exact base artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8, derived from the plan target
 
+# memory-mlx-adapter — sdxl (plain text-to-image)
+SCENEWORKS_SDXL_REPOSITORY=SceneWorks/sdxl-base-mlx          # fixed; validated against SDXL_REPOSITORY
+SCENEWORKS_SDXL_REVISION=<exact base artifact revision>
+SCENEWORKS_SDXL_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8, derived from the plan target
+
 # memory-mlx-adapter — krea_2_turbo_control   (mlx.rs:1717-1735)
 SCENEWORKS_KREA_CONTROL_REPOSITORY=SceneWorks/krea-2-turbo-mlx  # validated against KREA_REPOSITORY
 SCENEWORKS_KREA_CONTROL_REVISION=<exact base artifact revision>
@@ -413,6 +418,10 @@ All three of each family are **required** (`protocol::required_env`) — a missi
 model load, not after. The plain MLX Krea arm is reference-free, rejects overlays and PiD, and runs
 the production deferred-materialization shape across q4, q8, and bf16. Its plan deliberately has no
 evidence records or manifest bindings until a physical Apple-Silicon capture is executed and reviewed.
+The plain SDXL arm has the same artifact and surface guards, but plans only its three implemented
+rungs: Resident, Staged, and bounded-transformer residency across the exact cadence domain
+`1, 2, 5, 10`. Its measured-Missing decode and attention rungs are absent by design, and SC-18379
+likewise adds no evidence or binding.
 
 ### If the snapshot is absent
 

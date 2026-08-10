@@ -3793,8 +3793,8 @@ mod candle_image_load_shape_tests {
 /// measured identities at the current provider pin: base Lens Q4 exposes the full ladder, while
 /// Lens-Turbo BF16 retains its legacy text-encoder-only rung. Qwen base/edit also cover Q4/Q8 and
 /// forward-time adapters because the block stream replays packed quantization and captured residuals.
-/// Request-aware callers use the private helper below so Krea base calibration is never applied to
-/// reference, edit, or Hires.fix surfaces that happen to share the same engine and weight shape.
+/// Request-aware callers use the private helper below so Krea and SDXL base calibration is never
+/// applied to reference, edit, or Hires.fix surfaces that share the same engine and weight shape.
 #[cfg(target_os = "macos")]
 pub(crate) fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     apply_measured_mlx_load_shape_for_request(engine_id, spec, true)
@@ -3830,7 +3830,15 @@ fn apply_measured_mlx_load_shape_for_request(
         && spec.ip_adapter.is_none()
         && spec.adapters.is_empty()
         && spec.pid.is_none();
-    if lens_native || qwen_native || krea_native {
+    let sdxl_native = directory_native
+        && engine_id == "sdxl"
+        && plain_text_to_image
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.adapters.is_empty()
+        && spec.pid.is_none();
+    if lens_native || qwen_native || krea_native || sdxl_native {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -4117,6 +4125,96 @@ mod measured_mlx_load_shape_tests {
                 apply_measured_mlx_load_shape_for_request(engine, spec, true).load_shape,
                 gen_core::LoadShape::EagerMaterialization,
                 "{engine} overlay/edit/control surface is outside the base calibration identity"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_plain_sdxl_specs_reach_only_the_pinned_three_rung_contract() {
+        fn sdxl_spec(root: &std::path::Path, quant_bits: Option<u8>, quant: Option<Quant>) -> LoadSpec {
+            for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
+                let directory = root.join(component);
+                std::fs::create_dir_all(&directory).unwrap();
+                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+                bytes.extend_from_slice(header);
+                bytes.extend_from_slice(&0_f32.to_le_bytes());
+                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+            }
+            if let Some(bits) = quant_bits {
+                std::fs::write(
+                    root.join("unet").join("config.json"),
+                    format!(r#"{{"quantization":{{"bits":{bits},"group_size":64}}}}"#),
+                )
+                .unwrap();
+            }
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root.to_owned()));
+            if let Some(quant) = quant {
+                spec = spec.with_quant(quant);
+            }
+            spec
+        }
+
+        for (tier, quant_bits, quant) in [
+            ("bf16", None, None),
+            ("q4", Some(4), Some(Quant::Q4)),
+            ("q8", Some(8), Some(Quant::Q8)),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let shaped = apply_measured_mlx_load_shape_for_request(
+                "sdxl",
+                sdxl_spec(root.path(), quant_bits, quant),
+                true,
+            );
+            assert_eq!(
+                shaped.load_shape,
+                gen_core::LoadShape::DeferredMaterialization,
+                "plain SDXL {tier} must use the production deferred load shape"
+            );
+            let contract = crate::inference_runtime::media()
+                .memory_strategy_contract(
+                    "sdxl",
+                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
+                )
+                .unwrap()
+                .expect("plain SDXL must resolve its pinned provider contract before GPU work");
+            assert_eq!(
+                contract
+                    .capability(MemoryStrategy::BoundedTransformerResidency)
+                    .unwrap()
+                    .support,
+                MemoryStrategySupport::Implemented,
+                "{tier}"
+            );
+            for missing in [MemoryStrategy::BoundedDecode, MemoryStrategy::BoundedAttention] {
+                assert_eq!(
+                    contract.capability(missing).unwrap().support,
+                    MemoryStrategySupport::Missing,
+                    "SDXL {tier} must not invent measured-Missing rungs"
+                );
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let base = sdxl_spec(root.path(), Some(4), Some(Quant::Q4));
+        assert_eq!(
+            apply_measured_mlx_load_shape_for_request("sdxl", base.clone(), false).load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "SDXL edit/reference/Hires.fix requests are outside the base T2I apparatus"
+        );
+        let adapter = AdapterSpec::new(
+            root.path().join("adapter.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        for spec in [
+            base.clone().with_adapters(vec![adapter]),
+            base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
+        ] {
+            assert_eq!(
+                apply_measured_mlx_load_shape_for_request("sdxl", spec, true).load_shape,
+                gen_core::LoadShape::EagerMaterialization,
+                "SDXL adapter/control surfaces must not borrow the base calibration identity"
             );
         }
     }

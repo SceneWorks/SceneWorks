@@ -152,6 +152,19 @@
       "sourceFileCount": 158,
       "lockedPackageCount": 164
     },
+    "mlx:sdxl": {
+      "crate": "crates/media/mlx-gen/mlx-gen-sdxl",
+      "digest": "5c7802ff67f0fc6ffa712dc9e9eedd636d3af7f41bbc8be8c58debf725bda5a0",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-sdxl"
+      ],
+      "sourceFileCount": 145,
+      "lockedPackageCount": 165
+    },
     "mlx:z_image_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
       "digest": "10557e534c3c813e1bbc745c45764b0a0dc203a7a5bf4d36a7efd6beba29ac04",
