@@ -280,7 +280,7 @@ pub(crate) struct SeamMessages {
 /// fails THIS request with a clean [`WorkerError::Engine`] built from `msgs.panic_reset`, evicts the
 /// resident model (post-abort backend state is suspect), and leaves the shared thread serving.
 pub(crate) async fn run_cached<K, M, R>(
-    worker: &'static mpsc::Sender<CacheJob<K, M>>,
+    worker: &mpsc::Sender<CacheJob<K, M>>,
     key: K,
     load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
     run: impl FnOnce(&M) -> WorkerResult<R> + Send + 'static,
@@ -296,7 +296,7 @@ where
 
 /// [`run_cached`] plus the true cold/warm access state for request-scoped policy evaluation.
 pub(crate) async fn run_cached_with_access<K, M, R>(
-    worker: &'static mpsc::Sender<CacheJob<K, M>>,
+    worker: &mpsc::Sender<CacheJob<K, M>>,
     key: K,
     load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
     run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,

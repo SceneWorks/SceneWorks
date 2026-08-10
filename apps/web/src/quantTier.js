@@ -5,7 +5,7 @@
 // `variant` key and an `installState`), and maps the chosen tier to the worker control the
 // generation already understands — `advanced.mlxQuantize`.
 //
-// The worker side is already done (GeneratorCacheKey includes `quantize`; `resolve_quant`
+// The worker side is already done (`LoadIdentity` includes `quantize`; `resolve_quant`
 // honors `advanced.mlxQuantize`), so this is purely: which tiers are installed, and what
 // mlxQuantize value does the picked tier send. Reload-always (epic decision 4): switching a
 // heavy tier evicts + reloads on the worker; the studio surfaces a brief "loading" state and

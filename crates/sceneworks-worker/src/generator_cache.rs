@@ -14,21 +14,23 @@ use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages
 use crate::WorkerResult;
 
 /// The generator cache is a single-resident [`crate::cache_thread::CacheThread`] keyed by
-/// [`GeneratorCacheKey`], holding a loaded `Box<dyn Generator>`. The generic scaffolding (dedicated
+/// [`LoadIdentity`], holding a loaded `Box<dyn Generator>`. The generic scaffolding (dedicated
 /// worker thread, idle-timeout eviction, panic containment, `Fingerprint`, oneshot-reply seam) lives
 /// in [`crate::cache_thread`]; this module supplies only the key derivation, the loader, and the
 /// message strings (sc-11191, F-019).
 struct CachedGenerator {
     generator: Box<dyn Generator>,
-    load_policy: OffloadPolicy,
+    /// The execution policy selected on the cold load. This is a materialization fact about the
+    /// resident generator, not part of its reusable load identity.
+    loaded_policy: ExecutionPolicy,
     /// Process-global MLX active bytes that predated this cached generator. Request admission must
     /// never mistake these unrelated allocations for already-resident generator weights.
     external_committed_bytes: u64,
 }
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-type GeneratorCache = CacheThread<GeneratorCacheKey, CachedGenerator>;
-type GeneratorJob = CacheJob<GeneratorCacheKey, CachedGenerator>;
+type GeneratorCache = CacheThread<LoadIdentity, CachedGenerator>;
+type GeneratorJob = CacheJob<LoadIdentity, CachedGenerator>;
 
 const GENERATOR_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
 const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
@@ -54,7 +56,7 @@ fn capture_external_committed_bytes() -> u64 {
 static GENERATOR_WORKER: OnceLock<mpsc::Sender<GeneratorJob>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GeneratorCacheKey {
+pub(crate) struct LoadIdentity {
     engine_id: String,
     weights: CacheWeightsSource,
     quantize: Option<Quant>,
@@ -63,16 +65,24 @@ pub(crate) struct GeneratorCacheKey {
     extra_controls: Vec<CacheWeightsSource>,
     ip_adapter: Option<CacheWeightsSource>,
     adapters: Vec<CacheAdapterSpec>,
-    // Phase release and block materialization are independent load-time identities (SC-15998).
-    // Reusing a generator across either boundary would execute a different physical load shape than
-    // the caller requested.
-    offload_policy: OffloadPolicy,
-    load_shape: LoadShape,
     // Per-generation PiD decoder aux-weights (epic 7840, sc-7849): `(checkpoint, gemma)` when the
     // generator was loaded with `LoadSpec::with_pid`, else `None`. Keyed so a PiD-equipped load is a
     // distinct cache entry from the plain VAE load — toggling `usePid` reloads rather than reusing a
     // generator with the wrong decoder.
     pid: Option<(CacheWeightsSource, CacheWeightsSource)>,
+    identity: Option<CacheIdentityWeights>,
+    text_encoder: Option<CacheWeightsSource>,
+    /// `LoadSpec::components` is a `BTreeMap`, so iteration preserves the stable component-id order.
+    components: Vec<(String, CacheWeightsSource)>,
+}
+
+/// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
+/// policy does not force the same weights/composition to reload. Until sc-18317 adds warm switching,
+/// a cached generator continues to run under the policy selected when it was loaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExecutionPolicy {
+    pub(crate) offload_policy: OffloadPolicy,
+    pub(crate) load_shape: LoadShape,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +101,14 @@ struct CacheAdapterSpec {
     moe_expert: Option<MoeExpert>,
 }
 
-impl GeneratorCacheKey {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CacheIdentityWeights {
+    encoder: Option<CacheWeightsSource>,
+    eva: Option<CacheWeightsSource>,
+    face_dir: Option<CacheWeightsSource>,
+}
+
+impl LoadIdentity {
     pub(crate) fn from_load_spec(engine_id: &str, spec: &LoadSpec) -> Self {
         Self {
             engine_id: engine_id.to_owned(),
@@ -106,16 +123,54 @@ impl GeneratorCacheKey {
                 .collect(),
             ip_adapter: spec.ip_adapter.as_ref().map(CacheWeightsSource::from),
             adapters: spec.adapters.iter().map(CacheAdapterSpec::from).collect(),
-            offload_policy: spec.offload_policy,
-            load_shape: spec.load_shape,
             pid: spec.pid.as_ref().map(|pid| {
                 (
                     CacheWeightsSource::from(&pid.checkpoint),
                     CacheWeightsSource::from(&pid.gemma),
                 )
             }),
+            identity: spec.identity.as_ref().map(|identity| CacheIdentityWeights {
+                encoder: identity.encoder.as_ref().map(CacheWeightsSource::from),
+                eva: identity.eva.as_ref().map(CacheWeightsSource::from),
+                face_dir: identity.face_dir.as_ref().map(CacheWeightsSource::from),
+            }),
+            text_encoder: spec.text_encoder.as_ref().map(CacheWeightsSource::from),
+            components: spec
+                .components
+                .iter()
+                .map(|(id, source)| (id.clone(), CacheWeightsSource::from(source)))
+                .collect(),
         }
     }
+}
+
+impl ExecutionPolicy {
+    pub(crate) fn from_load_spec(spec: &LoadSpec) -> Self {
+        Self {
+            offload_policy: spec.offload_policy,
+            load_shape: spec.load_shape,
+        }
+    }
+}
+
+fn log_warm_policy_mismatch(
+    engine_id: &str,
+    access: CacheAccess,
+    loaded_policy: ExecutionPolicy,
+    requested_policy: ExecutionPolicy,
+) {
+    if access != CacheAccess::Warm || loaded_policy == requested_policy {
+        return;
+    }
+    tracing::warn!(
+        event = "generator_cache_policy_mismatch",
+        engine = engine_id,
+        loadedOffloadPolicy = ?loaded_policy.offload_policy,
+        loadedLoadShape = ?loaded_policy.load_shape,
+        requestedOffloadPolicy = ?requested_policy.offload_policy,
+        requestedLoadShape = ?requested_policy.load_shape,
+        "serving the cached generator under its cold-load policy"
+    );
 }
 
 impl From<&WeightsSource> for CacheWeightsSource {
@@ -164,7 +219,7 @@ fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Op
         rx,
         idle_timeout,
         GENERATOR_EVICT_BEFORE_LOAD,
-        |key: &GeneratorCacheKey, idle_seconds| {
+        |key: &LoadIdentity, idle_seconds| {
             // Documented event (docs/observability.md): expected idle-timeout eviction, so info
             // level with the engine + idle window.
             tracing::info!(
@@ -493,18 +548,29 @@ where
         spec,
         load_error_context,
         crate::inference_runtime::load,
-        move |generator, _cache_state, _load_policy, _external_committed_bytes| run(generator),
+        move |generator,
+              _cache_state,
+              _loaded_policy,
+              _requested_policy,
+              _external_committed_bytes| { run(generator) },
     )
     .await
 }
 
 /// Run one request against a cached generator while exposing the independent request-policy inputs
-/// that do not belong in [`GeneratorCacheKey`].
+/// that do not belong in [`LoadIdentity`]. The callback receives both the policy the resident
+/// generator was loaded under and the current request's policy intent.
 pub(crate) async fn with_cached_generator_for_request<R>(
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
-    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            ExecutionPolicy,
+            u64,
+        ) -> WorkerResult<R>
         + Send
         + 'static,
 ) -> WorkerResult<R>
@@ -547,7 +613,11 @@ where
         spec,
         load_error_context,
         load_generator,
-        move |generator, _cache_state, _load_policy, _external_committed_bytes| run(generator),
+        move |generator,
+              _cache_state,
+              _loaded_policy,
+              _requested_policy,
+              _external_committed_bytes| { run(generator) },
     )
     .await
 }
@@ -559,14 +629,53 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            ExecutionPolicy,
+            u64,
+        ) -> WorkerResult<R>
         + Send
         + 'static,
 ) -> WorkerResult<R>
 where
     R: Send + 'static,
 {
-    let key = GeneratorCacheKey::from_load_spec(engine_id, &spec);
+    with_cached_generator_for_request_using_on(
+        generator_worker(),
+        engine_id,
+        spec,
+        load_error_context,
+        load_generator,
+        run,
+    )
+    .await
+}
+
+async fn with_cached_generator_for_request_using_on<R>(
+    worker: &mpsc::Sender<GeneratorJob>,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            ExecutionPolicy,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    let key = LoadIdentity::from_load_spec(engine_id, &spec);
+    let requested_policy = ExecutionPolicy::from_load_spec(&spec);
     let load_error_context = load_error_context.into();
     // The loader owns the generator-specific cold-load policy. Pre-load unified-memory fit-gate +
     // residency selection (epic 10834; sc-10835 Phase 0, sc-10839 Phase 1): BEFORE crate::inference_runtime::load
@@ -577,13 +686,13 @@ where
     // miss (a warm cache hit never invokes the loader), so an already-resident model is never re-gated.
     let load = move || {
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
-        let load_policy = spec.offload_policy;
+        let loaded_policy = ExecutionPolicy::from_load_spec(&spec);
         let external_committed_bytes = capture_external_committed_bytes();
         let generator = load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
         Ok(CachedGenerator {
             generator,
-            load_policy,
+            loaded_policy,
             external_committed_bytes,
         })
     };
@@ -592,21 +701,16 @@ where
             CacheAccess::Cold => MemoryCacheState::Cold,
             CacheAccess::Warm => MemoryCacheState::Warm,
         };
+        log_warm_policy_mismatch(engine_id, access, cached.loaded_policy, requested_policy);
         run(
             cached.generator.as_ref(),
             cache_state,
-            cached.load_policy,
+            cached.loaded_policy,
+            requested_policy,
             cached.external_committed_bytes,
         )
     };
-    cache_thread::run_cached_with_access(
-        generator_worker(),
-        key,
-        load,
-        run,
-        GENERATOR_SEAM_MESSAGES,
-    )
-    .await
+    cache_thread::run_cached_with_access(worker, key, load, run, GENERATOR_SEAM_MESSAGES).await
 }
 
 /// Run `run` against a freshly-loaded, **uncached** generator on the shared cache thread (epic 10451
@@ -866,17 +970,17 @@ mod tests {
         different_scale.adapters[0].scale = 0.9;
 
         assert_ne!(
-            GeneratorCacheKey::from_load_spec("z_image_turbo", &base),
-            GeneratorCacheKey::from_load_spec("z_image_turbo", &with_adapter)
+            LoadIdentity::from_load_spec("z_image_turbo", &base),
+            LoadIdentity::from_load_spec("z_image_turbo", &with_adapter)
         );
         assert_ne!(
-            GeneratorCacheKey::from_load_spec("z_image_turbo", &with_adapter),
-            GeneratorCacheKey::from_load_spec("z_image_turbo", &different_scale)
+            LoadIdentity::from_load_spec("z_image_turbo", &with_adapter),
+            LoadIdentity::from_load_spec("z_image_turbo", &different_scale)
         );
     }
 
     #[test]
-    fn cache_key_separates_phase_residency_from_materialization_shape() {
+    fn execution_policy_does_not_change_load_identity() {
         let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/z-image/q4")));
         let staged = base.clone().with_offload_policy(OffloadPolicy::Sequential);
         let deferred = base
@@ -886,16 +990,189 @@ mod tests {
             .clone()
             .with_load_shape(LoadShape::DeferredMaterialization);
 
-        let keys = [&base, &staged, &deferred, &staged_deferred]
-            .map(|spec| GeneratorCacheKey::from_load_spec("z_image_turbo", spec));
-        for left in 0..keys.len() {
-            for right in (left + 1)..keys.len() {
+        let specs = [&base, &staged, &deferred, &staged_deferred];
+        let identities = specs.map(|spec| LoadIdentity::from_load_spec("z_image_turbo", spec));
+        assert!(
+            identities.iter().all(|identity| identity == &identities[0]),
+            "offload policy and load shape are request policy, not load identity"
+        );
+
+        let policies = specs.map(ExecutionPolicy::from_load_spec);
+        for left in 0..policies.len() {
+            for right in (left + 1)..policies.len() {
                 assert_ne!(
-                    keys[left], keys[right],
-                    "all four residency/materialization combinations need distinct cache entries"
+                    policies[left], policies[right],
+                    "the four residency/materialization combinations remain distinct policy intents"
                 );
             }
         }
+    }
+
+    fn fully_populated_load_spec() -> LoadSpec {
+        let mut spec = LoadSpec::new(WeightsSource::File(PathBuf::from("/load/base.safetensors")));
+        spec.quantize = Some(Quant::Q4);
+        spec.precision = Precision::Bf16;
+        spec.control = Some(WeightsSource::File(PathBuf::from(
+            "/load/control.safetensors",
+        )));
+        spec.extra_controls = vec![
+            WeightsSource::File(PathBuf::from("/load/control-2.safetensors")),
+            WeightsSource::File(PathBuf::from("/load/control-3.safetensors")),
+        ];
+        spec.ip_adapter = Some(WeightsSource::File(PathBuf::from(
+            "/load/ip-adapter.safetensors",
+        )));
+        spec.adapters = vec![
+            AdapterSpec::new(
+                PathBuf::from("/load/adapter-a.safetensors"),
+                0.75,
+                AdapterKind::Lora,
+            )
+            .with_pass_scales(vec![0.25, 0.75])
+            .with_moe_expert(MoeExpert::High),
+            AdapterSpec::new(
+                PathBuf::from("/load/adapter-b.safetensors"),
+                1.25,
+                AdapterKind::Lokr,
+            )
+            .with_moe_expert(MoeExpert::Low),
+        ];
+        spec.pid = Some(gen_core::PidWeights {
+            checkpoint: WeightsSource::File(PathBuf::from("/load/pid.safetensors")),
+            gemma: WeightsSource::Dir(PathBuf::from("/load/gemma")),
+        });
+        spec.identity = Some(gen_core::IdentityWeights {
+            encoder: Some(WeightsSource::File(PathBuf::from(
+                "/load/identity.safetensors",
+            ))),
+            eva: Some(WeightsSource::File(PathBuf::from("/load/eva.safetensors"))),
+            face_dir: Some(WeightsSource::Dir(PathBuf::from("/load/face"))),
+        });
+        spec.text_encoder = Some(WeightsSource::Dir(PathBuf::from("/load/text-encoder")));
+        spec.components.insert(
+            "tokenizer".to_owned(),
+            WeightsSource::Dir(PathBuf::from("/load/tokenizer")),
+        );
+        spec.components.insert(
+            "vae".to_owned(),
+            WeightsSource::File(PathBuf::from("/load/vae.safetensors")),
+        );
+        spec
+    }
+
+    #[test]
+    fn every_load_affecting_field_discriminates_load_identity() {
+        let base = fully_populated_load_spec();
+        let identity = LoadIdentity::from_load_spec("provider", &base);
+
+        macro_rules! assert_field_changes_identity {
+            ($field:literal, $change:expr) => {{
+                let mut changed = base.clone();
+                ($change)(&mut changed);
+                assert_ne!(
+                    identity,
+                    LoadIdentity::from_load_spec("provider", &changed),
+                    "{} must participate in load identity",
+                    $field
+                );
+            }};
+        }
+
+        assert_ne!(
+            identity,
+            LoadIdentity::from_load_spec("different-provider", &base),
+            "engine id must participate in load identity"
+        );
+        assert_field_changes_identity!("weights", |spec: &mut LoadSpec| {
+            spec.weights = WeightsSource::File(PathBuf::from("/load/other-base.safetensors"));
+        });
+        assert_field_changes_identity!("quantize", |spec: &mut LoadSpec| {
+            spec.quantize = Some(Quant::Q8);
+        });
+        assert_field_changes_identity!("precision", |spec: &mut LoadSpec| {
+            spec.precision = Precision::Fp32;
+        });
+        assert_field_changes_identity!("control", |spec: &mut LoadSpec| {
+            spec.control = None;
+        });
+        assert_field_changes_identity!("extra_controls order", |spec: &mut LoadSpec| {
+            spec.extra_controls.swap(0, 1);
+        });
+        assert_field_changes_identity!("ip_adapter", |spec: &mut LoadSpec| {
+            spec.ip_adapter = None;
+        });
+        assert_field_changes_identity!("adapter path", |spec: &mut LoadSpec| {
+            spec.adapters[0].path = PathBuf::from("/load/other-adapter.safetensors");
+        });
+        assert_field_changes_identity!("adapter scale", |spec: &mut LoadSpec| {
+            spec.adapters[0].scale = 0.5;
+        });
+        assert_field_changes_identity!("adapter kind", |spec: &mut LoadSpec| {
+            spec.adapters[0].kind = AdapterKind::Lokr;
+        });
+        assert_field_changes_identity!("adapter pass scales", |spec: &mut LoadSpec| {
+            spec.adapters[0].pass_scales = Some(vec![0.5, 0.5]);
+        });
+        assert_field_changes_identity!("adapter MoE expert", |spec: &mut LoadSpec| {
+            spec.adapters[0].moe_expert = Some(MoeExpert::Low);
+        });
+        assert_field_changes_identity!("adapter order", |spec: &mut LoadSpec| {
+            spec.adapters.swap(0, 1);
+        });
+        assert_field_changes_identity!("PiD checkpoint", |spec: &mut LoadSpec| {
+            spec.pid.as_mut().unwrap().checkpoint =
+                WeightsSource::File(PathBuf::from("/load/other-pid.safetensors"));
+        });
+        assert_field_changes_identity!("PiD Gemma", |spec: &mut LoadSpec| {
+            spec.pid.as_mut().unwrap().gemma =
+                WeightsSource::Dir(PathBuf::from("/load/other-gemma"));
+        });
+        assert_field_changes_identity!("identity encoder", |spec: &mut LoadSpec| {
+            spec.identity.as_mut().unwrap().encoder = None;
+        });
+        assert_field_changes_identity!("identity EVA", |spec: &mut LoadSpec| {
+            spec.identity.as_mut().unwrap().eva = None;
+        });
+        assert_field_changes_identity!("identity face directory", |spec: &mut LoadSpec| {
+            spec.identity.as_mut().unwrap().face_dir = None;
+        });
+        assert_field_changes_identity!("text encoder", |spec: &mut LoadSpec| {
+            spec.text_encoder = None;
+        });
+        assert_field_changes_identity!("component key", |spec: &mut LoadSpec| {
+            let original_index = spec
+                .components
+                .keys()
+                .position(|key| key == "vae")
+                .expect("vae component position");
+            let source = spec.components.remove("vae").unwrap();
+            spec.components.insert("vae_v2".to_owned(), source);
+            let renamed_index = spec
+                .components
+                .keys()
+                .position(|key| key == "vae_v2")
+                .expect("renamed VAE component position");
+            assert_eq!(
+                original_index, renamed_index,
+                "the component-key mutation must preserve source order"
+            );
+        });
+        assert_field_changes_identity!("component source", |spec: &mut LoadSpec| {
+            spec.components.insert(
+                "vae".to_owned(),
+                WeightsSource::File(PathBuf::from("/load/other-vae.safetensors")),
+            );
+        });
+
+        let policy_only = base
+            .clone()
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization);
+        assert_eq!(
+            identity,
+            LoadIdentity::from_load_spec("provider", &policy_only),
+            "only execution policy is excluded from load identity"
+        );
     }
 
     // sc-8841 (F-039): the fingerprint helper is the core of the fix — it must report a DIFFERENT
@@ -961,6 +1238,81 @@ mod tests {
         assert_ne!(missing, earlier);
     }
 
+    fn spec_with_file_in_load_slot(slot: &str, path: PathBuf) -> LoadSpec {
+        let source = WeightsSource::File(path.clone());
+        let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
+        match slot {
+            "weights" => spec.weights = source,
+            "control" => spec.control = Some(source),
+            "extra_control" => spec.extra_controls.push(source),
+            "ip_adapter" => spec.ip_adapter = Some(source),
+            "adapter" => {
+                spec.adapters = vec![AdapterSpec::new(path, 1.0, AdapterKind::Lora)];
+            }
+            "pid_checkpoint" => {
+                spec.pid = Some(gen_core::PidWeights {
+                    checkpoint: source,
+                    gemma: WeightsSource::Dir(PathBuf::from("/models/gemma")),
+                });
+            }
+            "pid_gemma" => {
+                spec.pid = Some(gen_core::PidWeights {
+                    checkpoint: WeightsSource::File(PathBuf::from("/models/pid.safetensors")),
+                    gemma: source,
+                });
+            }
+            "identity_encoder" | "identity_eva" | "identity_face" => {
+                let mut identity = gen_core::IdentityWeights::default();
+                match slot {
+                    "identity_encoder" => identity.encoder = Some(source),
+                    "identity_eva" => identity.eva = Some(source),
+                    "identity_face" => identity.face_dir = Some(source),
+                    _ => unreachable!(),
+                }
+                spec.identity = Some(identity);
+            }
+            "text_encoder" => spec.text_encoder = Some(source),
+            "component" => {
+                spec.components.insert("overlay".to_owned(), source);
+            }
+            _ => panic!("unknown load slot {slot}"),
+        }
+        spec
+    }
+
+    #[test]
+    fn every_weight_source_slot_uses_same_path_fingerprints() {
+        for slot in [
+            "weights",
+            "control",
+            "extra_control",
+            "ip_adapter",
+            "adapter",
+            "pid_checkpoint",
+            "pid_gemma",
+            "identity_encoder",
+            "identity_eva",
+            "identity_face",
+            "text_encoder",
+            "component",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("weights.safetensors");
+            std::fs::write(&path, b"v1").expect("write v1");
+            let before = LoadIdentity::from_load_spec(
+                "provider",
+                &spec_with_file_in_load_slot(slot, path.clone()),
+            );
+            std::fs::write(&path, b"version-two-is-longer").expect("write v2");
+            let after =
+                LoadIdentity::from_load_spec("provider", &spec_with_file_in_load_slot(slot, path));
+            assert_ne!(
+                before, after,
+                "{slot} must invalidate the resident generator when its file is replaced"
+            );
+        }
+    }
+
     // sc-8841 (F-039): the whole-key oracle. A LoRA re-imported at the SAME path (new bytes, same
     // name) must yield a DIFFERENT cache key so the resident generator reloads instead of silently
     // reusing the stale adapter within the 300 s idle window. An unchanged file must yield the SAME
@@ -980,11 +1332,11 @@ mod tests {
             spec
         };
 
-        let key_v1 = GeneratorCacheKey::from_load_spec("z_image_turbo", &make_spec());
+        let key_v1 = LoadIdentity::from_load_spec("z_image_turbo", &make_spec());
         // Same file, no change → identical key → cache still hits.
         assert_eq!(
             key_v1,
-            GeneratorCacheKey::from_load_spec("z_image_turbo", &make_spec()),
+            LoadIdentity::from_load_spec("z_image_turbo", &make_spec()),
             "an unchanged adapter file must produce an identical cache key (cache hit preserved)"
         );
 
@@ -1001,7 +1353,7 @@ mod tests {
                 .expect("write lora v2");
         }
 
-        let key_v2 = GeneratorCacheKey::from_load_spec("z_image_turbo", &make_spec());
+        let key_v2 = LoadIdentity::from_load_spec("z_image_turbo", &make_spec());
         assert_ne!(
             key_v1, key_v2,
             "re-importing a LoRA at the same path must change the cache key so the stale adapter \
@@ -1014,7 +1366,7 @@ mod tests {
     /// shared `standard_tier_subdir`, sc-9092) toggling `advanced.mlxQuantize` changes BOTH the resolved
     /// tier subdir (`q4/` ↔ `q8/` ↔ `bf16/`) AND the load `quantize` — either alone flips the key, so a
     /// toggle can never collide with the cached generator (reload-always on toggle, epic 8506). This is
-    /// the candle sibling of the MLX A/B behaviour: `GeneratorCacheKey` already keys on both fields.
+    /// the candle sibling of the MLX A/B behaviour: `LoadIdentity` already keys on both fields.
     #[test]
     fn cache_key_includes_quant_tier_toggle() {
         // q4 tier: `<root>/q4` weights + Q4 load quant.
@@ -1028,24 +1380,24 @@ mod tests {
 
         // Every pairwise toggle is a distinct cache entry → a miss → a reload, never a wrong-tier reuse.
         assert_ne!(
-            GeneratorCacheKey::from_load_spec("lens", &q4),
-            GeneratorCacheKey::from_load_spec("lens", &q8)
+            LoadIdentity::from_load_spec("lens", &q4),
+            LoadIdentity::from_load_spec("lens", &q8)
         );
         assert_ne!(
-            GeneratorCacheKey::from_load_spec("lens", &q8),
-            GeneratorCacheKey::from_load_spec("lens", &bf16)
+            LoadIdentity::from_load_spec("lens", &q8),
+            LoadIdentity::from_load_spec("lens", &bf16)
         );
         assert_ne!(
-            GeneratorCacheKey::from_load_spec("lens", &q4),
-            GeneratorCacheKey::from_load_spec("lens", &bf16)
+            LoadIdentity::from_load_spec("lens", &q4),
+            LoadIdentity::from_load_spec("lens", &bf16)
         );
         // The `quantize` field alone flips the key even if the tier dir were identical — the candle lane
         // has always keyed on it (generator_cache.rs), so the A/B toggle is safe regardless of layout.
         let mut same_dir_q8 = q4.clone();
         same_dir_q8.quantize = Some(Quant::Q8);
         assert_ne!(
-            GeneratorCacheKey::from_load_spec("lens", &q4),
-            GeneratorCacheKey::from_load_spec("lens", &same_dir_q8)
+            LoadIdentity::from_load_spec("lens", &q4),
+            LoadIdentity::from_load_spec("lens", &same_dir_q8)
         );
     }
 
@@ -1059,8 +1411,81 @@ mod tests {
         ip.ip_adapter = Some(WeightsSource::Dir(PathBuf::from("/ip-adapter")));
 
         assert_ne!(
-            GeneratorCacheKey::from_load_spec("sdxl", &control),
-            GeneratorCacheKey::from_load_spec("sdxl", &ip)
+            LoadIdentity::from_load_spec("sdxl", &control),
+            LoadIdentity::from_load_spec("sdxl", &ip)
+        );
+    }
+
+    #[test]
+    fn load_identity_includes_identity_text_encoder_and_named_components() {
+        let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
+
+        let mut identity = base.clone();
+        identity.identity = Some(gen_core::IdentityWeights {
+            encoder: Some(WeightsSource::File(PathBuf::from(
+                "/identity/encoder.safetensors",
+            ))),
+            eva: Some(WeightsSource::File(PathBuf::from(
+                "/identity/eva.safetensors",
+            ))),
+            face_dir: Some(WeightsSource::Dir(PathBuf::from("/identity/face"))),
+        });
+
+        let mut text_encoder = base.clone();
+        text_encoder.text_encoder = Some(WeightsSource::Dir(PathBuf::from("/text-encoder")));
+
+        let components = base
+            .clone()
+            .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")))
+            .with_component(
+                "vae",
+                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
+            );
+        let components_reversed = base
+            .clone()
+            .with_component(
+                "vae",
+                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
+            )
+            .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")));
+
+        let base_identity = LoadIdentity::from_load_spec("provider", &base);
+        assert_ne!(
+            base_identity,
+            LoadIdentity::from_load_spec("provider", &identity)
+        );
+        assert_ne!(
+            base_identity,
+            LoadIdentity::from_load_spec("provider", &text_encoder)
+        );
+        assert_ne!(
+            base_identity,
+            LoadIdentity::from_load_spec("provider", &components)
+        );
+        assert_eq!(
+            LoadIdentity::from_load_spec("provider", &components),
+            LoadIdentity::from_load_spec("provider", &components_reversed),
+            "component insertion order must not perturb load identity"
+        );
+    }
+
+    #[test]
+    fn load_identity_fingerprints_named_component_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let component = dir.path().join("component.safetensors");
+        std::fs::write(&component, b"v1").expect("write component v1");
+
+        let make_spec = || {
+            LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")))
+                .with_component("optional_overlay", WeightsSource::File(component.clone()))
+        };
+        let before = LoadIdentity::from_load_spec("provider", &make_spec());
+        std::fs::write(&component, b"version-two-is-longer").expect("write component v2");
+        let after = LoadIdentity::from_load_spec("provider", &make_spec());
+
+        assert_ne!(
+            before, after,
+            "replacing a named component at the same path must invalidate the resident generator"
         );
     }
 
@@ -1125,9 +1550,9 @@ mod tests {
         }))
     }
 
-    fn stub_cache_key() -> GeneratorCacheKey {
+    fn stub_cache_key() -> LoadIdentity {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/stub")));
-        GeneratorCacheKey::from_load_spec("sc3724_stub", &spec)
+        LoadIdentity::from_load_spec("sc3724_stub", &spec)
     }
 
     /// Seed the generic cache with a resident stub generator (the test replacement for directly
@@ -1139,7 +1564,10 @@ mod tests {
                 generator: Box::new(StubGenerator {
                     descriptor: stub_descriptor(),
                 }),
-                load_policy: OffloadPolicy::Resident,
+                loaded_policy: ExecutionPolicy {
+                    offload_policy: OffloadPolicy::Resident,
+                    load_shape: LoadShape::EagerMaterialization,
+                },
                 external_committed_bytes: 0,
             },
         );
@@ -1182,11 +1610,14 @@ mod tests {
                             generator: Box::new(StubGenerator {
                                 descriptor: stub_descriptor(),
                             }),
-                            load_policy: OffloadPolicy::Sequential,
+                            loaded_policy: ExecutionPolicy {
+                                offload_policy: OffloadPolicy::Sequential,
+                                load_shape: LoadShape::DeferredMaterialization,
+                            },
                             external_committed_bytes: 0,
                         })
                     },
-                    |cached, access| Ok((access, cached.load_policy)),
+                    |cached, access| Ok((access, cached.loaded_policy)),
                     "missing",
                 )
                 .unwrap()
@@ -1194,13 +1625,136 @@ mod tests {
 
         assert_eq!(
             run(&mut cache),
-            (CacheAccess::Cold, OffloadPolicy::Sequential)
+            (
+                CacheAccess::Cold,
+                ExecutionPolicy {
+                    offload_policy: OffloadPolicy::Sequential,
+                    load_shape: LoadShape::DeferredMaterialization,
+                }
+            )
         );
         assert_eq!(
             run(&mut cache),
-            (CacheAccess::Warm, OffloadPolicy::Sequential)
+            (
+                CacheAccess::Warm,
+                ExecutionPolicy {
+                    offload_policy: OffloadPolicy::Sequential,
+                    load_shape: LoadShape::DeferredMaterialization,
+                }
+            )
         );
         assert_eq!(loads.get(), 1, "geometry-independent key loads only once");
+    }
+
+    #[tokio::test]
+    async fn production_seam_reuses_identity_exposes_policy_and_logs_warm_mismatch() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_target(false)
+            .without_time()
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let worker = thread::spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || run_generator_cache_worker(rx, None))
+        });
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let resident = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let requested_resident = ExecutionPolicy::from_load_spec(&resident);
+        let staged = resident
+            .clone()
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization);
+        let requested_staged = ExecutionPolicy::from_load_spec(&staged);
+        let loads = Arc::new(AtomicUsize::new(0));
+
+        let cold_loads = Arc::clone(&loads);
+        let cold = with_cached_generator_for_request_using_on(
+            &tx,
+            "sc3724_stub",
+            resident,
+            "stub load",
+            move |_id, spec| {
+                cold_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, loaded_policy, requested_policy, _| {
+                Ok((cache_state, loaded_policy, requested_policy))
+            },
+        )
+        .await
+        .expect("cold request succeeds");
+
+        let warm_loads = Arc::clone(&loads);
+        let warm = with_cached_generator_for_request_using_on(
+            &tx,
+            "sc3724_stub",
+            staged,
+            "stub load",
+            move |_id, spec| {
+                warm_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, loaded_policy, requested_policy, _| {
+                Ok((cache_state, loaded_policy, requested_policy))
+            },
+        )
+        .await
+        .expect("warm request succeeds");
+
+        assert_eq!(
+            cold,
+            (
+                MemoryCacheState::Cold,
+                requested_resident,
+                requested_resident
+            )
+        );
+        assert_eq!(
+            warm,
+            (MemoryCacheState::Warm, requested_resident, requested_staged),
+            "the warm request must run the resident generator while preserving its own intent"
+        );
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "policy-only changes must not construct another generator"
+        );
+
+        drop(tx);
+        worker.join().expect("cache worker exits");
+        let text = String::from_utf8(capture.0.lock().unwrap().clone()).expect("utf-8 tracing");
+
+        assert_eq!(text.matches("generator_cache_policy_mismatch").count(), 1);
+        for expected in [
+            "engine=\"sc3724_stub\"",
+            "loadedOffloadPolicy=Resident",
+            "loadedLoadShape=EagerMaterialization",
+            "requestedOffloadPolicy=Sequential",
+            "requestedLoadShape=DeferredMaterialization",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
     }
 
     #[test]
