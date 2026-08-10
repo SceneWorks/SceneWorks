@@ -274,7 +274,9 @@ revision using `SCENEWORKS_INFERENCE_READ_TOKEN` when configured and the workflo
 otherwise, fingerprints the exact tier inventory, builds the release adapter, runs the
 authoritative provider through the harness, hashes every artifact byte, schema-checks the bundle, and
 uploads the evidence JSON together with a repository-relative receipt tree containing the exact
-request, raw provider response, and selected/reference RGB outputs. Every newly planned q4/bf16
+request, raw provider response, and selected/reference RGB outputs. The three session outputs are a
+closed typed set (`request`, `selected_rgb`, `reference_rgb`) with unique paths; RGB filenames include
+their role and content SHA-256, and receipt creation never overwrites different existing bytes. Every newly planned q4/bf16
 record carries `sourceProvenance: physical_mlx_v1`; JS and Rust bundle consumers require its claims
 to share one `physical_mlx` session bound to the record's exact inventory. Validate the downloaded
 artifact with `check --source-root <unpacked-raw-root>`, copy its `docs/calibration/...` tree into the

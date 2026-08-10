@@ -31,6 +31,12 @@ export const RUNG_REUSE_TOLERANCE = Object.freeze({
   absoluteBytes: 256 * 1024 * 1024,
   relative: 0.05,
 });
+const PHYSICAL_MLX_SESSION_OUTPUT_ROLES = Object.freeze([
+  "request", "selected_rgb", "reference_rgb",
+]);
+const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
+  "selected_rgb", "reference_rgb",
+]);
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -38,6 +44,38 @@ function stable(value) {
     return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
   }
   return value;
+}
+
+function validateExactOutputReceipts(outputs, expectedRoles, label) {
+  if (!Array.isArray(outputs) || outputs.length !== expectedRoles.length) {
+    fail(`${label} requires exactly ${expectedRoles.length} typed output receipts`);
+  }
+  const roles = new Set();
+  const paths = new Set();
+  for (const output of outputs) {
+    object(output, `${label}[]`);
+    text(output.role, `${label}[].role`);
+    text(output.path, `${label}[].path`);
+    if (roles.has(output.role)) fail(`${label} repeats output role ${output.role}`);
+    if (paths.has(output.path)) fail(`${label} repeats output path ${output.path}`);
+    roles.add(output.role);
+    paths.add(output.path);
+  }
+  const expected = new Set(expectedRoles);
+  if (roles.size !== expected.size || [...roles].some((role) => !expected.has(role))) {
+    fail(`${label} must contain exactly ${expectedRoles.join(", ")}`);
+  }
+}
+
+async function writeImmutableReceipt(file, contents) {
+  const bytes = Buffer.isBuffer(contents) ? contents : Buffer.from(contents, "utf8");
+  try {
+    await writeFile(file, bytes, { flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = await readFile(file);
+    if (!existing.equals(bytes)) fail(`immutable source receipt already exists with different bytes: ${file}`);
+  }
 }
 export function canonicalJson(value) {
   return `${JSON.stringify(stable(value), null, 2)}\n`;
@@ -557,6 +595,11 @@ export function validateBundle(bundle) {
       fail(`${session.id}: sourcePath must be a normalized path under docs/calibration`);
     }
     if (session.kind === "physical_mlx") {
+      validateExactOutputReceipts(
+        session.outputs,
+        PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+        `${session.id}.outputs`,
+      );
       for (const output of session.outputs) {
         if (!isNormalizedCalibrationPath(output.path)) {
           fail(`${session.id}: physical MLX output must be a normalized path under docs/calibration`);
@@ -1323,9 +1366,11 @@ export async function runProviderPlan({
         if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
           fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
         }
-        if (!Array.isArray(sourceCapture.outputs) || sourceCapture.outputs.length === 0) {
-          fail(`${planned.logicalCaseId}: physical MLX source capture requires persisted outputs`);
-        }
+        validateExactOutputReceipts(
+          sourceCapture.outputs,
+          PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+          `${planned.logicalCaseId}.sourceCapture.outputs`,
+        );
         if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
           fail(`${planned.logicalCaseId}: physical MLX source capture requires explicit claims`);
         }
@@ -1352,15 +1397,17 @@ export async function runProviderPlan({
         const sourcePath = `${sourcePathPrefix}/${sessionId}.log`;
         const receiptDir = path.join(rawLogDir, ...sourcePathPrefix.split("/"));
         await mkdir(receiptDir, { recursive: true });
-        await writeFile(path.join(receiptDir, `${sessionId}.log`), providerOutput, "utf8");
+        await writeImmutableReceipt(path.join(receiptDir, `${sessionId}.log`), providerOutput);
         const requestFileName = `${sessionId}.request.json`;
-        await writeFile(path.join(receiptDir, requestFileName), providerRequest, "utf8");
+        await writeImmutableReceipt(path.join(receiptDir, requestFileName), providerRequest);
         const outputs = [{
+          role: "request",
           path: `${sourcePathPrefix}/${requestFileName}`,
           sha256: createHash("sha256").update(providerRequest).digest("hex"),
         }];
         for (const output of sourceCapture.outputs) {
           object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
+          text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
           text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
           text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
           const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
@@ -1377,10 +1424,16 @@ export async function runProviderPlan({
           }
           const bytes = await readFile(physicalOutputPath);
           outputs.push({
+            role: output.role,
             path: output.path,
             sha256: createHash("sha256").update(bytes).digest("hex"),
           });
         }
+        validateExactOutputReceipts(
+          outputs,
+          PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+          `${sessionId}.outputs`,
+        );
         const direct = { kind: "direct", sourceSessionIds: [sessionId] };
         record.derivation = {
           memory: direct,

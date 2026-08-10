@@ -101,8 +101,16 @@ const fragment = async (planned) => {
         variant: "q4",
       }],
       outputs: [
-        { path: `${sourcePrefix}/${path.basename(selected)}`, localPath: selected },
-        { path: `${sourcePrefix}/${path.basename(reference)}`, localPath: reference },
+        {
+          role: "selected_rgb",
+          path: `${sourcePrefix}/${path.basename(selected)}`,
+          localPath: selected,
+        },
+        {
+          role: "reference_rgb",
+          path: `${sourcePrefix}/${path.basename(reference)}`,
+          localPath: reference,
+        },
       ],
       claims: ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
     };

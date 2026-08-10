@@ -92,6 +92,7 @@
     "sourceOutput": {
       "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
       "properties": {
+        "role": { "enum": ["request", "selected_rgb", "reference_rgb"] },
         "path": { "type": "string", "minLength": 1 },
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
@@ -112,16 +113,62 @@
     "sourceSession": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "kind", "command", "sourcePath", "capturedAt", "repositories", "hardware", "stdoutSha256", "inputs", "outputs", "claims", "result"],
-      "allOf": [{
-        "if": {
-          "properties": {
-            "claims": {
-              "contains": { "enum": ["loadability", "quality", "negative_mutation"] }
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "claims": {
+                "contains": { "enum": ["loadability", "quality", "negative_mutation"] }
+              }
+            }
+          },
+          "then": { "properties": { "inputs": { "minItems": 1 } } }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "const": "physical_mlx" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "outputs": {
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "required": ["role"] },
+                "allOf": [
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "request" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "selected_rgb" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "reference_rgb" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  }
+                ]
+              }
             }
           }
-        },
-        "then": { "properties": { "inputs": { "minItems": 1 } } }
-      }],
+        }
+      ],
       "properties": {
         "id": { "type": "string", "pattern": "^ims-[0-9a-f]{20}$" },
         "kind": { "enum": ["physical_cuda", "physical_mlx", "unit_test", "static_analysis", "comparison"] },

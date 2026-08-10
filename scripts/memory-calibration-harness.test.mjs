@@ -1417,6 +1417,10 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   const raw = await readFile(path.join(rawLogDir, session.sourcePath));
   assert.equal(createHash("sha256").update(raw).digest("hex"), session.stdoutSha256);
   assert.equal(session.outputs.length, 3);
+  assert.deepEqual(
+    session.outputs.map((output) => output.role).sort(),
+    ["reference_rgb", "request", "selected_rgb"],
+  );
   for (const output of session.outputs) {
     const local = path.join(rawLogDir, output.path);
     assert.equal(createHash("sha256").update(await readFile(local)).digest("hex"), output.sha256);
@@ -1448,6 +1452,43 @@ test("physical MLX capture binds raw provider stdout, exact inventory, and persi
   await assert.rejects(
     validateSourceSessionFiles(missingOutput, rawLogDir),
     /missing immutable source receipt/,
+  );
+
+  const noOutputs = structuredClone(result);
+  noOutputs.sourceSessions[0].outputs = [];
+  await assert.rejects(
+    validateSourceSessionFiles(noOutputs, rawLogDir),
+    /sourceSessions.*outputs|typed output receipts/,
+  );
+
+  const duplicateRole = structuredClone(result);
+  duplicateRole.sourceSessions[0].outputs[2].role = "selected_rgb";
+  assert.throws(
+    () => validateBundle(duplicateRole),
+    /sourceSessions.*outputs|repeats output role|selected_rgb.*reference_rgb/,
+  );
+
+  const duplicatePath = structuredClone(result);
+  duplicatePath.sourceSessions[0].outputs[2].path = duplicatePath.sourceSessions[0].outputs[1].path;
+  assert.throws(() => validateBundle(duplicatePath), /repeats output path/);
+
+  await writeFile(path.join(rawLogDir, session.sourcePath), "tampered provider output");
+  await assert.rejects(
+    runProviderPlan({
+      closureDigestFor: stubClosureDigest,
+      config,
+      providerCommand: [
+        process.execPath,
+        fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
+        rawLogDir,
+        sourcePathPrefix,
+      ],
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
+      rawLogDir,
+      sourcePathPrefix,
+    }),
+    /immutable source receipt already exists with different bytes/,
   );
 });
 

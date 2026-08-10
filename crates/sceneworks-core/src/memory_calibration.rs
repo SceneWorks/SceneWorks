@@ -183,8 +183,17 @@ pub struct SourceTarget {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceOutput {
+    pub role: Option<SourceOutputRole>,
     pub path: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOutputRole {
+    Request,
+    SelectedRgb,
+    ReferenceRgb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -1150,15 +1159,38 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
             ));
         }
     }
+    let mut physical_output_roles = BTreeSet::new();
+    let mut physical_output_paths = BTreeSet::new();
+    if session.kind == SourceSessionKind::PhysicalMlx && session.outputs.len() != 3 {
+        return Err(format!(
+            "{} physical MLX session requires exactly request, selected_rgb, and reference_rgb outputs",
+            session.id
+        ));
+    }
     for output in &session.outputs {
         require_nonempty(&output.path, "sourceSession.outputs.path")?;
-        if session.kind == SourceSessionKind::PhysicalMlx
-            && !is_normalized_calibration_path(&output.path)
-        {
-            return Err(format!(
-                "{} physical MLX output has an invalid repository path",
-                session.id
-            ));
+        if session.kind == SourceSessionKind::PhysicalMlx {
+            if !is_normalized_calibration_path(&output.path) {
+                return Err(format!(
+                    "{} physical MLX output has an invalid repository path",
+                    session.id
+                ));
+            }
+            let role = output
+                .role
+                .ok_or_else(|| format!("{} physical MLX output is missing its role", session.id))?;
+            if !physical_output_roles.insert(role) {
+                return Err(format!(
+                    "{} physical MLX session repeats an output role",
+                    session.id
+                ));
+            }
+            if !physical_output_paths.insert(output.path.as_str()) {
+                return Err(format!(
+                    "{} physical MLX session repeats an output path",
+                    session.id
+                ));
+            }
         }
         if !is_sha256(&output.sha256) {
             return Err(format!(
@@ -1166,6 +1198,19 @@ fn validate_source_session(session: &SourceSession) -> Result<(), String> {
                 session.id
             ));
         }
+    }
+    if session.kind == SourceSessionKind::PhysicalMlx
+        && physical_output_roles
+            != BTreeSet::from([
+                SourceOutputRole::Request,
+                SourceOutputRole::SelectedRgb,
+                SourceOutputRole::ReferenceRgb,
+            ])
+    {
+        return Err(format!(
+            "{} physical MLX session must contain request, selected_rgb, and reference_rgb outputs",
+            session.id
+        ));
     }
     Ok(())
 }
@@ -2472,10 +2517,23 @@ mod tests {
                 "resolvedRevision": "c".repeat(40),
                 "variant": "q4"
             }],
-            "outputs": [{
-                "path": "docs/calibration/sc-test/fixture.rgb",
-                "sha256": "3".repeat(64)
-            }],
+            "outputs": [
+                {
+                    "role": "request",
+                    "path": "docs/calibration/sc-test/fixture.request.json",
+                    "sha256": "3".repeat(64)
+                },
+                {
+                    "role": "selected_rgb",
+                    "path": "docs/calibration/sc-test/fixture-selected.rgb",
+                    "sha256": "4".repeat(64)
+                },
+                {
+                    "role": "reference_rgb",
+                    "path": "docs/calibration/sc-test/fixture-reference.rgb",
+                    "sha256": "5".repeat(64)
+                }
+            ],
             "claims": ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
             "result": "passed"
         });
@@ -2495,6 +2553,20 @@ mod tests {
             loaded.source_sessions[0].kind,
             SourceSessionKind::PhysicalMlx
         );
+
+        let mut missing_receipts = document.clone();
+        missing_receipts["sourceSessions"][0]["outputs"] = json!([]);
+        assert!(matches!(
+            load_bundle(&missing_receipts.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
+
+        let mut duplicate_role = document.clone();
+        duplicate_role["sourceSessions"][0]["outputs"][2]["role"] = json!("selected_rgb");
+        assert!(matches!(
+            load_bundle(&duplicate_role.to_string()),
+            Err(BundleLoadError::Invalid(_))
+        ));
 
         let mut missing_derivation = document;
         missing_derivation["records"][0]

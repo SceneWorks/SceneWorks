@@ -19,7 +19,10 @@ use mlx_rs::Array;
 use runtime_macos::providers::qwen_image::{load_vae, QwenVae};
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::cell::Cell;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -658,6 +661,50 @@ fn qwen_quality_passes(maximum: f64, mean: f64) -> bool {
     maximum <= QWEN_MAX_THRESHOLD && mean <= QWEN_MEAN_THRESHOLD
 }
 
+fn persist_physical_mlx_image(
+    output_dir: &Path,
+    source_prefix: &str,
+    logical_case_id: &str,
+    role: &str,
+    image: &Image,
+) -> Result<Value, String> {
+    let content_sha256 = format!("{:x}", Sha256::digest(&image.pixels));
+    let file_name = format!(
+        "{logical_case_id}-{role}-{}x{}-{content_sha256}.rgb",
+        image.width, image.height,
+    );
+    let local_path = output_dir.join(&file_name);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&local_path)
+    {
+        Ok(mut file) => file
+            .write_all(&image.pixels)
+            .map_err(|error| format!("write physical MLX {role} output: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(&local_path).map_err(|read_error| {
+                format!("read existing physical MLX {role} output: {read_error}")
+            })?;
+            if existing != image.pixels {
+                return Err(format!(
+                    "content-addressed physical MLX {role} output already exists with different bytes"
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(format!(
+                "create immutable physical MLX {role} output: {error}"
+            ));
+        }
+    }
+    Ok(json!({
+        "role": role,
+        "path": format!("{source_prefix}/{file_name}"),
+        "localPath": local_path,
+    }))
+}
+
 fn qwen_source_capture(
     request: &Value,
     root: &Path,
@@ -703,19 +750,6 @@ fn qwen_source_capture(
                 .to_owned(),
         );
     }
-    let persist = |label: &str, image: &Image| -> Result<Value, String> {
-        let file_name = format!(
-            "{logical_case_id}-{label}-{}x{}.rgb",
-            image.width, image.height
-        );
-        let local_path = output_dir.join(&file_name);
-        std::fs::write(&local_path, &image.pixels)
-            .map_err(|error| format!("write physical MLX {label} output: {error}"))?;
-        Ok(json!({
-            "path": format!("{source_prefix}/{file_name}"),
-            "localPath": local_path,
-        }))
-    };
     Ok(json!({
         "kind": "physical_mlx",
         "inputs": [{
@@ -728,8 +762,12 @@ fn qwen_source_capture(
             "variant": tier,
         }],
         "outputs": [
-            persist("selected", selected)?,
-            persist("reference", reference)?,
+            persist_physical_mlx_image(
+                &output_dir, &source_prefix, logical_case_id, "selected_rgb", selected,
+            )?,
+            persist_physical_mlx_image(
+                &output_dir, &source_prefix, logical_case_id, "reference_rgb", reference,
+            )?,
         ],
         "claims": [
             "memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"
@@ -5540,5 +5578,82 @@ mod qwen_evidence_tests {
         assert!(maximum >= 64.0 / 255.0);
         assert!(mean >= 64.0 / 255.0);
         assert!(!qwen_quality_passes(maximum, mean));
+    }
+
+    #[test]
+    fn physical_mlx_rgb_receipts_are_role_and_content_addressed_without_overwrite() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sceneworks-physical-mlx-receipts-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create receipt fixture");
+        let first = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![1, 2, 3, 4, 5, 6],
+        };
+        let changed = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![6, 5, 4, 3, 2, 1],
+        };
+
+        let selected = persist_physical_mlx_image(
+            &root,
+            "docs/calibration/sc-test",
+            "imc-case",
+            "selected_rgb",
+            &first,
+        )
+        .expect("persist first selected receipt");
+        let repeated = persist_physical_mlx_image(
+            &root,
+            "docs/calibration/sc-test",
+            "imc-case",
+            "selected_rgb",
+            &first,
+        )
+        .expect("identical content-addressed receipt is reusable");
+        assert_eq!(selected["path"], repeated["path"]);
+
+        let changed_selected = persist_physical_mlx_image(
+            &root,
+            "docs/calibration/sc-test",
+            "imc-case",
+            "selected_rgb",
+            &changed,
+        )
+        .expect("changed bytes receive a different content address");
+        assert_ne!(selected["path"], changed_selected["path"]);
+
+        let reference = persist_physical_mlx_image(
+            &root,
+            "docs/calibration/sc-test",
+            "imc-case",
+            "reference_rgb",
+            &first,
+        )
+        .expect("the role is part of the receipt address");
+        assert_ne!(selected["path"], reference["path"]);
+
+        let selected_local = selected["localPath"]
+            .as_str()
+            .expect("receipt carries local path");
+        std::fs::write(selected_local, b"tampered").expect("tamper fixture receipt");
+        let error = persist_physical_mlx_image(
+            &root,
+            "docs/calibration/sc-test",
+            "imc-case",
+            "selected_rgb",
+            &first,
+        )
+        .expect_err("exclusive receipt creation must not repair or overwrite tampering");
+        assert!(error.contains("already exists with different bytes"));
+
+        std::fs::remove_dir_all(root).ok();
     }
 }
