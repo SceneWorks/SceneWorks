@@ -75,7 +75,13 @@ Do not create an epic branch as a substitute for incomplete requirements.
 
 ## 2. Create the integration branches
 
-Use current remote state and a clean checkout:
+Use current remote state and a clean checkout. Before creating either ref,
+install the exact-branch merge-queue ruleset described below; GitHub rejects a
+merge-queue rule whose condition is the wildcard `feature/*`. The bootstrap
+command must treat the two exact queue rulesets and the two refs as one durable,
+recoverable operation.
+
+The equivalent manual ref creation is:
 
 ```bash
 git fetch origin
@@ -86,9 +92,10 @@ git push -u origin feature/sc-<epic-id>-<epic-slug>
 Create the inference branch only when inference changes are part of the approved
 scope. Use the identical command and branch name in that repository.
 
-Immediately verify that the appropriate feature-branch ruleset applies. Do not
-begin story merges while the branch allows unreviewed direct pushes or lacks
-required checks.
+Immediately verify that all three applicable layers aggregate: the wildcard
+base policy, the wildcard deletion guard, and the exact-branch queue policy. Do
+not begin story merges while the branch allows unreviewed direct pushes, lacks
+required checks, can be deleted, or has no merge queue.
 
 Add the following to the Shortcut epic:
 
@@ -291,9 +298,17 @@ dated baseline, not a substitute for current inspection.
 
 #### 1. Add feature-branch rulesets
 
-Create two layered `Feature integration` branch rulesets in each repository,
-both targeting `feature/*`. GitHub rulesets use `fnmatch`; this pattern
-intentionally matches the one-slash branch format defined above.
+Create three layers of `Feature integration` rulesets in each repository.
+GitHub rulesets use `fnmatch`, so the two durable wildcard layers target
+`feature/*`, which intentionally matches the one-slash branch format defined
+above. The third layer targets one exact feature branch.
+
+GitHub's ruleset API rejects `merge_queue` when the condition contains a
+wildcard (`Invalid rule 'merge_queue': Wildcard ref names are not supported
+when merge queue is enabled`). Consequently the wildcard base policy must not
+contain the queue rule. Every bootstrap must create or verify a separate exact
+queue ruleset for `feature/sc-<epic-id>-<epic-slug>` before it creates that
+branch. A wildcard queue payload is a configuration error, not a degraded mode.
 
 SceneWorks must require at least the same integration contexts currently
 required on `main`:
@@ -308,18 +323,24 @@ required on `main`:
 
 Inference must require `CI gate`.
 
-The core merge-policy ruleset in each repository must have no bypass actors and
+The wildcard base-policy ruleset in each repository must have no bypass actors and
 must:
 
 - require pull requests;
 - block force pushes and non-fast-forward updates;
 - require code-owner/review behavior consistent with each repository's `main`;
 - require current-head status checks;
-- use merge commits so story and synchronization provenance is retained;
-- use a merge queue after every required workflow supports `merge_group`;
-- use merge groups of one entry unless deliberate batch validation is accepted.
+- use merge commits so story and synchronization provenance is retained.
 
-The second ruleset must contain only the deletion rule and normally have no
+The exact-branch queue ruleset must also have no bypass actors. It contains the
+`merge_queue` rule for that one feature ref, uses merge commits, and uses merge
+groups of one entry unless deliberate batch validation is accepted. If GitHub
+ever stops aggregating a queue-only exact ruleset with the wildcard pull-request
+and status rules, repeat those rules in the exact ruleset; never remove them
+from the wildcard layer. Record the exact queue ruleset ID and payload digest
+with the epic bootstrap evidence.
+
+The wildcard deletion-guard ruleset must contain only the deletion rule and normally have no
 bypass actors. After a disposable ruleset proof succeeds, or after the
 post-merge checklist succeeds, an administrator may temporarily add one closed
 maintainer team or cleanup automation as its exact cleanup actor. If neither
@@ -331,7 +352,9 @@ authority active during an epic. Bypass is ruleset-wide: never put the
 deletion rule and its cleanup bypass in the core merge-policy ruleset, because
 that would also let the cleanup actor bypass pull-request, status-check, and
 non-fast-forward protections. Matching rulesets aggregate, so the no-bypass
-core policy remains enforced during that bounded cleanup window.
+base and exact queue policies remain enforced during that bounded cleanup
+window. Delete the obsolete exact queue ruleset only after its feature ref has
+been deleted and the completed cleanup has been audited.
 
 Start the rulesets in Evaluate mode if available, prove them with disposable
 branches, and activate them only after the check matrix is complete. GitHub's
@@ -401,7 +424,8 @@ After adding the inference ruleset:
 Implement small fail-closed automation rather than relying only on memory:
 
 - a feature bootstrap command or agent skill that creates and records mirrored
-  branches from exact main SHAs;
+  branches from exact main SHAs, verifies both wildcard layers, and creates or
+  safely recovers each exact-branch queue ruleset before creating its ref;
 - a PR policy check that rejects a feature story targeting `main` or the wrong
   epic branch;
 - a check that rejects a final SceneWorks feature PR while its inference pin is
@@ -426,10 +450,12 @@ feature branches and exercise all of the following:
    pinned by the SceneWorks feature branch.
 6. SceneWorks and inference merge queues validate their speculative commits and
    do not cancel one another.
-7. Direct and force pushes to feature branches fail.
-8. An unauthorized deletion fails, while the authorized post-epic cleanup path
-   succeeds.
-9. The final inference-first merge and SceneWorks pin transition succeed without
+7. The API refuses a wildcard queue payload, while each exact-branch queue
+   ruleset aggregates with the wildcard base and deletion layers.
+8. Direct and force pushes to feature branches fail.
+9. An unauthorized deletion fails, while the authorized post-epic cleanup path
+   succeeds without bypassing the base or exact queue policies.
+10. The final inference-first merge and SceneWorks pin transition succeed without
    leaving `main` dependent on a feature-only inference commit.
 
 Capture the disposable PRs and run URLs in the CI implementation PR. Only after
