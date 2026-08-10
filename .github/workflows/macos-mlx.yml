@@ -167,7 +167,7 @@ on:
         required: false
         type: string
       run_z_image_deferred_validation:
-        description: "Run the SC-18409 production Sequential/deferred Z-Image render"
+        description: "Run the SC-18409 bf16 Sequential/deferred RSS validation"
         required: false
         type: boolean
         default: false
@@ -890,24 +890,20 @@ jobs:
       - name: Validate production Z-Image Sequential deferred cold-load
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_z_image_deferred_validation }}
         env:
-          SC18101_TAG: sc18409-nax
-          SC18101_OUT_DIR: ${{ runner.temp }}/sc18409-zimage-validation
-          SC18101_C1_REPO: models--SceneWorks--z-image-turbo-mlx
-          SC18101_C1_ENGINE: z_image_turbo
-          SC18101_C1_TIER: q4
-          SC18101_C1_W: "1024"
-          SC18101_C1_H: "1024"
-          SC18101_C1_CAP_GB: "23"
-          SC18101_C1_STEPS: "8"
+          SC18409_OUT_DIR: ${{ runner.temp }}/sc18409-zimage-validation
+          SC18409_ARTIFACT_REVISION: ${{ inputs.z_image_revision }}
+          SC18409_W: "1024"
+          SC18409_H: "1024"
+          SC18409_STEPS: "4"
           RUST_TEST_THREADS: "1"
         run: |
-          if [[ "${{ inputs.run_five_rung_reference }}" != "true" ]]; then
-            echo "run_z_image_deferred_validation requires run_five_rung_reference=true so the exact q4 artifact is provisioned and checked first" >&2
+          if [[ ! "$SC18409_ARTIFACT_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "z_image_revision must be an exact lowercase 40-hex artifact revision" >&2
             exit 1
           fi
           cargo test --release -p sceneworks-worker --lib -- \
-            --ignored --nocapture --test-threads=1 \
-            c1_unmeasured_cell_engages_a_deep_rung_and_renders
+            --ignored --exact --nocapture --test-threads=1 \
+            ladder_e2e_sc18409::z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling
       - name: Upload raw schema-checked MLX five-rung reference
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
