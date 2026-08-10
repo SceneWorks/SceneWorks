@@ -483,13 +483,17 @@ fn validate_runtime_pair(
                 ));
             }
         }
-        for (model, engine) in &facts.model_mappings {
-            if descriptor_by_engine(facts, engine).is_none() {
-                return Err(format!(
-                    "{} production model mapping {model:?} -> {engine:?} names no descriptor",
-                    facts.snapshot.backend
-                ));
-            }
+    }
+    // The mapping catalog is intentionally shared across backends: a mapping may name an MLX-only
+    // engine (for example Qwen Image Edit) and therefore be absent from the Candle registry. It is
+    // drift only when neither matching-platform registry declares the mapped engine.
+    for (model, engine) in mlx.model_mappings.iter().chain(&candle.model_mappings) {
+        if descriptor_by_engine(mlx, engine).is_none()
+            && descriptor_by_engine(candle, engine).is_none()
+        {
+            return Err(format!(
+                "production model mapping {model:?} -> {engine:?} names no MLX or Candle descriptor"
+            ));
         }
     }
     Ok(())
@@ -532,7 +536,7 @@ fn native_generator_descriptor<'a>(
 }
 
 fn descriptor_modality<'a>(
-    model: &ManifestModel,
+    model: &'a ManifestModel,
     mlx: &'a RuntimeDescriptorFacts,
     candle: &'a RuntimeDescriptorFacts,
 ) -> Result<Option<&'a str>, String> {
@@ -541,6 +545,21 @@ fn descriptor_modality<'a>(
         .filter_map(|facts| generator_descriptor(facts, &model.id))
         .map(|descriptor| descriptor.modality.as_str())
         .collect();
+    if modalities.contains("audio") {
+        if modalities.len() == 1 {
+            return Ok(Some("audio"));
+        }
+        return Err(format!(
+            "runtime descriptors disagree on modality for {:?}: {modalities:?}",
+            model.id
+        ));
+    }
+    // `both` is a provider-level image/video descriptor breadth, while the shipped manifest row
+    // still has one product operation family. Bernini is deliberately `both` on MLX and `video`
+    // on Candle; its canonical SceneWorks request remains the manifest's video operation.
+    if matches!(model.model_type.as_str(), "image" | "video") {
+        return Ok(Some(model.model_type.as_str()));
+    }
     if modalities.len() > 1 {
         return Err(format!(
             "runtime descriptors disagree on modality for {:?}: {modalities:?}",
@@ -2438,6 +2457,16 @@ mod tests {
         let mutated_cell =
             operation_cell(flux2, "prompt_enhancement", &no_enhancement, &candle).unwrap();
         assert_eq!(mutated_cell.mlx, Some(false));
+
+        let mut bad_mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
+        let mut bad_candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
+        for facts in [&mut bad_mlx, &mut bad_candle] {
+            facts.model_mappings.insert(
+                "flux2_dev".to_owned(),
+                "missing-from-both-native-catalogs".to_owned(),
+            );
+        }
+        assert!(validate_runtime_pair(&bad_mlx, &bad_candle).is_err());
     }
 
     #[test]

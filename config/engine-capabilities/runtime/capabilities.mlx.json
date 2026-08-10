@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedFrom": {
-    "inferenceRevision": "e759c45396f08dbefacebe1811fcdf2bfcac9634",
+    "inferenceRevision": "6c0eeddcf734f8de099ad6ff8c75b9b561be1edb",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -190,6 +190,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -227,6 +228,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -264,6 +266,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -305,6 +308,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "unipc"
         ],
@@ -328,6 +332,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "unipc"
         ],
@@ -349,6 +354,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -388,6 +394,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "lcm",
           "euler_ancestral",
@@ -421,6 +428,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -458,6 +466,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -497,6 +506,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -536,6 +546,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -577,6 +588,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -618,6 +630,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -660,6 +673,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -702,6 +716,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -743,6 +758,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -784,6 +800,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -824,6 +841,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": true,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -865,6 +883,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": true,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -906,6 +925,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -947,6 +967,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -967,6 +988,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -987,6 +1009,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler_discrete",
           "euler",
@@ -1026,6 +1049,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1065,6 +1089,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1105,6 +1130,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1145,6 +1171,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1184,6 +1211,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1224,6 +1252,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "self_forcing"
         ],
@@ -1243,6 +1272,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1282,6 +1312,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1323,6 +1354,7 @@
         "supports_lokr": true,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1351,6 +1383,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1368,6 +1401,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1385,6 +1419,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1405,6 +1440,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1425,6 +1461,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1445,6 +1482,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1459,6 +1497,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1478,6 +1517,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1519,6 +1559,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1559,6 +1600,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1600,6 +1642,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1640,6 +1683,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1681,6 +1725,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "default"
         ],
@@ -1707,6 +1752,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "unipc",
           "dpm++"
@@ -1729,6 +1775,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1770,6 +1817,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1811,6 +1859,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -1854,6 +1903,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler_ancestral",
           "lcm",
@@ -1898,6 +1948,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "seedvr2_euler"
         ],
@@ -1922,6 +1973,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "seedvr2_euler"
         ],
@@ -1946,6 +1998,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "seedvr2_euler"
         ],
@@ -1970,6 +2023,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -1990,6 +2044,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2006,6 +2061,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -2037,6 +2093,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "uni_pc",
           "euler",
@@ -2064,6 +2121,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "uni_pc",
           "euler",
@@ -2093,6 +2151,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "uni_pc",
           "euler",
@@ -2123,6 +2182,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "uni_pc",
           "euler",
@@ -2149,6 +2209,7 @@
           "q8"
         ],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "uni_pc",
           "euler",
@@ -2174,6 +2235,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -2213,6 +2275,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -2253,6 +2316,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -2293,6 +2357,7 @@
           "q8"
         ],
         "supports_preview": true,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "euler",
           "euler_ancestral",
@@ -2532,6 +2597,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2546,6 +2612,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2562,6 +2629,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2580,6 +2648,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "pingpong",
           "euler",
@@ -2607,6 +2676,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "pingpong",
           "euler",
@@ -2634,6 +2704,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "pingpong",
           "euler",
@@ -2661,6 +2732,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "pingpong",
           "euler",
@@ -2688,6 +2760,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "pingpong",
           "euler",
@@ -2715,6 +2788,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [
           "pingpong",
           "euler",
@@ -2741,6 +2815,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2758,6 +2833,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2774,6 +2850,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2790,6 +2867,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2804,6 +2882,7 @@
         "supports_lokr": false,
         "supported_quants": [],
         "supports_preview": false,
+        "supports_prompt_enhancement": false,
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
