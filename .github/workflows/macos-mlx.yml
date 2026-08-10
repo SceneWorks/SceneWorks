@@ -897,7 +897,7 @@ jobs:
           SC18101_C1_TIER: q4
           SC18101_C1_W: "1024"
           SC18101_C1_H: "1024"
-          SC18101_C1_CAP_GB: "12"
+          SC18101_C1_CAP_GB: "23"
           SC18101_C1_STEPS: "8"
           RUST_TEST_THREADS: "1"
         run: |
