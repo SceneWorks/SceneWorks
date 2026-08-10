@@ -6,15 +6,16 @@
 //! evidence from qwen only. This scenario exercises that exact branch on real weights: it derives
 //! the cap boundary from the gate's own decision (no hand-copied numbers), asserts the deferred
 //! shape provably came from the Sequential branch, loads, admits a request through the real
-//! `evaluate_request` seam, renders, and compares the observed process-RSS delta to the admitted
-//! ceiling. The MLX allocator peak is recorded separately: deferred weights are mmap-backed and
-//! can sit outside MLX's active-memory counter, so that counter alone is not a valid headroom
-//! verdict.
+//! `evaluate_request` seam, renders, and compares the observed Darwin physical-footprint delta to
+//! the admitted ceiling. The MLX allocator peak is recorded separately: deferred weights are
+//! mmap-backed and can sit outside MLX's active-memory counter, so that counter alone is not a
+//! valid headroom verdict.
 //!
 //! This is a VALIDATION harness, not a calibration capture: it writes logs and numbers under
 //! `~/SceneWorks/render-validation-sc18409/` and never touches evidence records or the closure
-//! table. Like the sc-18101 scenarios it samples process-global MLX peak counters; it also samples
-//! this process's RSS through macOS `ps`, so run it in its own `cargo test` invocation.
+//! table. Like the sc-18101 scenarios it samples process-global MLX peak counters; it also reads
+//! this process's kernel-maintained `phys_footprint_peak` through macOS `footprint`, so run it in
+//! its own `cargo test` invocation.
 //!
 //! ```text
 //! cargo test -p sceneworks-worker --release --lib -- --ignored --exact --nocapture \
@@ -37,98 +38,81 @@ const ENGINE: &str = "z_image_turbo";
 const TIER: &str = "bf16";
 const SENTINEL: &str = "model_index.json";
 
-fn process_rss_bytes() -> Result<u64, String> {
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+struct PhysicalFootprintSample {
+    current_bytes: u64,
+    lifetime_peak_bytes: u64,
+    output: String,
+}
+
+fn process_physical_footprint() -> Result<PhysicalFootprintSample, String> {
+    let output = std::process::Command::new("/usr/bin/footprint")
+        .args([
+            "--pid",
+            &std::process::id().to_string(),
+            "--format",
+            "bytes",
+            "--noCategories",
+            "--wired",
+        ])
         .output()
-        .map_err(|error| format!("run /bin/ps: {error}"))?;
+        .map_err(|error| format!("run /usr/bin/footprint: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "/bin/ps exited {}: {}",
+            "/usr/bin/footprint exited {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let kib = String::from_utf8(output.stdout)
-        .map_err(|error| format!("ps RSS output is not UTF-8: {error}"))?
-        .trim()
-        .parse::<u64>()
-        .map_err(|error| format!("ps RSS output is not an integer: {error}"))?;
-    Ok(kib.saturating_mul(1024))
+    let output = String::from_utf8(output.stdout)
+        .map_err(|error| format!("footprint output is not UTF-8: {error}"))?;
+    let parse_field = |name: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(name))
+            .and_then(|value| value.trim().strip_suffix(" B"))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .ok_or_else(|| format!("footprint output has no integer `{name} <bytes> B` field"))
+    };
+    Ok(PhysicalFootprintSample {
+        current_bytes: parse_field("phys_footprint:")?,
+        lifetime_peak_bytes: parse_field("phys_footprint_peak:")?,
+        output,
+    })
 }
 
-/// Samples process RSS across the complete load + render interval. Unlike MLX's active-memory
-/// gauge, this includes resident mmap-backed model pages. The safe subprocess boundary preserves
-/// `sceneworks-worker`'s crate-wide `forbid(unsafe_code)` policy.
-struct ResidentSetSampler {
+/// Measures the process's full Darwin physical footprint across the complete load + render
+/// interval. `phys_footprint_peak` is maintained by the kernel for the process lifetime, so the
+/// post-render reading cannot miss a short-lived peak. It includes mmap-backed pages and wired
+/// GPU/shared allocations that process RSS and MLX's active-memory gauge can omit. The safe
+/// subprocess boundary preserves `sceneworks-worker`'s crate-wide `forbid(unsafe_code)` policy.
+struct PhysicalFootprintMeasurement {
     baseline_bytes: u64,
-    peak_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
 }
 
-impl ResidentSetSampler {
+impl PhysicalFootprintMeasurement {
     fn start() -> Self {
-        use std::sync::atomic::Ordering;
-
-        let baseline_bytes = process_rss_bytes().expect("macOS ps must expose this process's RSS");
-        let peak_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(baseline_bytes));
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let error = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let sampled_peak = std::sync::Arc::clone(&peak_bytes);
-        let sampled_stop = std::sync::Arc::clone(&stop);
-        let sampled_error = std::sync::Arc::clone(&error);
-        let thread = std::thread::spawn(move || {
-            while !sampled_stop.load(Ordering::Acquire) {
-                match process_rss_bytes() {
-                    Ok(bytes) => {
-                        sampled_peak.fetch_max(bytes, Ordering::Relaxed);
-                    }
-                    Err(error) => {
-                        *sampled_error.lock().expect("RSS sampler error lock") = Some(error);
-                        break;
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
+        let sample = process_physical_footprint()
+            .expect("macOS footprint must expose this process's physical footprint");
+        write_log("physical-footprint-before", &sample.output);
         Self {
-            baseline_bytes,
-            peak_bytes,
-            stop,
-            error,
-            thread: Some(thread),
+            baseline_bytes: sample.current_bytes,
         }
     }
 
-    fn finish(mut self) -> (u64, u64) {
-        use std::sync::atomic::Ordering;
-
-        let final_bytes = process_rss_bytes().expect("final macOS process RSS sample");
-        self.peak_bytes.fetch_max(final_bytes, Ordering::Relaxed);
-        self.stop.store(true, Ordering::Release);
-        self.thread
-            .take()
-            .expect("sampler thread")
-            .join()
-            .expect("RSS sampler did not panic");
-        if let Some(error) = self.error.lock().expect("RSS sampler error lock").take() {
-            panic!("RSS sampler failed during load/render: {error}");
-        }
-        let peak_bytes = self.peak_bytes.load(Ordering::Relaxed);
-        (peak_bytes, peak_bytes.saturating_sub(self.baseline_bytes))
-    }
-}
-
-impl Drop for ResidentSetSampler {
-    fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+    fn finish(self) -> (u64, u64) {
+        let sample =
+            process_physical_footprint().expect("final macOS process physical-footprint sample");
+        write_log("physical-footprint-after", &sample.output);
+        assert!(
+            sample.lifetime_peak_bytes >= self.baseline_bytes,
+            "process lifetime physical-footprint peak precedes the test baseline; rerun this test in its own fresh process"
+        );
+        (
+            sample.lifetime_peak_bytes,
+            sample
+                .lifetime_peak_bytes
+                .saturating_sub(self.baseline_bytes),
+        )
     }
 }
 
@@ -285,12 +269,12 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
         tier_dir.display()
     );
 
-    // Load with EXACTLY that spec and drive the real request seam under the same cap. Sample the
-    // full process RSS from immediately before load through the completed render: deferred
-    // mmap-backed weights are outside MLX's active-memory counter, so only this process-level delta
-    // can grade the estimate's weights-inclusive ceiling.
-    let rss_sampler = ResidentSetSampler::start();
-    let rss_baseline_bytes = rss_sampler.baseline_bytes;
+    // Load with EXACTLY that spec and drive the real request seam under the same cap. Capture the
+    // kernel-maintained process physical footprint from immediately before load through the
+    // completed render: deferred mmap-backed weights are outside MLX's active-memory counter, so
+    // only this weights- and GPU-inclusive process metric can grade the estimate's ceiling.
+    let footprint_measurement = PhysicalFootprintMeasurement::start();
+    let footprint_baseline_bytes = footprint_measurement.baseline_bytes;
     let width: u32 = crate::smoke_support::env_or("SC18409_W", "1024")
         .parse()
         .expect("SC18409_W");
@@ -363,7 +347,8 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
     };
     let elapsed = started.elapsed();
     let mlx_allocator_peak_bytes = mlx_rs::memory::get_peak_memory() as u64;
-    let (rss_peak_bytes, rss_delta_bytes) = rss_sampler.finish();
+    let (physical_footprint_peak_bytes, physical_footprint_delta_bytes) =
+        footprint_measurement.finish();
     mlx_rs::memory::clear_cache();
     let resident_after = mlx_rs::memory::get_active_memory() as u64;
 
@@ -388,13 +373,13 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
         "admittedCeilingBytes": admitted_ceiling_bytes,
         "admittedCeilingGib": gib(admitted_ceiling_bytes),
         "ceilingIsWidened": widened.is_some(),
-        "observedPeakMetric": "darwin_process_rss_delta_from_preload_baseline",
-        "observedPeakBytes": rss_delta_bytes,
-        "observedPeakGib": gib(rss_delta_bytes),
-        "processRssBaselineBytes": rss_baseline_bytes,
-        "processRssBaselineGib": gib(rss_baseline_bytes),
-        "processRssPeakBytes": rss_peak_bytes,
-        "processRssPeakGib": gib(rss_peak_bytes),
+        "observedPeakMetric": "darwin_phys_footprint_peak_delta_from_preload_baseline",
+        "observedPeakBytes": physical_footprint_delta_bytes,
+        "observedPeakGib": gib(physical_footprint_delta_bytes),
+        "physicalFootprintBaselineBytes": footprint_baseline_bytes,
+        "physicalFootprintBaselineGib": gib(footprint_baseline_bytes),
+        "physicalFootprintPeakBytes": physical_footprint_peak_bytes,
+        "physicalFootprintPeakGib": gib(physical_footprint_peak_bytes),
         "mlxAllocatorPeakBytes": mlx_allocator_peak_bytes,
         "mlxAllocatorPeakGib": gib(mlx_allocator_peak_bytes),
         "residentBeforeGib": gib(resident_before),
@@ -415,10 +400,10 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
         "sc-18409: the render looks degenerate (std {std_dev:.2})"
     );
     assert!(
-        rss_delta_bytes <= admitted_ceiling_bytes,
-        "CEILING BREACH: observed process-RSS delta {:.2} GiB EXCEEDS the admitted ceiling {:.2} GiB \
+        physical_footprint_delta_bytes <= admitted_ceiling_bytes,
+        "CEILING BREACH: observed Darwin physical-footprint delta {:.2} GiB EXCEEDS the admitted ceiling {:.2} GiB \
          (rung {strategy:?}, cap {cap_gb} GB). Do not tune anything to make this pass — report it.",
-        gib(rss_delta_bytes),
+        gib(physical_footprint_delta_bytes),
         gib(admitted_ceiling_bytes),
     );
 }
