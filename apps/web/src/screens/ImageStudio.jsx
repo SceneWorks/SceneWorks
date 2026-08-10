@@ -573,6 +573,9 @@ export function ImageStudio() {
   // it (~2048 output, faster + less GPU memory). Sticky pref, default "4k". Rides `advanced.pidTarget`
   // (emitted only when the PiD toggle is shown+on AND "2k" is picked — "4k" is the worker default).
   const { usePid, setUsePid, pidTarget, setPidTarget } = usePidState(saved);
+  // Experimental alternate terminal decoder. Native is intentionally represented as an omitted
+  // request key so the established provider path stays byte-for-byte identical.
+  const [decoder, setDecoder] = useState(saved.decoder ?? "native");
   const [faceRestore, setFaceRestore] = useState(false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
@@ -896,6 +899,22 @@ export function ImageStudio() {
   // the worker's capability downtier (sc-10733) still clamps a non-explicit pick to what actually fits.
   const hostMemory = useHostMemory();
   const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const decoderOptions = useMemo(
+    () => selectedModel?.decoders?.byBackend?.[activeBackend] ?? [],
+    [selectedModel, activeBackend],
+  );
+  const showDecoderPicker = decoderOptions.length > 0;
+  const selectedDecoderOption = decoderOptions.find((option) => option.id === decoder);
+  useEffect(() => {
+    if (decoder !== "native" && (!selectedDecoderOption || !selectedDecoderOption.available)) {
+      setDecoder("native");
+    }
+  }, [decoder, selectedDecoderOption]);
+  useEffect(() => {
+    if (decoder !== "native" && usePid) {
+      setUsePid(false);
+    }
+  }, [decoder, usePid, setUsePid]);
   const unifiedMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
     () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
@@ -1712,6 +1731,7 @@ export function ImageStudio() {
     setEnhancePrompt(rawSettings.enhancePrompt === true);
     setUsePid(rawSettings.usePid === true);
     setPidTarget(rawSettings.pidTarget === "2k" ? "2k" : "4k");
+    setDecoder(typeof rawSettings.decoder === "string" ? rawSettings.decoder : "native");
     setFaceRestore(rawSettings.faceRestore === true);
     setImg2imgStrength(replayNumber(rawSettings.strength, img2imgStrength));
     setTextStyleGain(replayNumber(rawSettings.textStyleGain, textStyleGain));
@@ -2050,6 +2070,7 @@ export function ImageStudio() {
     bf16Precision,
     usePid,
     pidTarget,
+    decoder,
   },
   // Suppress the live writer until the model catalog has loaded (sc-11962), so a
   // transient defaults-reset during the restart-restore/settle window can't be
@@ -2308,6 +2329,8 @@ export function ImageStudio() {
       showPidToggle,
       usePid,
       pidTarget,
+      showDecoderPicker,
+      decoder,
       hideReferenceStrength,
       ipAdapterScale,
       identityStructure,
@@ -3679,10 +3702,14 @@ export function ImageStudio() {
                     className="checkline pid-decoder-toggle"
                     title="Decode this generation through NVIDIA's PiD pixel-diffusion decoder instead of the model's VAE: it decodes and super-resolves in one pass to 2K or 4K (pick the tier at right — sharper detail, but slower and more memory). Non-commercial use only — PiD output is licensed for research/evaluation, unlike the rest of the pipeline. Off = the model's native VAE at the selected resolution."
                   >
-                    <input
-                      checked={usePid}
-                      disabled={upscaleEnabled || hiresFixEnabled}
-                      onChange={(event) => setUsePid(event.target.checked)}
+                  <input
+                    checked={usePid}
+                    disabled={upscaleEnabled || hiresFixEnabled}
+                    onChange={(event) => {
+                      const enabled = event.target.checked;
+                      setUsePid(enabled);
+                      if (enabled) setDecoder("native");
+                    }}
                       type="checkbox"
                     />
                     PiD decoder <span className="badge badge-nc">Non-Commercial</span>
@@ -3708,6 +3735,35 @@ export function ImageStudio() {
                     </label>
                   ) : null}
                 </>
+              ) : null}
+              {showDecoderPicker ? (
+                <label className="alternate-decoder-select">
+                  Decoder <span className="badge">Experimental</span>
+                  <select
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      setDecoder(next);
+                      if (next !== "native") setUsePid(false);
+                    }}
+                    value={decoder}
+                  >
+                    <option value="native">Native VAE (default)</option>
+                    {decoderOptions.map((option) => {
+                      const mib = option.estimatedSizeBytes
+                        ? Math.round(option.estimatedSizeBytes / (1024 * 1024))
+                        : null;
+                      return (
+                        <option disabled={!option.available} key={option.id} value={option.id}>
+                          {option.label}{mib ? ` (+${mib} MiB)` : ""}{option.available ? "" : " — install component"}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <span className="field-hint">
+                    Alternate decode only; the model, text encoder, and native VAE remain installed.
+                    Output licensing appends the selected decoder component.
+                  </span>
+                </label>
               ) : null}
               <label
                 className="checkline upscale-toggle"

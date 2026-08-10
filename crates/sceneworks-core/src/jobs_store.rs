@@ -29,6 +29,8 @@ mod routing;
 pub(crate) use routing::candle::*;
 #[cfg(test)]
 pub(crate) use routing::catalog::*;
+#[cfg(not(test))]
+pub(crate) use routing::catalog::{image_family_is_mlx_routed, is_builtin_image_model};
 pub(crate) use routing::gaps::*;
 pub(crate) use routing::mlx::*;
 

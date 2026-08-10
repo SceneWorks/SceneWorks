@@ -161,6 +161,17 @@ pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];
 /// One engine's weights-free preview facts, as written to a per-backend facts file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DecoderOptionFact {
+    pub id: String,
+    pub label: String,
+    pub component_id: String,
+    pub license_component: String,
+    pub experimental: bool,
+}
+
+/// One engine's weights-free capability facts, as written to a per-backend facts file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineFact {
     /// The gen-core registry id (`ModelDescriptor::id`) — the join key stage 2 resolves
     /// `MODEL_TABLE.engine_id` against.
@@ -169,6 +180,10 @@ pub struct EngineFact {
     pub modality: String,
     /// `Capabilities::supports_preview` — whether this engine emits `PreviewSink` frames.
     pub supports_preview: bool,
+    /// Alternate decoder choices derived from the provider's typed latent contract. Empty is omitted
+    /// so the existing Candle/audio facts remain byte-stable when only MLX adds this capability.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub decoder_options: Vec<DecoderOptionFact>,
 }
 
 /// Provenance stamped onto every facts file so a stale dump is detectable without rebuilding.
@@ -306,6 +321,17 @@ fn group_by_backend(
                 id: descriptor.id.to_owned(),
                 modality: modality_label(&descriptor.modality).to_owned(),
                 supports_preview: descriptor.capabilities.supports_preview,
+                decoder_options: descriptor
+                    .compatible_decoder_options()
+                    .into_iter()
+                    .map(|option| DecoderOptionFact {
+                        id: option.id.to_owned(),
+                        label: option.label.to_owned(),
+                        component_id: option.component_id.to_owned(),
+                        license_component: option.license_component.to_owned(),
+                        experimental: option.experimental,
+                    })
+                    .collect(),
             });
     }
     for (backend, engines) in &mut by_backend {
@@ -531,6 +557,7 @@ mod tests {
         modality: gen_core::Modality,
     ) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
+            denoiser_output_latent_space: Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE),
             id,
             family: id,
             backend,
@@ -596,6 +623,16 @@ mod tests {
         );
         assert!(facts[0].engines[0].supports_preview);
         assert!(!facts[0].engines[1].supports_preview);
+        assert!(
+            facts[0].engines[0].decoder_options.is_empty(),
+            "the MLX-only alternate decoder must not leak into Candle facts"
+        );
+        assert_eq!(facts[1].engines[0].decoder_options.len(), 1);
+        assert_eq!(
+            facts[1].engines[0].decoder_options[0].id,
+            gen_core::WAN_2_1_VAE_DECODER_ID
+        );
+        assert!(facts[1].engines[0].decoder_options[0].experimental);
         assert_eq!(facts[0].file_name(), "capabilities.candle.json");
         assert_eq!(facts[1].file_name(), "capabilities.mlx.json");
     }

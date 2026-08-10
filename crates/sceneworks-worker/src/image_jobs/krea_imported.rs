@@ -566,6 +566,12 @@ async fn generate_krea_imported_control_stream(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
+    spec = attach_selected_decoder(
+        spec,
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         KREA_CONTROL_ENGINE_ID,
         &request.model,
@@ -585,7 +591,13 @@ async fn generate_krea_imported_control_stream(
         adapter_count,
         spec,
         "Krea 2 imported checkpoint pose-control load failed".to_owned(),
-        move |model, initial_cache_state, load_policy, external_committed_bytes, tx, cancel| {
+        move |model,
+              initial_cache_state,
+              loaded_policy,
+              _requested_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
             let user_control = user_control.as_ref();
             let control_source = control_source.as_ref();
             // Build the per-job identity-likeness scorer ONCE on the generator-worker thread (the
@@ -618,7 +630,7 @@ async fn generate_krea_imported_control_stream(
                     &memory_plan,
                     &memory_inputs,
                     cache_state,
-                    load_policy,
+                    loaded_policy.offload_policy,
                     external_committed_bytes,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;
@@ -890,6 +902,7 @@ async fn generate_krea_imported_stream(
     } else {
         spec.with_adapters(adapters)
     };
+    let spec = attach_selected_decoder(spec, engine_id, request, settings)?;
 
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),

@@ -1357,6 +1357,11 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
          non-commercial marker. Unlike a quant tier it is not a memory accommodation.",
     ),
     allow(
+        "decoder",
+        AdvancedShape::Scalar,
+        "Authored alternate terminal decoder id. Native is omitted; replay must preserve an explicit experimental decoder choice.",
+    ),
+    allow(
         "pidTarget",
         AdvancedShape::Scalar,
         "Authored PiD output tier (2k / 4k) — output geometry, not a hardware budget.",

@@ -1541,14 +1541,14 @@ mod tests {
                 )
         };
 
-        let original = GeneratorCacheKey::from_load_spec("qwen_image", &make_spec());
+        let original = LoadIdentity::from_load_spec("qwen_image", &make_spec());
         assert_eq!(
             original,
-            GeneratorCacheKey::from_load_spec("qwen_image", &make_spec()),
+            LoadIdentity::from_load_spec("qwen_image", &make_spec()),
             "an unchanged imported assembly must hit the cache"
         );
         std::fs::write(&vae, b"vae-v2-with-different-size").expect("replace vae");
-        let companion_changed = GeneratorCacheKey::from_load_spec("qwen_image", &make_spec());
+        let companion_changed = LoadIdentity::from_load_spec("qwen_image", &make_spec());
         assert_ne!(
             original, companion_changed,
             "replacing a named companion must invalidate the imported generator"
@@ -1556,7 +1556,7 @@ mod tests {
         std::fs::write(&dit, b"dit-v2-with-different-size").expect("replace dit");
         assert_ne!(
             companion_changed,
-            GeneratorCacheKey::from_load_spec("qwen_image", &make_spec()),
+            LoadIdentity::from_load_spec("qwen_image", &make_spec()),
             "replacing the primary File must invalidate the imported generator"
         );
     }
@@ -1599,9 +1599,8 @@ mod tests {
             spec.adapters = vec![AdapterSpec::new(selected.clone(), 0.8, AdapterKind::Lora)];
             spec
         };
-        let first_file_key = GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_file_spec());
-        let first_adapter_key =
-            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_adapter_spec());
+        let first_file_key = LoadIdentity::from_load_spec("krea_2_turbo", &make_file_spec());
+        let first_adapter_key = LoadIdentity::from_load_spec("krea_2_turbo", &make_adapter_spec());
 
         std::fs::remove_file(&selected).expect("remove first link");
         symlink(&second, &selected).expect("link second blob");
@@ -1612,12 +1611,12 @@ mod tests {
         );
         assert_ne!(
             first_file_key,
-            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_file_spec()),
+            LoadIdentity::from_load_spec("krea_2_turbo", &make_file_spec()),
             "retargeting the lexical checkpoint link must invalidate the resident generator"
         );
         assert_ne!(
             first_adapter_key,
-            GeneratorCacheKey::from_load_spec("krea_2_turbo", &make_adapter_spec()),
+            LoadIdentity::from_load_spec("krea_2_turbo", &make_adapter_spec()),
             "retargeting an adapter link must invalidate the resident generator"
         );
     }
@@ -1672,6 +1671,7 @@ mod tests {
             backend: "stub",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }

@@ -4256,6 +4256,74 @@ fn attach_required_components(
         .fold(spec, |spec, (id, source)| spec.with_component(id, source)))
 }
 
+/// Resolve a decoder id through the linked provider descriptor. This is the worker's backend and
+/// latent-space gate: the inference registry owns provider eligibility, and its typed compatibility
+/// check fails closed for z48 or unknown/learned normalization.
+fn selected_decoder_option(
+    engine_id: &str,
+    decoder_id: &str,
+) -> WorkerResult<gen_core::DecoderOption> {
+    let descriptor = crate::inference_runtime::media_descriptor(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "decoder '{decoder_id}' cannot be selected because image engine '{engine_id}' is not registered"
+        ))
+    })?;
+    descriptor
+        .compatible_decoder_options()
+        .into_iter()
+        .find(|option| option.id == decoder_id)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "decoder '{decoder_id}' is not compatible with image engine '{engine_id}' on backend '{}'",
+                descriptor.backend
+            ))
+        })
+}
+
+/// Validate selection before routing or touching model weights. PiD and the alternate decoder both
+/// own terminal decode, so accepting both would make the recorded recipe disagree with execution.
+fn validate_selected_decoder_request(
+    engine_id: &str,
+    decoder_id: &str,
+    advanced: &JsonObject,
+) -> WorkerResult<gen_core::DecoderOption> {
+    if advanced::flag(advanced, "usePid") {
+        return Err(WorkerError::InvalidPayload(
+            "advanced.decoder cannot be combined with advanced.usePid; select exactly one decoder"
+                .to_owned(),
+        ));
+    }
+    selected_decoder_option(engine_id, decoder_id)
+}
+
+/// Stage the selected standalone decoder file in `LoadSpec.components`. The manifest row is a soft
+/// co-requisite, so native generation remains installable and runnable without it; selection itself
+/// is strict and refuses a missing/stale donor before the fit gate or provider load.
+fn attach_selected_decoder(
+    spec: LoadSpec,
+    engine_id: &str,
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<LoadSpec> {
+    let Some(decoder_id) = requested_decoder_id(&request.advanced)? else {
+        return Ok(spec);
+    };
+    let option = validate_selected_decoder_request(engine_id, decoder_id, &request.advanced)?;
+    let manifest = Value::Object(request.model_manifest_entry.clone());
+    let source = crate::model_jobs::resolve_optional_component(
+        &manifest,
+        option.component_id,
+        settings,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "decoder '{}' needs its standalone pinned component '{}' to be installed; install or repair this model before generating",
+            option.label, option.component_id
+        ))
+    })?;
+    Ok(spec.with_component(option.component_id, source))
+}
+
 /// The tier a [`LoadSpec`]'s weights dir resolved to, for matching a per-tier `coRequisite`'s
 /// `variant` (sc-14980).
 ///
@@ -6161,9 +6229,9 @@ fn mlx_tier_fit(engine_id: &str, spec: &LoadSpec) -> TierFit {
 /// install at 2.33 GB instead of 7.00 GB, which both under-quoted the over-budget message and let the
 /// permissive weights-fit floor admit budgets the tier does not fit.
 ///
-/// Staging is best-effort: a co-requisite that cannot be resolved leaves the bare spec, and the real
-/// load's `attach_required_components` fails the job with its own actionable error rather than this
-/// probe guessing.
+/// Required-component staging remains best-effort: the real load reports its actionable error. An
+/// explicitly selected decoder is different: it must never disappear from the probe, because doing
+/// so would under-price the request and silently evaluate the native-decoder composition instead.
 #[cfg(target_os = "macos")]
 fn tier_probe_spec(
     engine_id: &str,
@@ -6171,16 +6239,19 @@ fn tier_probe_spec(
     request: &ImageRequest,
     settings: &Settings,
     adapters: &[AdapterSpec],
-) -> LoadSpec {
+) -> WorkerResult<LoadSpec> {
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
-    attach_required_components(
+    let spec = attach_required_components(
         spec.clone(),
         engine_id,
         &request.model_manifest_entry,
         settings,
     )
-    .unwrap_or(spec)
-    .with_adapters(adapters.to_vec())
+    .unwrap_or(spec);
+    Ok(attach_selected_decoder(
+        spec, engine_id, request, settings,
+    )?
+    .with_adapters(adapters.to_vec()))
 }
 
 /// Real MLX generation: load once on a blocking thread, generate each image, and
@@ -6237,19 +6308,14 @@ async fn generate_stream(
                 downtier_candidate_tiers(request, settings, default_tier, floor)
                     .into_iter()
                     .filter_map(|cand| {
-                        resolve_tier_dir(request, settings, cand)
-                            .map(|dir| {
-                                let probe = tier_probe_spec(
-                                    engine_id,
-                                    &dir,
-                                    request,
-                                    settings,
-                                    &adapters,
-                                );
-                                (cand, mlx_tier_fit(engine_id, &probe))
-                            })
+                        resolve_tier_dir(request, settings, cand).map(|dir| (cand, dir))
                     })
-                    .collect();
+                    .map(|(cand, dir)| {
+                        let probe =
+                            tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
+                        Ok((cand, mlx_tier_fit(engine_id, &probe)))
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()?;
             match choose_downtier(default_tier, &candidates) {
                 DowntierPick::Keep => {}
                 DowntierPick::Downtier(chosen) => {
@@ -6274,21 +6340,21 @@ async fn generate_stream(
                     // dominates it — a q4 install of 7 GB refused with a bare "~25 GB" reads like
                     // the figure belongs to some other tier. Recomputed from the same probe spec
                     // `mlx_tier_fit` scored, so the two numbers cannot drift apart.
-                    let weights_note = resolve_tier_dir(request, settings, tier)
-                        .map(|dir| {
-                            crate::mlx_fit_gate::spec_weights_gb(
-                                engine_id,
-                                &tier_probe_spec(engine_id, &dir, request, settings, &adapters),
-                            )
-                        })
-                        .filter(|gb| *gb > 0.0)
-                        .map(|gb| {
-                            format!(
-                                " — ~{} GB of weights plus headroom for activations and the OS",
-                                gb.round() as i64
-                            )
-                        })
-                        .unwrap_or_default();
+                    let weights_note = if let Some(dir) = resolve_tier_dir(request, settings, tier) {
+                        let probe =
+                            tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
+                        let gb = crate::mlx_fit_gate::spec_weights_gb(engine_id, &probe);
+                        (gb > 0.0)
+                            .then(|| {
+                                format!(
+                                    " — ~{} GB of weights plus headroom for activations and the OS",
+                                    gb.round() as i64
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} needs ~{needed} GB of unified memory even at the smallest installed \
                          tier it can run ({tier}{weights_note}) but this machine has ~{available} GB. \
@@ -6521,6 +6587,9 @@ async fn generate_stream(
     // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
     // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
     spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+    // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
+    // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
+    spec = attach_selected_decoder(spec, engine_id, request, settings)?;
     let plain_text_to_image = matches!(request.mode.as_str(), "image_generation" | "text_to_image")
         && identity_init.is_none()
         && edit_refs.is_empty()

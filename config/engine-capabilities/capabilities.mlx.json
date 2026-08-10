@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "850a545fa444d9a555313bf150f4ba95df4f97a4",
+    "inferenceRevision": "275bbc613480321d6b161f4674a6f9881665e8a7",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -123,27 +123,72 @@
     {
       "id": "krea_2_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_raw",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_turbo",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_turbo_control",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_2_turbo_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "krea_realtime_14b",
@@ -208,17 +253,44 @@
     {
       "id": "qwen_image",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "qwen_image_control",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "qwen_image_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "decoderOptions": [
+        {
+          "id": "wan_2_1_vae",
+          "label": "Wan 2.1 VAE",
+          "componentId": "vae",
+          "licenseComponent": "wan2_1_t2v_14b_diffusers",
+          "experimental": true
+        }
+      ]
     },
     {
       "id": "sana_1600m",

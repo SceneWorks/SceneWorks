@@ -1788,6 +1788,7 @@ impl ArmProbe {
                     backend: "probe",
                     modality: gen_core::Modality::Video,
                     capabilities: gen_core::Capabilities::default(),
+                    denoiser_output_latent_space: None,
                     control_kinds: None,
                     required_components: &[],
                 },
