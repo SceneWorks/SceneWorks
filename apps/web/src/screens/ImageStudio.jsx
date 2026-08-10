@@ -47,6 +47,7 @@ import {
   validateCaption,
 } from "../ideogramCaption.js";
 import { buildImageJobRequest, composeImageJobPrompt } from "../imageJobRequest.js";
+import { reconcileDecoderSelection } from "../imageDecoderSelection.js";
 import {
   usePoseLibrary,
   useUserPoseLoader,
@@ -904,12 +905,11 @@ export function ImageStudio() {
     [selectedModel, activeBackend],
   );
   const showDecoderPicker = decoderOptions.length > 0;
-  const selectedDecoderOption = decoderOptions.find((option) => option.id === decoder);
   useEffect(() => {
-    if (decoder !== "native" && (!selectedDecoderOption || !selectedDecoderOption.available)) {
-      setDecoder("native");
-    }
-  }, [decoder, selectedDecoderOption]);
+    if (!selectedModel) return;
+    const reconciled = reconcileDecoderSelection(decoder, decoderOptions);
+    if (reconciled !== decoder) setDecoder(reconciled);
+  }, [decoder, decoderOptions, selectedModel]);
   useEffect(() => {
     if (decoder !== "native" && usePid) {
       setUsePid(false);
