@@ -327,6 +327,23 @@ test("the SDXL adapter's runtime-complete fragment passes the real harness witho
   assert.match(sdxlArm, /negativeMutationRootMeanSquareErrorPer255/);
 
   const record = runtimeComplete();
+  record.backend = "mlx";
+  record.loadShape = "deferred_materialization";
+  record.hardware = {
+    probe: "fixture sysctl and MLX allocator probe",
+    memoryBytes: 128 * 1024 ** 3,
+    model: "Mac16,5",
+    chip: "Apple M4 Max",
+    osVersion: "macOS 26.0",
+    metalDevice: "Apple M4 Max",
+    mlxMemoryLimitBytes: 96 * 1024 ** 3,
+    wiredLimitBytes: 64 * 1024 ** 3,
+  };
+  record.artifact = {
+    repository: "SceneWorks/sdxl-base-mlx",
+    resolvedRevision: "d".repeat(40),
+    variant: "q4",
+  };
   record.target = {
     modelId: "sdxl", provider: "sdxl", tier: "q4",
     mode: "text_to_image", overlay: "none",
@@ -343,6 +360,14 @@ test("the SDXL adapter's runtime-complete fragment passes the real harness witho
     axes: [{ parameter: "transformerWindowSize", testedValues: [1] }],
     cases: [{ parameters: structuredClone(record.strategy.parameters), result: "passed" }],
     rangeVerified: true,
+  };
+  record.predictedPeakBytes = { conditioning: 100, denoise: 200, decode: 150, overall: 200 };
+  record.observedMemory = {
+    conditioning: phase(100), denoise: phase(200), decode: phase(150), overall: phase(200),
+  };
+  record.loadability = {
+    result: "passed",
+    resolvedPathFingerprint: `SceneWorks/sdxl-base-mlx@${"d".repeat(40)}:q4`,
   };
   record.logicalCaseId = logicalCaseId(record);
   record.id = recordId(record);
