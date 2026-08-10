@@ -10,6 +10,10 @@ import { terminalStatuses } from "../constants.js";
 // Props:
 //   ready          — when true, render `children` (the Studio body) unchanged.
 //   title/description — gate copy.
+//   eyebrow        — the kicker above the title. Defaults to the Studio wording ("No supported
+//                    model installed", i.e. none of a whole family qualifies); a screen gated on
+//                    ONE named utility model (the Pose Library's DWPose detector) overrides it,
+//                    because "no supported model" misdescribes a single required download.
 //   offers         — models to offer for download (downloadOffersFor in modelEligibility.js).
 //   downloadJobs   — model_download jobs, to show progress for an in-flight offer.
 //   onDownload(model) / onOpenModels() / onOpenQueue() / onCancelJob(job) — wired from context.
@@ -24,6 +28,7 @@ export function ModelAvailabilityGate({
   ready,
   title,
   description,
+  eyebrow = "No supported model installed",
   offers = [],
   downloadJobs = [],
   onDownload,
@@ -41,7 +46,7 @@ export function ModelAvailabilityGate({
     <section className="model-availability-gate">
       <div className="model-availability-gate-card">
         <div className="section-heading">
-          <p className="eyebrow">No supported model installed</p>
+          <p className="eyebrow">{eyebrow}</p>
           <h2>{title}</h2>
         </div>
         {description ? <p>{description}</p> : null}
