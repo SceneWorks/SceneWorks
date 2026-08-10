@@ -4590,8 +4590,10 @@ mod model_size_concurrency_tests {
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
+        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
+        // each gain its exact pinned download context while macOS keeps the same one.
         for (os, expected_distinct_contexts) in
-            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 87_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
