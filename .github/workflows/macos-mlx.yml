@@ -167,7 +167,7 @@ on:
         required: false
         type: string
       run_z_image_deferred_validation:
-        description: "Run the SC-18409 bf16 Sequential/deferred RSS validation"
+        description: "Run the SC-18409 bf16 Sequential/deferred physical-footprint validation"
         required: false
         type: boolean
         default: false
