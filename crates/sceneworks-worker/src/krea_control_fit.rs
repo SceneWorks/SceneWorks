@@ -96,6 +96,11 @@ const HEADROOM_GB: f64 = crate::vram_gate::HEADROOM_GB;
 
 const KREA_CONTROL_ROUTE: &str = "krea_2_turbo_control";
 const KREA_CONTROL_CALIBRATION: &str = "sc-16013-krea-control-direct-1024-v1";
+/// Candle's bespoke Krea control provider models the separately supplied pose image as an img2img
+/// reference. These values mirror its authoritative evidence probe and must describe both measured
+/// cells and live requests identically.
+pub(crate) const KREA_CONTROL_MODE: &str = "image_to_image";
+pub(crate) const KREA_CONTROL_REFERENCE_COUNT: u32 = 1;
 /// Evidence-revision stamp for the synthesized estimate-floor candidates (sc-18097): request-scoped
 /// telemetry must be attributable to the estimate synthesis, never to the sc-16013 measured rows it
 /// floors on.
@@ -411,7 +416,7 @@ fn fit_ladder_for_tier(
         height: 1024,
         batch: 1,
         frames: 1,
-        reference_count: 0,
+        reference_count: KREA_CONTROL_REFERENCE_COUNT,
     };
     let overlay = if adapter_gb > 0.0 {
         format!(
@@ -430,7 +435,7 @@ fn fit_ladder_for_tier(
         resolved_route: KREA_CONTROL_ROUTE,
         backend: "candle",
         tier: numeric_tier,
-        mode: "pose_control",
+        mode: KREA_CONTROL_MODE,
         overlay: Some(&overlay),
         geometry: request_geometry,
         // sc-17774: one mechanism. `unwrap_or_default` fails closed on an undeclared lane.
@@ -493,7 +498,7 @@ fn fit_ladder_for_tier(
                 backend: gen_core::MemoryBackend::Candle,
                 tier: numeric_tier,
                 load_shape: contract.load_shape,
-                mode: crate::memory_strategy::memory_mode_from_mode_key("pose_control"),
+                mode: crate::memory_strategy::memory_mode_from_mode_key(KREA_CONTROL_MODE),
                 overlay: Some(overlay.clone()),
                 geometry: measured_geometry,
                 strategy: selection.strategy,
@@ -661,7 +666,7 @@ fn fit_ladder_for_tier(
                         backend: gen_core::MemoryBackend::Candle,
                         tier: numeric_tier,
                         load_shape: contract.load_shape,
-                        mode: crate::memory_strategy::memory_mode_from_mode_key("pose_control"),
+                        mode: crate::memory_strategy::memory_mode_from_mode_key(KREA_CONTROL_MODE),
                         overlay: Some(overlay.clone()),
                         geometry: request_geometry,
                         strategy,
@@ -835,7 +840,7 @@ pub(crate) fn fit_ladder(
             height: 1024,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: KREA_CONTROL_REFERENCE_COUNT,
         },
         peak_gb,
         sequential_peak_gb,
@@ -894,7 +899,7 @@ pub(crate) fn fit_ladder_for_entry_with_adapter_bytes(
             height: 1024,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: KREA_CONTROL_REFERENCE_COUNT,
         },
         contract.as_ref(),
         true,
@@ -1035,6 +1040,26 @@ mod tests {
     use super::*;
     use crate::vram_gate::VramBudget;
     use serde_json::json;
+
+    #[test]
+    fn candle_krea_pose_identity_matches_the_provider_evidence_probe_and_live_call_site() {
+        assert_eq!(KREA_CONTROL_REFERENCE_COUNT, 1);
+        assert_eq!(
+            crate::memory_strategy::memory_mode_from_mode_key(KREA_CONTROL_MODE),
+            gen_core::MemoryMode::ImageToImage
+        );
+
+        let candle_lane = include_str!("image_jobs/krea_control_candle.rs");
+        assert!(
+            candle_lane
+                .contains("reference_count: crate::krea_control_fit::KREA_CONTROL_REFERENCE_COUNT"),
+            "the live Candle route must use the provider-matched one-reference geometry"
+        );
+        assert!(
+            !candle_lane.contains("reference_count: 0"),
+            "the live Candle pose route must not reintroduce the zero-reference declaration"
+        );
+    }
 
     fn obj(value: Value) -> JsonObject {
         value.as_object().expect("object literal").clone()
@@ -1630,7 +1655,7 @@ mod tests {
             height: 512,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: KREA_CONTROL_REFERENCE_COUNT,
         };
         let peak = 40.0;
         let sequential = 30.0;
@@ -2157,7 +2182,7 @@ mod tests {
             height: 768,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: KREA_CONTROL_REFERENCE_COUNT,
         };
         let fit = |free_gb: f64| {
             fit_ladder_for_entry_with_runtime(
@@ -2223,7 +2248,7 @@ mod tests {
                 height: 1536,
                 batch: 1,
                 frames: 1,
-                reference_count: 0,
+                reference_count: KREA_CONTROL_REFERENCE_COUNT,
             },
             contract.as_ref(),
             true,
@@ -2260,7 +2285,7 @@ mod tests {
             height: 768,
             batch: 1,
             frames: 1,
-            reference_count: 0,
+            reference_count: KREA_CONTROL_REFERENCE_COUNT,
         };
         let contract = registered_contract_for_tier(tier).expect("control contract");
         let fit = |manifest: &JsonObject, contract: &MemoryProviderContract| {
