@@ -96,6 +96,15 @@ export const WAN_MOE_PAIRED_LORA_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_
 export const VISION_CAPTION_MODEL_ID = "vision_caption_qwen3vl_8b";
 export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated";
 
+// DWPose whole-body pose detector (sc-17634 re-host, `type: "utility"` in builtin.models.jsonc).
+// One catalog entry carrying BOTH ONNX graphs the pose lane loads — YOLOX person boxes + the RTMW
+// 133-point COCO-WholeBody model. Since sc-17634 the worker's resolver is CACHE-ONLY: it never
+// downloads mid-job, so a missing install can only surface as a failed `pose_detect` job unless the
+// UI checks first. As with PROMPT_REFINE_MODEL_ID / JOY_CAPTION_MODEL_ID the worker resolves the
+// graphs by repo+revision, not by this id; the web uses the id purely to read install state and
+// offer the download in place (the eligibility predicate is `poseDetectModelUsable`).
+export const POSE_DETECT_MODEL_ID = "dwpose_pose_detector";
+
 // Default interleave system prompt (the think/no-think protocol). Prefilled in
 // Document Studio; the worker falls back to this same text when the field is blank.
 // Keep in sync with the native worker's interleave system-message default.

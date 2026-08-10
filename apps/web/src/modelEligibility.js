@@ -4,7 +4,7 @@
 // exactly which models qualify. Predicates are capability + Mac-gating only (no install
 // state) — callers layer installState via the helpers at the bottom.
 import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGating.js";
-import { VISION_CAPTION_MODEL_ID } from "./constants.js";
+import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
 
 // Image generation modes a model can serve (ImageStudio mode tabs).
 const IMAGE_MODES = ["text_to_image", "edit_image", "character_image", "style_variations"];
@@ -204,6 +204,19 @@ export function visionCaptionModelUsable(model, caps) {
     }
   }
   return true;
+}
+
+// Photo → skeleton pose detection (Pose Library "Create" tab). Like the vision captioner this is
+// a single catalog-pinned UTILITY model rather than a family, so usability is "this IS the detector
+// AND it can run here", not a capability sweep — `dwpose_pose_detector` declares `capabilities: []`,
+// so any capability-shaped predicate would match nothing.
+//
+// No `platforms` / `macOnly` branch, unlike visionCaptionModelUsable: the entry is deliberately
+// unscoped because the `ort` lane runs everywhere (CoreML on macOS, CUDA/CPU off-Mac). Whether the
+// SURFACE is available on a gated Mac is a separate question, answered by the screen's
+// `macFeatureBlock(caps, "poseFromPhoto")` — this predicate is only about the model.
+export function poseDetectModelUsable(model, caps) {
+  return model?.id === POSE_DETECT_MODEL_ID && !macModelBlock(model, caps);
 }
 
 // Character Studio — mirrors CharacterStudio.jsx angle/pose predicates.
