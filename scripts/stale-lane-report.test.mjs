@@ -21,7 +21,7 @@ import {
   manifestBindings,
   planLaneCoverage,
   rankLanes,
-  recommendedMlxT2iContractLanes,
+  recommendedMlxT2iLanes,
 } from "./stale-lane-report.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -204,7 +204,7 @@ test("a declared lane with no measurement is unmeasured, never stale", () => {
   assert.equal(report.totals.declaredLanes, 3);
 });
 
-test("recommended contract-bearing MLX T2I coverage is manifest-derived and every gate is mutation-visible", () => {
+test("recommended MLX T2I coverage detects a missing whole contract and every apparatus gate", () => {
   const model = {
     id: "flagship",
     recommended: true,
@@ -212,8 +212,14 @@ test("recommended contract-bearing MLX T2I coverage is manifest-derived and ever
     capabilities: ["text_to_image"],
     mlx: { memoryStrategyContract: { provider: "alpha" } },
   };
-  assert.deepEqual(recommendedMlxT2iContractLanes({ models: [model] }), [
-    { modelId: "flagship", provider: "alpha", lane: "mlx:alpha" },
+  assert.deepEqual(recommendedMlxT2iLanes({ models: [model] }), [
+    {
+      modelId: "flagship",
+      provider: "alpha",
+      lane: "mlx:alpha",
+      contractDeclared: true,
+      providerSource: "memoryStrategyContract.provider",
+    },
   ]);
   const complete = fixtureFrom({
     models: [model],
@@ -223,6 +229,29 @@ test("recommended contract-bearing MLX T2I coverage is manifest-derived and ever
     adapterSources: { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta"]) },
   });
   assert.deepEqual(buildStaleLaneReport(complete).flagshipApparatusCoverage.missingLanes, []);
+
+  const contractlessModel = structuredClone(model);
+  delete contractlessModel.mlx.memoryStrategyContract;
+  const withoutWholeContract = {
+    ...complete,
+    manifest: { models: [contractlessModel] },
+  };
+  const missingContractCoverage = buildStaleLaneReport(withoutWholeContract)
+    .flagshipApparatusCoverage;
+  assert.deepEqual(missingContractCoverage.missingLanes, ["mlx:flagship"]);
+  assert.deepEqual(missingContractCoverage.lanes, [
+    {
+      modelId: "flagship",
+      provider: "flagship",
+      lane: "mlx:flagship",
+      contractDeclared: false,
+      providerSource: "model.id fallback",
+      declared: false,
+      planned: false,
+      capturable: false,
+      covered: false,
+    },
+  ]);
 
   const withoutDeclaration = { ...complete, liveDigests: new Map(), declarations: {} };
   const withoutPlan = { ...complete, plan: { providers: [] } };
@@ -422,7 +451,11 @@ test("the real corpus report is internally consistent, whatever the corpus curre
       report.capturability.arms.mlx.includes(lane.provider),
       `${lane.lane} adapter gate`,
     );
-    assert.equal(lane.covered, lane.declared && lane.planned && lane.capturable, lane.lane);
+    assert.equal(
+      lane.covered,
+      lane.contractDeclared && lane.declared && lane.planned && lane.capturable,
+      lane.lane,
+    );
   }
   assert.deepEqual(
     report.flagshipApparatusCoverage.missingLanes,

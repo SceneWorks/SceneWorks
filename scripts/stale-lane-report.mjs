@@ -106,23 +106,32 @@ export function laneOf(backend, provider) {
 
 /**
  * The bounded flagship MLX T2I population (SC-18377/SC-18379), derived from the shipped manifest.
- * `memoryStrategyContract.provider` is the provider registry identity; using the catalog model id
- * would be wrong for shared providers such as SDXL finetunes and routed variants.
+ * A declared `memoryStrategyContract.provider` is authoritative. If the whole contract is absent,
+ * the catalog id is the only available candidate identity and deliberately remains visible as an
+ * uncovered lane. That fallback is what makes the exact pre-SC-18377 Krea omission detectable.
  */
-export function recommendedMlxT2iContractLanes(manifest) {
+export function recommendedMlxT2iLanes(manifest) {
   return (manifest?.models ?? [])
     .filter(
       (model) =>
         model.recommended === true &&
         model.type === "image" &&
         model.capabilities?.includes("text_to_image") &&
-        typeof model.mlx?.memoryStrategyContract?.provider === "string",
+        model.mlx &&
+        typeof model.id === "string",
     )
-    .map((model) => ({
-      modelId: model.id,
-      provider: model.mlx.memoryStrategyContract.provider,
-      lane: laneOf("mlx", model.mlx.memoryStrategyContract.provider),
-    }))
+    .map((model) => {
+      const declaredProvider = model.mlx?.memoryStrategyContract?.provider;
+      const contractDeclared = typeof declaredProvider === "string";
+      const provider = contractDeclared ? declaredProvider : model.id;
+      return {
+        modelId: model.id,
+        provider,
+        lane: laneOf("mlx", provider),
+        contractDeclared,
+        providerSource: contractDeclared ? "memoryStrategyContract.provider" : "model.id fallback",
+      };
+    })
     .sort((left, right) => left.modelId.localeCompare(right.modelId));
 }
 
@@ -551,7 +560,7 @@ export function buildStaleLaneReport({
     candle: adapterCapturableProviders(adapterSources.candle, SOURCE_PATHS.candleAdapter),
   };
   const planCoverage = planLaneCoverage(plan ?? { providers: [] });
-  const flagshipCoverage = recommendedMlxT2iContractLanes(manifest).map((entry) => {
+  const flagshipCoverage = recommendedMlxT2iLanes(manifest).map((entry) => {
     const declared = liveDigests.has(entry.lane);
     const planned = planCoverage.has(entry.lane);
     const capturable = arms.mlx.includes(entry.provider);
@@ -560,7 +569,7 @@ export function buildStaleLaneReport({
       declared,
       planned,
       capturable,
-      covered: declared && planned && capturable,
+      covered: entry.contractDeclared && declared && planned && capturable,
     };
   });
   const margins = deriveMargins(records);
@@ -682,7 +691,7 @@ export function buildStaleLaneReport({
     },
     flagshipApparatusCoverage: {
       source:
-        "recommended:true image manifest entries with text_to_image and mlx.memoryStrategyContract.provider",
+        "recommended:true MLX image manifest entries with text_to_image; declared provider or model.id fallback when the whole contract is absent",
       lanes: flagshipCoverage,
       missingLanes: flagshipCoverage.filter((entry) => !entry.covered).map((entry) => entry.lane),
     },
@@ -839,7 +848,8 @@ export function formatReport(report) {
   out.push("RECOMMENDED MLX T2I APPARATUS COVERAGE (manifest-derived):");
   for (const entry of report.flagshipApparatusCoverage.lanes) {
     out.push(
-      `  ${entry.modelId} -> ${entry.lane}  closure=${entry.declared ? "yes" : "NO"}  ` +
+      `  ${entry.modelId} -> ${entry.lane}  contract=${entry.contractDeclared ? "yes" : "NO"}  ` +
+        `closure=${entry.declared ? "yes" : "NO"}  ` +
         `plan=${entry.planned ? "yes" : "NO"}  adapter=${entry.capturable ? "yes" : "NO"}`,
     );
   }

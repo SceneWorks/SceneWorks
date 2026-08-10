@@ -2276,14 +2276,69 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
 }
 
 fn validate_krea_base_target(request: &Value) -> Result<(), String> {
-    let provider = protocol::planned(request)?
-        .pointer("/target/provider")
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
         .and_then(Value::as_str)
         .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
     if provider != KREA_BASE_PROVIDER {
         return Err(format!(
             "MLX Krea base calibration does not implement provider {provider:?}"
         ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != KREA_BASE_PROVIDER {
+        return Err(format!(
+            "MLX Krea base calibration requires modelId {KREA_BASE_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_image" {
+        return Err(format!(
+            "MLX Krea base calibration requires reference-free text_to_image mode, got {mode:?}"
+        ));
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
+        let actual = geometry
+            .get(axis)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
+        if actual != expected {
+            return Err(format!(
+                "MLX Krea base calibration requires geometry.{axis} == {expected}, got {actual}"
+            ));
+        }
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "MLX Krea base calibration requires {field} == 0 when declared"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "MLX Krea base calibration requires {field} == false when declared"
+                ));
+            }
+        }
     }
     protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)
 }
@@ -2784,7 +2839,7 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
     }
 
     let mut fragment = json!({
-        "status": "runtime_complete",
+        "status": "complete",
         "strategy": strategy,
         "loadShape": load_shape_key(calibration.load_shape),
         "artifact": {
@@ -2828,7 +2883,13 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
             "maximumErrorThreshold": KREA_MAX_THRESHOLD,
             "meanErrorThreshold": KREA_MEAN_THRESHOLD,
         },
-        "negativeMutation": null,
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
         "loadability": {
             "result": "passed",
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
@@ -4369,7 +4430,13 @@ mod krea_base_tests {
     fn minimal_request(provider: &str, rung: &str) -> Value {
         json!({
             "planned": {
-                "target": { "provider": provider, "mode": "text_to_image", "overlay": "none" },
+                "target": {
+                    "provider": provider,
+                    "modelId": "krea_2_turbo",
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
                 "strategy": { "rung": rung, "engagedRungs": ["resident"], "parameters": {} }
             }
         })
@@ -4407,6 +4474,46 @@ mod krea_base_tests {
                 error,
                 format!("MLX Krea base calibration does not implement provider {provider:?}")
             );
+        }
+    }
+
+    #[test]
+    fn the_base_arm_fails_closed_on_a_non_plain_target_before_weight_work() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/target/modelId",
+                json!("krea_2_turbo_edit"),
+                "requires modelId",
+            ),
+            (
+                "/planned/target/mode",
+                json!("edit_image"),
+                "requires reference-free text_to_image mode",
+            ),
+            (
+                "/planned/target/geometry/batch",
+                json!(2),
+                "requires geometry.batch == 1",
+            ),
+            (
+                "/planned/target/geometry/frames",
+                json!(2),
+                "requires geometry.frames == 1",
+            ),
+        ] {
+            let mut request = minimal_request(KREA_BASE_PROVIDER, "resident");
+            *request.pointer_mut(pointer).unwrap() = value;
+            let error = run_krea_base(&request)
+                .expect_err("a non-plain Krea target must fail before environment or weights");
+            assert!(error.contains(expected), "{pointer}: {error}");
+        }
+
+        for (field, value) in [("referenceCount", json!(1)), ("hasReference", json!(true))] {
+            let mut request = minimal_request(KREA_BASE_PROVIDER, "resident");
+            request["planned"]["target"][field] = value;
+            let error = run_krea_base(&request)
+                .expect_err("a referenced Krea target must fail before environment or weights");
+            assert!(error.contains(field), "{field}: {error}");
         }
     }
 
