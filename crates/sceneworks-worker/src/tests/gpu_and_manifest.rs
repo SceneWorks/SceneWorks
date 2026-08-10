@@ -2762,6 +2762,17 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
         healthy.capabilities.contains(&WorkerCapability::ImageGenerate),
         "the healthy baseline must include image_generate, else this test proves nothing"
     );
+    for capability in [
+        WorkerCapability::VideoExtend,
+        WorkerCapability::VideoBridge,
+        WorkerCapability::PersonReplace,
+    ] {
+        assert!(
+            healthy.capabilities.contains(&capability),
+            "a healthy candle worker must advertise every advanced video dispatch capability; \
+             missing {capability:?}"
+        );
+    }
 
     // The withheld worker keeps the descriptor's own base set PLUS the `candle` lane marker, and
     // nothing else. The marker is not a job capability — it says "this host serves the candle

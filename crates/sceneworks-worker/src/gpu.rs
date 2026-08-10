@@ -139,6 +139,22 @@ pub(crate) fn with_candle_capabilities(
                 return gpu;
             }
             extend_capabilities_unique(&mut gpu.capabilities, derived);
+            // Advanced video generation is routed through production video-engine predicates,
+            // not the generic descriptor modality: Candle's Wan-VACE/SCAIL providers serve
+            // replace_person, extend_clip, and video_bridge, but `registry_capabilities` can only
+            // derive the coarse `video_generate` capability. Advertise the three concrete job
+            // types so scheduler eligibility, worker claiming, and the rich descriptor mappings
+            // describe the same executable surface. Per-model/mode routing remains fail-closed in
+            // `jobs_store::video_job_is_candle_eligible`; advertising these capabilities does not
+            // admit unsupported video models.
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::VideoExtend,
+                    WorkerCapability::VideoBridge,
+                    WorkerCapability::PersonReplace,
+                ],
+            );
             // Plain Image Edit (sc-5487, epic 5480): the distinct `image_edit` job type
             // (`mode == "edit_image"` + `sourceAssetId`, epic 2427) runs the bespoke candle edit lanes
             // (SdxlEdit / Flux2Edit / QwenEdit) via `run_image_generate_job`, which dispatches by payload
