@@ -3765,8 +3765,19 @@ mod candle_image_load_shape_tests {
 /// measured identities at the current provider pin: base Lens Q4 exposes the full ladder, while
 /// Lens-Turbo BF16 retains its legacy text-encoder-only rung. Qwen base/edit also cover Q4/Q8 and
 /// forward-time adapters because the block stream replays packed quantization and captured residuals.
+/// Request-aware callers use the private helper below so Krea base calibration is never applied to
+/// reference, edit, or Hires.fix surfaces that happen to share the same engine and weight shape.
 #[cfg(target_os = "macos")]
 pub(crate) fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    apply_measured_mlx_load_shape_for_request(engine_id, spec, true)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_measured_mlx_load_shape_for_request(
+    engine_id: &str,
+    spec: LoadSpec,
+    plain_text_to_image: bool,
+) -> LoadSpec {
     let directory_native = matches!(&spec.weights, WeightsSource::Dir(_))
         && spec.precision == gen_core::Precision::Bf16;
     let lens_native = directory_native
@@ -3783,7 +3794,15 @@ pub(crate) fn apply_measured_mlx_load_shape(engine_id: &str, spec: LoadSpec) -> 
         && spec.extra_controls.is_empty()
         && spec.ip_adapter.is_none()
         && spec.pid.is_none();
-    if lens_native || qwen_native {
+    let krea_native = directory_native
+        && engine_id == "krea_2_turbo"
+        && plain_text_to_image
+        && spec.control.is_none()
+        && spec.extra_controls.is_empty()
+        && spec.ip_adapter.is_none()
+        && spec.adapters.is_empty()
+        && spec.pid.is_none();
+    if lens_native || qwen_native || krea_native {
         spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
     } else {
         spec
@@ -3988,6 +4007,90 @@ mod measured_mlx_load_shape_tests {
             gen_core::LoadShape::EagerMaterialization,
             "the unbounded five-block control side branch is not advertised as rung 4"
         );
+    }
+
+    #[test]
+    fn worker_plain_krea_specs_reach_the_full_ladder_without_admitting_other_surfaces() {
+        for (tier, quant_bits, quant) in [
+            ("bf16", None, None),
+            ("q4", Some(4), Some(Quant::Q4)),
+            ("q8", Some(8), Some(Quant::Q8)),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut spec = fixture_spec(root.path(), quant_bits);
+            if let Some(quant) = quant {
+                spec = spec.with_quant(quant);
+            }
+            let shaped =
+                apply_measured_mlx_load_shape_for_request("krea_2_turbo", spec, true);
+            assert_eq!(
+                shaped.load_shape,
+                gen_core::LoadShape::DeferredMaterialization,
+                "plain Krea {tier} must use the production deferred load shape"
+            );
+            let resident_contract = crate::inference_runtime::media()
+                .memory_strategy_contract(
+                    "krea_2_turbo",
+                    &shaped.clone().with_offload_policy(OffloadPolicy::Resident),
+                )
+                .unwrap()
+                .expect("plain Krea registers a resident/deferred memory-strategy contract");
+            assert_eq!(
+                resident_contract
+                    .capability(MemoryStrategy::Resident)
+                    .unwrap()
+                    .support,
+                MemoryStrategySupport::Implemented,
+                "plain Krea {tier} must remain reachable on a roomy resident host"
+            );
+
+            let sequential_contract = crate::inference_runtime::media()
+                .memory_strategy_contract(
+                    "krea_2_turbo",
+                    &shaped.with_offload_policy(OffloadPolicy::Sequential),
+                )
+                .unwrap()
+                .expect("plain Krea registers a sequential/deferred memory-strategy contract");
+            let rung = sequential_contract
+                .capability(MemoryStrategy::BoundedTransformerResidency)
+                .expect("Krea compatibility contract contains rung 4");
+            assert_eq!(rung.support, MemoryStrategySupport::Implemented, "{tier}");
+            assert_eq!(rung.parameters.transformer_window_sizes, vec![1]);
+            assert_eq!(
+                rung.parameters.transformer_window_components,
+                vec![TransformerComponent::Dit]
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let base = fixture_spec(root.path(), Some(4)).with_quant(Quant::Q4);
+        assert_eq!(
+            apply_measured_mlx_load_shape_for_request("krea_2_turbo", base.clone(), false)
+                .load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "a reference/edit/hires request is outside the plain Krea T2I apparatus even when its \
+             weight spec is otherwise clean"
+        );
+        let adapter = AdapterSpec::new(
+            root.path().join("adapter.safetensors"),
+            1.0,
+            AdapterKind::Lora,
+        );
+        for (engine, spec) in [
+            ("krea_2_turbo_edit", base.clone()),
+            ("krea_2_turbo_control", base.clone()),
+            ("krea_2_turbo", base.clone().with_adapters(vec![adapter])),
+            (
+                "krea_2_turbo",
+                base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
+            ),
+        ] {
+            assert_eq!(
+                apply_measured_mlx_load_shape_for_request(engine, spec, true).load_shape,
+                gen_core::LoadShape::EagerMaterialization,
+                "{engine} overlay/edit/control surface is outside the base calibration identity"
+            );
+        }
     }
 }
 
@@ -6207,7 +6310,12 @@ async fn generate_stream(
     // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
     // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
     spec = attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
-    spec = apply_measured_mlx_load_shape(engine_id, spec);
+    let plain_text_to_image = matches!(request.mode.as_str(), "image_generation" | "text_to_image")
+        && identity_init.is_none()
+        && edit_refs.is_empty()
+        && ideogram_edit_mask.is_none()
+        && hires_fix.is_none();
+    spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
     let mlx_request_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
         engine_id,
         &request.model,

@@ -298,6 +298,25 @@ when they breach the unchanged production thresholds. Positive records remain `g
 Qwen VAE seam does not expose synchronized full-pipeline conditioning/denoise
 device/wired/reclaimable phase telemetry or all required lifecycle injections.
 
+The plain MLX Krea adapter uses a separate reference-free lane from Krea pose control and requires:
+
+```text
+SCENEWORKS_KREA_ROOT=/absolute/path/to/krea-2-turbo-snapshot/<tier>
+SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
+SCENEWORKS_KREA_REVISION=<resolved immutable artifact revision>
+```
+
+The selected plan target derives `bf16`, `q4`, or `q8`; the adapter canonicalizes the root and
+requires the matching fixed
+`/models--SceneWorks--krea-2-turbo-mlx/snapshots/<exact-revision>/<tier>` suffix. It refuses a
+reference, control, edit, adapter, overlay, or PiD surface before loading weights and performs no
+network fetch. The checked-in plan covers all five implemented rungs across the three shipped tiers
+at the 768 and 1024 production geometries, using the production deferred-materialization route and
+the exact native 512/64 decode, 67108864 attention, and DiT window-1 domains. The arm validates the
+pinned registry contract, runs synchronized phase peaks, parity and negative-mutation checks, and
+proves cancellation/error cleanup with warm recovery. SC-18377 deliberately publishes no Krea
+evidence record or manifest binding; only a later real Apple-Silicon capture may do that.
+
 The Candle adapter requires:
 
 ```text

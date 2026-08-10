@@ -107,6 +107,22 @@
       "sourceFileCount": 197,
       "lockedPackageCount": 174
     },
+    "mlx:krea_2_turbo": {
+      "crate": "crates/media/mlx-gen/mlx-gen-krea",
+      "digest": "945486e237c6e84aa75e5268c81ee10b61b23e1fc262bf34e2cc4d3aad46ea05",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-krea",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-qwen-image",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "sourceFileCount": 248,
+      "lockedPackageCount": 175
+    },
     "mlx:krea_2_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
       "digest": "1b8a34c150c91d18f9ec5801d81d29287bbf1624e6da03ee072defa04b51d7c8",

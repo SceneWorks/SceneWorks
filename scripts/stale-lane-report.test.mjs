@@ -21,6 +21,7 @@ import {
   manifestBindings,
   planLaneCoverage,
   rankLanes,
+  recommendedMlxT2iContractLanes,
 } from "./stale-lane-report.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -203,6 +204,39 @@ test("a declared lane with no measurement is unmeasured, never stale", () => {
   assert.equal(report.totals.declaredLanes, 3);
 });
 
+test("recommended contract-bearing MLX T2I coverage is manifest-derived and every gate is mutation-visible", () => {
+  const model = {
+    id: "flagship",
+    recommended: true,
+    type: "image",
+    capabilities: ["text_to_image"],
+    mlx: { memoryStrategyContract: { provider: "alpha" } },
+  };
+  assert.deepEqual(recommendedMlxT2iContractLanes({ models: [model] }), [
+    { modelId: "flagship", provider: "alpha", lane: "mlx:alpha" },
+  ]);
+  const complete = fixtureFrom({
+    models: [model],
+    records: [],
+    lanes: [["mlx:alpha", LIVE_MLX]],
+    plan: { providers: [planEntry("mlx", "alpha")] },
+    adapterSources: { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta"]) },
+  });
+  assert.deepEqual(buildStaleLaneReport(complete).flagshipApparatusCoverage.missingLanes, []);
+
+  const withoutDeclaration = { ...complete, liveDigests: new Map(), declarations: {} };
+  const withoutPlan = { ...complete, plan: { providers: [] } };
+  const withoutArm = {
+    ...complete,
+    adapterSources: { ...complete.adapterSources, mlx: adapterSource(["other"]) },
+  };
+  for (const fixture of [withoutDeclaration, withoutPlan, withoutArm]) {
+    const coverage = buildStaleLaneReport(fixture).flagshipApparatusCoverage;
+    assert.deepEqual(coverage.missingLanes, ["mlx:alpha"]);
+    assert.equal(coverage.lanes[0].covered, false);
+  }
+});
+
 test("a whole-block fit outside calibrations[] is a binding, not an unmeasured lane", () => {
   // The regression this test exists to prevent. `turboFit` and `candle.control` carry
   // `provider`/`inferenceRevision`/`inferenceClosureDigest` directly on the block, outside any
@@ -379,6 +413,24 @@ test("the real corpus report is internally consistent, whatever the corpus curre
   // exist elsewhere are recorded on sc-18104; this must not add another.
   const sources = await loadSources();
   const report = buildStaleLaneReport(sources);
+  const flagshipPlan = planLaneCoverage(sources.plan);
+  for (const lane of report.flagshipApparatusCoverage.lanes) {
+    assert.equal(lane.declared, sources.liveDigests.has(lane.lane), `${lane.lane} closure gate`);
+    assert.equal(lane.planned, flagshipPlan.has(lane.lane), `${lane.lane} plan gate`);
+    assert.equal(
+      lane.capturable,
+      report.capturability.arms.mlx.includes(lane.provider),
+      `${lane.lane} adapter gate`,
+    );
+    assert.equal(lane.covered, lane.declared && lane.planned && lane.capturable, lane.lane);
+  }
+  assert.deepEqual(
+    report.flagshipApparatusCoverage.missingLanes,
+    report.flagshipApparatusCoverage.lanes
+      .filter((lane) => !lane.covered)
+      .map((lane) => lane.lane),
+    "the real flagship omission list must be derived from the same three gates",
+  );
   // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable");
   // measured armless lanes stay in the staleness partition and appear in `uncapturableLanes` as a
   // second, cross-cutting membership.

@@ -625,6 +625,71 @@ test("FLUX.2-dev MLX plan is the reference-free T2I q4/q8 resident matrix", asyn
   ));
 });
 
+test("plain MLX Krea plan covers q4, q8, and bf16 across the exact five-rung contract", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const expectedRungs = [
+    "resident",
+    "staged_residency",
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const expectedCompositions = {
+    resident: ["resident"],
+    staged_residency: ["resident", "staged_residency"],
+    bounded_decode: ["resident", "bounded_decode"],
+    bounded_attention: ["resident", "bounded_decode", "bounded_attention"],
+    bounded_transformer_residency: [
+      "resident",
+      "staged_residency",
+      "bounded_decode",
+      "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+  };
+  const assertPlan = (candidate) => {
+    const krea = expandPlan(candidate).filter(
+      (item) => item.backend === "mlx" && item.target.provider === "krea_2_turbo",
+    );
+    assert.equal(krea.length, 15, "three tiers must each publish exactly five planned rungs");
+    for (const [tier, edge] of [["q4", 768], ["q8", 1024], ["bf16", 1024]]) {
+      const cases = krea.filter((item) => item.target.tier === tier);
+      assert.deepEqual(cases.map((item) => item.strategy.rung).sort(), [...expectedRungs].sort());
+      assert.ok(cases.every((item) =>
+        item.evidenceScope === "authoritative" &&
+        item.loadShape === "deferred_materialization" &&
+        item.target.modelId === "krea_2_turbo" &&
+        item.target.mode === "text_to_image" &&
+        item.target.overlay === "none" &&
+        item.target.geometry.width === edge &&
+        item.target.geometry.height === edge &&
+        item.target.geometry.batch === 1 &&
+        item.target.geometry.frames === 1 &&
+        item.calibrationFingerprint ===
+          "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3" &&
+        item.fixture === `krea-base-mlx-${tier}-${edge}-seed18377-step2` &&
+        JSON.stringify(item.strategy.engagedRungs) ===
+          JSON.stringify(expectedCompositions[item.strategy.rung])
+      ), `${tier} plain Krea entries must preserve the exact capture tuple and composition`);
+    }
+  };
+  assertPlan(config);
+
+  const missingTierRung = structuredClone(config);
+  missingTierRung.providers = missingTierRung.providers.filter(
+    (provider) => provider.name !== "mlx-krea-base-q8-bounded-transformer-1024",
+  );
+  assert.throws(() => assertPlan(missingTierRung), /exactly five/);
+
+  const wrongSurface = structuredClone(config);
+  wrongSurface.providers.find(
+    (provider) => provider.name === "mlx-krea-base-q4-resident-768",
+  ).target.overlay = "control:1";
+  assert.throws(() => assertPlan(wrongSurface), /plain Krea entries/);
+});
+
 test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {
   const config = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)));
   const expectedRungs = [

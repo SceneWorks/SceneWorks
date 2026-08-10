@@ -104,6 +104,28 @@ export function laneOf(backend, provider) {
   return `${backend}:${provider}`;
 }
 
+/**
+ * The bounded flagship MLX T2I population (SC-18377/SC-18379), derived from the shipped manifest.
+ * `memoryStrategyContract.provider` is the provider registry identity; using the catalog model id
+ * would be wrong for shared providers such as SDXL finetunes and routed variants.
+ */
+export function recommendedMlxT2iContractLanes(manifest) {
+  return (manifest?.models ?? [])
+    .filter(
+      (model) =>
+        model.recommended === true &&
+        model.type === "image" &&
+        model.capabilities?.includes("text_to_image") &&
+        typeof model.mlx?.memoryStrategyContract?.provider === "string",
+    )
+    .map((model) => ({
+      modelId: model.id,
+      provider: model.mlx.memoryStrategyContract.provider,
+      lane: laneOf("mlx", model.mlx.memoryStrategyContract.provider),
+    }))
+    .sort((left, right) => left.modelId.localeCompare(right.modelId));
+}
+
 /*
  * CAPTURABILITY — derived from the adapter's own dispatch, never from a hand list (sc-18212)
  *
@@ -529,6 +551,18 @@ export function buildStaleLaneReport({
     candle: adapterCapturableProviders(adapterSources.candle, SOURCE_PATHS.candleAdapter),
   };
   const planCoverage = planLaneCoverage(plan ?? { providers: [] });
+  const flagshipCoverage = recommendedMlxT2iContractLanes(manifest).map((entry) => {
+    const declared = liveDigests.has(entry.lane);
+    const planned = planCoverage.has(entry.lane);
+    const capturable = arms.mlx.includes(entry.provider);
+    return {
+      ...entry,
+      declared,
+      planned,
+      capturable,
+      covered: declared && planned && capturable,
+    };
+  });
   const margins = deriveMargins(records);
   const bindings = manifestBindings({ manifestBody, manifest });
   const evidence = evidenceBindings(records);
@@ -645,6 +679,12 @@ export function buildStaleLaneReport({
       source: CAPTURABILITY_SOURCE,
       arms,
       uncapturableLanes: uncapturable.map((lane) => lane.lane),
+    },
+    flagshipApparatusCoverage: {
+      source:
+        "recommended:true image manifest entries with text_to_image and mlx.memoryStrategyContract.provider",
+      lanes: flagshipCoverage,
+      missingLanes: flagshipCoverage.filter((entry) => !entry.covered).map((entry) => entry.lane),
     },
     totals: {
       declaredLanes: lanes.length,
@@ -794,6 +834,14 @@ export function formatReport(report) {
         `  ${lane.lane}  plan=${lane.plan.entries} entries (${lane.plan.authoritative} authoritative)`,
       );
     }
+  }
+  out.push("");
+  out.push("RECOMMENDED MLX T2I APPARATUS COVERAGE (manifest-derived):");
+  for (const entry of report.flagshipApparatusCoverage.lanes) {
+    out.push(
+      `  ${entry.modelId} -> ${entry.lane}  closure=${entry.declared ? "yes" : "NO"}  ` +
+        `plan=${entry.planned ? "yes" : "NO"}  adapter=${entry.capturable ? "yes" : "NO"}`,
+    );
   }
   out.push("");
   out.push(`Margin source: ${report.marginSource}`);
