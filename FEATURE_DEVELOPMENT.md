@@ -319,14 +319,19 @@ must:
 - use a merge queue after every required workflow supports `merge_group`;
 - use merge groups of one entry unless deliberate batch validation is accepted.
 
-The second ruleset must contain only the deletion rule. Give only a closed
-maintainer team or cleanup automation a bypass on that deletion-only ruleset for
-branch removal after verified epic completion. Bypass is ruleset-wide: never
-put the deletion rule and its cleanup bypass in the core merge-policy ruleset,
-because that would also let the cleanup actor bypass pull-request, status-check,
-and non-fast-forward protections. Matching rulesets aggregate, so the no-bypass
-core policy remains enforced while the authorized actor deletes a completed
-feature branch.
+The second ruleset must contain only the deletion rule and normally have no
+bypass actors. After a disposable ruleset proof succeeds, or after the
+post-merge checklist succeeds, an administrator may temporarily add one closed
+maintainer team or cleanup automation as its exact cleanup actor. If neither
+exists, one explicitly named repository administrator may be the temporary
+actor; record its immutable actor ID, the approved proof-or-completed branch
+names, and the start/end of the cleanup window. Delete only those branches and
+immediately restore the no-bypass deletion guard. Never leave deletion
+authority active during an epic. Bypass is ruleset-wide: never put the
+deletion rule and its cleanup bypass in the core merge-policy ruleset, because
+that would also let the cleanup actor bypass pull-request, status-check, and
+non-fast-forward protections. Matching rulesets aggregate, so the no-bypass
+core policy remains enforced during that bounded cleanup window.
 
 Start the rulesets in Evaluate mode if available, prove them with disposable
 branches, and activate them only after the check matrix is complete. GitHub's
