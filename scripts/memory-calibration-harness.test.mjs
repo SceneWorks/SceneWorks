@@ -310,19 +310,23 @@ test("the Krea adapter's complete fragment shape passes the real harness with si
   );
 });
 
-test("the SDXL adapter's complete fragment shape passes the real harness and keeps string scope out of numeric axes", async () => {
+test("the SDXL adapter's runtime-complete fragment passes the real harness without inventing lifecycle coverage", async () => {
   const adapter = await readFile(
     fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
     "utf8",
   );
   const start = adapter.indexOf("fn run_sdxl(request:");
   const sdxlArm = adapter.slice(start, adapter.indexOf("fn run_krea_control", start));
-  assert.match(sdxlArm, /"status": "complete"/);
-  assert.match(sdxlArm, /"sweep": sdxl_complete_sweep\(request\)\?/);
-  assert.match(sdxlArm, /verify_plain_lifecycle\(/);
-  assert.match(sdxlArm, /"negativeMutation": \{/);
+  assert.match(sdxlArm, /"status": "runtime_complete"/);
+  assert.match(sdxlArm, /"sweep": sdxl_runtime_complete_sweep\(request\)\?/);
+  assert.match(sdxlArm, /"warm_repeat", "result": "not_run"/);
+  assert.match(sdxlArm, /"cancel", "result": "not_run"/);
+  assert.match(sdxlArm, /"error", "result": "not_run"/);
+  assert.match(sdxlArm, /"negativeMutation": null/);
+  assert.match(sdxlArm, /"rootMeanSquareError": rms_error/);
+  assert.match(sdxlArm, /negativeMutationRootMeanSquareErrorPer255/);
 
-  const record = qwenPositiveComplete();
+  const record = runtimeComplete();
   record.target = {
     modelId: "sdxl", provider: "sdxl", tier: "q4",
     mode: "text_to_image", overlay: "none",
@@ -340,10 +344,10 @@ test("the SDXL adapter's complete fragment shape passes the real harness and kee
     cases: [{ parameters: structuredClone(record.strategy.parameters), result: "passed" }],
     rangeVerified: true,
   };
-  record.negativeMutation.parameters = structuredClone(record.strategy.parameters);
   record.logicalCaseId = logicalCaseId(record);
   record.id = recordId(record);
   assert.equal(validateRecord(record), record);
+  validateBundle({ schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: [record] });
 
   const stringAxis = structuredClone(record);
   stringAxis.sweep.axes.push({ parameter: "transformerWindowComponent", testedValues: ["dit"] });

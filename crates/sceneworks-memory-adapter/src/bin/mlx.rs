@@ -54,6 +54,10 @@ const KREA_BASE_SEED: u64 = 18377;
 const SDXL_PROVIDER: &str = "sdxl";
 const SDXL_CALIBRATION_FINGERPRINT: &str = "sdxl-mlx-unet-shared-ladder-v3";
 const SDXL_SEED: u64 = 18379;
+// RMS is bounded by the same per-pixel envelope as maximum absolute error. This avoids inventing a
+// tighter SDXL-specific tolerance before the first physical campaign while still making the real
+// harness's runtime-complete quality contract explicit and mutation-sensitive.
+const SDXL_RMS_THRESHOLD: f64 = MAX_THRESHOLD;
 const SDXL_PLAIN_EXECUTION_PATH: &str = "the MLX SDXL base-only text-to-image path";
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
@@ -2490,7 +2494,7 @@ fn krea_base_context(
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct PlainLifecycleMetrics {
+struct KreaBaseLifecycleMetrics {
     clean_warm_peak: u64,
     clean_post_cleanup: AllocatorState,
     max_fault_post_cleanup: AllocatorState,
@@ -2498,20 +2502,19 @@ struct PlainLifecycleMetrics {
     max_recovery_post_cleanup: AllocatorState,
 }
 
-fn verify_plain_lifecycle(
+fn verify_krea_base_lifecycle(
     generator: &dyn Generator,
     context: &MemoryRunContext,
     selected: &Image,
-    request_factory: &dyn Fn() -> GenerationRequest,
-    provider_label: &str,
-    maximum_error_threshold: f64,
-    mean_error_threshold: f64,
-) -> Result<PlainLifecycleMetrics, String> {
+    width: u32,
+    height: u32,
+    seed: u64,
+) -> Result<KreaBaseLifecycleMetrics, String> {
     clear_cache();
     reset_peak_memory();
     let clean_warm = one_image(scoped_generate(
         generator,
-        request_factory(),
+        krea_base_request(width, height, seed),
         context,
         None,
         &mut |_| {},
@@ -2521,13 +2524,11 @@ fn verify_plain_lifecycle(
     let clean_post_cleanup = AllocatorState::capture_current();
     let bounds = LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
     let (warm_maximum, warm_mean) = image_max_mean_abs(selected, &clean_warm)?;
-    if warm_maximum > maximum_error_threshold || warm_mean > mean_error_threshold {
-        return Err(format!(
-            "{provider_label} clean warm control changed the deterministic output"
-        ));
+    if warm_maximum > KREA_MAX_THRESHOLD || warm_mean > KREA_MEAN_THRESHOLD {
+        return Err("Krea base clean warm control changed the deterministic output".to_owned());
     }
 
-    let mut metrics = PlainLifecycleMetrics {
+    let mut metrics = KreaBaseLifecycleMetrics {
         clean_warm_peak,
         clean_post_cleanup,
         ..Default::default()
@@ -2541,7 +2542,7 @@ fn verify_plain_lifecycle(
         if phase == MemoryPhase::Conditioning {
             cancel.cancel();
         }
-        let mut cancelled = request_factory();
+        let mut cancelled = krea_base_request(width, height, seed);
         cancelled.cancel = cancel.clone();
         let result = scoped_generate(generator, cancelled, context, None, &mut |progress| {
             if (phase == MemoryPhase::Denoise
@@ -2555,12 +2556,12 @@ fn verify_plain_lifecycle(
             Err(error) if error.to_ascii_lowercase().contains("cancel") => {}
             Err(error) => {
                 return Err(format!(
-                    "{provider_label} {phase:?} cancellation returned the wrong error: {error}"
+                    "Krea base {phase:?} cancellation returned the wrong error: {error}"
                 ));
             }
             Ok(_) => {
                 return Err(format!(
-                    "{provider_label} {phase:?} cancellation returned images instead of the typed cancellation path"
+                    "Krea base {phase:?} cancellation returned images instead of the typed cancellation path"
                 ));
             }
         }
@@ -2576,14 +2577,14 @@ fn verify_plain_lifecycle(
             .max(fault_cleanup.cache);
         if !bounds.allows_retained(fault_cleanup) {
             return Err(format!(
-                "{provider_label} {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "Krea base {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         reset_peak_memory();
         let recovery = one_image(scoped_generate(
             generator,
-            request_factory(),
+            krea_base_request(width, height, seed),
             context,
             None,
             &mut |_| {},
@@ -2592,7 +2593,7 @@ fn verify_plain_lifecycle(
         metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
         if !bounds.allows_warm_peak(recovery_peak) {
             return Err(format!(
-                "{provider_label} {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+                "Krea base {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
             ));
         }
         clear_cache();
@@ -2607,14 +2608,14 @@ fn verify_plain_lifecycle(
             .max(recovery_cleanup.cache);
         if !bounds.allows_retained(recovery_cleanup) {
             return Err(format!(
-                "{provider_label} {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "Krea base {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
-        if maximum > maximum_error_threshold || mean > mean_error_threshold {
+        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
             return Err(format!(
-                "{provider_label} {phase:?} cancellation cleanup changed the warm follow-up"
+                "Krea base {phase:?} cancellation cleanup changed the warm follow-up"
             ));
         }
     }
@@ -2626,7 +2627,7 @@ fn verify_plain_lifecycle(
     ] {
         let result = scoped_generate(
             generator,
-            request_factory(),
+            krea_base_request(width, height, seed),
             context,
             Some(phase),
             &mut |_| {},
@@ -2635,12 +2636,12 @@ fn verify_plain_lifecycle(
             Err(error) if error.contains("injected memory-strategy calibration error") => {}
             Err(error) => {
                 return Err(format!(
-                    "{provider_label} {phase:?} error injection returned the wrong error: {error}"
+                    "Krea base {phase:?} error injection returned the wrong error: {error}"
                 ));
             }
             Ok(_) => {
                 return Err(format!(
-                    "{provider_label} {phase:?} error injection returned images instead of failing at its physical boundary"
+                    "Krea base {phase:?} error injection returned images instead of failing at its physical boundary"
                 ));
             }
         }
@@ -2656,14 +2657,14 @@ fn verify_plain_lifecycle(
             .max(fault_cleanup.cache);
         if !bounds.allows_retained(fault_cleanup) {
             return Err(format!(
-                "{provider_label} {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "Krea base {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         reset_peak_memory();
         let recovery = one_image(scoped_generate(
             generator,
-            request_factory(),
+            krea_base_request(width, height, seed),
             context,
             None,
             &mut |_| {},
@@ -2672,7 +2673,7 @@ fn verify_plain_lifecycle(
         metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
         if !bounds.allows_warm_peak(recovery_peak) {
             return Err(format!(
-                "{provider_label} {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+                "Krea base {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
             ));
         }
         clear_cache();
@@ -2687,14 +2688,14 @@ fn verify_plain_lifecycle(
             .max(recovery_cleanup.cache);
         if !bounds.allows_retained(recovery_cleanup) {
             return Err(format!(
-                "{provider_label} {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                "Krea base {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
                 bounds.tolerance_bytes,
             ));
         }
         let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
-        if maximum > maximum_error_threshold || mean > mean_error_threshold {
+        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
             return Err(format!(
-                "{provider_label} {phase:?} error cleanup changed the warm follow-up"
+                "Krea base {phase:?} error cleanup changed the warm follow-up"
             ));
         }
     }
@@ -2867,15 +2868,8 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
             "Krea base selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
         ));
     }
-    let lifecycle = verify_plain_lifecycle(
-        generator.as_ref(),
-        &context,
-        &selected,
-        &|| krea_base_request(width, height, seed),
-        "Krea base",
-        KREA_MAX_THRESHOLD,
-        KREA_MEAN_THRESHOLD,
-    )?;
+    let lifecycle =
+        verify_krea_base_lifecycle(generator.as_ref(), &context, &selected, width, height, seed)?;
     let mutated = qwen_negative_mutation(&selected);
     let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
     if mutated_maximum <= KREA_MAX_THRESHOLD && mutated_mean <= KREA_MEAN_THRESHOLD {
@@ -3032,6 +3026,48 @@ fn validate_sdxl_target(request: &Value) -> Result<(), String> {
     protocol::validate_plain_overlay_target(request, SDXL_PLAIN_EXECUTION_PATH)
 }
 
+fn validate_sdxl_selection_parameters(
+    request: &Value,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    let parameters = protocol::strategy_parameters(request)?;
+    match selection.strategy {
+        MemoryStrategy::Resident | MemoryStrategy::StagedResidency => {
+            if !parameters.is_empty() {
+                return Err(format!(
+                    "MLX SDXL {:?} calibration requires no strategy parameters, got {parameters:?}",
+                    selection.strategy
+                ));
+            }
+        }
+        MemoryStrategy::BoundedTransformerResidency => {
+            let mut keys = parameters.keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            if keys != ["transformerWindowComponent", "transformerWindowSize"] {
+                return Err(format!(
+                    "MLX SDXL bounded transformer calibration requires exactly transformerWindowSize and transformerWindowComponent, got {keys:?}"
+                ));
+            }
+            if selection.parameters.transformer_window_size.is_none()
+                || selection.parameters.transformer_window_component
+                    != Some(TransformerComponent::Dit)
+            {
+                return Err(
+                    "MLX SDXL bounded transformer calibration requires an explicit Dit window"
+                        .to_owned(),
+                );
+            }
+        }
+        MemoryStrategy::BoundedDecode | MemoryStrategy::BoundedAttention => {
+            return Err(format!(
+                "MLX SDXL {:?} is measured Missing at the pinned provider and is not capturable",
+                selection.strategy
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn planned_sdxl_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
     let fixture = protocol::planned(request)?
         .get("fixture")
@@ -3058,7 +3094,7 @@ fn planned_sdxl_seed(request: &Value, tier: &str, width: u32) -> Result<u64, Str
     Ok(seed)
 }
 
-fn sdxl_complete_sweep(request: &Value) -> Result<Value, String> {
+fn sdxl_runtime_complete_sweep(request: &Value) -> Result<Value, String> {
     let parameters = protocol::strategy_parameters(request)?;
     let axes = parameters
         .iter()
@@ -3170,6 +3206,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
         );
     }
     let selection = planned_selection(request)?;
+    validate_sdxl_selection_parameters(request, &selection)?;
     let tier = planned_qwen_tier(request)?;
     let (width, height) = protocol::target_geometry(request)?;
     let seed = planned_sdxl_seed(request, tier, width)?;
@@ -3312,29 +3349,38 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             .generate(&sdxl_request(width, height, seed), &mut |_| {})
             .map_err(|error| format!("generate unselected SDXL reference: {error}"))?,
     )?;
-    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
-    if maximum_error > MAX_THRESHOLD || mean_error > MEAN_THRESHOLD {
+    let (maximum_error, mean_error, rms_error) = image_max_mean_rms_abs(&selected, &baseline)?;
+    if maximum_error > MAX_THRESHOLD
+        || mean_error > MEAN_THRESHOLD
+        || rms_error > SDXL_RMS_THRESHOLD
+    {
         return Err(format!(
-            "SDXL selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+            "SDXL selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
         ));
     }
-    let lifecycle = verify_plain_lifecycle(
-        generator.as_ref(),
-        &context,
-        &selected,
-        &|| sdxl_request(width, height, seed),
-        "SDXL base",
-        MAX_THRESHOLD,
-        MEAN_THRESHOLD,
-    )?;
     let mutated = qwen_negative_mutation(&selected);
-    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
-    if mutated_maximum <= MAX_THRESHOLD && mutated_mean <= MEAN_THRESHOLD {
+    let (mutated_maximum, mutated_mean, mutated_rms) = image_max_mean_rms_abs(&mutated, &baseline)?;
+    if mutated_maximum <= MAX_THRESHOLD
+        && mutated_mean <= MEAN_THRESHOLD
+        && mutated_rms <= SDXL_RMS_THRESHOLD
+    {
         return Err("SDXL output mutation did not breach the parity envelope".to_owned());
     }
 
+    // The pinned SDXL provider exposes synchronized request scopes and phase telemetry, but not the
+    // exhaustive lifecycle hooks required for `complete`: it never reads the calibration error
+    // authorization, and its plain untiled VAE decode does not consult the request cancel flag.
+    // Preserve the real phase/quality/admission measurements as `runtime_complete`, keep the formal
+    // lifecycle scenarios explicitly not_run, and record the internally verified mutation only as
+    // diagnostics (the runtime-complete schema requires `negativeMutation: null`).
+    let lifecycle_blocker = concat!(
+        "the pinned mlx-gen-sdxl provider does not implement calibration error injection and its ",
+        "plain untiled VAE decode does not consult the cancellation flag, so exhaustive warm/cancel/",
+        "error lifecycle certification cannot execute; synchronized phase telemetry, selected-versus-",
+        "unselected parity, and the internal negative discriminator are attested separately"
+    );
     let mut fragment = json!({
-        "status": "complete",
+        "status": "runtime_complete",
         "strategy": strategy,
         "loadShape": load_shape_key(calibration.load_shape),
         "artifact": {
@@ -3342,14 +3388,14 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             "resolvedRevision": revision,
             "variant": tier,
         },
-        "sweep": sdxl_complete_sweep(request)?,
+        "sweep": sdxl_runtime_complete_sweep(request)?,
         "scenarios": [
             { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
             { "name": "unknown_budget", "result": "passed" },
             { "name": "stale_evidence", "result": "passed" },
-            { "name": "warm_repeat", "result": "passed" },
-            { "name": "cancel", "result": "passed", "reason": "conditioning, denoise, and decode cancellation returned typed cancellation; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
-            { "name": "error", "result": "passed", "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "warm_repeat", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
@@ -3371,16 +3417,12 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "maximumError": maximum_error,
             "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
             "maximumErrorThreshold": MAX_THRESHOLD,
             "meanErrorThreshold": MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": SDXL_RMS_THRESHOLD,
         },
-        "negativeMutation": {
-            "parameters": protocol::strategy_parameters(request)?,
-            "measured": true,
-            "result": "failed_as_expected",
-            "maximumError": mutated_maximum,
-            "meanError": mutated_mean,
-        },
+        "negativeMutation": null,
         "loadability": {
             "result": "passed",
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
@@ -3388,7 +3430,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:sdxl-shared-ladder",
             "executed",
-            [],
+            [lifecycle_blocker.to_owned()],
             [
                 ("preRungActiveAfterClear", "bytes", pre_rung_active),
                 ("preRungCacheAfterClear", "bytes", pre_rung_cache),
@@ -3396,16 +3438,9 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
                 ("denoiseActivePeak", "bytes", denoise.active),
                 ("decodeActivePeak", "bytes", decode.active),
                 ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
-                ("lifecycleCleanWarmPeak", "bytes", lifecycle.clean_warm_peak),
-                ("lifecycleCleanPostCleanupActive", "bytes", lifecycle.clean_post_cleanup.active),
-                ("lifecycleCleanPostCleanupCache", "bytes", lifecycle.clean_post_cleanup.cache),
-                ("lifecycleMaximumFaultPostCleanupActive", "bytes", lifecycle.max_fault_post_cleanup.active),
-                ("lifecycleMaximumFaultPostCleanupCache", "bytes", lifecycle.max_fault_post_cleanup.cache),
-                ("lifecycleMaximumRecoveryPeak", "bytes", lifecycle.max_recovery_peak),
-                ("lifecycleMaximumRecoveryPostCleanupActive", "bytes", lifecycle.max_recovery_post_cleanup.active),
-                ("lifecycleMaximumRecoveryPostCleanupCache", "bytes", lifecycle.max_recovery_post_cleanup.cache),
                 ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
                 ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
                 ("loadShapeDeferred", "count", 1),
             ],
         ),
@@ -5285,10 +5320,26 @@ mod sdxl_tests {
         request["planned"]["strategy"]["parameters"] =
             json!({ "transformerWindowComponent": "dit" });
         assert!(planned_selection(&request).is_err());
+
+        request["planned"]["strategy"] = json!({
+            "rung": "resident",
+            "engagedRungs": ["resident"],
+            "parameters": { "unknownParameter": 1 }
+        });
+        let selection = planned_selection(&request).unwrap();
+        assert!(validate_sdxl_selection_parameters(&request, &selection).is_err());
+
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_decode",
+            "engagedRungs": ["resident", "bounded_decode"],
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+        });
+        let selection = planned_selection(&request).unwrap();
+        assert!(validate_sdxl_selection_parameters(&request, &selection).is_err());
     }
 
     #[test]
-    fn sdxl_complete_sweep_attests_the_exact_tuple_without_a_string_axis() {
+    fn sdxl_runtime_complete_sweep_attests_the_exact_tuple_without_a_string_axis() {
         let mut request = minimal_request(SDXL_PROVIDER);
         request["planned"]["strategy"] = json!({
             "rung": "bounded_transformer_residency",
@@ -5296,7 +5347,7 @@ mod sdxl_tests {
             "parameters": { "transformerWindowSize": 5, "transformerWindowComponent": "dit" }
         });
         assert_eq!(
-            sdxl_complete_sweep(&request).unwrap(),
+            sdxl_runtime_complete_sweep(&request).unwrap(),
             json!({
                 "axes": [{ "parameter": "transformerWindowSize", "testedValues": [5] }],
                 "cases": [{
@@ -5312,7 +5363,10 @@ mod sdxl_tests {
 
         request["planned"]["strategy"] =
             json!({ "rung": "resident", "engagedRungs": ["resident"], "parameters": {} });
-        assert_eq!(sdxl_complete_sweep(&request).unwrap()["axes"], json!([]));
+        assert_eq!(
+            sdxl_runtime_complete_sweep(&request).unwrap()["axes"],
+            json!([])
+        );
     }
 
     #[test]
