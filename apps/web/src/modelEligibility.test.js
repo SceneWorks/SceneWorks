@@ -12,6 +12,7 @@ import {
   hasUsableModelFor,
   imageModelServesMode,
   imageModelUsable,
+  missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
   videoModelUsable,
@@ -387,5 +388,41 @@ describe("audio model eligibility (sc-13403)", () => {
     }
     // Kokoro is the recommended default in the fallback list.
     expect(fallbackAudio.find((m) => m.id === "kokoro_82m")?.recommended).toBe(true);
+  });
+});
+
+describe("missingRequiredModels", () => {
+  const catalog = [
+    { id: "person_detector", name: "YOLO11m Person Detector", installState: "installed" },
+    { id: "dwpose_pose_detector", name: "DWPose Pose Detector", installState: "missing" },
+    { id: "torn_one", name: "Torn", installState: "incomplete" },
+  ];
+
+  it("returns only the entries that are not install-complete", () => {
+    expect(missingRequiredModels(catalog, ["person_detector", "dwpose_pose_detector"])).toEqual([
+      catalog[1],
+    ]);
+  });
+
+  it("treats a torn install as missing — it fails to load exactly the same way", () => {
+    expect(missingRequiredModels(catalog, ["torn_one"]).map((m) => m.id)).toEqual(["torn_one"]);
+  });
+
+  it("preserves the caller's declaration order", () => {
+    const ids = ["torn_one", "dwpose_pose_detector"];
+    expect(missingRequiredModels(catalog, ids).map((m) => m.id)).toEqual(ids);
+  });
+
+  // The load-bearing rule, shared with the Pose Library gate: `models` is [] on first render and an
+  // older API may not declare a utility entry at all, while the worker still resolves it. Reading
+  // "absent" as "missing" would block a working install on every mount.
+  it("treats an id with no catalog entry as satisfied", () => {
+    expect(missingRequiredModels(catalog, ["not_in_catalog"])).toEqual([]);
+    expect(missingRequiredModels([], ["dwpose_pose_detector"])).toEqual([]);
+  });
+
+  it("tolerates missing arguments", () => {
+    expect(missingRequiredModels(undefined, undefined)).toEqual([]);
+    expect(missingRequiredModels(catalog, undefined)).toEqual([]);
   });
 });

@@ -278,6 +278,22 @@ export function hasUsableModelFor(models, predicate, caps) {
   );
 }
 
+// The catalog entries among `ids` that a feature needs but doesn't have (epic 17625 made the
+// utility resolvers — DWPose, the person detector — cache-only, so "not installed" is a job-time
+// error, never a mid-job download). Returns them in the order `ids` was given, so the caller's
+// declaration order is the display order.
+//
+// An id with NO catalog entry is treated as SATISFIED and omitted, matching the Pose Library gate:
+// `models` is empty on first render, and an API too old to declare a utility entry still has a
+// worker that resolves it, so "not found" must never read as "missing" — that would block a working
+// install. Only an entry that positively reports missing/incomplete counts.
+export function missingRequiredModels(models, ids) {
+  const catalog = models ?? [];
+  return (ids ?? [])
+    .map((id) => catalog.find((model) => model?.id === id))
+    .filter((model) => model && !modelInstallComplete(model));
+}
+
 // The models to OFFER for download when a screen is gated: catalog models usable on the
 // screen that aren't installed, recommended-first. Falls back to any eligible-but-not-
 // installed model so every screen has at least the models that would unlock it.

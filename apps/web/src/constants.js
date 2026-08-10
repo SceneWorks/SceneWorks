@@ -105,6 +105,12 @@ export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-
 // offer the download in place (the eligibility predicate is `poseDetectModelUsable`).
 export const POSE_DETECT_MODEL_ID = "dwpose_pose_detector";
 
+// YOLO11m person detector (sc-17629/17635, `type: "utility"`). The sibling of POSE_DETECT_MODEL_ID
+// in every respect that matters here: epic 17625 made `person_jobs::require_detector_weights`
+// cache-only too, so a missing install is an error at job time rather than an ~80 MB mid-job fetch.
+// Catalog analysis needs BOTH this and DWPose before it can run structured analysis.
+export const PERSON_DETECT_MODEL_ID = "person_detector";
+
 // Default interleave system prompt (the think/no-think protocol). Prefilled in
 // Document Studio; the worker falls back to this same text when the field is blank.
 // Keep in sync with the native worker's interleave system-message default.
