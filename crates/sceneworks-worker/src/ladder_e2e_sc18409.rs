@@ -183,6 +183,13 @@ fn z_image_deferred_sequential_cold_load_renders_within_the_admitted_ceiling() {
     let Some((tier_dir, revision)) = cached_tier_dir(REPO_DIR, TIER, SENTINEL) else {
         panic!("SKIP-AS-FAILURE: no {REPO_DIR} {TIER} weights cached; sc-18409 cannot be validated without them");
     };
+    let expected_revision = crate::smoke_support::env_or("SC18409_ARTIFACT_REVISION", "");
+    if !expected_revision.is_empty() {
+        assert_eq!(
+            revision, expected_revision,
+            "the cached Z-Image artifact must match the exact requested revision"
+        );
+    }
     let entry = shipped_manifest_entry(ENGINE);
     // No shipped binding names the bf16 tier, so there is no provenance to prove — and if one ever
     // appears this scenario must start proving it (mirrors sc-18101's provenance discipline).
