@@ -1616,6 +1616,141 @@
       ]
     },
     {
+      "name": "mlx-krea-base-q4-resident-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q4-768-seed18377-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q4-staged-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q4-768-seed18377-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q4-bounded-decode-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "bounded_decode"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q4-768-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q4-bounded-attention-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q4-768-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q4-bounded-transformer-768",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q4", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q4-768-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q8-resident-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q8-1024-seed18377-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q8-staged-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q8-1024-seed18377-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q8-bounded-decode-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "bounded_decode"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q8-1024-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q8-bounded-attention-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q8-1024-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-q8-bounded-transformer-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "q8", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-q8-1024-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-bf16-resident-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "resident", "engagedRungs": ["resident"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-bf16-1024-seed18377-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-bf16-staged-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "staged_residency", "engagedRungs": ["resident", "staged_residency"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-bf16-1024-seed18377-step2",
+      "cases": [{ "parameters": {}, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-bf16-bounded-decode-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_decode", "engagedRungs": ["resident", "bounded_decode"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-bf16-1024-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-bf16-bounded-attention-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_attention", "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-bf16-1024-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "expectedResult": "passed" }]
+    },
+    {
+      "name": "mlx-krea-base-bf16-bounded-transformer-1024",
+      "evidenceScope": "authoritative", "backend": "mlx", "loadShape": "deferred_materialization",
+      "target": { "provider": "krea_2_turbo", "modelId": "krea_2_turbo", "tier": "bf16", "mode": "text_to_image", "overlay": "none", "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 } },
+      "rung": "bounded_transformer_residency", "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "fixture": "krea-base-mlx-bf16-1024-seed18377-step2",
+      "cases": [{ "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1 }, "expectedResult": "passed" }]
+    },
+    {
       "name": "mlx-krea-pose-control-q4-768",
       "evidenceScope": "authoritative",
       "backend": "mlx",

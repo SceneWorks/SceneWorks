@@ -6216,6 +6216,160 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission() {
+        fn fixture_spec(root: &std::path::Path, policy: OffloadPolicy) -> LoadSpec {
+            for component in ["text_encoder", "transformer", "vae"] {
+                let directory = root.join(component);
+                std::fs::create_dir_all(&directory).unwrap();
+                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+                bytes.extend_from_slice(header);
+                bytes.extend_from_slice(&0_f32.to_le_bytes());
+                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+            }
+            for component in ["text_encoder", "transformer"] {
+                std::fs::write(
+                    root.join(component).join("config.json"),
+                    r#"{"quantization":{"bits":4,"group_size":64}}"#,
+                )
+                .unwrap();
+            }
+            LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+                .with_quant(gen_core::Quant::Q4)
+                .with_offload_policy(policy)
+                .with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+        }
+
+        fn contract(root: &std::path::Path, policy: OffloadPolicy) -> MemoryProviderContract {
+            let mut contract = crate::inference_runtime::media()
+                .memory_strategy_contract("krea_2_turbo", &fixture_spec(root, policy))
+                .unwrap()
+                .expect("the shipped plain Krea registry contract");
+            // Preserve the shipped contract, composition, parameters and load shape while making
+            // the pure selector arithmetic legible: a 6 GiB base consists of a 1 GiB conditioner
+            // and 5 GiB DiT. With 6 GiB of request headroom, only the windowed composition fits an
+            // 8 GiB constrained host after the canonical 10% estimate margin.
+            contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = 0;
+            contract
+        }
+
+        fn generator(contract: MemoryProviderContract) -> RequestGenerator {
+            RequestGenerator {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "krea_2_turbo",
+                    family: "krea",
+                    backend: "mlx",
+                    modality: gen_core::Modality::Image,
+                    capabilities: gen_core::Capabilities::default(),
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                contract: Some(contract),
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let plan = MlxRequestPlan {
+            engine_id: "krea_2_turbo",
+            model_id: "krea_2_turbo".to_owned(),
+            tier: MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q4),
+                component_precision_floors: &[],
+            },
+            asset_bytes: gib_to_bytes(6.0),
+            folded_control_bytes: 0,
+            folded_adapter_bytes: 0,
+            activation_headroom_bytes: gib_to_bytes(6.0),
+            fixed_reserve_bytes: gib_to_bytes(2.0),
+            calibration: MlxCalibrationConfig::Absent,
+        };
+        let inputs = fixture_inputs(1024, 1024);
+
+        let resident = evaluate_request_with_budget(
+            &generator(contract(root.path(), OffloadPolicy::Resident)),
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(20.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect("a roomy host must keep the exact plain Krea request on resident admission");
+        assert_eq!(
+            resident.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert_eq!(
+            resident.context.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+
+        let constrained = evaluate_request_with_budget(
+            &generator(contract(root.path(), OffloadPolicy::Sequential)),
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Sequential,
+            fixture_budget(8.0),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect("the unmeasured shipped Krea contract must reach the deep estimate rung");
+        assert_eq!(
+            constrained.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        assert_eq!(
+            constrained.context.selection.parameters.decode_tile_edge,
+            Some(512)
+        );
+        assert_eq!(
+            constrained.context.selection.parameters.decode_overlap,
+            Some(64)
+        );
+        assert_eq!(
+            constrained
+                .context
+                .selection
+                .parameters
+                .attention_chunk_size,
+            Some(67_108_864)
+        );
+        assert_eq!(
+            constrained
+                .context
+                .selection
+                .parameters
+                .transformer_window_size,
+            Some(1)
+        );
+        assert!(constrained.memory.stage_residency);
+        assert!(constrained.memory.tile_vae_decode);
+        assert!(constrained.memory.chunk_attention);
+        assert!(constrained.memory.stream_transformer_blocks);
+        for evaluation in [&resident, &constrained] {
+            assert_eq!(evaluation.context.mode, MemoryMode::TextToImage);
+            assert!(!evaluation.context.has_reference);
+            assert_eq!(evaluation.context.geometry.reference_count, 0);
+            assert!(evaluation.context.overlay.is_none());
+            assert!(!evaluation.context.use_pid);
+            assert_eq!(
+                evaluation.context.evidence_revision,
+                REQUEST_EVIDENCE_REVISION
+            );
+            assert_eq!(evaluation.process_limit_bytes, None);
+        }
+    }
+
     /// sc-18094/sc-18096: `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` is honored at the
     /// synthesis seam. An extrapolation that moves the request peak onto a DIFFERENT phase than
     /// the measured cell's is rejected — the rung falls back to the no-measured-basis floor,

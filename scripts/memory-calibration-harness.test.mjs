@@ -254,6 +254,62 @@ test("complete final-output quality may attest identical inputs without claiming
   assert.throws(() => validateRecord(record), /identical latents or identical inputs/);
 });
 
+test("the Krea adapter's complete fragment shape passes the real harness with singleton axes", async () => {
+  const adapter = await readFile(
+    fileURLToPath(new URL("../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url)),
+    "utf8",
+  );
+  const kreaArm = adapter.slice(
+    adapter.indexOf("fn run_krea_base(request:"),
+    adapter.indexOf("fn run_krea_control", adapter.indexOf("fn run_krea_base(request:")),
+  );
+  assert.match(kreaArm, /"status": "complete"/);
+  assert.match(kreaArm, /"sweep": krea_base_complete_sweep\(request\)\?/);
+  assert.match(kreaArm, /"negativeMutation": \{/);
+
+  const record = qwenPositiveComplete();
+  record.target = {
+    modelId: "krea_2_turbo", provider: "krea_2_turbo", tier: "q4",
+    mode: "text_to_image", overlay: "none",
+    geometry: { width: 768, height: 768, batch: 1, frames: 1 },
+  };
+  record.fixture = "krea-base-mlx-q4-768-seed18377-step2";
+  record.calibrationFingerprint =
+    "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
+  record.strategy = {
+    rung: "bounded_transformer_residency",
+    engagedRungs: [
+      "resident", "staged_residency", "bounded_decode", "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+    parameters: {
+      decodeTileEdge: 512,
+      decodeOverlap: 64,
+      attentionChunkSize: 67_108_864,
+      transformerWindowSize: 1,
+    },
+  };
+  record.sweep = {
+    axes: Object.entries(record.strategy.parameters).map(([parameter, value]) => ({
+      parameter,
+      testedValues: [value],
+    })),
+    cases: [{ parameters: structuredClone(record.strategy.parameters), result: "passed" }],
+    rangeVerified: true,
+  };
+  record.negativeMutation.parameters = structuredClone(record.strategy.parameters);
+  record.logicalCaseId = logicalCaseId(record);
+  record.id = recordId(record);
+  assert.equal(validateRecord(record), record);
+
+  const oldEmptySweep = structuredClone(record);
+  oldEmptySweep.sweep.axes = [];
+  assert.throws(
+    () => validateRecord(oldEmptySweep),
+    /parameterized complete strategy must sweep at least one axis/,
+  );
+});
+
 test("complete status fails closed on scenario, quality, mutation, memory and loadability mutations", () => {
   const mutations = [
     [(r) => (r.scenarios.find((x) => x.name === "warm_repeat").result = "not_run"), /warm_repeat/],
@@ -623,6 +679,71 @@ test("FLUX.2-dev MLX plan is the reference-free T2I q4/q8 resident matrix", asyn
     item.fixture ===
       `flux2-dev-mlx-${item.target.tier}-${item.target.geometry.width}-seed18218-step2`
   ));
+});
+
+test("plain MLX Krea plan covers q4, q8, and bf16 across the exact five-rung contract", async () => {
+  const config = JSON.parse(
+    await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url)),
+  );
+  const expectedRungs = [
+    "resident",
+    "staged_residency",
+    "bounded_decode",
+    "bounded_attention",
+    "bounded_transformer_residency",
+  ];
+  const expectedCompositions = {
+    resident: ["resident"],
+    staged_residency: ["resident", "staged_residency"],
+    bounded_decode: ["resident", "bounded_decode"],
+    bounded_attention: ["resident", "bounded_decode", "bounded_attention"],
+    bounded_transformer_residency: [
+      "resident",
+      "staged_residency",
+      "bounded_decode",
+      "bounded_attention",
+      "bounded_transformer_residency",
+    ],
+  };
+  const assertPlan = (candidate) => {
+    const krea = expandPlan(candidate).filter(
+      (item) => item.backend === "mlx" && item.target.provider === "krea_2_turbo",
+    );
+    assert.equal(krea.length, 15, "three tiers must each publish exactly five planned rungs");
+    for (const [tier, edge] of [["q4", 768], ["q8", 1024], ["bf16", 1024]]) {
+      const cases = krea.filter((item) => item.target.tier === tier);
+      assert.deepEqual(cases.map((item) => item.strategy.rung).sort(), [...expectedRungs].sort());
+      assert.ok(cases.every((item) =>
+        item.evidenceScope === "authoritative" &&
+        item.loadShape === "deferred_materialization" &&
+        item.target.modelId === "krea_2_turbo" &&
+        item.target.mode === "text_to_image" &&
+        item.target.overlay === "none" &&
+        item.target.geometry.width === edge &&
+        item.target.geometry.height === edge &&
+        item.target.geometry.batch === 1 &&
+        item.target.geometry.frames === 1 &&
+        item.calibrationFingerprint ===
+          "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3" &&
+        item.fixture === `krea-base-mlx-${tier}-${edge}-seed18377-step2` &&
+        JSON.stringify(item.strategy.engagedRungs) ===
+          JSON.stringify(expectedCompositions[item.strategy.rung])
+      ), `${tier} plain Krea entries must preserve the exact capture tuple and composition`);
+    }
+  };
+  assertPlan(config);
+
+  const missingTierRung = structuredClone(config);
+  missingTierRung.providers = missingTierRung.providers.filter(
+    (provider) => provider.name !== "mlx-krea-base-q8-bounded-transformer-1024",
+  );
+  assert.throws(() => assertPlan(missingTierRung), /exactly five/);
+
+  const wrongSurface = structuredClone(config);
+  wrongSurface.providers.find(
+    (provider) => provider.name === "mlx-krea-base-q4-resident-768",
+  ).target.overlay = "control:1";
+  assert.throws(() => assertPlan(wrongSurface), /plain Krea entries/);
 });
 
 test("shipped five-rung oracles stay fresh after backend reuse verdicts", async () => {

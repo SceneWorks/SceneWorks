@@ -5248,6 +5248,50 @@
         "minMemoryGb": 48,
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx",
+        // SC-18377: the clean base route now uses DeferredMaterialization. With Sequential selected,
+        // the pinned provider reopens one DiT block at a time and exposes the full request-scoped
+        // ladder. Edit/reference/control/PiD/adapter surfaces remain eager and are outside this
+        // declaration.
+        "supportsSequentialOffload": true,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "krea_2_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            }
+          ]
+        },
         // SC-16099: exact, current MLX pose-control evidence. These bindings are intentionally
         // geometry-specific; the refusal path may name 768² only by selecting its complete promoted
         // record through the shared reader. No curve or area interpolation is permitted.

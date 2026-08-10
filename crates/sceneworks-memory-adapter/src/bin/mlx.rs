@@ -43,12 +43,19 @@ const QWEN_MEAN_THRESHOLD: f64 = 0.5 / 255.0;
 // pass on the maximum alone.
 const Z_IMAGE_MAX_THRESHOLD: f64 = 56.0 / 255.0;
 const Z_IMAGE_MEAN_THRESHOLD: f64 = 4.0 / 255.0;
+/// Plain, reference-free Krea 2 Turbo text-to-image. This is a distinct calibration lane from the
+/// pose-control provider below even though both providers live in `mlx-gen-krea`.
+const KREA_BASE_PROVIDER: &str = "krea_2_turbo";
+const KREA_BASE_CALIBRATION_FINGERPRINT: &str =
+    "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3";
+const KREA_BASE_SEED: u64 = 18377;
 const KREA_PROVIDER: &str = "krea_2_turbo_control";
 const KREA_OVERLAY_REPOSITORY: &str = "SceneWorks/krea2-pose-controlnet-beta";
 const KREA_OVERLAY_FILE: &str = "control_step5000.safetensors";
 const KREA_TILE_EDGES: [u32; 1] = [512];
 const KREA_TILE_OVERLAP: u32 = 64;
 const KREA_CONTROL_EXECUTION_PATH: &str = "the MLX Krea pose-control path";
+const KREA_PLAIN_EXECUTION_PATH: &str = "the MLX Krea base-only text-to-image path";
 /// The gated VAE probe reaches `load_vae` directly, with no `LoadSpec` and therefore no deferred
 /// block schedule: it bulk-materializes the VAE, which is eager materialization.
 const QWEN_VAE_PROBE_LOAD_SHAPE: LoadShape = LoadShape::EagerMaterialization;
@@ -329,7 +336,7 @@ mod tests {
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
         // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
         // contract provider is not a dispatchable lane.
-        for provider in ["flux2_klein_9b", "flux2_dev_edit", "krea_2_turbo", "sana"] {
+        for provider in ["flux2_klein_9b", "flux2_dev_edit", "sana"] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request).expect_err("unimplemented provider must not dispatch");
             assert_eq!(
@@ -364,6 +371,7 @@ mod tests {
         for provider in [
             "qwen_image",
             "z_image_turbo",
+            "krea_2_turbo",
             "krea_2_turbo_control",
             "flux2_dev",
         ] {
@@ -377,6 +385,7 @@ mod tests {
         }
         assert_eq!(QWEN_PROVIDER, "qwen_image");
         assert_eq!(Z_IMAGE_PROVIDER, "z_image_turbo");
+        assert_eq!(KREA_BASE_PROVIDER, "krea_2_turbo");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
     }
@@ -902,7 +911,7 @@ struct PhaseMemory {
     cache: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AllocatorState {
     active: u64,
     cache: u64,
@@ -2266,6 +2275,660 @@ fn assess_z_image_batch(request: &Value) -> Result<Value, String> {
     }))
 }
 
+fn validate_krea_base_target(request: &Value) -> Result<(), String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != KREA_BASE_PROVIDER {
+        return Err(format!(
+            "MLX Krea base calibration does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != KREA_BASE_PROVIDER {
+        return Err(format!(
+            "MLX Krea base calibration requires modelId {KREA_BASE_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_image" {
+        return Err(format!(
+            "MLX Krea base calibration requires reference-free text_to_image mode, got {mode:?}"
+        ));
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
+        let actual = geometry
+            .get(axis)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
+        if actual != expected {
+            return Err(format!(
+                "MLX Krea base calibration requires geometry.{axis} == {expected}, got {actual}"
+            ));
+        }
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "MLX Krea base calibration requires {field} == 0 when declared"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "MLX Krea base calibration requires {field} == false when declared"
+                ));
+            }
+        }
+    }
+    protocol::validate_plain_overlay_target(request, KREA_PLAIN_EXECUTION_PATH)
+}
+
+fn planned_krea_base_seed(request: &Value, tier: &str, width: u32) -> Result<u64, String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!("krea-base-mlx-{tier}-{width}-seed");
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (seed, steps) = remainder
+        .split_once("-step")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse Krea fixture seed {seed:?}: {error}"))?;
+    let steps = steps
+        .parse::<u32>()
+        .map_err(|error| format!("parse Krea fixture step count {steps:?}: {error}"))?;
+    if steps != 2 {
+        return Err(format!(
+            "planned.fixture {fixture:?} must use the two-step calibration request"
+        ));
+    }
+    Ok(seed)
+}
+
+fn krea_base_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // Each Krea plan row executes exactly one production parameter tuple. The singleton axes are
+    // derived from that tuple, so a parameterized `complete` receipt satisfies the harness without
+    // claiming any sibling value was exercised.
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+fn krea_base_request(width: u32, height: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "an editorial photograph of a glass sculpture in a sunlit studio".to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed),
+        // Two steps produce distinct conditioning/denoise/decode boundaries while keeping the
+        // future physical capture bounded. This story adds no records or manifest bindings.
+        steps: Some(2),
+        ..Default::default()
+    }
+}
+
+fn krea_base_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, LoadSpec), String> {
+    validate_krea_base_target(request)?;
+    let repository = protocol::required_env("SCENEWORKS_KREA_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_KREA_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::KREA_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_KREA_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_KREA_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::KREA_REPOSITORY,
+    )?;
+    let offload = if selection.strategy == MemoryStrategy::Resident {
+        OffloadPolicy::Resident
+    } else {
+        OffloadPolicy::Sequential
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
+        .with_offload_policy(offload)
+        .with_load_shape(LoadShape::DeferredMaterialization);
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok((repository, revision, spec))
+}
+
+fn krea_base_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18377@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct KreaBaseLifecycleMetrics {
+    clean_warm_peak: u64,
+    clean_post_cleanup: AllocatorState,
+    max_fault_post_cleanup: AllocatorState,
+    max_recovery_peak: u64,
+    max_recovery_post_cleanup: AllocatorState,
+}
+
+fn verify_krea_base_lifecycle(
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    selected: &Image,
+    width: u32,
+    height: u32,
+    seed: u64,
+) -> Result<KreaBaseLifecycleMetrics, String> {
+    clear_cache();
+    reset_peak_memory();
+    let clean_warm = one_image(scoped_generate(
+        generator,
+        krea_base_request(width, height, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let bounds = LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (warm_maximum, warm_mean) = image_max_mean_abs(selected, &clean_warm)?;
+    if warm_maximum > KREA_MAX_THRESHOLD || warm_mean > KREA_MEAN_THRESHOLD {
+        return Err("Krea base clean warm control changed the deterministic output".to_owned());
+    }
+
+    let mut metrics = KreaBaseLifecycleMetrics {
+        clean_warm_peak,
+        clean_post_cleanup,
+        ..Default::default()
+    };
+    for phase in [
+        MemoryPhase::Conditioning,
+        MemoryPhase::Denoise,
+        MemoryPhase::Decode,
+    ] {
+        let cancel = mlx_gen::CancelFlag::new();
+        if phase == MemoryPhase::Conditioning {
+            cancel.cancel();
+        }
+        let mut cancelled = krea_base_request(width, height, seed);
+        cancelled.cancel = cancel.clone();
+        let result = scoped_generate(generator, cancelled, context, None, &mut |progress| {
+            if (phase == MemoryPhase::Denoise
+                && matches!(progress, Progress::Step { current: 1, .. }))
+                || (phase == MemoryPhase::Decode && matches!(progress, Progress::Decoding))
+            {
+                cancel.cancel();
+            }
+        });
+        match result {
+            Err(error) if error.to_ascii_lowercase().contains("cancel") => {}
+            Err(error) => {
+                return Err(format!(
+                    "Krea base {phase:?} cancellation returned the wrong error: {error}"
+                ));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "Krea base {phase:?} cancellation returned images instead of the typed cancellation path"
+                ));
+            }
+        }
+        clear_cache();
+        let fault_cleanup = AllocatorState::capture_current();
+        metrics.max_fault_post_cleanup.active = metrics
+            .max_fault_post_cleanup
+            .active
+            .max(fault_cleanup.active);
+        metrics.max_fault_post_cleanup.cache = metrics
+            .max_fault_post_cleanup
+            .cache
+            .max(fault_cleanup.cache);
+        if !bounds.allows_retained(fault_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} cancellation retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        reset_peak_memory();
+        let recovery = one_image(scoped_generate(
+            generator,
+            krea_base_request(width, height, seed),
+            context,
+            None,
+            &mut |_| {},
+        )?)?;
+        let recovery_peak = get_peak_memory() as u64;
+        metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
+        if !bounds.allows_warm_peak(recovery_peak) {
+            return Err(format!(
+                "Krea base {phase:?} cancellation left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+            ));
+        }
+        clear_cache();
+        let recovery_cleanup = AllocatorState::capture_current();
+        metrics.max_recovery_post_cleanup.active = metrics
+            .max_recovery_post_cleanup
+            .active
+            .max(recovery_cleanup.active);
+        metrics.max_recovery_post_cleanup.cache = metrics
+            .max_recovery_post_cleanup
+            .cache
+            .max(recovery_cleanup.cache);
+        if !bounds.allows_retained(recovery_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} cancellation warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
+        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
+            return Err(format!(
+                "Krea base {phase:?} cancellation cleanup changed the warm follow-up"
+            ));
+        }
+    }
+
+    for phase in [
+        MemoryPhase::Conditioning,
+        MemoryPhase::Denoise,
+        MemoryPhase::Decode,
+    ] {
+        let result = scoped_generate(
+            generator,
+            krea_base_request(width, height, seed),
+            context,
+            Some(phase),
+            &mut |_| {},
+        );
+        match result {
+            Err(error) if error.contains("injected memory-strategy calibration error") => {}
+            Err(error) => {
+                return Err(format!(
+                    "Krea base {phase:?} error injection returned the wrong error: {error}"
+                ));
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "Krea base {phase:?} error injection returned images instead of failing at its physical boundary"
+                ));
+            }
+        }
+        clear_cache();
+        let fault_cleanup = AllocatorState::capture_current();
+        metrics.max_fault_post_cleanup.active = metrics
+            .max_fault_post_cleanup
+            .active
+            .max(fault_cleanup.active);
+        metrics.max_fault_post_cleanup.cache = metrics
+            .max_fault_post_cleanup
+            .cache
+            .max(fault_cleanup.cache);
+        if !bounds.allows_retained(fault_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} injected error retained active/cache bytes {fault_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        reset_peak_memory();
+        let recovery = one_image(scoped_generate(
+            generator,
+            krea_base_request(width, height, seed),
+            context,
+            None,
+            &mut |_| {},
+        )?)?;
+        let recovery_peak = get_peak_memory() as u64;
+        metrics.max_recovery_peak = metrics.max_recovery_peak.max(recovery_peak);
+        if !bounds.allows_warm_peak(recovery_peak) {
+            return Err(format!(
+                "Krea base {phase:?} injected error left the warm follow-up peak at {recovery_peak} bytes, above the clean warm control {clean_warm_peak} bytes plus 2%"
+            ));
+        }
+        clear_cache();
+        let recovery_cleanup = AllocatorState::capture_current();
+        metrics.max_recovery_post_cleanup.active = metrics
+            .max_recovery_post_cleanup
+            .active
+            .max(recovery_cleanup.active);
+        metrics.max_recovery_post_cleanup.cache = metrics
+            .max_recovery_post_cleanup
+            .cache
+            .max(recovery_cleanup.cache);
+        if !bounds.allows_retained(recovery_cleanup) {
+            return Err(format!(
+                "Krea base {phase:?} injected-error warm follow-up retained active/cache bytes {recovery_cleanup:?} above the clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+                bounds.tolerance_bytes,
+            ));
+        }
+        let (maximum, mean) = image_max_mean_abs(selected, &recovery)?;
+        if maximum > KREA_MAX_THRESHOLD || mean > KREA_MEAN_THRESHOLD {
+            return Err(format!(
+                "Krea base {phase:?} error cleanup changed the warm follow-up"
+            ));
+        }
+    }
+    Ok(metrics)
+}
+
+/// Capture arm for the shipped, reference-free `mlx:krea_2_turbo` lane. The pose-control arm is
+/// intentionally separate: its overlay, geometry and provider fingerprint are not interchangeable.
+fn run_krea_base(request: &Value) -> Result<Value, String> {
+    validate_krea_base_target(request)?;
+    let planned_shape = planned_load_shape(request)?;
+    if planned_shape != LoadShape::DeferredMaterialization {
+        return Err(
+            "plain Krea calibration must use the production deferred_materialization load shape"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let (width, height) = protocol::target_geometry(request)?;
+    let seed = planned_krea_base_seed(request, tier, width)?;
+    if seed != KREA_BASE_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the Krea base calibration seed {KREA_BASE_SEED}"
+        ));
+    }
+    let (repository, revision, spec) = krea_base_load_spec(request, tier, &selection)?;
+    let registry = mlx_gen_krea::provider_registry()
+        .map_err(|error| format!("build Krea registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(KREA_BASE_PROVIDER, &spec)
+        .map_err(|error| format!("read {KREA_BASE_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| {
+            format!("{KREA_BASE_PROVIDER} has no memory-strategy contract at the pin")
+        })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned Krea base contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned Krea base contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != KREA_BASE_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned Krea base fingerprint changed: expected {KREA_BASE_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    if calibration.load_shape != planned_shape {
+        return Err(format!(
+            "plan/provider load-shape mismatch: plan={}, pinned provider={}",
+            load_shape_key(planned_shape),
+            load_shape_key(calibration.load_shape)
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let generator = registry
+        .load(KREA_BASE_PROVIDER, &spec)
+        .map_err(|error| format!("load real Krea base {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded Krea base generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded Krea base generator contract differs from the registry contract".to_owned(),
+        );
+    }
+    let context = krea_base_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        width,
+        height,
+        hardware_bytes,
+        1,
+    );
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let selected = one_image(scoped_generate(
+        generator.as_ref(),
+        krea_base_request(width, height, seed),
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized Krea base lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let predicted = predicted_ceiling(overall.allocator_bytes());
+
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("Krea base provider rejected an exact-fit calibrated budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Krea base provider accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-krea-base-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("Krea base provider accepted stale calibration evidence".to_owned());
+    }
+
+    let baseline = one_image(
+        generator
+            .generate(&krea_base_request(width, height, seed), &mut |_| {})
+            .map_err(|error| format!("generate unselected Krea base reference: {error}"))?,
+    )?;
+    let (maximum_error, mean_error) = image_max_mean_abs(&selected, &baseline)?;
+    if maximum_error > KREA_MAX_THRESHOLD || mean_error > KREA_MEAN_THRESHOLD {
+        return Err(format!(
+            "Krea base selected rung exceeded unselected parity: max={maximum_error:.6}, mean={mean_error:.6}"
+        ));
+    }
+    let lifecycle =
+        verify_krea_base_lifecycle(generator.as_ref(), &context, &selected, width, height, seed)?;
+    let mutated = qwen_negative_mutation(&selected);
+    let (mutated_maximum, mutated_mean) = image_max_mean_abs(&mutated, &baseline)?;
+    if mutated_maximum <= KREA_MAX_THRESHOLD && mutated_mean <= KREA_MEAN_THRESHOLD {
+        return Err("Krea base output mutation did not breach the parity envelope".to_owned());
+    }
+
+    let mut fragment = json!({
+        "status": "complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": krea_base_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed" },
+            { "name": "stale_evidence", "result": "passed" },
+            { "name": "warm_repeat", "result": "passed" },
+            { "name": "cancel", "result": "passed", "reason": "conditioning, denoise, and decode cancellation returned typed cancellation; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "conditioning, denoise, and decode injected errors fired at physical boundaries; retained memory and warm recovery stayed within the clean-warm control plus 2%", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
+        ],
+        "predictedPeakBytes": {
+            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
+            "denoise": predicted_ceiling(denoise.allocator_bytes()),
+            "decode": predicted_ceiling(decode.allocator_bytes()),
+            "overall": predicted,
+        },
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, steps and tier; selected Krea rung versus unselected request",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "maximumErrorThreshold": KREA_MAX_THRESHOLD,
+            "meanErrorThreshold": KREA_MEAN_THRESHOLD,
+        },
+        "negativeMutation": {
+            "parameters": protocol::strategy_parameters(request)?,
+            "measured": true,
+            "result": "failed_as_expected",
+            "maximumError": mutated_maximum,
+            "meanError": mutated_mean,
+        },
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:krea-base-shared-ladder",
+            "executed",
+            [],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("lifecycleCleanWarmPeak", "bytes", lifecycle.clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", lifecycle.clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", lifecycle.clean_post_cleanup.cache),
+                ("lifecycleMaximumFaultPostCleanupActive", "bytes", lifecycle.max_fault_post_cleanup.active),
+                ("lifecycleMaximumFaultPostCleanupCache", "bytes", lifecycle.max_fault_post_cleanup.cache),
+                ("lifecycleMaximumRecoveryPeak", "bytes", lifecycle.max_recovery_peak),
+                ("lifecycleMaximumRecoveryPostCleanupActive", "bytes", lifecycle.max_recovery_post_cleanup.active),
+                ("lifecycleMaximumRecoveryPostCleanupCache", "bytes", lifecycle.max_recovery_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("loadShapeDeferred", "count", 1),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, KREA_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
 fn run_krea_control(request: &Value) -> Result<Value, String> {
     protocol::validate_exact_overlay_target(request, "control:1", KREA_CONTROL_EXECUTION_PATH)?;
     let parameters = protocol::strategy_parameters(request)?;
@@ -3311,6 +3974,7 @@ fn run(request: &Value) -> Result<Value, String> {
     // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
     match provider {
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
+        KREA_BASE_PROVIDER => run_krea_base(request),
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
         FLUX2_PROVIDER => run_flux2_dev(request),
@@ -3760,6 +4424,234 @@ mod flux2_tests {
             ),
             MemorySafetyDecision::Reject { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod krea_base_tests {
+    use super::*;
+    use mlx_gen::gen_core::MemoryStrategySupport;
+
+    fn minimal_request(provider: &str, rung: &str) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": "krea_2_turbo",
+                    "mode": "text_to_image",
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
+                "strategy": { "rung": rung, "engagedRungs": ["resident"], "parameters": {} }
+            }
+        })
+    }
+
+    fn fixture_spec(root: &std::path::Path) -> LoadSpec {
+        for component in ["text_encoder", "transformer", "vae"] {
+            let directory = root.join(component);
+            std::fs::create_dir_all(&directory).unwrap();
+            let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes.extend_from_slice(&0_f32.to_le_bytes());
+            std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+        }
+        for component in ["text_encoder", "transformer"] {
+            std::fs::write(
+                root.join(component).join("config.json"),
+                r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )
+            .unwrap();
+        }
+        LoadSpec::new(WeightsSource::Dir(root.to_owned()))
+            .with_quant(Quant::Q4)
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization)
+    }
+
+    #[test]
+    fn the_base_arm_refuses_a_foreign_provider_before_environment_or_weight_work() {
+        for provider in ["krea_2_turbo_edit", "krea_2_turbo_control", "qwen_image"] {
+            let error = run_krea_base(&minimal_request(provider, "resident"))
+                .expect_err("a foreign provider must not reach the Krea base arm");
+            assert_eq!(
+                error,
+                format!("MLX Krea base calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn the_base_arm_fails_closed_on_a_non_plain_target_before_weight_work() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/target/modelId",
+                json!("krea_2_turbo_edit"),
+                "requires modelId",
+            ),
+            (
+                "/planned/target/mode",
+                json!("edit_image"),
+                "requires reference-free text_to_image mode",
+            ),
+            (
+                "/planned/target/geometry/batch",
+                json!(2),
+                "requires geometry.batch == 1",
+            ),
+            (
+                "/planned/target/geometry/frames",
+                json!(2),
+                "requires geometry.frames == 1",
+            ),
+        ] {
+            let mut request = minimal_request(KREA_BASE_PROVIDER, "resident");
+            *request.pointer_mut(pointer).unwrap() = value;
+            let error = run_krea_base(&request)
+                .expect_err("a non-plain Krea target must fail before environment or weights");
+            assert!(error.contains(expected), "{pointer}: {error}");
+        }
+
+        for (field, value) in [("referenceCount", json!(1)), ("hasReference", json!(true))] {
+            let mut request = minimal_request(KREA_BASE_PROVIDER, "resident");
+            request["planned"]["target"][field] = value;
+            let error = run_krea_base(&request)
+                .expect_err("a referenced Krea target must fail before environment or weights");
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn complete_sweep_attests_only_the_exact_executed_krea_parameters() {
+        let request = json!({
+            "planned": {
+                "strategy": {
+                    "parameters": {
+                        "decodeTileEdge": 512,
+                        "decodeOverlap": 64,
+                        "attentionChunkSize": 67_108_864,
+                        "transformerWindowSize": 1
+                    }
+                }
+            }
+        });
+        let sweep = krea_base_complete_sweep(&request).unwrap();
+        assert_eq!(sweep["rangeVerified"], true);
+        assert_eq!(sweep["cases"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            sweep["cases"][0]["parameters"],
+            request["planned"]["strategy"]["parameters"]
+        );
+        for (parameter, expected) in [
+            ("decodeTileEdge", json!([512])),
+            ("decodeOverlap", json!([64])),
+            ("attentionChunkSize", json!([67_108_864])),
+            ("transformerWindowSize", json!([1])),
+        ] {
+            assert!(sweep["axes"].as_array().unwrap().iter().any(|axis| {
+                axis["parameter"] == parameter && axis["testedValues"] == expected
+            }));
+        }
+    }
+
+    #[test]
+    fn base_admission_context_is_reference_free_text_to_image() {
+        let calibration = MemoryCalibrationIdentity::new(
+            KREA_BASE_CALIBRATION_FINGERPRINT,
+            LoadShape::DeferredMaterialization,
+        );
+        let context = krea_base_context(
+            MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant: Some(Quant::Q4),
+                    component_precision_floors: &[],
+                },
+            },
+            &calibration,
+            &calibration.fingerprint,
+            768,
+            768,
+            1,
+            1,
+        );
+        assert_eq!(context.mode, MemoryMode::TextToImage);
+        assert!(!context.has_reference);
+        assert_eq!(context.geometry.reference_count, 0);
+        assert!(context.overlay.is_none());
+        assert!(!context.use_pid);
+    }
+
+    #[test]
+    fn pinned_base_contract_exposes_the_exact_declared_full_ladder() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sc-18377-krea-contract-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let spec = fixture_spec(&root);
+        let contract = mlx_gen_krea::provider_registry()
+            .unwrap()
+            .memory_strategy_contract(KREA_BASE_PROVIDER, &spec)
+            .unwrap()
+            .expect("the pinned Krea base provider contract");
+        assert_eq!(contract.provider_id, KREA_BASE_PROVIDER);
+        assert_eq!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            KREA_BASE_CALIBRATION_FINGERPRINT
+        );
+        for strategy in [
+            MemoryStrategy::Resident,
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            assert_eq!(
+                contract.capability(strategy).unwrap().support,
+                MemoryStrategySupport::Implemented,
+                "{strategy:?}"
+            );
+        }
+        let decode = contract.capability(MemoryStrategy::BoundedDecode).unwrap();
+        assert!(decode.parameters.decode_tile_edges.contains(&512));
+        assert!(decode.parameters.decode_overlaps.contains(&64));
+        let routes = contract
+            .pid_decode_routes
+            .as_ref()
+            .expect("Krea distinguishes native and PiD decode domains");
+        assert_eq!(routes.native.tile_edges, vec![512]);
+        assert_eq!(routes.native.tile_overlap, 64);
+        let attention = contract
+            .capability(MemoryStrategy::BoundedAttention)
+            .unwrap();
+        assert_eq!(attention.parameters.attention_chunk_sizes, vec![67_108_864]);
+        let transformer = contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)
+            .unwrap();
+        assert_eq!(transformer.parameters.transformer_window_sizes, vec![1]);
+        assert_eq!(
+            transformer.parameters.transformer_window_components,
+            vec![TransformerComponent::Dit]
+        );
+        assert_eq!(
+            contract.engaged_composition(MemoryStrategy::BoundedTransformerResidency),
+            vec![
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
+                MemoryStrategy::BoundedTransformerResidency,
+            ]
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 }
 

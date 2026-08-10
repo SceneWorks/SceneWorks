@@ -180,10 +180,15 @@ fn quant_for_tier(tier: &str) -> Option<gen_core::Quant> {
 ///
 /// This matters because the load shape decides which rungs exist at all: mlx-gen-z-image and
 /// mlx-gen-lens declare `BoundedTransformerResidency` `Implemented` only under
-/// `DeferredMaterialization` (mlx-gen-krea gates its own on `OffloadPolicy::Sequential` instead,
-/// which comes from the load-time residency gate rather than from here).
-const DEFERRED_MATERIALIZATION_ROUTES: &[&str] =
-    &["qwen_image", "qwen_image_edit", "lens", "lens_turbo"];
+/// `DeferredMaterialization`, while plain mlx-gen-krea requires that load shape together with the
+/// `OffloadPolicy::Sequential` selected independently by the load-time residency gate.
+const DEFERRED_MATERIALIZATION_ROUTES: &[&str] = &[
+    "qwen_image",
+    "qwen_image_edit",
+    "lens",
+    "lens_turbo",
+    "krea_2_turbo",
+];
 
 /// The resolved-artifact provenance for a subject, derived from the shipped binding that names its
 /// provider AND tier — `None` only when no such binding exists.
@@ -1335,19 +1340,19 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
 
 /// The deferred-materialization mirror must name exactly the routes `image_jobs/base.rs` names.
 ///
-/// `apply_measured_mlx_load_shape` is private and lives in an `include!`d, macOS-gated file, so the
-/// coupling cannot be a direct call without rotating the memory-matrix source fingerprint (see
-/// [`DEFERRED_MATERIALIZATION_ROUTES`]). It can still be a TEXT coupling: the engine ids are
-/// single-line double-quoted literals in that source, which is exactly the shape the matrix's own
-/// comment-stripping fingerprint guarantees stays load-bearing. A route added to or removed from
-/// the production list therefore reds this test instead of silently changing what the ignored
-/// scenarios exercise.
+/// `apply_measured_mlx_load_shape_for_request` is private and lives in an `include!`d,
+/// macOS-gated file, so the coupling cannot be a direct call without rotating the memory-matrix
+/// source fingerprint (see [`DEFERRED_MATERIALIZATION_ROUTES`]). It can still be a TEXT coupling:
+/// the engine ids are single-line double-quoted literals in that source, which is exactly the shape
+/// the matrix's own comment-stripping fingerprint guarantees stays load-bearing. A route added to
+/// or removed from the production list therefore reds this test instead of silently changing what
+/// the ignored scenarios exercise.
 #[test]
 fn load_shape_mirror_matches_the_documented_routes() {
     let base = include_str!("image_jobs/base.rs");
     let start = base
-        .find("fn apply_measured_mlx_load_shape")
-        .expect("image_jobs/base.rs declares apply_measured_mlx_load_shape");
+        .find("fn apply_measured_mlx_load_shape_for_request")
+        .expect("image_jobs/base.rs declares apply_measured_mlx_load_shape_for_request");
     // Bound the slice to the function itself: the first line-start `}` after the signature. A
     // fixed-width window would run into the neighbouring test module, whose fixtures are full of
     // quoted component names.
@@ -1358,7 +1363,7 @@ fn load_shape_mirror_matches_the_documented_routes() {
     for route in DEFERRED_MATERIALIZATION_ROUTES {
         assert!(
             body.contains(&format!("\"{route}\"")),
-            "{route} is mirrored here but no longer named by apply_measured_mlx_load_shape"
+            "{route} is mirrored here but no longer named by apply_measured_mlx_load_shape_for_request"
         );
     }
     // And the converse: no OTHER engine id appears in that function. Counting quoted literals is
@@ -1367,7 +1372,7 @@ fn load_shape_mirror_matches_the_documented_routes() {
     assert_eq!(
         quoted,
         DEFERRED_MATERIALIZATION_ROUTES.len() * 2,
-        "apply_measured_mlx_load_shape names a route this harness does not mirror"
+        "apply_measured_mlx_load_shape_for_request names a route this harness does not mirror"
     );
 }
 

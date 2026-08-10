@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:3b5fa41f4c32eeca5cbb2dbff91de3e4aef3ce45fd8fae80e26fd0af151e842e",
+    "sceneWorksRevision": "source-tree:6632ba78dbdbdc25fb50168e9862cfb908216581a032fee6dac8695dcdb52e7c",
     "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "dfead9359a2645d41e9fecaba636fe8245b3949b4654037ec6c1c4ed8967588a"
+        "sha256": "7801de4999d392d925809d61eb6fb3ce0bc2b8d361f619b13561365c4d160d26"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -26,11 +26,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "400001cc642ad6eb9fddb56daff21915994e23e8239ef83080a6da0dc0c2ae86"
+        "sha256": "38b60e9b83e994175e61c22217a7c32624f0302fdfed8c694b0cc1545cb75f75"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "336b89c4902547519048414dad9fe7feb1da59db621c43f79a0921f5aff0043f"
+        "sha256": "47d0a8d3d78c032d845fff445fc93c50ec5d668d991a5ae1d975105a912249bb"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -50,11 +50,11 @@
       },
       "calibrationPlan": {
         "path": "config/memory-calibration-plan.json",
-        "sha256": "a94630f6fbe9cbadf92d1ca139c8cb93863fd0cb58f8b84727757fee12786c61"
+        "sha256": "9e2c3bed847ee48f5fea5226526be8edb50bee2133ad3012f4813d433d967c86"
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "a030df59d885f41fe1e52320cdf981b0401842f979c734f4dc26f1155d3271cc"
+        "sha256": "5d828a2a98ba0f69f7dacc1e2864b8e1018afeeb0056ee77cefac50041d07762"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
@@ -129,11 +129,11 @@
   "summary": {
     "imageModels": 53,
     "cells": 9140,
-    "publishedCells": 184,
-    "elidedCells": 8956,
+    "publishedCells": 199,
+    "elidedCells": 8941,
     "elidedByState": {
-      "Implemented/unverified": 3091,
-      "Missing": 5865
+      "Implemented/unverified": 3082,
+      "Missing": 5859
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -8224,11 +8224,28 @@
       "backend": "mlx",
       "rung": "bounded_attention",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
-      "implemented": 0,
+      "published": 3,
+      "elided": 15,
+      "implemented": 3,
       "states": {
-        "Missing": 18
+        "Implemented/unverified": 3,
+        "Missing": 15
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 1,
+          "q4": 1,
+          "q8": 1
+        },
+        "mode": {
+          "edit_image": 0,
+          "text_to_image": 3
+        },
+        "overlay": {
+          "control": 0,
+          "lora": 0,
+          "none": 3
+        }
       }
     },
     {
@@ -8236,27 +8253,27 @@
       "backend": "mlx",
       "rung": "bounded_decode",
       "coordinates": 18,
-      "published": 1,
-      "elided": 17,
-      "implemented": 1,
+      "published": 4,
+      "elided": 14,
+      "implemented": 4,
       "states": {
-        "Implemented/unverified": 1,
-        "Missing": 17
+        "Implemented/unverified": 4,
+        "Missing": 14
       },
       "implementedBy": {
         "tier": {
-          "bf16": 0,
-          "q4": 1,
-          "q8": 0
+          "bf16": 1,
+          "q4": 2,
+          "q8": 1
         },
         "mode": {
           "edit_image": 0,
-          "text_to_image": 1
+          "text_to_image": 4
         },
         "overlay": {
           "control": 1,
           "lora": 0,
-          "none": 0
+          "none": 3
         }
       }
     },
@@ -8265,8 +8282,8 @@
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 3,
+      "elided": 15,
       "implemented": 12,
       "states": {
         "Implemented/unverified": 12,
@@ -8294,8 +8311,8 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 3,
+      "elided": 15,
       "implemented": 18,
       "states": {
         "Implemented/unverified": 18
@@ -8306,8 +8323,8 @@
       "backend": "mlx",
       "rung": "staged_residency",
       "coordinates": 18,
-      "published": 0,
-      "elided": 18,
+      "published": 3,
+      "elided": 15,
       "implemented": 18,
       "states": {
         "Implemented/unverified": 18
@@ -12675,10 +12692,37 @@
         }
       ]
     },
+    "krea_2_turbo:mlx:bf16": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/minMemoryGb",
+          "tier": "bf16"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/supportsSequentialOffload",
+          "tier": "bf16"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/quantize",
+          "tier": "bf16"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/krea-2-turbo-mlx",
+          "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+          "variant": "bf16"
+        }
+      ]
+    },
     "krea_2_turbo:mlx:q4": {
       "declaredCalibration": [
         {
           "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/minMemoryGb",
+          "tier": "q4"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/supportsSequentialOffload",
           "tier": "q4"
         },
         {
@@ -12691,6 +12735,29 @@
           "repository": "SceneWorks/krea-2-turbo-mlx",
           "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
           "variant": "q4"
+        }
+      ]
+    },
+    "krea_2_turbo:mlx:q8": {
+      "declaredCalibration": [
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/minMemoryGb",
+          "tier": "q8"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/supportsSequentialOffload",
+          "tier": "q8"
+        },
+        {
+          "source": "config/manifests/builtin.models.jsonc#models/krea_2_turbo/mlx/quantize",
+          "tier": "q8"
+        }
+      ],
+      "loadability": [
+        {
+          "repository": "SceneWorks/krea-2-turbo-mlx",
+          "revision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+          "variant": "q8"
         }
       ]
     },
@@ -17535,6 +17602,1086 @@
         ],
         "structural": [],
         "manifestScope": "krea_2_turbo:candle:q8"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:bounded_attention",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:bf16"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:bounded_decode",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:bf16"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:bf16"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "c1d5287c0a9fd22820363d4c59cee1fee5e236b9a65d01dee7121b0ffa2846d1",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:bf16"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:staged_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "f859bddd66b52f48fce22824d6b152f24a2a4afd7d1798f2affe4258d25b0be1",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:bf16"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:bounded_attention",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q4"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:bounded_decode",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q4"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q4"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "25cdda799524de2f189e4a7688077baf03ddb30fbe6387f9a22174718b2bec5e",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q4"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:staged_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "919f71b231f62e956943274033c320ea9277853e753931e8737626bf4df48da7",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q4"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:bounded_attention",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_attention",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q8"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:bounded_decode",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_decode",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "bounded_decode"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q8"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "bounded_transformer_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "decodeTileEdge": 512,
+        "decodeOverlap": 64,
+        "attentionChunkSize": 67108864,
+        "transformerWindowSize": 1,
+        "transformerWindowComponent": "Dit",
+        "publishedRanges": {
+          "decodeTileEdges": [
+            512
+          ],
+          "decodeOverlaps": [
+            64
+          ],
+          "attentionChunkSizes": [
+            67108864
+          ],
+          "transformerWindowSizes": [
+            1
+          ],
+          "transformerWindowComponents": [
+            "Dit"
+          ]
+        }
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention",
+        "bounded_transformer_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "rung4Survey": {
+        "story": 15969,
+        "structuralApplicability": "partial",
+        "requestPeak": "moves",
+        "implementation": "shared-primitive",
+        "overlayIncompatible": false
+      },
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q8"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:resident",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {},
+      "engagedRungs": [
+        "resident"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "e7512975f0ca206462fd822266174665f25370661369ef74a7d095af7546589a",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q8"
+      }
+    },
+    {
+      "id": "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:staged_residency",
+      "modelId": "krea_2_turbo",
+      "resolvedRoute": "krea_2_turbo",
+      "provider": "krea_2_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "staged_residency",
+      "geometryEnvelope": {
+        "defaultResolution": "1024x1024",
+        "resolutions": [
+          "1024x1024",
+          "896x896",
+          "768x768",
+          "768x1024",
+          "1024x768",
+          "1280x720",
+          "720x1280",
+          "1216x832",
+          "832x1216",
+          "1152x896",
+          "896x1152",
+          "1536x1536",
+          "2048x1152",
+          "1152x2048",
+          "2048x1408",
+          "1408x2048",
+          "2048x2048"
+        ]
+      },
+      "strategyParameters": {
+        "phaseOrder": [
+          "conditioning",
+          "denoise",
+          "decode"
+        ]
+      },
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "state": "Implemented/unverified",
+      "memoryCharacterization": {
+        "status": "unmeasured",
+        "measuredGeometries": [],
+        "coveredPixelBound": null
+      },
+      "calibrationFingerprint": "7a783742acd5161d84d5e8a3dd35d5749c67717176c72d82281c5f4d68342382",
+      "owningFamilyStory": 15517,
+      "owningModelStory": 15477,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/mlx_fit_gate.rs#engine_supports_sequential"
+          }
+        ],
+        "historicalVerification": [],
+        "currentEnvironmentVerification": [],
+        "strategyParameterVerification": [],
+        "structural": [],
+        "manifestScope": "krea_2_turbo:mlx:q8"
       }
     },
     {
@@ -30286,7 +31433,22 @@
       "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_decode",
       "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:bounded_transformer_residency",
       "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:resident",
-      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:staged_residency"
+      "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:staged_residency",
+      "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:bounded_attention",
+      "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:bounded_decode",
+      "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:resident",
+      "krea_2_turbo:krea_2_turbo:mlx:bf16:text_to_image:none:staged_residency",
+      "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:bounded_attention",
+      "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:bounded_decode",
+      "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:resident",
+      "krea_2_turbo:krea_2_turbo:mlx:q4:text_to_image:none:staged_residency",
+      "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:bounded_attention",
+      "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:bounded_decode",
+      "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:bounded_transformer_residency",
+      "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:resident",
+      "krea_2_turbo:krea_2_turbo:mlx:q8:text_to_image:none:staged_residency"
     ],
     "lens": [],
     "lens_turbo": [],
