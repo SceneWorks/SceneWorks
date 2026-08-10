@@ -2,8 +2,8 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, rename, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,13 @@ export const RUNG_REUSE_TOLERANCE = Object.freeze({
   absoluteBytes: 256 * 1024 * 1024,
   relative: 0.05,
 });
+const PHYSICAL_MLX_SESSION_OUTPUT_ROLES = Object.freeze([
+  "request", "selected_rgb", "reference_rgb",
+]);
+const PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES = Object.freeze([
+  "selected_rgb", "reference_rgb",
+]);
+const PHYSICAL_MLX_RGB_BASENAME = /^(implan-[0-9a-f]{20})-(selected_rgb|reference_rgb)-([1-9][0-9]*)x([1-9][0-9]*)-([0-9a-f]{64})\.rgb$/;
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -38,6 +45,140 @@ function stable(value) {
     return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
   }
   return value;
+}
+
+function validateExactOutputReceipts(outputs, expectedRoles, label) {
+  if (!Array.isArray(outputs) || outputs.length !== expectedRoles.length) {
+    fail(`${label} requires exactly ${expectedRoles.length} typed output receipts`);
+  }
+  const roles = new Set();
+  const paths = new Set();
+  for (const output of outputs) {
+    object(output, `${label}[]`);
+    text(output.role, `${label}[].role`);
+    text(output.path, `${label}[].path`);
+    if (!/^[0-9a-f]{64}$/.test(output.sha256)) {
+      fail(`${label}[].sha256 must be a lowercase SHA-256 digest`);
+    }
+    if (!Number.isSafeInteger(output.bytes) || output.bytes <= 0) {
+      fail(`${label}[].bytes must be a positive safe integer`);
+    }
+    if (roles.has(output.role)) fail(`${label} repeats output role ${output.role}`);
+    if (paths.has(output.path)) fail(`${label} repeats output path ${output.path}`);
+    roles.add(output.role);
+    paths.add(output.path);
+  }
+  const expected = new Set(expectedRoles);
+  if (roles.size !== expected.size || [...roles].some((role) => !expected.has(role))) {
+    fail(`${label} must contain exactly ${expectedRoles.join(", ")}`);
+  }
+}
+
+function physicalMlxRgbMetadata(output, label) {
+  const match = path.posix.basename(output.path).match(PHYSICAL_MLX_RGB_BASENAME);
+  if (!match || match[2] !== output.role) {
+    fail(`${label} path must bind its logical case, RGB role, dimensions, and content digest`);
+  }
+  const width = Number(match[3]);
+  const height = Number(match[4]);
+  const expectedBytes = width * height * 3;
+  if (!Number.isSafeInteger(expectedBytes) || output.bytes !== expectedBytes) {
+    fail(`${label} byte count must equal its encoded RGB dimensions`);
+  }
+  if (output.sha256 !== match[5]) {
+    fail(`${label} SHA-256 must match its content-addressed filename`);
+  }
+  return { logicalCaseId: match[1], width, height };
+}
+
+function validatePhysicalMlxSessionReceipts(session) {
+  const sourceDirectory = path.posix.dirname(session.sourcePath);
+  if (session.sourcePath !== `${sourceDirectory}/${session.id}.log`) {
+    fail(`${session.id}: physical MLX sourcePath must be named from the session id`);
+  }
+  const request = session.outputs.find((output) => output.role === "request");
+  if (request.path !== `${sourceDirectory}/${session.id}.request.json`) {
+    fail(`${session.id}: request receipt must share the source directory and session id`);
+  }
+  for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
+    if (path.posix.dirname(output.path) !== sourceDirectory) {
+      fail(`${session.id}: physical MLX RGB receipts must share the source directory`);
+    }
+    physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+  }
+}
+
+function validatePhysicalMlxOutputsAgainstRecord(record, session) {
+  for (const output of session.outputs.filter((candidate) => candidate.role !== "request")) {
+    const metadata = physicalMlxRgbMetadata(output, `${session.id}.${output.role}`);
+    if (metadata.logicalCaseId !== record.logicalCaseId
+        || metadata.width !== record.target.geometry.width
+        || metadata.height !== record.target.geometry.height) {
+      fail(`${record.id}: physical MLX RGB receipt does not match the measured logical case geometry`);
+    }
+  }
+}
+
+export function physicalMlxSessionId({
+  kind, logicalCaseId, capturedAt, repositories, hardware, stdoutSha256,
+}) {
+  return `ims-${digest({
+    kind,
+    logicalCaseId,
+    capturedAt,
+    repositories,
+    hardware,
+    stdoutSha256,
+  }).slice(0, 20)}`;
+}
+
+function physicalMlxDerivation(sessionId) {
+  const direct = { kind: "direct", sourceSessionIds: [sessionId] };
+  return {
+    memory: direct,
+    quality: direct,
+    negativeMutation: direct,
+    lifecycle: direct,
+    loadability: direct,
+    overlay: direct,
+    justification: "Exact physical MLX provider response, artifact inventory, and selected/reference outputs are preserved as immutable capture receipts.",
+  };
+}
+
+function recordFromPhysicalMlxResponse(providerResponse, request, session) {
+  const { sourceCapture, ...fragment } = providerResponse;
+  const planned = request.planned;
+  const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
+  const record = {
+    ...fragment,
+    artifact: { ...fragment.artifact, inventorySha256: baseInput.sha256 },
+    logicalCaseId: planned.logicalCaseId,
+    evidenceScope: planned.evidenceScope,
+    backend: planned.backend,
+    loadShape: fragment.loadShape,
+    repositories: request.repositories,
+    hardware: request.hardware,
+    target: planned.target,
+    strategy: fragment.strategy,
+    ...(planned.sourceProvenance ? { sourceProvenance: planned.sourceProvenance } : {}),
+    calibrationFingerprint: planned.calibrationFingerprint,
+    fixture: planned.fixture,
+    harnessVersion: HARNESS_VERSION,
+    derivation: physicalMlxDerivation(session.id),
+  };
+  record.id = recordId(record);
+  return record;
+}
+
+async function writeImmutableReceipt(file, contents) {
+  const bytes = Buffer.isBuffer(contents) ? contents : Buffer.from(contents, "utf8");
+  try {
+    await writeFile(file, bytes, { flag: "wx" });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = await readFile(file);
+    if (!existing.equals(bytes)) fail(`immutable source receipt already exists with different bytes: ${file}`);
+  }
 }
 export function canonicalJson(value) {
   return `${JSON.stringify(stable(value), null, 2)}\n`;
@@ -61,6 +202,37 @@ function number(value, label, positive = false) {
 }
 function equal(left, right) {
   return JSON.stringify(stable(left)) === JSON.stringify(stable(right));
+}
+
+function requiresPhysicalMlxProvenanceForCurrency(record) {
+  return record.backend === "mlx"
+    && record.target.modelId === "qwen_image"
+    && ["q4", "bf16"].includes(record.target.tier)
+    && record.evidenceScope === "authoritative"
+    && ["complete", "runtime_complete"].includes(record.status);
+}
+
+function validateCurrentPhysicalMlxProvenance(record, inferenceClosureDigests) {
+  if (!requiresPhysicalMlxProvenanceForCurrency(record)) return;
+  const provider = `${record.backend}:${record.target.provider}`;
+  const live = inferenceClosureDigests?.[provider];
+  if (
+    live
+    && record.repositories.inference.closureDigest === live
+    && record.sourceProvenance !== "physical_mlx_v1"
+  ) {
+    fail(
+      `${record.id}: current authoritative Qwen MLX ${record.target.tier} evidence requires ` +
+        "sourceProvenance=physical_mlx_v1 and its validated physical source-session derivation",
+    );
+  }
+}
+
+function isNormalizedCalibrationPath(value) {
+  if (typeof value !== "string" || !value.startsWith("docs/calibration/")) return false;
+  const parts = value.split("/");
+  return path.posix.normalize(value) === value
+    && parts.every((part) => part && part !== "." && part !== "..");
 }
 
 function schemaTypeMatches(value, type) {
@@ -149,6 +321,7 @@ export function logicalCaseId(spec) {
     loadShape: spec.loadShape,
     target: spec.target,
     strategy: spec.strategy,
+    sourceProvenance: spec.sourceProvenance,
     calibrationFingerprint: spec.calibrationFingerprint,
     fixture: spec.fixture,
     negative: spec.negative === true || spec.status === "negative_complete",
@@ -179,6 +352,7 @@ export function recordId(record) {
     artifact: record.artifact,
     target: record.target,
     strategy: record.strategy,
+    sourceProvenance: record.sourceProvenance,
     calibrationFingerprint: record.calibrationFingerprint,
     fixture: record.fixture,
   }).slice(0, 20)}`;
@@ -520,6 +694,22 @@ export function validateBundle(bundle) {
   const inventoryInputs = new Map();
   for (const session of bundle.sourceSessions ?? []) {
     if (sessions.has(session.id)) fail(`duplicate source session ${session.id}`);
+    if (!isNormalizedCalibrationPath(session.sourcePath)) {
+      fail(`${session.id}: sourcePath must be a normalized path under docs/calibration`);
+    }
+    if (session.kind === "physical_mlx") {
+      validateExactOutputReceipts(
+        session.outputs,
+        PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+        `${session.id}.outputs`,
+      );
+      validatePhysicalMlxSessionReceipts(session);
+      for (const output of session.outputs) {
+        if (!isNormalizedCalibrationPath(output.path)) {
+          fail(`${session.id}: physical MLX output must be a normalized path under docs/calibration`);
+        }
+      }
+    }
     const requiresExactInputs = session.claims.some((claim) =>
       ["loadability", "quality", "negative_mutation"].includes(claim));
     if (requiresExactInputs && session.inputs.length === 0) {
@@ -549,19 +739,43 @@ export function validateBundle(bundle) {
     validateRecord(record);
     if (ids.has(record.id)) fail(`duplicate record ${record.id}`);
     ids.add(record.id);
-    const requiresDerivation = record.backend === "candle"
+    const requiresZImageDerivation = record.backend === "candle"
       && record.target.modelId === "z_image"
       && record.evidenceScope === "authoritative"
       && record.status === "complete";
+    const isAuthoritativeQwenMlx = record.backend === "mlx"
+      && record.target.modelId === "qwen_image"
+      && record.evidenceScope === "authoritative"
+      && record.status === "complete";
+    if (record.sourceProvenance !== undefined
+        && (record.sourceProvenance !== "physical_mlx_v1" || !isAuthoritativeQwenMlx)) {
+      fail(`${record.id}: sourceProvenance is valid only for complete authoritative Qwen MLX evidence`);
+    }
+    const requiresQwenMlxDerivation = isAuthoritativeQwenMlx
+      && record.sourceProvenance === "physical_mlx_v1";
+    const provenancePolicy = requiresZImageDerivation
+      ? "z_image"
+      : requiresQwenMlxDerivation ? "qwen_image" : null;
+    const requiresDerivation = provenancePolicy !== null;
+    if (requiresQwenMlxDerivation && !record.artifact.inventorySha256) {
+      fail(`${record.id}: authoritative Qwen MLX evidence requires an exact artifact inventory`);
+    }
     if (requiresDerivation && !record.derivation) fail(`${record.id}: missing source-session derivation`);
     if (record.derivation) {
+      const derivationSessionIds = new Set();
       for (const [claim, reference] of Object.entries(record.derivation).filter(([key]) => key !== "justification")) {
         const sourceClaim = claim === "negativeMutation" ? "negative_mutation" : claim;
         for (const sessionId of reference.sourceSessionIds) {
+          derivationSessionIds.add(sessionId);
           const session = sessions.get(sessionId);
           if (!session) fail(`${record.id}: missing source session ${sessionId}`);
           if (!session.claims.includes(sourceClaim)) fail(`${record.id}: ${sessionId} does not claim ${sourceClaim}`);
-          if (requiresDerivation) validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs);
+          if (requiresQwenMlxDerivation && session.kind !== "physical_mlx") {
+            fail(`${record.id}: authoritative Qwen MLX derivation requires a physical_mlx source session`);
+          }
+          if (requiresDerivation) {
+            validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy);
+          }
           if (["memory", "quality", "overlay"].includes(claim)
               && session.target && session.target.tier !== record.target.tier) {
             fail(`${record.id}: ${claim} cannot cross precision tiers`);
@@ -593,17 +807,27 @@ export function validateBundle(bundle) {
           }
         }
       }
+      if (requiresQwenMlxDerivation && derivationSessionIds.size !== 1) {
+        fail(`${record.id}: authoritative Qwen MLX claims must share one physical capture session`);
+      }
+      if (requiresQwenMlxDerivation) {
+        const [sessionId] = derivationSessionIds;
+        validatePhysicalMlxOutputsAgainstRecord(record, sessions.get(sessionId));
+      }
     }
   }
   return bundle;
 }
 
-function validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs) {
+function validateSourceInputsAgainstRecord(record, session, sourceClaim, inventoryInputs, provenancePolicy) {
   const fingerprint = record.loadability.resolvedPathFingerprint ?? "";
   for (const input of session.inputs) {
     const expectedInput = inventoryInputs.get(`${input.role}\0${input.variant}`);
-    if (!expectedInput) fail(`${record.id}: ${session.id} has no canonical ${input.role}/${input.variant} inventory`);
-    if (!equal(expectedInput, input)) fail(`${record.id}: ${session.id} input differs from its exact inventory identity`);
+    if (expectedInput) {
+      if (!equal(expectedInput, input)) fail(`${record.id}: ${session.id} input differs from its exact inventory identity`);
+    } else if (provenancePolicy !== "qwen_image" || session.kind !== "physical_mlx") {
+      fail(`${record.id}: ${session.id} has no canonical ${input.role}/${input.variant} inventory`);
+    }
     if (input.role === "base") {
       if (input.repository !== record.artifact.repository
           || input.resolvedRevision !== record.artifact.resolvedRevision) {
@@ -611,6 +835,9 @@ function validateSourceInputsAgainstRecord(record, session, sourceClaim, invento
       }
       const expectedTier = session.target?.tier ?? record.target.tier;
       if (input.variant !== expectedTier) fail(`${record.id}: ${session.id} base input has the wrong tier variant`);
+      if (provenancePolicy === "qwen_image" && input.sha256 !== record.artifact.inventorySha256) {
+        fail(`${record.id}: ${session.id} base input does not match the record artifact inventory`);
+      }
     }
     const exactOverlaySource = (!session.target || session.target.overlay === record.target.overlay)
       && ["quality", "loadability", "overlay"].includes(sourceClaim);
@@ -624,6 +851,157 @@ function validateSourceInputsAgainstRecord(record, session, sourceClaim, invento
       fail(`${record.id}: ${session.id} input is absent from the record artifact fingerprint`);
     }
   }
+}
+
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function resolveReceiptPath(relativePath, roots) {
+  for (const root of roots) {
+    const physicalRoot = await realpath(root);
+    const candidate = path.resolve(physicalRoot, relativePath);
+    const relative = path.relative(physicalRoot, candidate);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    try {
+      const physical = await realpath(candidate);
+      const physicalRelative = path.relative(physicalRoot, physical);
+      if (physicalRelative && !physicalRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(physicalRelative)) {
+        return physical;
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  fail(`missing immutable source receipt ${relativePath}`);
+}
+
+export async function validateSourceSessionFiles(
+  bundle,
+  extraRoot = null,
+  inferenceClosureDigests = null,
+) {
+  validateBundle(bundle);
+  if (inferenceClosureDigests) {
+    for (const record of bundle.records) {
+      validateCurrentPhysicalMlxProvenance(record, inferenceClosureDigests);
+    }
+  }
+  const roots = [...new Set([extraRoot, ROOT].filter(Boolean).map((root) => path.resolve(root)))];
+  for (const session of bundle.sourceSessions ?? []) {
+    const sourceFile = await resolveReceiptPath(session.sourcePath, roots);
+    const sourceBytes = await readFile(sourceFile);
+    if (createHash("sha256").update(sourceBytes).digest("hex") !== session.stdoutSha256) {
+      fail(`${session.id}: sourcePath no longer matches stdoutSha256`);
+    }
+    if (session.kind !== "physical_mlx") continue;
+    const boundRecords = bundle.records.filter((record) => Object.entries(record.derivation ?? {})
+      .filter(([key]) => key !== "justification")
+      .some(([, reference]) => reference.sourceSessionIds.includes(session.id)));
+    if (boundRecords.length !== 1) {
+      fail(`${session.id}: physical MLX session must bind exactly one evidence record`);
+    }
+    const record = boundRecords[0];
+    const requestOutput = session.outputs.find((output) => output.role === "request");
+    for (const output of session.outputs) {
+      const outputFile = await resolveReceiptPath(output.path, roots);
+      const outputBytes = await readFile(outputFile);
+      if (createHash("sha256").update(outputBytes).digest("hex") !== output.sha256
+          || outputBytes.length !== output.bytes) {
+        fail(`${session.id}: output ${output.path} no longer matches its SHA-256 receipt`);
+      }
+    }
+    const requestBytes = await readFile(await resolveReceiptPath(requestOutput.path, roots));
+    let request;
+    try {
+      request = JSON.parse(requestBytes.toString("utf8"));
+    } catch {
+      fail(`${session.id}: request receipt must contain JSON`);
+    }
+    if (canonicalJson(request) !== requestBytes.toString("utf8")) {
+      fail(`${session.id}: request receipt must contain canonical JSON`);
+    }
+    if (request.action !== "run" || !request.planned) {
+      fail(`${session.id}: request receipt must describe one fresh planned case`);
+    }
+    for (const key of [
+      "logicalCaseId", "evidenceScope", "backend", "loadShape", "target", "strategy",
+      "sourceProvenance", "calibrationFingerprint", "fixture",
+    ]) {
+      if (!equal(request.planned[key], record[key])) {
+        fail(`${session.id}: request receipt ${key} does not match its evidence record`);
+      }
+    }
+    const expectedSessionTarget = {
+      tier: request.planned.target.tier,
+      mode: request.planned.target.mode,
+      overlay: request.planned.target.overlay,
+      rung: request.planned.strategy.rung,
+    };
+    if (!equal(request.repositories, record.repositories)
+        || !equal(session.repositories, record.repositories)
+        || !equal(request.hardware, record.hardware)
+        || !equal(session.hardware, record.hardware)
+        || session.capturedAt !== record.capturedAt
+        || !equal(session.target, expectedSessionTarget)) {
+      fail(`${session.id}: request receipt provenance does not match its evidence record`);
+    }
+    let providerResponse;
+    try {
+      providerResponse = JSON.parse(sourceBytes.toString("utf8"));
+    } catch {
+      fail(`${session.id}: provider response receipt must contain JSON`);
+    }
+    object(providerResponse, `${session.id}.providerResponse`);
+    object(providerResponse.sourceCapture, `${session.id}.providerResponse.sourceCapture`);
+    if (providerResponse.sourceCapture.kind !== session.kind
+        || !equal(providerResponse.sourceCapture.inputs, session.inputs)
+        || !equal(providerResponse.sourceCapture.claims, session.claims)
+        || providerResponse.capturedAt !== session.capturedAt) {
+      fail(`${session.id}: provider response source inputs, claims, or capture time do not match the session receipt`);
+    }
+    validateExactOutputReceipts(
+      providerResponse?.sourceCapture?.outputs,
+      PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+      `${session.id}.providerResponse.sourceCapture.outputs`,
+    );
+    for (const providerOutput of providerResponse.sourceCapture.outputs) {
+      physicalMlxRgbMetadata(
+        providerOutput,
+        `${session.id}.providerResponse.sourceCapture.outputs[${providerOutput.role}]`,
+      );
+      const sessionOutput = session.outputs.find((output) => output.role === providerOutput.role);
+      if (!equal(
+        {
+          role: providerOutput.role,
+          path: providerOutput.path,
+          sha256: providerOutput.sha256,
+          bytes: providerOutput.bytes,
+        },
+        sessionOutput,
+      )) {
+        fail(`${session.id}: provider response output attestation does not match the session receipt`);
+      }
+    }
+    const expectedSessionId = physicalMlxSessionId({
+      kind: providerResponse.sourceCapture.kind,
+      logicalCaseId: request.planned.logicalCaseId,
+      capturedAt: providerResponse.capturedAt,
+      repositories: session.repositories,
+      hardware: session.hardware,
+      stdoutSha256: session.stdoutSha256,
+    });
+    if (session.id !== expectedSessionId) {
+      fail(`${session.id}: physical MLX session id does not match its provider response digest`);
+    }
+    const reconstructedRecord = recordFromPhysicalMlxResponse(providerResponse, request, session);
+    if (!equal(reconstructedRecord, record)) {
+      fail(`${session.id}: provider response measurements do not match the evidence record`);
+    }
+  }
+  return bundle;
 }
 
 export function evidenceSemantics(record, revisions) {
@@ -667,6 +1045,7 @@ export function evidenceSemantics(record, revisions) {
         "--repo <inference> --write.",
     );
   }
+  validateCurrentPhysicalMlxProvenance(record, revisions.inferenceClosureDigests);
   return captured === live ? "current" : "historical";
 }
 
@@ -775,6 +1154,7 @@ function completedLogicalIds(record) {
         engagedRungs: record.strategy.engagedRungs,
         parameters: item.parameters,
       },
+      sourceProvenance: record.sourceProvenance,
       calibrationFingerprint: record.calibrationFingerprint,
       fixture: record.fixture,
       negative: item.result === "failed",
@@ -832,6 +1212,7 @@ export function expandPlan(config, completed = []) {
           engagedRungs: provider.engagedRungs,
           parameters: candidate.parameters,
         },
+        ...(provider.sourceProvenance ? { sourceProvenance: provider.sourceProvenance } : {}),
         calibrationFingerprint: provider.calibrationFingerprint,
         fixture: provider.fixture,
         negative: candidate.negative === true,
@@ -908,11 +1289,33 @@ function execute(command, args, input) {
 export async function runProviderPlan({
   config, providerCommand, sceneWorksRepo, inferenceRepo, resume, backend, providerName, fixture,
   onProviderInvocation, onProviderCheckpoint, forceFreshPerCase = false, forceBatchRungs = false,
+  rawLogDir = null, sourcePathPrefix = null,
   // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
+  if (Boolean(rawLogDir) !== Boolean(sourcePathPrefix)) {
+    fail("--raw-log-dir and --source-path-prefix must be supplied together");
+  }
+  if (sourcePathPrefix) {
+    const parts = sourcePathPrefix.split("/");
+    if (!/^docs\/calibration\/[A-Za-z0-9._/-]+$/.test(sourcePathPrefix)
+        || path.posix.normalize(sourcePathPrefix) !== sourcePathPrefix
+        || parts.some((part) => !part || part === "." || part === "..")) {
+      fail("source path prefix must be a normalized path under docs/calibration");
+    }
+  }
+  if (rawLogDir) {
+    await mkdir(rawLogDir, { recursive: true });
+    rawLogDir = await realpath(rawLogDir);
+    for (const [name, repo] of [["SceneWorks", sceneWorksRepo], ["inference", inferenceRepo]]) {
+      const relative = path.relative(await realpath(repo), rawLogDir);
+      if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+        fail(`raw log directory must be outside the ${name} checkout so capture provenance cannot dirty it`);
+      }
+    }
+  }
   const gitState = async (repo, sceneWorks = false) => ({
     revision: (await execute("git", ["-C", repo, "rev-parse", "HEAD"])).trim(),
     dirty: Boolean((await execute("git", ["-C", repo, "status", "--porcelain"])).trim()),
@@ -1036,6 +1439,7 @@ export async function runProviderPlan({
     return { ...repositories, inference: { ...repositories.inference, closureDigest: digest } };
   };
   const incoming = [];
+  const incomingSessions = [];
   let remaining = cases;
   const sameBatch = (left, right) =>
     left.modelLoadPolicy === "batch_rungs" &&
@@ -1083,16 +1487,17 @@ export async function runProviderPlan({
     }
     const action = invocation.length > 1 ? "run_batch" : "run";
     onProviderInvocation?.({ action, cases: invocation });
+    const providerRequest = canonicalJson({
+      action,
+      ...(action === "run" ? { planned: first } : { planned: invocation }),
+      repositories: repositoriesFor(first),
+      repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
+      hardware: probe.hardware,
+    });
     const providerOutput = await execute(
       providerCommand[0],
       providerCommand.slice(1),
-      canonicalJson({
-        action,
-        ...(action === "run" ? { planned: first } : { planned: invocation }),
-        repositories,
-        repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
-        hardware: probe.hardware,
-      }),
+      providerRequest,
     );
     await assertRepositoriesStable();
     const response = JSON.parse(providerOutput);
@@ -1107,6 +1512,11 @@ export async function runProviderPlan({
     }
     for (const [index, fragment] of fragments.entries()) {
       const planned = invocation[index];
+      const sourceCapture = fragment.sourceCapture;
+      delete fragment.sourceCapture;
+      if (rawLogDir && !sourceCapture) {
+        fail(`${planned.logicalCaseId}: configured raw-log provenance requires provider sourceCapture`);
+      }
       if (!fragment.strategy || typeof fragment.strategy !== "object" || Array.isArray(fragment.strategy)) {
         fail(`${planned.logicalCaseId}: provider fragment.strategy must attest the executed strategy`);
       }
@@ -1143,10 +1553,130 @@ export async function runProviderPlan({
         hardware: probe.hardware,
         target: planned.target,
         strategy: fragment.strategy,
+        ...(planned.sourceProvenance ? { sourceProvenance: planned.sourceProvenance } : {}),
         calibrationFingerprint: planned.calibrationFingerprint,
         fixture: planned.fixture,
         harnessVersion: HARNESS_VERSION,
       };
+      if (sourceCapture) {
+        if (!rawLogDir || !sourcePathPrefix) {
+          fail(`${planned.logicalCaseId}: provider returned sourceCapture without configured raw-log provenance`);
+        }
+        if (action !== "run") {
+          fail(`${planned.logicalCaseId}: physical source capture must run fresh per case`);
+        }
+        object(sourceCapture, `${planned.logicalCaseId}.sourceCapture`);
+        if (sourceCapture.kind !== "physical_mlx") {
+          fail(`${planned.logicalCaseId}: unsupported source capture kind ${JSON.stringify(sourceCapture.kind)}`);
+        }
+        if (!Array.isArray(sourceCapture.inputs) || sourceCapture.inputs.length === 0) {
+          fail(`${planned.logicalCaseId}: physical MLX source capture requires exact inputs`);
+        }
+        validateExactOutputReceipts(
+          sourceCapture.outputs,
+          PHYSICAL_MLX_PROVIDER_OUTPUT_ROLES,
+          `${planned.logicalCaseId}.sourceCapture.outputs`,
+        );
+        if (!Array.isArray(sourceCapture.claims) || sourceCapture.claims.length === 0) {
+          fail(`${planned.logicalCaseId}: physical MLX source capture requires explicit claims`);
+        }
+        const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
+        if (!baseInput || baseInput.repository !== fragment.artifact?.repository
+            || baseInput.resolvedRevision !== fragment.artifact?.resolvedRevision
+            || baseInput.variant !== fragment.artifact?.variant) {
+          fail(`${planned.logicalCaseId}: physical MLX source input must match the measured artifact exactly`);
+        }
+        if (record.artifact.inventorySha256 !== undefined
+            && record.artifact.inventorySha256 !== baseInput.sha256) {
+          fail(`${planned.logicalCaseId}: provider artifact inventory disagrees with sourceCapture`);
+        }
+        record.artifact.inventorySha256 = baseInput.sha256;
+        const stdoutSha256 = createHash("sha256").update(providerOutput).digest("hex");
+        const sessionId = physicalMlxSessionId({
+          kind: sourceCapture.kind,
+          logicalCaseId: planned.logicalCaseId,
+          capturedAt: fragment.capturedAt,
+          repositories: repositoriesFor(planned),
+          hardware: probe.hardware,
+          stdoutSha256,
+        });
+        const sourcePath = `${sourcePathPrefix}/${sessionId}.log`;
+        const receiptDir = path.join(rawLogDir, ...sourcePathPrefix.split("/"));
+        await mkdir(receiptDir, { recursive: true });
+        await writeImmutableReceipt(path.join(receiptDir, `${sessionId}.log`), providerOutput);
+        const requestFileName = `${sessionId}.request.json`;
+        await writeImmutableReceipt(path.join(receiptDir, requestFileName), providerRequest);
+        const outputs = [{
+          role: "request",
+          path: `${sourcePathPrefix}/${requestFileName}`,
+          sha256: createHash("sha256").update(providerRequest).digest("hex"),
+          bytes: Buffer.byteLength(providerRequest),
+        }];
+        for (const output of sourceCapture.outputs) {
+          object(output, `${planned.logicalCaseId}.sourceCapture.outputs[]`);
+          text(output.role, `${planned.logicalCaseId}.sourceCapture.outputs[].role`);
+          text(output.path, `${planned.logicalCaseId}.sourceCapture.outputs[].path`);
+          text(output.localPath, `${planned.logicalCaseId}.sourceCapture.outputs[].localPath`);
+          const metadata = physicalMlxRgbMetadata(
+            output,
+            `${planned.logicalCaseId}.sourceCapture.outputs[${output.role}]`,
+          );
+          if (metadata.logicalCaseId !== planned.logicalCaseId
+              || metadata.width !== planned.target.geometry.width
+              || metadata.height !== planned.target.geometry.height) {
+            fail(`${planned.logicalCaseId}: physical MLX provider output has the wrong logical case geometry`);
+          }
+          const outputRelative = path.posix.relative(sourcePathPrefix, output.path);
+          if (!outputRelative || outputRelative.startsWith("../") || path.posix.isAbsolute(outputRelative)) {
+            fail(`${planned.logicalCaseId}: physical MLX output path must stay under ${sourcePathPrefix}`);
+          }
+          if (!path.isAbsolute(output.localPath)) {
+            fail(`${planned.logicalCaseId}: physical MLX local output path must be absolute`);
+          }
+          const physicalOutputPath = await realpath(output.localPath);
+          const localRelative = path.relative(rawLogDir, physicalOutputPath);
+          if (!localRelative || localRelative.startsWith(`..${path.sep}`) || path.isAbsolute(localRelative)) {
+            fail(`${planned.logicalCaseId}: physical MLX local output must stay under the raw log directory`);
+          }
+          const bytes = await readFile(physicalOutputPath);
+          const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+          if (actualSha256 !== output.sha256 || bytes.length !== output.bytes) {
+            fail(`${planned.logicalCaseId}: physical MLX provider output differs from its provider attestation`);
+          }
+          outputs.push({
+            role: output.role,
+            path: output.path,
+            sha256: output.sha256,
+            bytes: output.bytes,
+          });
+        }
+        validateExactOutputReceipts(
+          outputs,
+          PHYSICAL_MLX_SESSION_OUTPUT_ROLES,
+          `${sessionId}.outputs`,
+        );
+        record.derivation = physicalMlxDerivation(sessionId);
+        incomingSessions.push({
+          id: sessionId,
+          kind: sourceCapture.kind,
+          command: JSON.stringify(providerCommand),
+          sourcePath,
+          capturedAt: fragment.capturedAt,
+          repositories: repositoriesFor(planned),
+          hardware: probe.hardware,
+          target: {
+            tier: planned.target.tier,
+            mode: planned.target.mode,
+            overlay: planned.target.overlay,
+            rung: planned.strategy.rung,
+          },
+          stdoutSha256,
+          inputs: sourceCapture.inputs,
+          outputs,
+          claims: sourceCapture.claims,
+          result: "passed",
+        });
+      }
       if (planned.expectedResult === "failed" && record.status !== "negative_complete") {
         fail(`${planned.logicalCaseId}: negative plan case must return status=negative_complete`);
       }
@@ -1166,15 +1696,30 @@ export async function runProviderPlan({
       await onProviderCheckpoint(mergeBundles(existing, {
         schemaVersion: 4,
         harnessVersion: HARNESS_VERSION,
+        sourceSessions: incomingSessions,
         records: incoming,
       }));
     }
   }
-  return mergeBundles(existing, { schemaVersion: 4, harnessVersion: HARNESS_VERSION, records: incoming });
+  return mergeBundles(existing, {
+    schemaVersion: 4,
+    harnessVersion: HARNESS_VERSION,
+    sourceSessions: incomingSessions,
+    records: incoming,
+  });
 }
 
 async function readJson(file) {
   return JSON.parse(await readFile(path.resolve(ROOT, file), "utf8"));
+}
+async function liveInferenceClosureDigests() {
+  const declarations = await readJson("config/inference-provider-closures.json");
+  return Object.fromEntries(
+    Object.entries(declarations.providers ?? {}).map(([provider, declaration]) => [
+      provider,
+      declaration.digest,
+    ]),
+  );
 }
 export async function atomicWrite(file, value) {
   const destination = path.resolve(ROOT, file);
@@ -1189,14 +1734,32 @@ async function main() {
     const index = args.indexOf(flag);
     return index < 0 ? undefined : args[index + 1];
   };
-  if (command === "check") return void validateBundle(await readJson(value("--input")));
+  if (command === "check") {
+    const closureDigests = await liveInferenceClosureDigests();
+    return void await validateSourceSessionFiles(
+      await readJson(value("--input")),
+      value("--source-root") ? path.resolve(value("--source-root")) : null,
+      closureDigests,
+    );
+  }
   if (command === "plan") {
     const resume = value("--resume") ? validateBundle(await readJson(value("--resume"))).records : [];
     return void await atomicWrite(value("--output"), { harnessVersion: HARNESS_VERSION, cases: expandPlan(await readJson(value("--config")), resume) });
   }
   if (command === "ingest") {
-    const incoming = validateBundle(await readJson(value("--input")));
-    const output = value("--resume") ? mergeBundles(validateBundle(await readJson(value("--resume"))), incoming) : incoming;
+    const sourceRoot = value("--source-root") ? path.resolve(value("--source-root")) : null;
+    const closureDigests = await liveInferenceClosureDigests();
+    const incoming = await validateSourceSessionFiles(
+      await readJson(value("--input")),
+      sourceRoot,
+      closureDigests,
+    );
+    const output = value("--resume")
+      ? mergeBundles(
+          await validateSourceSessionFiles(await readJson(value("--resume")), null, closureDigests),
+          incoming,
+        )
+      : incoming;
     return void await atomicWrite(value("--output"), output);
   }
   if (command === "compare-reuse") {
@@ -1226,6 +1789,8 @@ async function main() {
       fixture: value("--fixture"),
       forceFreshPerCase: args.includes("--fresh-per-case"),
       forceBatchRungs: args.includes("--batch-rungs"),
+      rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
+      sourcePathPrefix: value("--source-path-prefix"),
       onProviderCheckpoint: (checkpoint) => atomicWrite(outputPath, checkpoint),
     });
     return void await atomicWrite(outputPath, output);

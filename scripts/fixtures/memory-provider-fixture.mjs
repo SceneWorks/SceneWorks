@@ -1,4 +1,12 @@
 import process from "node:process";
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+const captureDir = process.argv[2];
+const sourcePrefix = process.argv[3];
+const outputDir = process.argv[4] ?? captureDir;
+const captureMutation = process.argv[5] ?? null;
 
 let body = "";
 for await (const chunk of process.stdin) body += chunk;
@@ -12,7 +20,16 @@ if (request.action === "assess_batch") {
 }
 if (request.action === "probe") {
   process.stdout.write(JSON.stringify({
-    hardware: {
+    hardware: captureDir ? {
+      probe: "executable physical MLX fixture probe",
+      memoryBytes: 137438953472,
+      model: "Mac17,6",
+      chip: "Apple M5 Max",
+      osVersion: "26.5.2",
+      metalDevice: "Apple M5 Max",
+      mlxMemoryLimitBytes: 130567005798,
+      wiredLimitBytes: 87044670532,
+    } : {
       probe: "executable fixture probe",
       memoryBytes: 51539607552,
       deviceId: "fixture:0",
@@ -28,9 +45,9 @@ const phase = (value) => ({
   activeBytes: value, allocatorBytes: value + 10, deviceBytes: value + 20,
   wiredBytes: value + 30, reclaimableBytes: 0
 });
-const fragment = (planned) => {
+const fragment = async (planned) => {
   const p = planned.strategy.parameters;
-  return {
+  const result = {
     status: request.repositories.sceneWorks.dirty || request.repositories.inference.dirty ? "gated" : "complete",
     strategy: planned.strategy,
     loadShape: planned.loadShape,
@@ -67,12 +84,54 @@ const fragment = (planned) => {
     loadability: { result: "passed", resolvedPathFingerprint: "fixture@resolved:q4" },
     capturedAt: "2026-07-28T12:00:00Z"
   };
+  if (captureDir) {
+    const receiptDir = path.join(outputDir, ...sourcePrefix.split("/"));
+    await mkdir(receiptDir, { recursive: true });
+    const persistRgb = async (role, fill) => {
+      const bytes = Buffer.alloc(
+        planned.target.geometry.width * planned.target.geometry.height * 3,
+        fill,
+      );
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      const fileName = `${planned.logicalCaseId}-${role}-${planned.target.geometry.width}x${
+        planned.target.geometry.height}-${sha256}.rgb`;
+      const localPath = path.join(receiptDir, fileName);
+      await writeFile(localPath, bytes);
+      return {
+        role,
+        path: `${sourcePrefix}/${fileName}`,
+        localPath,
+        sha256,
+        bytes: bytes.length,
+      };
+    };
+    const selected = await persistRgb("selected_rgb", 0x31);
+    const reference = await persistRgb("reference_rgb", 0x52);
+    if (captureMutation === "tamper-after-attest") {
+      await writeFile(selected.localPath, Buffer.alloc(selected.bytes, 0xff));
+    }
+    result.sourceCapture = {
+      kind: "physical_mlx",
+      inputs: [{
+        role: "base",
+        path: "/fixture/q4",
+        bytes: 1234,
+        sha256: "d".repeat(64),
+        repository: "SceneWorks/fixture",
+        resolvedRevision: "c".repeat(40),
+        variant: "q4",
+      }],
+      outputs: [selected, reference],
+      claims: ["memory", "quality", "negative_mutation", "lifecycle", "loadability", "overlay"],
+    };
+  }
+  return result;
 };
 if (request.action === "run_batch") {
   process.stdout.write(JSON.stringify({
     modelLoads: 1,
-    fragments: request.planned.map(fragment),
+    fragments: await Promise.all(request.planned.map(fragment)),
   }));
 } else {
-  process.stdout.write(JSON.stringify(fragment(request.planned)));
+  process.stdout.write(JSON.stringify(await fragment(request.planned)));
 }
