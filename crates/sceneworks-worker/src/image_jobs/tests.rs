@@ -14960,6 +14960,37 @@ fn krea_imported_control_mlx_gpu_smoke() {
         "the imported control assembly keeps the builtin provider identity"
     );
 
+    // The MEMORY GATE the lane really runs, on the real generator — not a unit fixture.
+    //
+    // This is the composition the shipped defect lived in. Every piece was individually plausible:
+    // the lane declared its `MlxRequestInputs`, the engine rendered when driven directly, and the
+    // route/claim predicates were unit-tested. What nothing exercised was generator + gate +
+    // render TOGETHER, so a declaration that disagreed with the live request — `references=0`
+    // against the one reference gen-core charges for `Conditioning::Control` — passed every test
+    // and refused every real render with `request geometry ... references=1 does not fit admitted
+    // ... references=0`. `krea_control_declares_the_reference_count_gen_core_derives_from_its_request`
+    // now grades the declaration statically; this grades it against a LOADED provider, which is the
+    // only place `MlxRequestScopeCore::configure_request` actually runs.
+    //
+    // Built exactly as `generate_krea_imported_control_stream` builds them, so a drift in the lane's
+    // spec or inputs surfaces here rather than in a user's refused pose set.
+    let mut estimation_spec = LoadSpec::new(WeightsSource::Dir(base.clone()))
+        .with_control(WeightsSource::File(overlay.clone()));
+    estimation_spec = estimation_spec.with_adapters(Vec::new());
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        "krea_2_turbo_control",
+        &req.model,
+        &estimation_spec,
+        Some(&req.model_manifest_entry),
+        None,
+    );
+    let memory_inputs = krea_control_memory_inputs(w, h, &req.mode, 0);
+    assert_eq!(
+        memory_inputs.reference_count, 1,
+        "a pose Control is one image reference; declaring zero is the shipped defect this smoke \
+         exists to catch"
+    );
+
     // Two DIFFERENT skeletons rendered at the same size as the output. `draw_wholebody` is the same
     // renderer the lane (and training) uses, so these are real conditioning inputs, not noise.
     let stickwidth = crate::openpose_skeleton::body_stickwidth(w, h);
@@ -14988,7 +15019,7 @@ fn krea_imported_control_mlx_gpu_smoke() {
         .expect("render the DWPose skeleton for the pose entry")
     };
     let render = |label: &str, control: Image, scale: f32| {
-        let request = GenerationRequest {
+        let mut request = GenerationRequest {
             prompt: prompt.clone(),
             width: w,
             height: h,
@@ -15003,17 +15034,41 @@ fn krea_imported_control_mlx_gpu_smoke() {
             }],
             ..Default::default()
         };
+        // The live re-derivation the declaration is graded against. Asserted per render, before the
+        // gate runs, so a conditioning change that alters the reference count is caught here rather
+        // than as an opaque geometry refusal below.
+        assert_eq!(
+            request.image_reference_count(),
+            memory_inputs.reference_count,
+            "[{label}] the live request's reference count must equal the admitted declaration"
+        );
         let started = std::time::Instant::now();
         let mut last = String::new();
-        let out = model
-            .generate(&request, &mut |p| {
+        // Admit through the REAL fit gate against the loaded provider, then render through the same
+        // `generate_with_scope` seam `krea_control_generate_one` uses. With the pre-fix
+        // `references=0` declaration this call chain is what returned the geometry refusal.
+        let evaluation = crate::mlx_fit_gate::evaluate_request(
+            model.as_ref(),
+            &memory_plan,
+            &memory_inputs,
+            gen_core::MemoryCacheState::Warm,
+            gen_core::OffloadPolicy::Resident,
+            0,
+        )
+        .unwrap_or_else(|error| panic!("[{label}] fit gate refused the pose request: {error}"));
+        let out = crate::memory_strategy::generate_with_scope(
+            model.as_ref(),
+            &mut request,
+            Some(&evaluation.context),
+            &mut |p| {
                 let s = format!("{p:?}");
                 if s != last {
                     eprintln!("[{label}] {s}");
                     last = s;
                 }
-            })
-            .unwrap_or_else(|error| panic!("{label} generate: {error}"));
+            },
+        )
+        .unwrap_or_else(|error| panic!("{label} generate: {error}"));
         let image = match out {
             GenerationOutput::Images(mut images) => images.pop().expect("one image"),
             other => panic!("expected Images, got {other:?}"),
