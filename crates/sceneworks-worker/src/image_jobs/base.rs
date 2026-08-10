@@ -3690,6 +3690,7 @@ mod candle_image_load_shape_tests {
                     capabilities: Default::default(),
                     required_components: &[],
                     control_kinds: None,
+                    denoiser_output_latent_space: None,
                 },
             }
         }
