@@ -4238,6 +4238,113 @@ mod tests {
         }
     }
 
+    /// sc-18408 item (d): every MLX plan row must resolve through the shipped registry to a
+    /// weights-free provider contract. This is deliberately derived from the plan rather than a
+    /// hand-maintained provider list: adding a planned lane without registering its contract must
+    /// fail in CI before the calibration adapter reaches a physical capture. Provider-owned
+    /// contract fixtures avoid filesystem-shaped test doubles; SDXL's normal registration is
+    /// itself weights-free and is the intentional fixture-less fallback.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn every_planned_mlx_lane_resolves_a_weights_free_provider_contract() {
+        let plan: Value =
+            serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
+                .expect("memory calibration plan parses");
+        let rows = plan["providers"].as_array().expect("plan providers array");
+        let registry = crate::inference_runtime::media();
+        let mut checked = 0_usize;
+
+        for row in rows.iter().filter(|row| row["backend"] == "mlx") {
+            let target = row["target"].as_object().expect("plan target object");
+            let provider = target["provider"].as_str().expect("plan provider");
+            let mode = target["mode"].as_str().expect("plan mode");
+            let tier = target["tier"].as_str().expect("plan tier");
+            let overlay = target["overlay"].as_str().expect("plan overlay");
+            let load_shape = match row["loadShape"].as_str().expect("plan loadShape") {
+                "eager_materialization" => gen_core::LoadShape::EagerMaterialization,
+                "deferred_materialization" => gen_core::LoadShape::DeferredMaterialization,
+                other => {
+                    panic!("planned MLX lane {provider}/{mode} names unknown load shape {other}")
+                }
+            };
+
+            let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")))
+                .with_load_shape(load_shape);
+            spec = match tier {
+                "q4" => spec.with_quant(gen_core::Quant::Q4),
+                "q8" => spec.with_quant(gen_core::Quant::Q8),
+                "bf16" => spec,
+                other => panic!("planned MLX lane {provider}/{mode} names unknown tier {other}"),
+            };
+            match overlay {
+                "none" => {}
+                "control:1" => {
+                    spec = spec.with_control(WeightsSource::File(std::path::PathBuf::from(
+                        "fixture-control",
+                    )));
+                }
+                other => panic!(
+                    "planned MLX lane {provider}/{mode} names unmapped overlay {other}; teach the \
+                     generic contract guard how production represents it"
+                ),
+            }
+
+            let registration = registry
+                .memory_strategy_registrations()
+                .find(|registration| registration.provider_id == provider)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "planned MLX lane {provider}/{mode} has no memory-strategy registration in \
+                         the shipped runtime registry"
+                    )
+                });
+            let contract = match registry
+                .memory_contract_fixture_registrations()
+                .find(|fixture| fixture.provider_id == provider)
+            {
+                Some(fixture) => (fixture.contract)(&spec),
+                None => (registration.contract)(&spec),
+            }
+            .unwrap_or_else(|error| {
+                panic!(
+                    "planned MLX lane {provider}/{mode} cannot build a weights-free memory \
+                     contract: {error}"
+                )
+            });
+
+            assert_eq!(
+                contract.provider_id, provider,
+                "planned MLX lane {provider}/{mode} resolved another provider's contract"
+            );
+            assert_eq!(
+                contract.backend.backend_kind(),
+                gen_core::MemoryBackend::Mlx,
+                "planned MLX lane {provider}/{mode} resolved a non-MLX contract"
+            );
+            assert_eq!(
+                contract.load_shape, load_shape,
+                "planned MLX lane {provider}/{mode} contract does not preserve its load shape"
+            );
+            let calibration = contract.calibration.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "planned MLX lane {provider}/{mode} resolves only an uncalibratable \
+                     compatibility contract"
+                )
+            });
+            assert_eq!(
+                calibration.load_shape, load_shape,
+                "planned MLX lane {provider}/{mode} calibration identity does not preserve its \
+                 load shape"
+            );
+            checked += 1;
+        }
+
+        assert!(
+            checked > 0,
+            "the shipped plan must contain at least one MLX lane"
+        );
+    }
+
     /// SC-16915 acceptance: the SHIPPED manifest opt-in and the SHIPPED evidence bundle must agree
     /// well enough for a covered cell to take the calibrated path. Every other test in this module
     /// builds its own fixture manifest and fixture bundle, so all of them stay green even when the
