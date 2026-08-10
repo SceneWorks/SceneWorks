@@ -6611,7 +6611,13 @@ async fn generate_stream(
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
-        move |generator, cache_state, load_policy, external_committed_bytes, tx, cancel| {
+        move |generator,
+              cache_state,
+              loaded_policy,
+              _requested_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
             // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`
             // face stack lives here); source embedded once, reused across every output (sc-4411). `None`
             // ⇒ not a With-Character generation, or non-fatal staging/construction failure ⇒ omitted.
@@ -6650,7 +6656,7 @@ async fn generate_stream(
                     &mlx_request_plan,
                     &mlx_request_inputs,
                     cache_state,
-                    load_policy,
+                    loaded_policy.offload_policy,
                     request_external_committed_bytes,
                 )?;
                 // Exact promoted MLX evidence may tighten the soft process limit for this request.

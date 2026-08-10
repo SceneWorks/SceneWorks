@@ -280,14 +280,21 @@ where
         adapter_count,
         spec,
         load_error_context,
-        move |generator, _cache_state, _load_policy, _external_committed_bytes, tx, cancel| {
+        move |generator,
+              _cache_state,
+              _loaded_policy,
+              _requested_policy,
+              _external_committed_bytes,
+              tx,
+              cancel| {
             drive(generator, tx, cancel)
         },
     )
 }
 
-/// Cached stream seam that exposes cold/warm state and the actual cold-load residency policy to the
-/// request callback. Geometry and request strategy remain absent from the generator cache key.
+/// Cached stream seam that exposes cold/warm state, the actual cold-load execution policy, and the
+/// current request's policy intent to the callback. Geometry and request strategy remain absent from
+/// the generator load identity.
 fn start_cached_gen_stream_with_request_state<D>(
     job_id: String,
     engine_id: &'static str,
@@ -304,7 +311,8 @@ where
     D: FnOnce(
             &dyn Generator,
             gen_core::MemoryCacheState,
-            gen_core::OffloadPolicy,
+            crate::generator_cache::ExecutionPolicy,
+            crate::generator_cache::ExecutionPolicy,
             u64,
             tokio::sync::mpsc::Sender<GenEvent>,
             CancelFlag,
@@ -326,7 +334,11 @@ where
             engine_id,
             spec,
             load_error_context,
-            move |generator, cache_state, load_policy, external_committed_bytes| {
+            move |generator,
+                  cache_state,
+                  loaded_policy,
+                  requested_policy,
+                  external_committed_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
@@ -336,7 +348,8 @@ where
                 drive(
                     generator,
                     cache_state,
-                    load_policy,
+                    loaded_policy,
+                    requested_policy,
                     external_committed_bytes,
                     tx,
                     blocking_cancel,
