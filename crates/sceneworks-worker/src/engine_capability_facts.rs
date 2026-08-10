@@ -238,6 +238,41 @@ impl AudioCapabilityFacts {
     }
 }
 
+/// A matching-platform dump of inference's full weights-free runtime snapshot.
+///
+/// Unlike the legacy preview facts, this schema is intentionally rich: the nested inference
+/// snapshot carries generator conditioning, adapters, quant tiers and preview support, trainer
+/// modes, and every registered utility provider id. Keeping the inference JSON nested and intact
+/// prevents SceneWorks from maintaining a second descriptor projection that can drift.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDescriptorFacts {
+    pub schema_version: u32,
+    pub generated_from: FactsProvenance,
+    /// SceneWorks job-payload id -> inference registry id, sourced from the production
+    /// `MODEL_TABLE` used by worker dispatch.
+    pub model_mappings: BTreeMap<String, String>,
+    /// The exact capability advertisement produced by the matching platform's production GPU
+    /// worker constructor. The matrix replays canonical requests against this list and the API's
+    /// `worker_supports_job` predicate instead of assigning utility support by hand.
+    pub worker_capabilities: Vec<String>,
+    pub snapshot: serde_json::Value,
+}
+
+impl RuntimeDescriptorFacts {
+    pub fn backend(&self) -> Result<&str, String> {
+        self.snapshot
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .filter(|backend| !backend.is_empty())
+            .ok_or_else(|| "runtime capability snapshot has no non-empty backend".to_owned())
+    }
+
+    pub fn file_name(&self) -> Result<String, String> {
+        Ok(format!("capabilities.{}.json", self.backend()?))
+    }
+}
+
 fn modality_label(modality: &gen_core::Modality) -> &'static str {
     // Exhaustive on purpose: a new gen-core modality must break this build loudly at the next pin
     // bump rather than be silently flattened into a catch-all label.
@@ -432,6 +467,134 @@ pub fn collect_audio_capability_facts() -> Result<Vec<AudioCapabilityFacts>, Str
     )
 }
 
+/// Capture the linked runtime-catalog snapshot exactly as inference exposes it.
+pub fn collect_runtime_descriptor_facts() -> Result<RuntimeDescriptorFacts, String> {
+    let snapshot = crate::inference_runtime::capability_snapshot_json().ok_or_else(|| {
+        "refusing to dump runtime descriptor facts: this build links no inference runtime catalog"
+            .to_owned()
+    })?;
+    let model_mappings = crate::engines::MODEL_TABLE
+        .iter()
+        .map(|row| (row.sceneworks_id.to_owned(), row.engine_id.to_owned()))
+        .collect();
+    let worker_capabilities = matching_platform_worker_capabilities()?;
+    runtime_descriptor_facts_from_snapshot(
+        snapshot,
+        model_mappings,
+        worker_capabilities,
+        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        dumper_invocation(),
+    )
+}
+
+/// Build the same GPU capability list production registers on this matching-platform lane.
+fn matching_platform_worker_capabilities() -> Result<Vec<String>, String> {
+    let mut settings = crate::Settings::from_env();
+    settings.backend_mlx_enabled = cfg!(target_os = "macos");
+    settings.backend_candle_enabled =
+        cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
+
+    #[cfg(target_os = "macos")]
+    let gpu = crate::gpu::mlx_gpu(&settings);
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let gpu = crate::gpu::with_candle_capabilities(
+        crate::DiscoveredGpu {
+            id: "capability-facts-candle".to_owned(),
+            name: "Capability facts Candle GPU".to_owned(),
+            capabilities: vec![sceneworks_core::contracts::WorkerCapability::Gpu],
+            utilization: None,
+        },
+        &settings,
+        // Include every production-advertised precision marker. Per-device eligibility remains a
+        // separate API/UI gate and is represented by the manifest tier metadata in the matrix.
+        Some(12.0),
+        &crate::preflight::GpuHealth::Usable,
+    );
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    return Err(
+        "runtime descriptor facts require a matching MLX or backend-candle build".to_owned(),
+    );
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        let mut capabilities: Vec<String> =
+            crate::gpu::worker_capabilities_with_utility(&gpu, true)
+                .into_iter()
+                .map(|capability| capability.as_str().to_owned())
+                .collect();
+        capabilities.sort();
+        capabilities.dedup();
+        if capabilities.is_empty() {
+            return Err("matching-platform GPU advertised no worker capabilities".to_owned());
+        }
+        Ok(capabilities)
+    }
+}
+
+/// Validate and wrap one inference-owned runtime snapshot without changing its nested schema.
+pub fn runtime_descriptor_facts_from_snapshot(
+    snapshot: serde_json::Value,
+    model_mappings: BTreeMap<String, String>,
+    mut worker_capabilities: Vec<String>,
+    inference_revision: &str,
+    dumper: &str,
+) -> Result<RuntimeDescriptorFacts, String> {
+    for (ids, capabilities) in [
+        ("generator_ids", "generator_capabilities"),
+        ("trainer_ids", "trainer_capabilities"),
+        ("audio_generator_ids", "audio_generator_capabilities"),
+    ] {
+        let id_count = snapshot
+            .get(ids)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("runtime capability snapshot is missing {ids}"))?
+            .len();
+        let capability_count = snapshot
+            .get(capabilities)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("runtime capability snapshot is missing {capabilities}"))?
+            .len();
+        if id_count != capability_count {
+            return Err(format!(
+                "runtime capability snapshot has {id_count} {ids} but {capability_count} {capabilities}"
+            ));
+        }
+    }
+    if model_mappings.is_empty() {
+        return Err("runtime capability facts have no SceneWorks model mappings".to_owned());
+    }
+    worker_capabilities.sort();
+    if worker_capabilities.is_empty() {
+        return Err("runtime capability facts have no worker capabilities".to_owned());
+    }
+    if worker_capabilities
+        .windows(2)
+        .any(|pair| pair[0] == pair[1])
+    {
+        return Err("runtime capability facts contain duplicate worker capabilities".to_owned());
+    }
+    let facts = RuntimeDescriptorFacts {
+        schema_version: 1,
+        generated_from: FactsProvenance {
+            inference_revision: inference_revision.to_owned(),
+            dumper: dumper.to_owned(),
+        },
+        model_mappings,
+        worker_capabilities,
+        snapshot,
+    };
+    facts.backend()?;
+    Ok(facts)
+}
+
 /// Serialize one backend's facts as the exact bytes checked in (pretty JSON + trailing newline),
 /// matching `apps/web/scripts/generate-styles.mjs`'s `JSON.stringify(value, null, 2) + "\n"` so a
 /// JS-side rewrite and a Rust-side dump agree byte-for-byte.
@@ -446,6 +609,14 @@ pub fn facts_json(facts: &EngineCapabilityFacts) -> Result<String, String> {
 pub fn audio_facts_json(facts: &AudioCapabilityFacts) -> Result<String, String> {
     let mut json = serde_json::to_string_pretty(facts)
         .map_err(|error| format!("audio engine capability facts do not serialize: {error}"))?;
+    json.push('\n');
+    Ok(json)
+}
+
+/// [`facts_json`] for the complete inference runtime descriptor snapshot.
+pub fn runtime_descriptor_facts_json(facts: &RuntimeDescriptorFacts) -> Result<String, String> {
+    let mut json = serde_json::to_string_pretty(facts)
+        .map_err(|error| format!("runtime descriptor facts do not serialize: {error}"))?;
     json.push('\n');
     Ok(json)
 }
@@ -470,9 +641,17 @@ pub fn default_facts_dir() -> PathBuf {
 /// single-level, while the glob's `*` would happily match `capabilities.candle.audio.json`.
 pub const AUDIO_FACTS_SUBDIR: &str = "audio";
 
+/// The subdirectory holding the rich inference runtime snapshots used by the parity matrix.
+pub const RUNTIME_DESCRIPTOR_FACTS_SUBDIR: &str = "runtime";
+
 /// `<facts root>/audio` — where [`dump_audio_to`] writes.
 pub fn audio_facts_dir(root: &Path) -> PathBuf {
     root.join(AUDIO_FACTS_SUBDIR)
+}
+
+/// `<facts root>/runtime` â€” where [`dump_runtime_descriptor_to`] writes.
+pub fn runtime_descriptor_facts_dir(root: &Path) -> PathBuf {
+    root.join(RUNTIME_DESCRIPTOR_FACTS_SUBDIR)
 }
 
 /// Dump this build's facts files into `dir`, returning the paths written.
@@ -512,6 +691,18 @@ pub fn dump_audio_to(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(written)
 }
 
+/// Dump this build's complete inference runtime snapshot into `<root>/runtime`.
+pub fn dump_runtime_descriptor_to(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let facts = collect_runtime_descriptor_facts()?;
+    let dir = runtime_descriptor_facts_dir(root);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let path = dir.join(facts.file_name()?);
+    std::fs::write(&path, runtime_descriptor_facts_json(&facts)?)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(vec![path])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +737,104 @@ mod tests {
 
     fn audio_descriptor(id: &'static str, supports_preview: bool) -> gen_core::ModelDescriptor {
         descriptor_with_modality(id, "candle", supports_preview, gen_core::Modality::Audio)
+    }
+
+    fn runtime_snapshot() -> serde_json::Value {
+        serde_json::json!({
+            "platform": "macos",
+            "backend": "mlx",
+            "generator_ids": ["probe"],
+            "generator_capabilities": [{
+                "id": "probe",
+                "conditioning": ["reference"],
+                "supports_lora": true,
+                "supports_lokr": false,
+                "supported_quants": ["q4"],
+                "supports_preview": true
+            }],
+            "trainer_ids": ["probe"],
+            "trainer_capabilities": [{
+                "id": "probe",
+                "supports_lora": true,
+                "supports_lokr": false,
+                "supports_control": false,
+                "supports_full_finetune": true
+            }],
+            "audio_generator_ids": [],
+            "audio_generator_capabilities": []
+        })
+    }
+
+    #[test]
+    fn runtime_snapshot_requires_rich_generator_and_trainer_records() {
+        let mappings = BTreeMap::from([("probe-ui".to_owned(), "probe".to_owned())]);
+        let capabilities = vec!["gpu".to_owned(), "image_generate".to_owned()];
+        let facts = runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            mappings.clone(),
+            capabilities.clone(),
+            "rev",
+            "dump",
+        )
+        .expect("complete rich snapshot is accepted");
+        assert_eq!(facts.backend().unwrap(), "mlx");
+        assert_eq!(facts.file_name().unwrap(), "capabilities.mlx.json");
+        assert_eq!(facts.model_mappings["probe-ui"], "probe");
+        assert_eq!(facts.worker_capabilities, ["gpu", "image_generate"]);
+
+        for field in ["generator_capabilities", "trainer_capabilities"] {
+            let mut mutated = runtime_snapshot();
+            mutated.as_object_mut().unwrap().remove(field);
+            let error = runtime_descriptor_facts_from_snapshot(
+                mutated,
+                mappings.clone(),
+                capabilities.clone(),
+                "rev",
+                "dump",
+            )
+            .expect_err("a missing rich descriptor axis must fail the dump");
+            assert!(error.contains(field), "got: {error}");
+        }
+
+        let mut mismatched = runtime_snapshot();
+        mismatched["generator_capabilities"] = serde_json::json!([]);
+        let error = runtime_descriptor_facts_from_snapshot(
+            mismatched,
+            mappings.clone(),
+            capabilities.clone(),
+            "rev",
+            "dump",
+        )
+        .expect_err("an incomplete descriptor inventory must fail the dump");
+        assert!(error.contains("generator_ids"), "got: {error}");
+
+        assert!(runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            BTreeMap::new(),
+            capabilities.clone(),
+            "rev",
+            "dump",
+        )
+        .expect_err("missing dispatch mappings must fail")
+        .contains("model mappings"));
+        assert!(runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            mappings.clone(),
+            Vec::new(),
+            "rev",
+            "dump",
+        )
+        .expect_err("missing worker capability facts must fail")
+        .contains("worker capabilities"));
+        assert!(runtime_descriptor_facts_from_snapshot(
+            runtime_snapshot(),
+            mappings,
+            vec!["gpu".to_owned(), "gpu".to_owned()],
+            "rev",
+            "dump",
+        )
+        .expect_err("duplicate capability facts must fail")
+        .contains("duplicate"));
     }
 
     // The vacuous-green trap (epic 16948 decision, activity-16974). An empty registry is the
