@@ -150,6 +150,15 @@ shared code) when it drops its resident generator after the idle timeout: `engin
 level. It correlates with the worker releasing cached GPU allocations (Metal/MLX or
 CUDA) before the next generation cold-loads weights again.
 
+### Generator cache policy mismatch — `generator_cache_policy_mismatch`
+
+Emitted at warn level on a warm cache hit when a request asks for an execution policy
+different from the resident generator's cold-load policy. Fields: `engine`,
+`loadedOffloadPolicy`, `loadedLoadShape`, `requestedOffloadPolicy`, and
+`requestedLoadShape`. Until the request planner can switch a resident generator's staged
+components, the worker logs the mismatch and safely serves the cached generator under its
+loaded policy; the event does not indicate a reload or an execution failure.
+
 ### API errors — `api_error` (API)
 
 Emitted from `ApiError`'s `IntoResponse` so no failure leaves the server without a
