@@ -1958,6 +1958,7 @@ mod tests {
             backend: "stub",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }

@@ -270,6 +270,7 @@ export const ADVANCED_PREFILL = {
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
   enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
   usePid: { label: "PiD decoder", prefill: PREFILL_CONTROL },
+  decoder: { label: "Alternate decoder", prefill: PREFILL_CONTROL },
   pidTarget: { label: "PiD output", prefill: PREFILL_CONTROL },
   ipAdapterScale: { label: "Reference strength", prefill: PREFILL_CONTROL },
   controlnetConditioningScale: { label: "Identity structure", prefill: PREFILL_CONTROL },

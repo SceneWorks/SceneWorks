@@ -215,6 +215,22 @@ const MAX_JOB_LORAS: usize = 5;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use crate::engines::{mlx_model, ResolvedModel};
+
+/// Parse the request-selected terminal decoder. Missing, null, empty, and `native` all preserve the
+/// provider's built-in decoder byte-for-byte; every other value must be a bounded string id.
+fn requested_decoder_id(
+    advanced: &sceneworks_core::contracts::JsonObject,
+) -> WorkerResult<Option<&str>> {
+    match advanced.get("decoder") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() || value == "native" => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(_) => Err(WorkerError::InvalidPayload(
+            "advanced.decoder must be a decoder id string (or 'native')".to_owned(),
+        )),
+    }
+}
+
 /// Dispatch handler for `JobType::ImageGenerate`: generate, save, and stream image
 /// assets through the Rust GPU worker.
 ///
@@ -233,6 +249,35 @@ pub(crate) async fn run_image_generate_job(
         ));
     }
     validate_hires_fix_request(&request)?;
+    if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        {
+            let backend = if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            };
+            let provider_id = sceneworks_core::decoder_support::provider_id_for_backend(
+                &request.model_manifest_entry,
+                backend,
+            )
+            .or_else(|| mlx_model(&request.model).map(|model| model.engine_id().to_owned()))
+            .unwrap_or_else(|| request.model.clone());
+            validate_selected_decoder_request(&provider_id, decoder_id, &request.advanced)?;
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )))]
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "decoder '{decoder_id}' is unavailable because this worker has no compatible image backend"
+            )));
+        }
+    }
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);

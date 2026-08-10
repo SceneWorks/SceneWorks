@@ -2144,6 +2144,22 @@
           "estimatedSizeBytes": 57731960832,
           "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // Experimental Wan 2.1 z16 decoder donor (F3). Fetch ONLY the standalone native MLX VAE
+        // file already published with the Krea-Realtime turnkey; this does not install a Wan or
+        // Krea-Realtime generator. Soft keeps Qwen usable if the optional donor is absent, while the
+        // UI and worker expose the selection only when this exact pinned file is present.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "vae",
+          "files": ["q4/vae.safetensors"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 507591212,
+          "footprint": { "diskSizeBytes": 507591212, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         // Packed 2512-Fun-Controlnet-Union strict-control tier (sc-9870, epic 8236). SceneWorks re-host
         // of alibaba-pai/Qwen-Image-2512-Fun-Controlnet-Union as a per-tier packed matrix — each subdir
         // is a SINGLE `model.safetensors` control overlay: q4/ q8/ bf16/. This replaces the old dense
@@ -2510,6 +2526,20 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 57731960832,
           "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Optional experimental terminal decoder for the shared `qwen_image_edit` MLX engine.
+        // This is one standalone pinned VAE file, not a Wan/Krea-Realtime model install.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "vae",
+          "files": ["q4/vae.safetensors"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 507591212,
+          "footprint": { "diskSizeBytes": 507591212, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -2706,6 +2736,20 @@
           "files": ["bf16/*"],
           "estimatedSizeBytes": 57731960832,
           "footprint": { "diskSizeBytes": 57731960832, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // Same optional standalone decoder as the base Edit-2511 catalog entry. The Lightning LoRA
+        // changes denoising only; both products route to the compatible `qwen_image_edit` engine.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "vae",
+          "files": ["q4/vae.safetensors"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 507591212,
+          "footprint": { "diskSizeBytes": 507591212, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -5264,6 +5308,20 @@
           "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35678119918
         },
+        // Experimental terminal decoder: one pinned Wan 2.1 z16 VAE file only. This soft optional
+        // component is not a Krea-Realtime/Wan model install and never gates native Krea generation.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "vae",
+          "files": ["q4/vae.safetensors"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 507591212,
+          "footprint": { "diskSizeBytes": 507591212, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         {
           // INT8-ConvRot tier (sc-9300, epic 9083) — candle-ONLY (Windows/Linux; NOT macOS/mlx). The
           // community INT8-ConvRot DiT (online-rotation IGEMM, sc-9601: PSNR 34.4 dB vs bf16, > Q4's
@@ -6656,6 +6714,20 @@
           ],
           "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35678121657
+        },
+        // Experimental terminal decoder: one pinned Wan 2.1 z16 VAE file only. Soft and macOS-only;
+        // native Raw/edit generation remains installable and exact when the donor is absent.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/krea-realtime-14b-mlx",
+          "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "vae",
+          "files": ["q4/vae.safetensors"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 507591212,
+          "footprint": { "diskSizeBytes": 507591212, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {

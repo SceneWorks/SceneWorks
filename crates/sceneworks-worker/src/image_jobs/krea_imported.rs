@@ -706,11 +706,20 @@ async fn generate_krea_imported_control_stream(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
+    spec = attach_selected_decoder_unprepared(
+        spec,
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
+    let decoder_pin =
+        selected_decoder_component_pin(&spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
     crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
         std::iter::once(dit_pin)
             .chain(std::iter::once(control_pin))
-            .chain(adapter_pins),
+            .chain(adapter_pins)
+            .chain(decoder_pin),
         "Krea 2 imported pose source preparation failed",
     )?;
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
@@ -1320,20 +1329,23 @@ async fn generate_krea_imported_stream(
         WeightsSource::Dir(base_dir.clone()),
     );
     #[cfg(target_os = "macos")]
-    {
-        if !prepared_adapters.specs.is_empty() {
-            spec = spec.with_adapters(prepared_adapters.specs);
-        }
-        crate::paths::prepare_load_spec_with_file_pins(
-            &mut spec,
-            std::iter::once(dit_pin).chain(prepared_adapters.pins),
-            "Krea 2 imported source preparation failed",
-        )?;
+    if !prepared_adapters.specs.is_empty() {
+        spec = spec.with_adapters(prepared_adapters.specs);
     }
+    spec = attach_selected_decoder_unprepared(spec, engine_id, request, settings)?;
+    let decoder_pin = selected_decoder_component_pin(&spec, engine_id, request, settings)?;
+    #[cfg(target_os = "macos")]
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        std::iter::once(dit_pin)
+            .chain(prepared_adapters.pins)
+            .chain(decoder_pin),
+        "Krea 2 imported source preparation failed",
+    )?;
     #[cfg(not(target_os = "macos"))]
     crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
-        std::iter::once(dit_pin),
+        std::iter::once(dit_pin).chain(decoder_pin),
         "Krea 2 imported source preparation failed",
     )?;
 
@@ -1351,7 +1363,6 @@ async fn generate_krea_imported_stream(
             &[text_encoder.as_path(), vae.as_path()],
         )?
     };
-
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
         engine_id,

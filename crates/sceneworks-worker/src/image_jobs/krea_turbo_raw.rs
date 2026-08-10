@@ -241,7 +241,12 @@ async fn generate_krea_turbo_on_raw_stream(
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let spec = load_spec(weights_dir, quant, adapters, None);
+    let spec = attach_selected_decoder(
+        load_spec(weights_dir, quant, adapters, None),
+        engine_id,
+        request,
+        settings,
+    )?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
 

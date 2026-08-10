@@ -44,6 +44,9 @@ export function buildImageJobAdvanced(state) {
     showPidToggle,
     usePid,
     pidTarget,
+    // Experimental load-time alternate decoder. `native` is the byte-exact default and omitted.
+    showDecoderPicker,
+    decoder,
     // Character-reference knobs.
     mode,
     referenceAssetId,
@@ -190,6 +193,9 @@ export function buildImageJobAdvanced(state) {
     // size by capping the effective base. Emit `pidTarget:"2k"` only when the PiD toggle is shown+on AND
     // 2K is picked; "4k" is the worker default, so omitting it keeps existing usePid recipes byte-identical.
     ...(showPidToggle && usePid && pidTarget === "2k" ? { pidTarget: "2k" } : {}),
+    // Descriptor-derived alternate decoder. The UI exposes only ids from capability facts; the API
+    // and worker independently revalidate eligibility/install state. Never emit alongside PiD.
+    ...(showDecoderPicker && !usePid && decoder && decoder !== "native" ? { decoder } : {}),
     // IP-Adapter / InstantID reference strength only applies when a character
     // reference is attached AND the model uses the IP-Adapter knob; Qwen's
     // edit pipeline ignores this scalar (hideReferenceStrength gates it out).
