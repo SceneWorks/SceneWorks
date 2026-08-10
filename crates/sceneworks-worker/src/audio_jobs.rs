@@ -2146,6 +2146,7 @@ mod tests {
 
     fn stub_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
+            denoiser_output_latent_space: None,
             id: "stub_audio",
             family: "stub",
             backend: "mlx",
@@ -2219,6 +2220,7 @@ mod tests {
     /// hardcoded id). The audio twin of the real moss_tts_realtime descriptor's streaming flag.
     fn streaming_stub_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
+            denoiser_output_latent_space: None,
             id: "stub_streaming_audio",
             family: "stub",
             backend: "mlx",
@@ -2875,6 +2877,7 @@ mod tests {
     /// real moss_ttsd_v05 descriptor's dialogue flags.
     fn multi_speaker_stub_descriptor() -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
+            denoiser_output_latent_space: None,
             id: "stub_multi_speaker_audio",
             family: "stub",
             backend: "mlx",

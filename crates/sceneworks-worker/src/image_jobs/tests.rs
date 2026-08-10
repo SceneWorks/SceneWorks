@@ -85,6 +85,7 @@ impl HiresProbeGenerator {
     fn new() -> Self {
         Self {
             descriptor: gen_core::ModelDescriptor {
+                denoiser_output_latent_space: None,
                 id: "hires_probe",
                 family: "test",
                 backend: "test",

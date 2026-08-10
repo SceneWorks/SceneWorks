@@ -560,16 +560,13 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
-  // SC-18353 adds production-deferred physical MLX receipts for q4/bf16. Pinned as the SET, not a
-  // count: neither admitting an unbound sibling nor losing any current binding may read as green.
+  // SC-18311 changes the shared gen-core contract and therefore the provider compile closure. The
+  // older SC-18353 q4/bf16 receipts must remain historical; this fixture deliberately re-stamps only
+  // the retained q8 rung-4 records. Pinned as the SET, not a count: neither admitting a stale sibling
+  // nor losing one of the explicitly refreshed q8 bindings may read as green.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
     ],
@@ -578,18 +575,13 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
-  // and also includes SC-18237's production-deferred pair. The new q4/bf16 cells carry one exact
-  // current record each. Exact counts keep both facts visible.
+  // and also includes SC-18237's production-deferred pair. Exact counts keep that fact visible while
+  // ensuring the stale q4/bf16 receipts cannot be promoted by a manifest-only restamp.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 1,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
     },
@@ -627,7 +619,7 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
 });
 
-test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async () => {
+test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keeps stale captures historical", async () => {
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
@@ -671,11 +663,12 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async 
       .filter((cell) => cell.state !== "Missing")
       .every(
         (cell) =>
-          cell.state === "Runtime verified" &&
+          cell.state === "Implemented/unverified" &&
           cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
-          cell.evidence.currentEnvironmentVerification.length === 2,
+          cell.evidence.currentEnvironmentVerification.length === 0 &&
+          cell.evidence.historicalVerification.length === 2,
       ),
-    "each admitted cell must be backed by its exact 768 and 1024 current captures",
+    "the exact 768 and 1024 captures must remain visible but cannot survive SC-18311's closure change as current",
   );
 });
 
@@ -2564,13 +2557,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(promotedQwen),
-    9,
-    "the retained q8 fixture plus the physical q4/bf16 captures must verify all nine bindings",
+    2,
+    "only the explicitly re-stamped q8 rung-4 records may verify after the shared contract changes",
   );
   assert.equal(
     verifiedQwen(shipped),
-    9,
-    "the shipped Qwen opt-in contains all nine production-deferred bindings",
+    0,
+    "SC-18311 moves the Qwen provider closure, so every shipped capture is historical until recaptured",
   );
 
   const evidenceOnlyZ = await buildMatrix({
@@ -2622,7 +2615,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(pinOnlyQwen),
-    9,
+    2,
     "a pin move that leaves Qwen's compile closure alone must NOT demote its retained measurements",
   );
 
@@ -2639,7 +2632,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(otherProviderMoved),
-    9,
+    2,
     "another model's code path moving must never demote retained Qwen evidence",
   );
 
@@ -2908,12 +2901,11 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, admits the nine current Qwen coordinates
-  // (SC-18237 q8 plus SC-18353 q4/bf16) and the SC-18218 FLUX.2 q4/q8 Resident coordinates at this
-  // pin. Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, currently admits nothing: SC-18311 changes
+  // the shared gen-core contract and moves the Qwen and FLUX.2 provider closures, so their prior
+  // captures are historical until they are re-run. Two facts keep this assertion useful:
   //
-  //   1. It is exact: each listed Qwen and FLUX.2 cell was captured at its current provider closure;
-  //      no historical or sibling-rung row may join.
+  //   1. It is exact: no historical Qwen or FLUX.2 row may survive the closure change as current.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm being empty therefore cannot elide anything.
@@ -2925,20 +2917,8 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
       .map((cell) => cell.id)
       .sort(),
-    [
-      "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
-      "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:resident",
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:staged_residency",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
-    ],
-    "only the SC-18237/SC-18353 Qwen cells and SC-18218 FLUX.2 Resident cells are current",
+    [],
+    "the SC-18311 closure change must demote every prior Qwen and FLUX.2 capture to historical",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),

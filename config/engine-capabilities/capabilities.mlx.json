@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071",
+    "inferenceRevision": "db5ece59634b1dfe273d368c4fcd6e54ee2669ad",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -33,132 +33,564 @@
     {
       "id": "boogu_image",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "boogu_image_edit",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "boogu_image_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "chroma1_base",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "chroma1_flash",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "chroma1_hd",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "flux1_dev",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "flux1_dev_control",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "flux1_schnell",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "flux2_dev",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "flux2_dev_control",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "flux2_dev_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "flux2_klein_9b",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "flux2_klein_9b_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "flux2_klein_9b_kv_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "ideogram_4",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "ideogram_4_turbo",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "kolors",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 4,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1040539714,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "krea_2_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "krea_2_raw",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "krea_2_turbo",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "krea_2_turbo_control",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "krea_2_turbo_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "krea_realtime_14b",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "lens",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "lens_turbo",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
     },
     {
       "id": "ltx_2_3",
@@ -203,22 +635,89 @@
     {
       "id": "pulid_flux",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "qwen_image",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "qwen_image_control",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "qwen_image_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "sana_1600m",
@@ -238,22 +737,86 @@
     {
       "id": "sd3_5_large",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1069803373,
+          "shiftBits": 1031369287
+        }
+      }
     },
     {
       "id": "sd3_5_large_turbo",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1069803373,
+          "shiftBits": 1031369287
+        }
+      }
     },
     {
       "id": "sd3_5_medium",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1069803373,
+          "shiftBits": 1031369287
+        }
+      }
     },
     {
       "id": "sdxl",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 4,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1040539714,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "seedvr2",
@@ -288,47 +851,196 @@
     {
       "id": "wan2_2_i2v_14b",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "wan2_2_t2v_14b",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "wan2_2_ti2v_5b",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 48,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "wan-z48-v1",
+          "channels": 48,
+          "contentHash": "fnv1a64:c4bd9dfd1ccc2869"
+        }
+      }
     },
     {
       "id": "wan2_2_vace_fun_14b",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "wan_vace",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "z_image",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "z_image_control",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "z_image_turbo",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     },
     {
       "id": "z_image_turbo_control",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1052303897,
+          "shiftBits": 1038966011
+        }
+      }
     }
   ]
 }
