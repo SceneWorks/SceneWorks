@@ -50,13 +50,13 @@ const QWEN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["bf16", "q8", "q4"];
 /// plus the optional in-place tree VAE (sc-10830).
 struct ComfyuiQwenPaths {
     /// ComfyUI Qwen-Image DiT (`diffusion_models/qwen_image_*_fp8_e4m3fn.safetensors`), read in place.
-    transformer: PathBuf,
+    transformer: gen_core::PinnedWeightsFile,
     /// A resident `SceneWorks/qwen-image-mlx` tier dir (`text_encoder/ vae/ tokenizer/tokenizer.json`).
     snapshot_dir: PathBuf,
     /// The tree's `vae/qwen_image_vae.safetensors` (native WAN-VAE keys), read in place when the API
     /// folded it into the row (sc-10830). `None` ⇒ the snapshot tier's VAE. The TE + tokenizer always
     /// come from the snapshot (the tree TE is scaled-fp8, sc-10671).
-    vae: Option<PathBuf>,
+    vae: Option<gen_core::PinnedWeightsFile>,
 }
 
 /// Resolve the ComfyUI Qwen-Image DiT path + the resident snapshot tier from the forwarded
@@ -119,17 +119,17 @@ fn resolve_qwen_comfyui_paths(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            crate::paths::normalize_app_managed_model_file_path(
+            crate::paths::pin_app_managed_model_file(
                 settings,
-                value,
+                Path::new(value),
                 "ComfyUI Qwen-Image VAE",
             )
         })
         .transpose()?;
     Ok(Some(ComfyuiQwenPaths {
-        transformer: crate::paths::normalize_app_managed_model_file_path(
+        transformer: crate::paths::pin_app_managed_model_file(
             settings,
-            transformer,
+            Path::new(transformer),
             "ComfyUI Qwen-Image transformer",
         )?,
         snapshot_dir,
@@ -207,31 +207,45 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
                 .to_owned(),
         )
     })?;
-    // Price the imported DiT plus only the companion weights the provider actually consumes. The
-    // snapshot transformer is replaced; when a tree VAE is supplied, the snapshot VAE is replaced too.
-    let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
-    let snapshot_vae = paths.snapshot_dir.join("vae");
-    let admission_vae = paths.vae.as_deref().unwrap_or(snapshot_vae.as_path());
-    let cold_admission = prepare_cached_candle_base_floor(
-        &request.model,
-        "ComfyUI Qwen-Image",
-        settings,
-        &[
-            paths.transformer.as_path(),
-            snapshot_text_encoder.as_path(),
-            admission_vae,
-        ],
-    );
-    let mut spec = LoadSpec::new(WeightsSource::File(paths.transformer.clone())).with_component(
+    let mut spec = LoadSpec::new(WeightsSource::File(
+        paths.transformer.loader_path().to_path_buf(),
+    ))
+    .with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(paths.snapshot_dir.clone()),
     );
     if let Some(vae) = paths.vae.as_ref() {
         spec = spec.with_component(
             gen_core::COMFYUI_VAE_COMPONENT,
-            WeightsSource::File(vae.clone()),
+            WeightsSource::File(vae.loader_path().to_path_buf()),
         );
     }
+    let mut pins = vec![paths.transformer];
+    pins.extend(paths.vae.clone());
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        pins,
+        "ComfyUI Qwen-Image source preparation failed",
+    )?;
+    // Price finalized File tokens plus only the companion directories the provider consumes. The
+    // snapshot transformer is replaced; an imported VAE also replaces the snapshot VAE.
+    let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
+    let snapshot_vae = paths.snapshot_dir.join("vae");
+    let mut companion_paths = vec![snapshot_text_encoder];
+    if paths.vae.is_none() {
+        companion_paths.push(snapshot_vae);
+    }
+    let companion_refs = companion_paths
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let cold_admission = prepare_cached_candle_base_floor(
+        &request.model,
+        "ComfyUI Qwen-Image",
+        settings,
+        &spec,
+        &companion_refs,
+    )?;
 
     let (width, height) = (request.width, request.height);
     let steps =

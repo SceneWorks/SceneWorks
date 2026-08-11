@@ -28,7 +28,8 @@
 //! The pure decision logic is cross-platform and unit-tested on every lane; only the live
 //! `sysctl hw.memsize` probe is macOS-only (it returns `None` elsewhere, so the gate no-ops).
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use gen_core::{
@@ -99,6 +100,63 @@ impl MlxRequestPlan {
         )
     }
 
+    /// Prepared-spec planner used by imported single-file routes. Provider queries and token
+    /// validation are fallible contract operations here: failures propagate to the job instead of
+    /// being silently converted into an unmeasured/raw-restat estimate.
+    pub(crate) fn try_for_spec_and_manifest(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+        resolved_artifact: Option<ResolvedArtifactProvenance>,
+    ) -> WorkerResult<Self> {
+        let media = crate::inference_runtime::media();
+        let provider_footprint = media
+            .footprint(engine_id, spec)
+            .map_err(|error| crate::classify_engine_error("MLX footprint query failed", error))?;
+        let activation_anchor_bytes =
+            media
+                .activation_memory_bytes_1024(engine_id)
+                .map_err(|error| {
+                    crate::classify_engine_error("MLX activation-memory query failed", error)
+                })?;
+        let (asset_bytes, _, headroom) = spec_component_bytes_with_provider_footprint_checked(
+            engine_id,
+            spec,
+            provider_footprint,
+        )
+        .map_err(|error| {
+            crate::classify_engine_error("MLX prepared source accounting failed", error)
+        })?;
+        let file_sizes = prepared_file_sizes(spec).map_err(|error| {
+            crate::classify_engine_error("MLX prepared source validation failed", error)
+        })?;
+        let folded_control_bytes = spec
+            .control
+            .as_ref()
+            .map_or(0, |source| prepared_source_bytes(source, &file_sizes));
+        let folded_adapter_source_bytes = spec.adapters.iter().fold(0_u64, |total, adapter| {
+            total.saturating_add(prepared_source_bytes(
+                &WeightsSource::File(adapter.path.clone()),
+                &file_sizes,
+            ))
+        });
+        let folded_adapter_bytes =
+            adapter_resident_source_bytes(engine_id, spec, folded_adapter_source_bytes);
+        Ok(Self::for_spec_and_manifest_with_accounting(
+            engine_id,
+            model_id,
+            spec,
+            manifest,
+            resolved_artifact,
+            asset_bytes,
+            folded_control_bytes,
+            folded_adapter_bytes,
+            headroom,
+            activation_anchor_bytes,
+        ))
+    }
+
     /// The platform-neutral core of [`Self::for_spec_and_manifest`]. Production supplies both facts
     /// from the active provider registry; tests may inject the same provider-owned facts when the
     /// host deliberately links no MLX catalog (the default Linux workspace build). Keeping the
@@ -118,6 +176,33 @@ impl MlxRequestPlan {
             spec_component_bytes_with_provider_footprint(engine_id, spec, provider_footprint);
         let folded_control_bytes = spec.control.as_ref().map_or(0, weights_source_bytes);
         let folded_adapter_bytes = adapter_source_bytes_for_gate(engine_id, spec);
+        Self::for_spec_and_manifest_with_accounting(
+            engine_id,
+            model_id,
+            spec,
+            manifest,
+            resolved_artifact,
+            asset_bytes,
+            folded_control_bytes,
+            folded_adapter_bytes,
+            headroom,
+            activation_anchor_bytes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn for_spec_and_manifest_with_accounting(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+        resolved_artifact: Option<ResolvedArtifactProvenance>,
+        asset_bytes: u64,
+        folded_control_bytes: u64,
+        folded_adapter_bytes: u64,
+        headroom: HeadroomAllowance,
+        activation_anchor_bytes: Option<u64>,
+    ) -> Self {
         let declared_floors = declared_component_floors(engine_id);
         let spec_tier = MemoryNumericTier {
             precision: spec.precision,
@@ -3090,6 +3175,10 @@ fn adapter_source_bytes_for_gate_where(
         };
         total.saturating_add(bytes)
     });
+    adapter_resident_source_bytes(engine_id, spec, source_bytes)
+}
+
+fn adapter_resident_source_bytes(engine_id: &str, spec: &LoadSpec, source_bytes: u64) -> u64 {
     if matches!(engine_id, "wan_vace" | "wan2_2_vace_fun_14b") {
         return 0;
     }
@@ -3110,6 +3199,50 @@ fn adapter_source_bytes_for_gate_where(
     } else {
         0
     }
+}
+
+fn prepared_file_sizes(spec: &LoadSpec) -> gen_core::Result<BTreeMap<PathBuf, u64>> {
+    spec.validate_prepared_file_pins()?;
+    if !spec.prepared_file_pins().is_prepared() {
+        return Err(gen_core::Error::Unsupported(
+            "prepared accounting requires a finalized prepared LoadSpec".into(),
+        ));
+    }
+    Ok(spec
+        .prepared_file_pins()
+        .iter()
+        .map(|(path, pin)| (path.clone(), pin.target_fingerprint().size))
+        .collect())
+}
+
+fn prepared_source_bytes(source: &WeightsSource, file_sizes: &BTreeMap<PathBuf, u64>) -> u64 {
+    match source {
+        WeightsSource::Dir(dir) => sum_safetensors_bytes(dir),
+        WeightsSource::File(file) => std::path::absolute(file)
+            .ok()
+            .and_then(|file| file_sizes.get(&file).copied())
+            .unwrap_or(0),
+    }
+}
+
+fn prepared_adapter_source_bytes_for_gate_where(
+    engine_id: &str,
+    spec: &LoadSpec,
+    file_sizes: &BTreeMap<PathBuf, u64>,
+    include: impl Fn(&Path) -> bool,
+) -> u64 {
+    let source_bytes = spec.adapters.iter().fold(0_u64, |total, adapter| {
+        if include(&adapter.path) {
+            let bytes = std::path::absolute(&adapter.path)
+                .ok()
+                .and_then(|path| file_sizes.get(&path).copied())
+                .unwrap_or(0);
+            total.saturating_add(bytes)
+        } else {
+            total
+        }
+    });
+    adapter_resident_source_bytes(engine_id, spec, source_bytes)
 }
 
 /// Resolve the TEXT-ENCODER on-disk bytes for the staged split (sc-10894), preferring the provider-owned
@@ -3669,15 +3802,29 @@ fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
 /// `engine_id` is both the [`engine_supports_sequential`] key and the human-facing model name in the
 /// rejection message.
 pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerResult<LoadSpec> {
+    if spec.prepared_file_pins().is_prepared() {
+        spec.validate_prepared_file_pins().map_err(|error| {
+            crate::classify_engine_error("MLX residency source validation failed", error)
+        })?;
+    }
     // Respect an offload policy already chosen upstream (defensive: the MLX cache seam normally sees
     // the default `Resident`, but never downgrade a `Sequential` set by another gate).
     if spec.offload_policy == OffloadPolicy::Sequential {
         return Ok(spec);
     }
-    match decide_residency_for_spec(engine_id, &spec) {
+    let outcome = if spec.prepared_file_pins().is_prepared() {
+        try_decide_residency_for_spec(engine_id, &spec)?
+    } else {
+        decide_residency_for_spec(engine_id, &spec)
+    };
+    match outcome {
         ResidencyOutcome::Resident => Ok(spec),
         ResidencyOutcome::Sequential => {
-            let (total_bytes, te_bytes, _) = spec_component_bytes(engine_id, &spec);
+            let (total_bytes, te_bytes, _) = if spec.prepared_file_pins().is_prepared() {
+                spec_component_bytes_checked(engine_id, &spec)?
+            } else {
+                spec_component_bytes(engine_id, &spec)
+            };
             tracing::info!(
                 event = "mlx_sequential_residency_selected",
                 engine = %engine_id,
@@ -3717,6 +3864,18 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, Headroom
     spec_component_bytes_with_provider_footprint(engine_id, spec, footprint)
 }
 
+fn spec_component_bytes_checked(
+    engine_id: &str,
+    spec: &LoadSpec,
+) -> WorkerResult<(u64, u64, HeadroomAllowance)> {
+    let footprint = crate::inference_runtime::media()
+        .footprint(engine_id, spec)
+        .map_err(|error| crate::classify_engine_error("MLX footprint query failed", error))?;
+    spec_component_bytes_with_provider_footprint_checked(engine_id, spec, footprint).map_err(
+        |error| crate::classify_engine_error("MLX prepared source accounting failed", error),
+    )
+}
+
 /// Provider-injected core of [`spec_component_bytes`]. The live path obtains `footprint` from the
 /// active registry; keeping the arithmetic independent of registry composition lets platform-neutral
 /// tests exercise the exact Lens materialization and overlay accounting used on macOS.
@@ -3724,6 +3883,23 @@ fn spec_component_bytes_with_provider_footprint(
     engine_id: &str,
     spec: &LoadSpec,
     footprint: Option<PerComponentBytes>,
+) -> (u64, u64, HeadroomAllowance) {
+    let external_adapter_bytes = external_adapter_source_bytes_for_gate(engine_id, spec);
+    spec_component_bytes_with_provider_footprint_and_sizes(
+        engine_id,
+        spec,
+        footprint,
+        weights_source_bytes,
+        external_adapter_bytes,
+    )
+}
+
+fn spec_component_bytes_with_provider_footprint_and_sizes(
+    engine_id: &str,
+    spec: &LoadSpec,
+    footprint: Option<PerComponentBytes>,
+    source_bytes: impl Fn(&WeightsSource) -> u64,
+    external_adapter_bytes: u64,
 ) -> (u64, u64, HeadroomAllowance) {
     let footprint_te = footprint.map(|fp| fp.text_encoder);
     // A provider that accepts a primary single-file checkpoint owns the meaning of its named
@@ -3752,13 +3928,8 @@ fn spec_component_bytes_with_provider_footprint(
         // A single-file source has no component tree of its own. A File-aware provider footprint
         // prices the complete consumed assembly; otherwise keep the primary file here and add only
         // the well-known companion subtrees below.
-        WeightsSource::File(file) => provider_owned_file_footprint.map_or_else(
-            || {
-                (
-                    std::fs::metadata(file).map_or(0, |meta| meta.len()),
-                    footprint_te.unwrap_or(0),
-                )
-            },
+        WeightsSource::File(_) => provider_owned_file_footprint.map_or_else(
+            || (source_bytes(&spec.weights), footprint_te.unwrap_or(0)),
             |components| {
                 (
                     components
@@ -3771,14 +3942,13 @@ fn spec_component_bytes_with_provider_footprint(
         ),
     };
     if let Some(control) = &spec.control {
-        total_bytes += weights_source_bytes(control);
+        total_bytes += source_bytes(control);
     }
     // Read the actual adapter sources at the same pre-load seam as controls. Provider-specific
     // residency matters: packed Wan keeps additive residuals, while dense Wan folds them into the
     // base and adds zero independent bytes. Other providers conservatively retain the source bytes;
     // a typed component contract may replace them with a more exact resident measurement below.
-    total_bytes =
-        total_bytes.saturating_add(external_adapter_source_bytes_for_gate(engine_id, spec));
+    total_bytes = total_bytes.saturating_add(external_adapter_bytes);
     // Caller-provisioned components (epic 13657) are staged from a DIFFERENT snapshot than
     // `spec.weights`, so the dir scan above cannot see them (sc-15154). Mage-Flow's per-tier dir
     // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
@@ -3824,7 +3994,7 @@ fn spec_component_bytes_with_provider_footprint(
             },
         };
         if !inside {
-            let component_bytes = weights_source_bytes(source);
+            let component_bytes = source_bytes(source);
             total_bytes = total_bytes.saturating_add(component_bytes);
             if matches!(&spec.weights, WeightsSource::File(_))
                 && component_id == gen_core::COMFYUI_TEXT_ENCODER_COMPONENT
@@ -3834,6 +4004,49 @@ fn spec_component_bytes_with_provider_footprint(
         }
     }
     (total_bytes, te_bytes, headroom)
+}
+
+fn spec_component_bytes_with_provider_footprint_checked(
+    engine_id: &str,
+    spec: &LoadSpec,
+    footprint: Option<PerComponentBytes>,
+) -> gen_core::Result<(u64, u64, HeadroomAllowance)> {
+    let file_sizes = prepared_file_sizes(spec)?;
+    // Keep the provider's component layout/materialization facts, but replace every generic File
+    // slot it reports with the exact prepared target size. Compatibility-mode provider code may
+    // still stat a path while producing its fact; that stat never becomes prepared admission
+    // identity or overrides the caller's token.
+    let footprint = footprint.map(|mut footprint| {
+        if matches!(spec.weights, WeightsSource::File(_)) {
+            footprint.dit = prepared_source_bytes(&spec.weights, &file_sizes);
+        }
+        if let Some(source @ WeightsSource::File(_)) = spec
+            .components
+            .get(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT)
+        {
+            footprint.text_encoder = prepared_source_bytes(source, &file_sizes);
+        }
+        if let Some(source @ WeightsSource::File(_)) =
+            spec.components.get(gen_core::COMFYUI_VAE_COMPONENT)
+        {
+            footprint.vae = prepared_source_bytes(source, &file_sizes);
+        }
+        footprint
+    });
+    let external_adapter_bytes =
+        prepared_adapter_source_bytes_for_gate_where(engine_id, spec, &file_sizes, |path| {
+            match &spec.weights {
+                WeightsSource::Dir(root) => !path.starts_with(root),
+                WeightsSource::File(_) => true,
+            }
+        });
+    Ok(spec_component_bytes_with_provider_footprint_and_sizes(
+        engine_id,
+        spec,
+        footprint,
+        |source| prepared_source_bytes(source, &file_sizes),
+        external_adapter_bytes,
+    ))
 }
 
 fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
@@ -3862,6 +4075,21 @@ pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> Res
         engine_supports_sequential(engine_id),
         headroom.total_gb,
     )
+}
+
+fn try_decide_residency_for_spec(
+    engine_id: &str,
+    spec: &LoadSpec,
+) -> WorkerResult<ResidencyOutcome> {
+    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    let (total_bytes, te_bytes, headroom) = spec_component_bytes_checked(engine_id, spec)?;
+    Ok(decide_residency_with_headroom(
+        total_bytes,
+        te_bytes,
+        budget,
+        engine_supports_sequential(engine_id),
+        headroom.total_gb,
+    ))
 }
 
 /// The residency outcome for a candidate tier's WEIGHTS DIR — a bare-`Dir` convenience over
@@ -4116,6 +4344,33 @@ pub fn full_finetune_memory_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_component_accounting_uses_token_size_and_propagates_stale_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("model.safetensors");
+        std::fs::write(&path, vec![0_u8; 23]).expect("weights write");
+        let pin = gen_core::PinnedWeightsFile::pin(&path).expect("weights pin");
+        let mut spec = LoadSpec::new(WeightsSource::File(path.clone()));
+        spec.prepare_with_file_pins([pin])
+            .expect("prepared spec finalizes");
+
+        let (total, _, _) = spec_component_bytes_with_provider_footprint_checked(
+            "fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: 0,
+                dit: 9_999,
+                vae: 0,
+            }),
+        )
+        .expect("prepared accounting succeeds");
+        assert_eq!(total, 23, "primary File size comes from its prepared token");
+
+        std::fs::write(&path, vec![1_u8; 31]).expect("weights replacement writes");
+        spec_component_bytes_with_provider_footprint_checked("fixture", &spec, None)
+            .expect_err("stale prepared source errors are propagated, not restatted or swallowed");
+    }
 
     /// sc-18237: every shipped Qwen binding must describe a load shape the production route can
     /// execute. Native Qwen is deliberately deferred under both Resident and Sequential policies;

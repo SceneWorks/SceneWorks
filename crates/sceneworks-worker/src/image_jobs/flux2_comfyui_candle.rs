@@ -53,7 +53,7 @@ pub(super) const FLUX2_COMFYUI_DEFAULT_QUANT: Quant = Quant::Q8;
 /// The in-place ComfyUI DiT file + the resident snapshot tier dir supplying the other components.
 struct ComfyuiFlux2Paths {
     /// ComfyUI FLUX.2-dev DiT (`diffusion_models/flux2_dev_fp8mixed.safetensors`), read in place.
-    transformer: PathBuf,
+    transformer: gen_core::PinnedWeightsFile,
     /// A resident `SceneWorks/flux2-dev-mlx` tier dir (`text_encoder/ vae/ tokenizer/tokenizer.json`).
     snapshot_dir: PathBuf,
 }
@@ -109,9 +109,9 @@ fn resolve_flux2_comfyui_paths(
         return Ok(None);
     };
     Ok(Some(ComfyuiFlux2Paths {
-        transformer: crate::paths::normalize_app_managed_model_file_path(
+        transformer: crate::paths::pin_app_managed_model_file(
             settings,
-            transformer,
+            Path::new(transformer),
             "ComfyUI FLUX.2-dev transformer",
         )?,
         snapshot_dir,
@@ -279,32 +279,36 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
                 .to_owned(),
         )
     })?;
-    // The companion snapshot supplies TE/VAE/tokenizer/config only. Its own transformer is replaced
-    // by the imported File and must not be recursively double-priced by admission.
-    let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
-    let snapshot_vae = paths.snapshot_dir.join("vae");
-    let cold_admission = prepare_cached_candle_base_floor(
-        &request.model,
-        "ComfyUI FLUX.2",
-        settings,
-        &[
-            paths.transformer.as_path(),
-            snapshot_text_encoder.as_path(),
-            snapshot_vae.as_path(),
-        ],
-    );
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
     let guidance = flux2_comfyui_guidance(request);
     let quant = flux2_comfyui_quant(request);
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
-    let spec = LoadSpec::new(WeightsSource::File(paths.transformer.clone()))
-        .with_component(
-            gen_core::BASE_SNAPSHOT_COMPONENT,
-            WeightsSource::Dir(paths.snapshot_dir.clone()),
-        )
-        .with_quant(quant);
+    let mut spec = LoadSpec::new(WeightsSource::File(
+        paths.transformer.loader_path().to_path_buf(),
+    ))
+    .with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(paths.snapshot_dir.clone()),
+    )
+    .with_quant(quant);
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        [paths.transformer],
+        "ComfyUI FLUX.2 source preparation failed",
+    )?;
+    // The companion snapshot supplies TE/VAE/tokenizer/config only. Its own transformer is replaced;
+    // finalized File bytes and only the consumed companion dirs feed admission.
+    let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
+    let snapshot_vae = paths.snapshot_dir.join("vae");
+    let cold_admission = prepare_cached_candle_base_floor(
+        &request.model,
+        "ComfyUI FLUX.2",
+        settings,
+        &spec,
+        &[snapshot_text_encoder.as_path(), snapshot_vae.as_path()],
+    )?;
 
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)

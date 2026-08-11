@@ -3355,6 +3355,65 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     Ok(AdapterKind::Lora)
 }
 
+fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<AdapterKind> {
+    let header = pin
+        .read_unchanged(|file| {
+            read_safetensors_header(file)
+                .map_err(|error| gen_core::Error::Msg(format!("LoRA header: {error}")))
+        })
+        .map_err(|error| crate::classify_engine_error("LoRA source validation failed", error))?;
+    let network_type = header
+        .get("__metadata__")
+        .and_then(|meta| meta.get("networkType"))
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase());
+    Ok(if network_type.as_deref() == Some("lokr") {
+        AdapterKind::Lokr
+    } else {
+        AdapterKind::Lora
+    })
+}
+
+#[derive(Debug)]
+struct PreparedAdapters {
+    specs: Vec<AdapterSpec>,
+    pins: Vec<gen_core::PinnedWeightsFile>,
+}
+
+impl PreparedAdapters {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.specs.is_empty()
+    }
+}
+
+/// Prepared counterpart of [`resolve_adapters`]. Classification reads through the exact token that
+/// is later installed on the `LoadSpec`; repeated references to the same lexical entry share one
+/// token, while preserving every requested adapter spec and its scale/order.
+fn resolve_prepared_adapters(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<PreparedAdapters> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs = Vec::with_capacity(request.loras.len());
+    let mut pins = BTreeMap::<PathBuf, gen_core::PinnedWeightsFile>::new();
+    for lora in &request.loras {
+        let pin = resolve_prepared_adapter_file(lora, settings)?;
+        let kind = classify_prepared_adapter(&pin)?;
+        let scale = lora_weight(lora) as f32;
+        specs.push(AdapterSpec::new(pin.loader_path().to_path_buf(), scale, kind));
+        pins.entry(pin.loader_path().to_path_buf()).or_insert(pin);
+    }
+    Ok(PreparedAdapters {
+        specs,
+        pins: pins.into_values().collect(),
+    })
+}
+
 /// Resolve up to 3 request LoRAs into engine adapter specs (path + scale + kind).
 /// Shared by the MLX path and the candle Lens lane (sc-5126).
 #[cfg(any(

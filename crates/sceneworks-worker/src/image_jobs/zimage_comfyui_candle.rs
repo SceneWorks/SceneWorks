@@ -34,9 +34,9 @@ const ZIMAGE_COMFYUI_TOKENIZER_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 
 /// The three in-place ComfyUI component files + our tokenizer dir, all confined.
 struct ComfyuiZImagePaths {
-    transformer: PathBuf,
-    text_encoder: PathBuf,
-    vae: PathBuf,
+    transformer: gen_core::PinnedWeightsFile,
+    text_encoder: gen_core::PinnedWeightsFile,
+    vae: gen_core::PinnedWeightsFile,
     tokenizer_dir: PathBuf,
 }
 
@@ -85,19 +85,19 @@ fn resolve_zimage_comfyui_paths(
         return Ok(None);
     };
     Ok(Some(ComfyuiZImagePaths {
-        transformer: crate::paths::normalize_app_managed_model_file_path(
+        transformer: crate::paths::pin_app_managed_model_file(
             settings,
-            transformer,
+            Path::new(transformer),
             "ComfyUI Z-Image transformer",
         )?,
-        text_encoder: crate::paths::normalize_app_managed_model_file_path(
+        text_encoder: crate::paths::pin_app_managed_model_file(
             settings,
-            text_encoder,
+            Path::new(text_encoder),
             "ComfyUI Z-Image text encoder",
         )?,
-        vae: crate::paths::normalize_app_managed_model_file_path(
+        vae: crate::paths::pin_app_managed_model_file(
             settings,
-            vae,
+            Path::new(vae),
             "ComfyUI Z-Image VAE",
         )?,
         tokenizer_dir,
@@ -150,31 +150,29 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                 .to_owned(),
         )
     })?;
-    // The tokenizer snapshot is a structural companion, not another model to price recursively.
-    // Admission counts exactly the three external weight files consumed by this assembly.
-    let cold_admission = prepare_cached_candle_base_floor(
-        &request.model,
-        "ComfyUI Z-Image",
-        settings,
-        &[
-            paths.transformer.as_path(),
-            paths.text_encoder.as_path(),
-            paths.vae.as_path(),
-        ],
+    let mut spec = LoadSpec::new(WeightsSource::File(
+        paths.transformer.loader_path().to_path_buf(),
+    ))
+    .with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(paths.tokenizer_dir.clone()),
+    )
+    .with_component(
+        gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
+        WeightsSource::File(paths.text_encoder.loader_path().to_path_buf()),
+    )
+    .with_component(
+        gen_core::COMFYUI_VAE_COMPONENT,
+        WeightsSource::File(paths.vae.loader_path().to_path_buf()),
     );
-    let spec = LoadSpec::new(WeightsSource::File(paths.transformer.clone()))
-        .with_component(
-            gen_core::BASE_SNAPSHOT_COMPONENT,
-            WeightsSource::Dir(paths.tokenizer_dir.clone()),
-        )
-        .with_component(
-            gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
-            WeightsSource::File(paths.text_encoder.clone()),
-        )
-        .with_component(
-            gen_core::COMFYUI_VAE_COMPONENT,
-            WeightsSource::File(paths.vae.clone()),
-        );
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        [paths.transformer, paths.text_encoder, paths.vae],
+        "ComfyUI Z-Image source preparation failed",
+    )?;
+    // The tokenizer snapshot is structural; all weight files are priced from finalized tokens.
+    let cold_admission =
+        prepare_cached_candle_base_floor(&request.model, "ComfyUI Z-Image", settings, &spec, &[])?;
 
     let (width, height) = (request.width, request.height);
     let steps =

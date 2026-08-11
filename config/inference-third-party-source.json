@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 25d4a52f adds the SC-18306 imported File-provider residency surface, including Krea Turbo Edit, on top of the feature-epic policy revision e2cbfe83. Candle's provider-license mapping adds krea_2_turbo_edit with the existing krea_2_turbo and qwen_image components; the already-pinned Qwen3-VL-4B hole remains explicit. The exact scanner still finds 624 provenance candidates and 94 production-Rust crate prefixes. Against e2cbfe83, all candidate paths, source-area classifications, normalized provenance markers, and the entire crate-prefix inventory remain unchanged; 8 candidate source blob ids changed within already-classified Krea, Z-Image, and shared MLX weight-loading areas. The e2cbfe83..25d4a52f delta changes no NOTICE, LICENSE, Cargo manifest, or production include_str!/include_bytes! site.",
-  "inferenceRevision": "25d4a52faedc7393ed39155f1d41461be1a13ef2",
-  "auditDigest": "cc8a8abf07e49e6e7f2972e1ec82404a6cd942b86e2f9a438022924013763d4d",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 52f94dc7 completes SC-18306 caller-prepared File identities across gen-core and the Krea, Z-Image, Qwen-Image, and FLUX.2 providers. The exact scanner still finds 624 provenance candidates and 94 production-Rust crate prefixes. Against 25d4a52f, all candidate paths, source-area classifications, normalized provenance markers, and the entire crate-prefix inventory remain unchanged; 5 candidate source blob ids changed within already-classified Candle Krea/Z-Image and MLX Krea/LTX areas. The direct Windows file-identity dependency is an already-locked workspace package. The 25d4a52f..52f94dc7 delta changes no NOTICE, LICENSE, or production include_str!/include_bytes! site.",
+  "inferenceRevision": "52f94dc7c105c8afe732ba5901fdbb7563fed640",
+  "auditDigest": "257228b33d7679aa33d39eaee7aa6562d679bf688bbb4f827d6b2a75e70f9c77",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "25d4a52faedc7393ed39155f1d41461be1a13ef2",
+    "revision": "52f94dc7c105c8afe732ba5901fdbb7563fed640",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 624,
-    "populationSha256": "a5056067524e8cbada0b0f09ef4eb7fd666be37fc85723c60d8eee21b611b675"
+    "populationSha256": "68b029737ae7f9be6f7d02031dfa57d2939d50264790509e2474ab255f25ea0a"
   },
   "portedSourceAreas": [
     {
@@ -818,7 +818,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "25d4a52faedc7393ed39155f1d41461be1a13ef2",
+    "revision": "52f94dc7c105c8afe732ba5901fdbb7563fed640",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"

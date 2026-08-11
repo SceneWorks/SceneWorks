@@ -1438,6 +1438,34 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
     Ok(file)
 }
 
+/// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
+/// confined as directories, then their selected child is independently pinned and confined so a
+/// child symlink cannot inherit trust from its parent.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_prepared_adapter_file(
+    lora: &Value,
+    settings: &Settings,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    let raw = lora_path(lora)
+        .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
+    let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
+    let candidate = if confined.is_dir() {
+        let directory = confined;
+        crate::resolve_adapter_in_dir(&directory, declared_adapter_file(lora)).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                directory.display()
+            ))
+        })?
+    } else {
+        raw
+    };
+    crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
+}
+
 /// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
 #[cfg(any(
     target_os = "macos",

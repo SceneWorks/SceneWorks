@@ -97,6 +97,27 @@ pub(crate) fn normalized_data_dir(settings: &Settings) -> WorkerResult<PathBuf> 
     normalize_absolute_path(&settings.data_dir)
 }
 
+/// Every operator-controlled root from which read-only model files may be loaded.
+///
+/// Keep both lexical and canonical forms: callers first confine the retained lexical loader entry,
+/// then the exact target captured by [`gen_core::PinnedWeightsFile`]. A missing external root is
+/// intentionally inert rather than fatal, matching the pre-existing model/LoRA policy.
+pub(crate) fn allowed_model_roots(settings: &Settings) -> WorkerResult<Vec<PathBuf>> {
+    let data_dir = normalized_data_dir(settings)?;
+    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
+    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let canonical_hf_cache =
+        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
+    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    for root in &settings.external_model_roots {
+        roots.push(normalize_absolute_path(root)?);
+        if let Ok(canonical) = normalize_existing_or_absolute(root) {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
+
 pub(crate) fn ensure_path_under(
     path: PathBuf,
     roots: &[PathBuf],
@@ -174,12 +195,7 @@ pub(crate) fn normalize_app_managed_model_path(
     // Canonicalize the input and allow either the lexical or canonical form of each
     // root, so a symlink/`..` can't slip past the confinement check (sc-8877 / F-075),
     // matching `normalize_app_managed_lora_path` (same roots).
-    let data_dir = normalized_data_dir(settings)?;
-    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    let roots = allowed_model_roots(settings)?;
     // Additionally admit the operator's external model roots (epic 10451 / sc-10668). Phase 1
     // widened only the LoRA lane; Phase 2 reads an external ComfyUI **base** model's component
     // files (DiT / text-encoder / VAE) in place from the configured tree, so those paths must
@@ -187,12 +203,6 @@ pub(crate) fn normalize_app_managed_model_path(
     // roots come only from the process env (never a payload — a LAN caller, epic 4484, cannot
     // widen the allow-list), and the list is empty by default and on macOS, so confinement is
     // unchanged for every install that has not opted in. Both lexical + canonical forms are added.
-    for root in &settings.external_model_roots {
-        roots.push(normalize_absolute_path(root)?);
-        if let Ok(canonical) = normalize_existing_or_absolute(root) {
-            roots.push(canonical);
-        }
-    }
     let path = normalize_existing_or_absolute(Path::new(raw_path))?;
     ensure_path_under(path, &roots, label)
 }
@@ -205,6 +215,7 @@ pub(crate) fn normalize_app_managed_model_path(
 /// pre-canonical path when it resolves to exactly the vetted file. This lets inference pin the entry
 /// with `lstat` and re-open it for transformer windows; returning only the canonical HF blob path would
 /// discard both the user-visible filename extension and the symlink-entry identity.
+#[cfg(test)]
 pub(crate) fn normalize_app_managed_model_file_path(
     settings: &Settings,
     raw_path: &str,
@@ -221,37 +232,73 @@ pub(crate) fn normalize_app_managed_model_file_path(
 /// has selected its lone checkpoint entry. Re-running the canonical confinement check on that child
 /// is essential: a confined directory can contain a `.safetensors` symlink whose target escapes every
 /// app-managed root.
+#[cfg(test)]
 pub(crate) fn normalize_app_managed_model_file_entry_path(
     settings: &Settings,
     raw_path: &Path,
     label: &str,
 ) -> WorkerResult<PathBuf> {
+    Ok(pin_app_managed_model_file(settings, raw_path, label)?
+        .loader_path()
+        .to_path_buf())
+}
+
+/// Pin a model file before resolving it, then confine both the retained lexical entry and the exact
+/// target captured by that same pin. This is the file trust-boundary primitive for prepared
+/// [`gen_core::LoadSpec`]s: there is no authorize-then-re-resolve gap, and the extension-bearing
+/// loader path is preserved for format dispatch.
+pub(crate) fn pin_app_managed_model_file(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
     if raw_path.as_os_str().is_empty() {
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
-    let data_dir = normalized_data_dir(settings)?;
-    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
-    for root in &settings.external_model_roots {
-        roots.push(normalize_absolute_path(root)?);
-        if let Ok(canonical) = normalize_existing_or_absolute(root) {
-            roots.push(canonical);
-        }
-    }
-
+    let roots = allowed_model_roots(settings)?;
     let lexical = normalize_absolute_path(raw_path)?;
     ensure_path_under(lexical.clone(), &roots, label)?;
-    let resolved = normalize_existing_or_absolute(&lexical)?;
-    let confined = ensure_path_under(resolved, &roots, label)?;
-    match (lexical.canonicalize(), confined.canonicalize()) {
-        (Ok(lexical_target), Ok(confined_target)) if lexical_target == confined_target => {
-            Ok(lexical)
-        }
-        _ => Ok(confined),
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    ensure_path_under(pin.canonical_target_path().to_path_buf(), &roots, label)?;
+    pin.ensure_unchanged()
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    Ok(pin)
+}
+
+/// Pin an operator-only model file without applying payload model-root confinement. Used only for
+/// `SCENEWORKS_CONTROLNET_KREA`, whose pre-existing contract deliberately admits an absolute
+/// operator path outside the managed roots. The exact entry/target identity is still retained and
+/// revalidated like every prepared File source.
+pub(crate) fn pin_operator_model_file(
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
+    let lexical = normalize_absolute_path(raw_path)?;
+    let pin = gen_core::PinnedWeightsFile::pin(&lexical)
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    pin.ensure_unchanged()
+        .map_err(|error| WorkerError::InvalidPayload(format!("{label}: {error}")))?;
+    Ok(pin)
+}
+
+/// Atomically finalize a complete prepared token set, deduplicating repeated lexical File slots
+/// (for example the same adapter selected twice at different scales) before calling the strict
+/// gen-core preparation API.
+pub(crate) fn prepare_load_spec_with_file_pins(
+    spec: &mut gen_core::LoadSpec,
+    pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
+    label: &str,
+) -> WorkerResult<()> {
+    let mut unique = BTreeMap::new();
+    for pin in pins {
+        unique.entry(pin.loader_path().to_path_buf()).or_insert(pin);
+    }
+    spec.prepare_with_file_pins(unique.into_values())
+        .map_err(|error| crate::classify_engine_error(label, error))
 }
 
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root
@@ -276,23 +323,12 @@ pub(crate) fn normalize_app_managed_lora_path(
     settings: &Settings,
     path: &Path,
 ) -> WorkerResult<PathBuf> {
-    let data_dir = normalized_data_dir(settings)?;
-    let canonical_data_dir = normalize_existing_or_absolute(&settings.data_dir)?;
-    let hf_cache = normalize_absolute_path(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let canonical_hf_cache =
-        normalize_existing_or_absolute(&huggingface_hub_cache_dir(&settings.data_dir))?;
-    let mut roots = vec![data_dir, canonical_data_dir, hf_cache, canonical_hf_cache];
+    let roots = allowed_model_roots(settings)?;
     // Both the lexical and canonical form of each external root, matching the posture
     // above: `resolved` is canonical, and a canonical path never `starts_with` a
     // lexical root when the two differ (a symlinked or `..`-bearing root, macOS
     // `/var` -> `/private/var`). A root that cannot be canonicalized (unmounted drive)
     // contributes its lexical form only, and simply never matches.
-    for root in &settings.external_model_roots {
-        roots.push(normalize_absolute_path(root)?);
-        if let Ok(canonical) = normalize_existing_or_absolute(root) {
-            roots.push(canonical);
-        }
-    }
     let normalized = normalize_absolute_path(path)?;
     let resolved = normalize_existing_or_absolute(&normalized)?;
     let confined = ensure_path_under(resolved, &roots, "LoRA path")?;

@@ -137,13 +137,21 @@ fn imported_dit_file(path: &Path) -> Option<PathBuf> {
 ///     or the lone weight file inside its single-file install dir, but NOT a diffusers snapshot dir.
 ///
 /// Both the supplied location and the checkpoint selected from an install directory are confined by
-/// `normalize_app_managed_model_file_path` (a payload or child symlink can never point the checkpoint
-/// outside a declared root; LAN jobs API, epic 4484), while retaining the lexical entry for
-/// lstat-pinned re-opening (sc-18306).
+/// `pin_app_managed_model_file` (a payload or child symlink can never point the checkpoint outside a
+/// declared root; LAN jobs API, epic 4484), while retaining the lexical entry for lstat-pinned
+/// re-opening (sc-18306).
 fn resolve_imported_krea_dit(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
+    Ok(resolve_imported_krea_dit_pin(request, settings)?
+        .map(|pin| pin.loader_path().to_path_buf()))
+}
+
+fn resolve_imported_krea_dit_pin(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<gen_core::PinnedWeightsFile>> {
     if request
         .model_manifest_entry
         .get("family")
@@ -176,14 +184,27 @@ fn resolve_imported_krea_dit(
     else {
         return Ok(None);
     };
-    let path = crate::paths::normalize_app_managed_model_file_path(
+    let confined = crate::paths::normalize_app_managed_model_path(
         settings,
         raw_path,
         "Imported Krea 2 checkpoint",
     )?;
-    imported_dit_file(&path)
+    let candidate = if confined.is_dir() {
+        // Select against the confined target, but retain the caller's lexical directory spelling in
+        // the loader entry. Besides preserving extension/path dispatch, this lets the token fingerprint
+        // every caller-visible parent component instead of silently switching to the canonical alias.
+        imported_dit_file(&confined).and_then(|dit| {
+            dit.file_name()
+                .map(|file_name| Path::new(raw_path).join(file_name))
+        })
+    } else if imported_dit_file(Path::new(raw_path)).is_some() {
+        Some(PathBuf::from(raw_path))
+    } else {
+        None
+    };
+    candidate
         .map(|dit| {
-            crate::paths::normalize_app_managed_model_file_entry_path(
+            crate::paths::pin_app_managed_model_file(
                 settings,
                 &dit,
                 "Imported Krea 2 checkpoint",
@@ -355,31 +376,54 @@ fn krea_imported_control_available(request: &ImageRequest, settings: &Settings) 
 /// This is why the imported lane does NOT reuse the builtin lane's download-on-first-use helper:
 /// that helper is a grandfathered job-time download site, and `job_time_download_guard` forbids new
 /// ones.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn resolve_krea_imported_control_overlay(
     settings: &Settings,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
+    Ok(resolve_krea_imported_control_overlay_pin(settings, request)?
+        .loader_path()
+        .to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_krea_imported_control_overlay_pin(
+    settings: &Settings,
+    request: &ImageRequest,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
     if let Ok(path) = std::env::var(KREA_CONTROL_WEIGHTS_ENV) {
         let path = PathBuf::from(path.trim());
         if path.is_file() {
-            return Ok(path);
+            return crate::paths::pin_operator_model_file(
+                &path,
+                "SCENEWORKS_CONTROLNET_KREA overlay",
+            );
         }
     }
     if let Some(path) = krea_control_payload_overlay_path(settings, request)? {
         if path.is_file() {
-            return Ok(path);
+            return crate::paths::pin_app_managed_model_file(
+                settings,
+                &path,
+                "Krea 2 pose ControlNet overlay",
+            );
         }
     }
     let (repo, file) = krea_control_overlay_repo_file(request)?;
     let revision = trusted_control_weight_revision(request, KREA_CONTROL_ENGINE_ID, &repo, &file)?;
-    crate::downloads::resolve_hf_component_file(settings, &repo, &revision, &file).ok_or_else(|| {
+    let path = crate::downloads::resolve_hf_component_file(settings, &repo, &revision, &file)
+        .ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "Krea 2 pose ControlNet overlay is not installed — install it from the Model Manager \
              ({repo} / {file}), then run the pose set again. An imported Krea 2 checkpoint is the \
              transformer only; the pose control branch is a separate trained overlay."
         ))
-    })
+    })?;
+    crate::paths::pin_app_managed_model_file(
+        settings,
+        &path,
+        "Krea 2 pose ControlNet overlay",
+    )
 }
 
 /// The identity-likeness face stack (SCRFD + ArcFace) resolved **cache-only** — the scoring-side
@@ -501,21 +545,26 @@ async fn generate_krea_imported_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let dit = resolve_imported_krea_dit(request, settings)?.ok_or_else(|| {
+    let dit_pin = resolve_imported_krea_dit_pin(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Imported Krea 2 checkpoint could not be resolved (family/modelPath/single-file)"
                 .to_owned(),
         )
     })?;
+    let dit = dit_pin.loader_path().to_path_buf();
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first"
     // error (the shared TE/VAE/tokenizer + arch config the control assembly pairs the DiT with).
     let base_dir = resolve_krea_imported_base_tier(settings)?;
     // Cache-only (epic 17625 AC9): a render never fetches weights — a missing overlay is an
     // actionable "install it from the Model Manager" error before any compute.
-    let control_weights = resolve_krea_imported_control_overlay(settings, request)?;
+    let control_pin = resolve_krea_imported_control_overlay_pin(settings, request)?;
+    let control_weights = control_pin.loader_path().to_path_buf();
     // Job LoRA/LoKr adapters ride additively on the imported DiT (path-confined by the shared
     // helper); the pose control branch is never adapted.
-    let adapters = resolve_adapters(request, settings)?;
+    let PreparedAdapters {
+        specs: adapters,
+        pins: adapter_pins,
+    } = resolve_prepared_adapters(request, settings)?;
 
     let steps = krea_control_steps(request);
     let control_scale = advanced::f32_clamped(
@@ -566,13 +615,20 @@ async fn generate_krea_imported_control_stream(
     if !adapters.is_empty() {
         spec = spec.with_adapters(adapters);
     }
-    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        std::iter::once(dit_pin)
+            .chain(std::iter::once(control_pin))
+            .chain(adapter_pins),
+        "Krea 2 imported pose source preparation failed",
+    )?;
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
         KREA_CONTROL_ENGINE_ID,
         &request.model,
         &spec,
         Some(&request.model_manifest_entry),
         None,
-    );
+    )?;
     // Imported and builtin Krea pose routes send the same one-Control request. Keep their admitted
     // geometry and measured lane identity on the shared constructor so neither call site can drift
     // back to declaring zero references while gen-core derives one from `Conditioning::Control`.
@@ -761,8 +817,8 @@ fn resolve_krea_imported_adapters_and_edit(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
-) -> WorkerResult<(Vec<AdapterSpec>, Option<Vec<Conditioning>>)> {
-    let adapters = resolve_adapters(request, settings)?;
+) -> WorkerResult<(PreparedAdapters, Option<Vec<Conditioning>>)> {
+    let adapters = resolve_prepared_adapters(request, settings)?;
     if request.mode != "edit_image" {
         return Ok((adapters, None));
     }
@@ -1117,27 +1173,15 @@ async fn generate_krea_imported_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let dit = resolve_imported_krea_dit(request, settings)?.ok_or_else(|| {
+    let dit_pin = resolve_imported_krea_dit_pin(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Imported Krea 2 checkpoint could not be resolved (family/modelPath/single-file)"
                 .to_owned(),
         )
     })?;
+    let dit = dit_pin.loader_path().to_path_buf();
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let cold_admission = {
-        // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
-        // not be double-priced. Admit exactly the weight-bearing paths the provider consumes.
-        let text_encoder = base_dir.join("text_encoder");
-        let vae = base_dir.join("vae");
-        prepare_cached_candle_base_floor(
-            &request.model,
-            "Krea imported",
-            settings,
-            &[dit.as_path(), text_encoder.as_path(), vae.as_path()],
-        )
-    };
     let is_edit = request.mode == "edit_image";
 
     // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
@@ -1155,10 +1199,10 @@ async fn generate_krea_imported_stream(
     // (sc-14111) and, for an `edit_image` job, the fitted source reference(s) + the required identity-edit
     // adapter (sc-14119). Candle takes no adapters (sc-14135), so it stays t2i/img2img with an empty stack.
     #[cfg(target_os = "macos")]
-    let (adapters, edit_conditioning) =
+    let (prepared_adapters, edit_conditioning) =
         resolve_krea_imported_adapters_and_edit(request, settings, project_path)?;
     #[cfg(target_os = "macos")]
-    let adapter_count = adapters.len();
+    let adapter_count = prepared_adapters.specs.len();
     #[cfg(not(target_os = "macos"))]
     let adapter_count = 0usize;
     #[cfg(target_os = "macos")]
@@ -1184,25 +1228,51 @@ async fn generate_krea_imported_stream(
     } else {
         "krea_2_turbo"
     };
-    let spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
+    let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(base_dir),
+        WeightsSource::Dir(base_dir.clone()),
     );
     #[cfg(target_os = "macos")]
-    let spec = if adapters.is_empty() {
-        spec
-    } else {
-        spec.with_adapters(adapters)
+    {
+        if !prepared_adapters.specs.is_empty() {
+            spec = spec.with_adapters(prepared_adapters.specs);
+        }
+        crate::paths::prepare_load_spec_with_file_pins(
+            &mut spec,
+            std::iter::once(dit_pin).chain(prepared_adapters.pins),
+            "Krea 2 imported source preparation failed",
+        )?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        std::iter::once(dit_pin),
+        "Krea 2 imported source preparation failed",
+    )?;
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let cold_admission = {
+        // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
+        // not be double-priced. Admit exactly the prepared primary plus the companion component dirs.
+        let text_encoder = base_dir.join("text_encoder");
+        let vae = base_dir.join("vae");
+        prepare_cached_candle_base_floor(
+            &request.model,
+            "Krea imported",
+            settings,
+            &spec,
+            &[text_encoder.as_path(), vae.as_path()],
+        )?
     };
 
     #[cfg(target_os = "macos")]
-    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
         engine_id,
         &request.model,
         &spec,
         Some(&request.model_manifest_entry),
         None,
-    );
+    )?;
     #[cfg(target_os = "macos")]
     let memory_inputs =
         krea_imported_memory_inputs(request, &conditioning, hires_fix, adapter_count);

@@ -387,16 +387,42 @@ pub(super) fn prepare_cached_candle_base_floor(
     model: &str,
     lane: &'static str,
     settings: &Settings,
-    paths: &[&Path],
-) -> CachedCandleBaseFloorAdmission {
-    let bytes = distinct_weight_bytes(paths);
-    CachedCandleBaseFloorAdmission {
+    spec: &LoadSpec,
+    companion_dirs: &[&Path],
+) -> WorkerResult<CachedCandleBaseFloorAdmission> {
+    let bytes = prepared_floor_weight_bytes(lane, spec, companion_dirs)?;
+    Ok(CachedCandleBaseFloorAdmission {
         model: model.to_owned(),
         lane,
         gpu_id: settings.gpu_id.clone(),
         floor_gb: (bytes > 0).then(|| bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB),
         runtime: tokio::runtime::Handle::current(),
+    })
+}
+
+fn prepared_floor_weight_bytes(
+    lane: &str,
+    spec: &LoadSpec,
+    companion_dirs: &[&Path],
+) -> WorkerResult<u64> {
+    if !spec.prepared_file_pins().is_prepared() {
+        return Err(WorkerError::Engine(format!(
+            "{lane} admission requires a finalized prepared LoadSpec"
+        )));
     }
+    spec.validate_prepared_file_pins().map_err(|error| {
+        crate::classify_engine_error(&format!("{lane} source validation failed"), error)
+    })?;
+    // File bytes come from the exact target fingerprints captured during lexical pinning. This
+    // deliberately does not call metadata on File slots; companion directories remain recursive
+    // because directory snapshots are outside gen-core's single-file token model.
+    let file_bytes = spec
+        .prepared_file_pins()
+        .iter()
+        .fold(0_u64, |total, (_, pin)| {
+            total.saturating_add(pin.target_fingerprint().size)
+        });
+    Ok(file_bytes.saturating_add(distinct_weight_bytes(companion_dirs)))
 }
 
 /// Imported SDXL already materializes a `LoadSpec` containing its external checkpoint,
@@ -451,6 +477,37 @@ mod tests {
         assert!(
             consumed < recursively_priced,
             "the companion snapshot's replaced transformer must stay outside the imported-file floor"
+        );
+    }
+
+    #[test]
+    fn prepared_floor_uses_token_target_size_and_propagates_stale_source_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let imported = temp.path().join("imported.safetensors");
+        let companion = temp.path().join("text_encoder");
+        std::fs::create_dir_all(&companion).expect("companion creates");
+        std::fs::write(&imported, vec![0_u8; 11]).expect("imported weights");
+        std::fs::write(companion.join("model.safetensors"), vec![0_u8; 13])
+            .expect("companion weights");
+
+        let pin = gen_core::PinnedWeightsFile::pin(&imported).expect("primary pins");
+        assert_eq!(pin.target_fingerprint().size, 11);
+        let mut spec = LoadSpec::new(WeightsSource::File(imported.clone()));
+        spec.prepare_with_file_pins([pin]).expect("spec prepares");
+        assert_eq!(
+            prepared_floor_weight_bytes("fixture", &spec, &[companion.as_path()])
+                .expect("prepared floor accounts"),
+            24,
+            "File bytes come from the prepared target fingerprint and companions remain recursive"
+        );
+
+        std::fs::write(&imported, vec![1_u8; 17]).expect("primary replacement writes");
+        let error = prepared_floor_weight_bytes("fixture", &spec, &[companion.as_path()])
+            .expect_err("stale prepared sources propagate instead of being restatted/swallowed");
+        assert!(
+            error.to_string().contains("source validation failed")
+                || error.to_string().contains("changed after load"),
+            "unexpected stale-source error: {error}"
         );
     }
 

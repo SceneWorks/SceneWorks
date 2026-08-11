@@ -7479,6 +7479,79 @@ fn instantid_resolves_user_loras_into_adapters() {
     );
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prepared_adapter_resolver_reads_under_the_exact_deduplicated_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = dir.path().to_path_buf();
+    let lora_file = dir.path().join("style.safetensors");
+    write_min_lora(&lora_file);
+    let req = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "prompt": "portrait",
+        "loras": [
+            { "path": lora_file.to_string_lossy(), "weight": 0.5 },
+            { "path": lora_file.to_string_lossy(), "weight": 0.8 }
+        ],
+        "modelManifestEntry": { "family": "krea_2" }
+    }));
+
+    let prepared = resolve_prepared_adapters(&req, &settings).expect("prepared adapters resolve");
+    assert_eq!(
+        prepared.specs.len(),
+        2,
+        "request order/scales remain distinct"
+    );
+    assert_eq!(prepared.specs[0].scale, 0.5);
+    assert_eq!(prepared.specs[1].scale, 0.8);
+    assert_eq!(
+        prepared.pins.len(),
+        1,
+        "identical lexical entries share one token"
+    );
+    assert_eq!(prepared.specs[0].path, prepared.pins[0].loader_path());
+    assert_eq!(prepared.specs[1].path, prepared.pins[0].loader_path());
+    prepared.pins[0]
+        .ensure_unchanged()
+        .expect("the same token used for header classification remains valid");
+}
+
+#[cfg(all(
+    unix,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+#[test]
+fn prepared_adapter_directory_reconfines_the_selected_child() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let install = data.join("loras").join("installed");
+    std::fs::create_dir_all(&install).expect("install dir");
+    let outside = dir.path().join("outside.safetensors");
+    write_min_lora(&outside);
+    symlink(&outside, install.join("escape.safetensors")).expect("escaping child link");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data;
+    let req = request(json!({
+        "projectId": "p", "model": "kreamania_variant5", "prompt": "portrait",
+        "loras": [{
+            "path": install.to_string_lossy(),
+            "files": ["escape.safetensors"]
+        }],
+        "modelManifestEntry": { "family": "krea_2" }
+    }));
+
+    resolve_prepared_adapters(&req, &settings)
+        .expect_err("a selected directory child must independently remain under an allowed root");
+}
+
 /// sc-10117: the inline Image Studio "Upscale" variant must carry the SAME lineage keys the
 /// standalone `image_upscale` job writes (`sourceAssetId` / `parents` / `extra.upscaledFromAssetId`),
 /// or the Library / Recent-Batches fold and the Original↔Upscaled toggle can't pair it with its
