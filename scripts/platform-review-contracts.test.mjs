@@ -234,6 +234,38 @@ test("Rust Docker dependency layers include every memory-strategy adapter target
   }
 });
 
+test("both Rust Docker builders carry the mechanically digested web capability sources", async () => {
+  const dockerfile = await source("docker/rust.Dockerfile");
+  const matrix = await source(
+    "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+  );
+  const webEmbeds = [
+    ...matrix.matchAll(
+      /include_str!\(\s*"\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/apps\/web\/src\/([^"\n]+)"\s*\)/g,
+    ),
+  ].map((match) => match[1]);
+  assert.ok(webEmbeds.length > 0, "matrix must retain its production web source inputs");
+  const stage = (name) => {
+    const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(
+      dockerfile,
+    );
+    assert.ok(heading, `${name} Docker stage must exist`);
+    const start = heading.index + heading[0].length;
+    const end = dockerfile.indexOf("\nFROM ", start);
+    return dockerfile.slice(start, end === -1 ? undefined : end);
+  };
+  for (const name of ["builder", "candle-builder"]) {
+    assert.match(
+      stage(name),
+      /^COPY apps\/web\/src \.\/apps\/web\/src$/m,
+      `${name} must copy the whole owning source root`,
+    );
+  }
+  for (const relative of webEmbeds) {
+    assert.doesNotMatch(relative, /(?:^|\/)\.\.(?:\/|$)/, relative);
+  }
+});
+
 test("all three manifest scripts import the shared JSONC parser", async () => {
   for (const scriptPath of [
     "scripts/check-scaffold.mjs",
