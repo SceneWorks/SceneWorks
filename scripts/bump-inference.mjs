@@ -213,6 +213,31 @@ function cargoUpdate(sha) {
   execFileSync("cargo", ["update", ...spec], { cwd: repoRoot, stdio: "inherit" });
 }
 
+function updateLockIfNeededAndVerifySkew(
+  sha,
+  manifestsAlreadyPinned,
+  {
+    lockText = readFileSync(LOCKFILE, "utf8"),
+    update = cargoUpdate,
+    verify = verifyNoSkew,
+  } = {},
+) {
+  // A transition always needs Cargo to resolve the rewritten manifests. On a re-run, only resolve
+  // again when an inference source is stale: Cargo may otherwise choose a different, still-valid
+  // solution for unrelated transitive dependencies and make an already-complete bump non-idempotent.
+  const needsUpdate = !manifestsAlreadyPinned || lockHasStaleInferenceRevision(sha, lockText);
+  if (needsUpdate) update(sha);
+  else {
+    console.log(
+      "bump-inference: Cargo.lock already carries the requested inference revision; skipping update",
+    );
+  }
+
+  // Keep this unconditional. Revision-string agreement cannot detect gen-core or pmetal-mlx-rs skew.
+  verify();
+  return needsUpdate;
+}
+
 function distinctResolutions(crate) {
   // One `cargo tree` over both platform bundles (--target all), so macOS + CUDA resolutions are
   // visible even off-macOS -- the same data source check-gen-core-skew.sh uses.
@@ -618,6 +643,28 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
     ),
   );
+  let updateCalls = 0;
+  let verifyCalls = 0;
+  check(
+    "an already-current lock skips cargo update but still verifies skew",
+    !updateLockIfNeededAndVerifySkew(SHA, true, {
+      lockText: duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
+      update: () => updateCalls++,
+      verify: () => verifyCalls++,
+    }) &&
+      updateCalls === 0 &&
+      verifyCalls === 1,
+  );
+  check(
+    "a pin transition updates the lock and still verifies skew",
+    updateLockIfNeededAndVerifySkew(SHA, false, {
+      lockText: duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
+      update: () => updateCalls++,
+      verify: () => verifyCalls++,
+    }) &&
+      updateCalls === 1 &&
+      verifyCalls === 2,
+  );
   let stampThrew = false;
   try {
     repinSemanticProvenance(`const OTHER: &str = "x";`, SHA);
@@ -953,11 +1000,10 @@ function main() {
   // early-return on the manifests alone, so a tree whose manifests were correct but whose
   // `Cargo.lock` still carried the previous revision could never self-heal -- re-running the script
   // just said "already pinned" and did nothing. That is precisely the state a partially-applied bump
-  // leaves behind. Fall through to `cargoUpdate()` + `verifyNoSkew()` instead: both are cheap, and
-  // running them unconditionally makes the script idempotent AND verifying rather than idempotent
-  // and blind. `lockHasStaleInferenceRevision` narrows the report to the case that actually needs
-  // repair; it deliberately does NOT gate the skew check, which catches divergences (gen-core,
-  // pmetal-mlx-rs) that no revision-string comparison can see.
+  // leaves behind. Fall through to the lock/skew step instead. It resolves Cargo.lock when the
+  // manifests changed or an inference source is stale, and always runs the independent skew guards.
+  // Skipping Cargo's resolver for an already-current lock is important: a fresh resolution can pick
+  // a different, still-valid solution for unrelated transitive dependencies, violating idempotence.
   // Captured before anything is written: after the rewrite loop below the previous revision is gone
   // from the tree, and `verifyFlux2AuditWindow` needs it to tell a bump that MOVES the pin out of
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
@@ -1002,8 +1048,7 @@ function main() {
     writeFileSync(m.path, m.bumped);
     console.log(`  wrote ${m.path}`);
   }
-  cargoUpdate(sha);
-  verifyNoSkew();
+  updateLockIfNeededAndVerifySkew(sha, manifestsAlreadyPinned);
   regenerateMemoryMatrix();
   verifyLicenseAudit();
   // Beside the licence re-scan for the same reason: both are pin-keyed artifacts that need an input

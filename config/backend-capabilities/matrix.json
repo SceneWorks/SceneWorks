@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 91,
     "cellCount": 868,
-    "mlxOnlyCellCount": 216,
+    "mlxOnlyCellCount": 214,
     "candleOnlyCellCount": 37,
     "exceptionCount": 0
   },
@@ -13,17 +13,17 @@
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
     "apiGeneration": "6d91fe0874135dbda3b40192bd0dee53f869e493c58d3627a2beec4cdfeaa1be",
     "apiValidation": "84f992aa4aa573b363a8428d320738c53b6e4b36078af5110c6852a15b2254eb",
-    "descriptorAudioFacts": "634d90068826cd9cc06fe1bf1b5b08c682b88638cb2afa46752cce29d097222f",
-    "descriptorCandleFacts": "17eaf8a60bd9b90b789b8f6fe022c01494ddd1d701a8c6ebfa1600781d9fa728",
-    "descriptorCandleRuntime": "5a62e095bbb6db33594096d2d45d047c2d3931891be65a13a6a2c2328be9957d",
-    "descriptorMlxFacts": "68858788dbcb6bc3c3e0f2b2dd11a42843eaa5f0a82b9debc63ae0a95ae19900",
-    "descriptorMlxRuntime": "a4df129934b390858af02374cf7c12114003c46c2236c1c47634eb1c1fecba7b",
-    "descriptorPreviewFacts": "c6596f1ae68c59a9eac383a1e643c6dd89b206faa42f7232da0a8bc92dde8fca",
+    "descriptorAudioFacts": "6977bbbc0b584fffc89a68d1939e92789b1533c45cc35806797dc6a48d5bfb69",
+    "descriptorCandleFacts": "d584718f767f06e4fc983ab38a0a4340683b470eb649011904c449fc4e8fa845",
+    "descriptorCandleRuntime": "c2a3f6526aa44eeee1b990531488f1ff9961fa43f010648d7da680f352ae107c",
+    "descriptorMlxFacts": "0135e9702a6e2d539c7becca66dd38aa60de5337fe8d0f6702b39b02fb7b336f",
+    "descriptorMlxRuntime": "37dfe34a5508cc5dbbefbb7f30c3cc1d9fa8bee1eda5dea7718621528b6d0af6",
+    "descriptorPreviewFacts": "70591717bc69b7ba62e0c833b94aec3da1519b731f4a3925482fd4396a35aded",
     "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
     "manifest": "693b42b5464c235ada92d5d06ac92a982216d2dbeda2a2a4cdf6ff984e0c9eed",
-    "routerCandle": "4073e3cc947ad4e53c27320d56ae265a294c4f58256bf95c50bc8a53ac31f8ba",
+    "routerCandle": "a51ba528a710428b1f77dadda6f8cbbdab2b34549ce6bf07d02b1f83d4111eb0",
     "routerCatalog": "135bff1a323dd59e7318864f454e711e9a56253aeba9b148a36fdc816991e19a",
-    "routerGaps": "f495497899b6b73b1884e7f703c9b356ac4690ee4d4ed1e8655890673d9db340",
+    "routerGaps": "e2b2fa7a5fe90832ff46f6de3fdf29a71c28ef5ed5e63b0faebe2dfbf51b99f1",
     "routerMlx": "485f72eb161bdcad7dcd5891cb73e42db91b7af4da7f567db3a53c2c75296697",
     "scheduler": "1b05c5c9c33fe036276bffeb400637575dbcab309a2977e8b1702bfce669d52f",
     "trainingCatalog": "783b049b02a0e4085ddc0a4c59ace7b1093a6cc919fe26625109abf884b60a49",
@@ -42,16 +42,16 @@
     "webVideoValidation": "1650a576cbe0a080e70e466f71a26e9d7b599379987e891385b2d33bab86cea9",
     "workerAudioDispatch": "1679977fd1fbd9427572df035fd32e2644f79363eadceef90305ea54083043b1",
     "workerDispatch": "74251a96f9ae0ea50d166a2678609287c4eaaa946b35c931db6bb55e9443036e",
-    "workerEngineTable": "527455e759e96d1e636532a2032e1532cef6e28debd0a7cd4d2eef6f84544bfc",
+    "workerEngineTable": "ba4fbcc655cecf0d7c7235e4f894638a6c1a1d5c02837f82dc387929e5819c4d",
     "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
     "workerImageDispatch": "cc62f0ec8aaf91270e45229239f9f2ad6a2aabef6453cd63524b7cdfae2a5605",
     "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "0884a375e5006409d6f892212e1a4cb2bb250c18a8ef11f948d3d3098f63a651",
-    "workerVideoCandle": "1a43ed7815a47d7db846f3313ed6fdfcc9eb85f3a5d377857fbbf6559ea00374",
-    "workerVideoDispatch": "d1329d8212c2661cefbaff91d4989bbdb4f8733a8a740509124f2d6786ead2f4",
+    "workerVideoCandle": "209e2e9760c8e3afc1482855a4c0052e6575d305542677a8782dc099a34f8f30",
+    "workerVideoDispatch": "8686346f7e665ab8974d3bd7316826d8b3cac9699719a722c7ef225c750dc183",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "73d76df14aadd41c4c4324bd82deb2112550d0f06cd1fa3a2037f8fa96104eba",
+    "workerVideoLtx": "9971e3df9b78ca4fc4007ba5d22226cf2f078c0ff649c8feeeec7b71ab3ef054",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "52f560272ff42dca5568b41e3d732d63215616cb03aa102243ed7dc67d25ace0",
     "workerVideoSeedvr2": "632d4afe9649858e8f73d226c46276a3222a2c129f2a3afabd24b0640727e0cf",
@@ -2832,11 +2832,7 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
@@ -3027,11 +3023,7 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18478",
-            "url": "https://app.shortcut.com/trefry/story/18478"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
