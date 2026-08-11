@@ -447,7 +447,27 @@ So the correct consequences are:
 | Run | Head SHA | Runner | Outcome |
 | --- | --- | --- | --- |
 | [31509409586](https://github.com/SceneWorks/SceneWorks/actions/runs/31509409586) | `ad072c06` | `cuda-windows-2` | **provisioned, resolve failed** — found the §8.1 bug |
-| [_pending_](#) | — | — | — |
+| [31511147004](https://github.com/SceneWorks/SceneWorks/actions/runs/31511147004) | `62410075` | `cuda-windows` | **success, every step** — the `.` sentinel fix |
+| [31512848344](https://github.com/SceneWorks/SceneWorks/actions/runs/31512848344) | `06ebcf53` | — | re-run at the merge head, after the containment rework |
+
+Run **31511147004 is the AC4 evidence**: every step green, including `Clippy (candle worker)` and
+`Verify capabilities.candle.json is a real dump, not a restamp`. What it printed:
+
+```
+cache dir       : E:\huggingface\hub
+snapshot suffix : \models--MiniMaxAI--MiniMax-H3\snapshots\939557dc319dd91227e30195a763f272ba7f8765
+Exact public snapshot provisioned: MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765
+  path: E:\huggingface\hub\models--MiniMaxAI--MiniMax-H3\snapshots\939557dc319dd91227e30195a763f272ba7f8765
+resolved snapshot root: E:\huggingface\hub\models--MiniMaxAI--MiniMax-H3\snapshots\939557dc319dd91227e30195a763f272ba7f8765
+```
+
+The suffix carries no tier segment — the `.` sentinel resolved to the snapshot root, which is the
+whole point of §8.1 — and the resolve step's component-presence assertion passed against all
+thirteen declared patterns. It also landed on `cuda-windows`, the *other* org-level `real-weights`
+runner, so both halves of that pool are now demonstrated.
+
+Run 31512848344 re-runs the same dispatch at the merge head, because the containment logic in the
+validate and resolve steps was reworked after 31511147004 (§8.2).
 
 Run 31509409586 confirmed the substance and found a real defect, which is the outcome worth having.
 What it established:
@@ -497,7 +517,32 @@ Two things are worth recording about how this was missed, because both are reusa
 - The contract tests could not have caught it either: they assert the default **is** `q4`, which was
   true and correct. The gap was between two things that were each individually right.
 
-The lesson is now generalized rather than patched: a test walks every **optional** `provision_*`
+### 8.2 Containment is decided by canonicalizing, not by matching path segments
+
+The first attempt validated `provision_patterns` by splitting each entry on separators and
+rejecting a `..` segment. Adversarial review broke it twice, and both breaks are worth recording
+because they generalize:
+
+- **`..*`** — the resolve step joins the pattern's *head* (the text before the first `*`, `?` or
+  `[`), not the pattern. Moving the wildcard one character left yields head `..` from a pattern
+  containing no `..` segment at all, so any check on the pattern string misses it.
+- **`.. `** — survives `-contains '..'` because `'.. '` ≠ `'..'`, but Win32 strips trailing spaces
+  and dots from path components, so it names the parent anyway. `-LiteralPath` suppresses globbing,
+  **not** normalization.
+
+Both are now closed by two complementary checks, because neither alone is sufficient:
+`[System.IO.Path]::GetFullPath` collapses every ordinary spelling (including the wildcard-adjacent
+ones) but does *not* strip a trailing space; a segment check rejecting anything empty after
+`TrimEnd(' ', '.')` covers exactly what it misses. The resolve step canonicalizes independently, so
+the proof does not rest on validation having run. All eight demonstrated bypasses are rejected and
+the legitimate thirteen-pattern H3 set still passes, exercised against the shipped step body.
+
+The general lesson: **segment-equality is the wrong tool for Windows path containment.** Canonicalize
+and compare prefixes.
+
+### 8.3 The sentinel lesson, generalized
+
+A test walks every **optional** `provision_*`
 input — optionality derived from the validation step wrapping its checks in `if ($env:NAME)`, not
 from a hand-maintained list — and requires that any such input with a non-empty default be handled
 by a sentinel in the params step. The next input to hit this cannot ship without making the same
