@@ -3574,6 +3574,19 @@ fn candle_supported_accepts_eligible_and_in_process_jobs() {
         json!({ "model": "z_image_turbo", "prompt": "p" }),
     );
     assert!(candle_supported(&eligible).is_ok());
+    // A plain LTX text-to-video request remains candle-eligible when it carries a user LoRA. This is
+    // the exact shape that previously reached the enforce sweep and failed as `candle_unsupported`.
+    let ltx_lora = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({
+            "model": "ltx_2_3",
+            "mode": "text_to_video",
+            "prompt": "p",
+            "loras": [{ "id": "ltx_style", "path": "loras/style.safetensors" }],
+        }),
+    );
+    assert!(candle_supported(&ltx_lora).is_ok());
     // In-process job types run off-Mac on native Rust lanes.
     let download = job_of(&store, JobType::ModelDownload, json!({ "repo": "x/y" }));
     assert!(candle_supported(&download).is_ok());

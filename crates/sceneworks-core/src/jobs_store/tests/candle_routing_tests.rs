@@ -1825,7 +1825,7 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
         ),
         "an unported model must fall back to the Python worker"
     );
-    // A txt2video model in any conditioned shape (default/i2v mode, a source, or a LoRA) is refused.
+    // Wan-5B in any conditioned shape (default/i2v mode, a source, or a LoRA) is refused.
     let cases = [
         json!({ "prompt": "p" }), // no mode → defaults to i2v
         json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
@@ -1892,7 +1892,7 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
 }
 
 #[test]
-fn candle_wan_14b_video_accepts_user_loras() {
+fn candle_video_models_with_provider_slots_accept_user_loras() {
     // sc-10539: the Wan-14B MoE engines advertise `supports_lora` and their candle worker path
     // (`candle_resolve_wan_adapters`) applies each user LoRA — including an external ComfyUI file
     // read in place — so a LoRA-carrying job stays on candle instead of the old blanket exclusion
@@ -1916,14 +1916,24 @@ fn candle_wan_14b_video_accepts_user_loras() {
         ),
         "wan_2_2_i2v_14b i2v + source + user LoRA must stay on candle"
     );
-    // Families whose candle provider advertises no LoRA slot still refuse a LoRA (wan-5B TI2V / LTX / SVD).
+    // The pinned candle LTX provider installs additive LoRA residuals on the video-attention
+    // projections for both the packed base tier and the dense Eros checkpoint.
+    for model in ["ltx_2_3", "ltx_2_3_eros"] {
+        assert!(
+            video_request_candle_eligible(
+                model,
+                &object(json!({
+                    "mode": "text_to_video",
+                    "loras": [{ "id": "ltx_style" }],
+                }))
+            ),
+            "{model} text_to_video + user LoRA must stay on candle"
+        );
+    }
+    // Families whose candle provider advertises no LoRA slot still refuse a LoRA.
     for (model, payload) in [
         (
             "wan_2_2",
-            json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
-        ),
-        (
-            "ltx_2_3",
             json!({ "mode": "text_to_video", "loras": [{ "id": "x" }] }),
         ),
         (
