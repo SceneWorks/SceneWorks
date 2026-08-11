@@ -4,8 +4,8 @@ use std::thread;
 use std::time::Duration;
 
 use gen_core::{
-    AdapterKind, AdapterSpec, Generator, LoadShape, LoadSpec, MemoryCacheState, MoeExpert,
-    OffloadPolicy, Precision, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, FileStatFingerprint, Generator, LoadShape, LoadSpec,
+    MemoryCacheState, MoeExpert, OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
 };
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -26,6 +26,13 @@ struct CachedGenerator {
     /// Process-global MLX active bytes that predated this cached generator. Request admission must
     /// never mistake these unrelated allocations for already-resident generator weights.
     external_committed_bytes: u64,
+    /// Conservative source-weight bytes bound to this exact resident cache entry. Candle File-route
+    /// admission may credit only these bytes before replacing the entry; a process-global peak can
+    /// describe an older, larger model and over-admit the incoming load. Ordinary entries use zero
+    /// until their route supplies an exact cache-bound value. Sequential entries expose zero: their
+    /// complete source floor includes staged components that the provider may already have dropped,
+    /// so it is not a proved lower bound on the entry's current resident VRAM.
+    reclaimable_weight_bytes: u64,
 }
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -42,13 +49,13 @@ const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
 /// the [`crate::cache_thread`] module docs; do not silently unify it away.
 const GENERATOR_EVICT_BEFORE_LOAD: bool = false;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn capture_external_committed_bytes() -> u64 {
     mlx_rs::memory::clear_cache();
     mlx_rs::memory::get_active_memory() as u64
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn capture_external_committed_bytes() -> u64 {
     0
 }
@@ -88,13 +95,56 @@ pub(crate) struct ExecutionPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheWeightsSource {
     Dir(PathBuf, Fingerprint),
-    File(PathBuf, Fingerprint),
+    File(PathBuf, Box<CacheFileIdentity>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheFileIdentity {
+    /// The exact caller-prepared identity handed through to inference, retained opaquely so every
+    /// entry/target/path-component field participates in cache equality.
+    Prepared(PinnedWeightsFile),
+    /// Compatibility mode for older unprepared callers. Re-pin or nonce only exists on this arm.
+    Fallback(CacheFileFingerprint),
+}
+
+/// Mutation-sensitive identity for an imported single-file source or adapter.
+///
+/// The legacy [`Fingerprint`] follows symlinks and records only target length + mtime, so retargeting
+/// an extension-bearing snapshot link to a different same-sized blob with the same timestamp could
+/// otherwise collide with a resident generator. Keep both the lexical entry and resolved target
+/// identity, matching the pin that streamed providers enforce on every reopen. If pinning fails, use
+/// a fresh nonce so an unstatable source can never hit an older cache entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheFileFingerprint {
+    Pinned {
+        entry: FileStatFingerprint,
+        target: FileStatFingerprint,
+    },
+    Unavailable(u64),
+}
+
+static UNAVAILABLE_FILE_FINGERPRINT_NONCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+impl CacheFileFingerprint {
+    fn of(path: &Path) -> Self {
+        match PinnedWeightsFile::pin(path) {
+            Ok(pinned) => Self::Pinned {
+                entry: pinned.entry_fingerprint().clone(),
+                target: pinned.target_fingerprint().clone(),
+            },
+            Err(_) => Self::Unavailable(
+                UNAVAILABLE_FILE_FINGERPRINT_NONCE
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CacheAdapterSpec {
     path: PathBuf,
-    fingerprint: Fingerprint,
+    fingerprint: CacheFileIdentity,
     scale_bits: u32,
     kind: AdapterKind,
     pass_scale_bits: Option<Vec<u32>>,
@@ -109,38 +159,83 @@ struct CacheIdentityWeights {
 }
 
 impl LoadIdentity {
+    #[cfg(test)]
     pub(crate) fn from_load_spec(engine_id: &str, spec: &LoadSpec) -> Self {
-        Self {
+        Self::try_from_load_spec(engine_id, spec)
+            .expect("unprepared LoadSpec cache identity remains infallible")
+    }
+
+    pub(crate) fn try_from_load_spec(engine_id: &str, spec: &LoadSpec) -> gen_core::Result<Self> {
+        spec.validate_prepared_file_pins()?;
+        Ok(Self {
             engine_id: engine_id.to_owned(),
-            weights: CacheWeightsSource::from(&spec.weights),
+            weights: CacheWeightsSource::from_spec(spec, &spec.weights)?,
             quantize: spec.quantize,
             precision: spec.precision,
-            control: spec.control.as_ref().map(CacheWeightsSource::from),
+            control: spec
+                .control
+                .as_ref()
+                .map(|source| CacheWeightsSource::from_spec(spec, source))
+                .transpose()?,
             extra_controls: spec
                 .extra_controls
                 .iter()
-                .map(CacheWeightsSource::from)
-                .collect(),
-            ip_adapter: spec.ip_adapter.as_ref().map(CacheWeightsSource::from),
-            adapters: spec.adapters.iter().map(CacheAdapterSpec::from).collect(),
-            pid: spec.pid.as_ref().map(|pid| {
-                (
-                    CacheWeightsSource::from(&pid.checkpoint),
-                    CacheWeightsSource::from(&pid.gemma),
-                )
-            }),
-            identity: spec.identity.as_ref().map(|identity| CacheIdentityWeights {
-                encoder: identity.encoder.as_ref().map(CacheWeightsSource::from),
-                eva: identity.eva.as_ref().map(CacheWeightsSource::from),
-                face_dir: identity.face_dir.as_ref().map(CacheWeightsSource::from),
-            }),
-            text_encoder: spec.text_encoder.as_ref().map(CacheWeightsSource::from),
+                .map(|source| CacheWeightsSource::from_spec(spec, source))
+                .collect::<gen_core::Result<_>>()?,
+            ip_adapter: spec
+                .ip_adapter
+                .as_ref()
+                .map(|source| CacheWeightsSource::from_spec(spec, source))
+                .transpose()?,
+            adapters: spec
+                .adapters
+                .iter()
+                .map(|adapter| CacheAdapterSpec::from_spec(spec, adapter))
+                .collect::<gen_core::Result<_>>()?,
+            pid: spec
+                .pid
+                .as_ref()
+                .map(|pid| {
+                    Ok::<_, gen_core::Error>((
+                        CacheWeightsSource::from_spec(spec, &pid.checkpoint)?,
+                        CacheWeightsSource::from_spec(spec, &pid.gemma)?,
+                    ))
+                })
+                .transpose()?,
+            identity: spec
+                .identity
+                .as_ref()
+                .map(|identity| {
+                    Ok::<_, gen_core::Error>(CacheIdentityWeights {
+                        encoder: identity
+                            .encoder
+                            .as_ref()
+                            .map(|source| CacheWeightsSource::from_spec(spec, source))
+                            .transpose()?,
+                        eva: identity
+                            .eva
+                            .as_ref()
+                            .map(|source| CacheWeightsSource::from_spec(spec, source))
+                            .transpose()?,
+                        face_dir: identity
+                            .face_dir
+                            .as_ref()
+                            .map(|source| CacheWeightsSource::from_spec(spec, source))
+                            .transpose()?,
+                    })
+                })
+                .transpose()?,
+            text_encoder: spec
+                .text_encoder
+                .as_ref()
+                .map(|source| CacheWeightsSource::from_spec(spec, source))
+                .transpose()?,
             components: spec
                 .components
                 .iter()
-                .map(|(id, source)| (id.clone(), CacheWeightsSource::from(source)))
-                .collect(),
-        }
+                .map(|(id, source)| Ok((id.clone(), CacheWeightsSource::from_spec(spec, source)?)))
+                .collect::<gen_core::Result<_>>()?,
+        })
     }
 }
 
@@ -173,28 +268,37 @@ fn log_warm_policy_mismatch(
     );
 }
 
-impl From<&WeightsSource> for CacheWeightsSource {
-    fn from(source: &WeightsSource) -> Self {
-        match source {
+impl CacheWeightsSource {
+    fn from_spec(spec: &LoadSpec, source: &WeightsSource) -> gen_core::Result<Self> {
+        Ok(match source {
             WeightsSource::Dir(path) => Self::Dir(path.clone(), Fingerprint::of(path)),
-            WeightsSource::File(path) => Self::File(path.clone(), Fingerprint::of(path)),
-        }
+            WeightsSource::File(path) => Self::File(
+                path.clone(),
+                Box::new(match spec.prepared_file_pin_for(path)? {
+                    Some(pin) => CacheFileIdentity::Prepared(pin.clone()),
+                    None => CacheFileIdentity::Fallback(CacheFileFingerprint::of(path)),
+                }),
+            ),
+        })
     }
 }
 
-impl From<&AdapterSpec> for CacheAdapterSpec {
-    fn from(spec: &AdapterSpec) -> Self {
-        Self {
-            path: spec.path.clone(),
-            fingerprint: Fingerprint::of(&spec.path),
-            scale_bits: spec.scale.to_bits(),
-            kind: spec.kind,
-            pass_scale_bits: spec
+impl CacheAdapterSpec {
+    fn from_spec(load_spec: &LoadSpec, adapter: &AdapterSpec) -> gen_core::Result<Self> {
+        Ok(Self {
+            path: adapter.path.clone(),
+            fingerprint: match load_spec.prepared_file_pin_for(&adapter.path)? {
+                Some(pin) => CacheFileIdentity::Prepared(pin.clone()),
+                None => CacheFileIdentity::Fallback(CacheFileFingerprint::of(&adapter.path)),
+            },
+            scale_bits: adapter.scale.to_bits(),
+            kind: adapter.kind,
+            pass_scale_bits: adapter
                 .pass_scales
                 .as_ref()
                 .map(|scales| scales.iter().map(|scale| scale.to_bits()).collect()),
-            moe_expert: spec.moe_expert,
-        }
+            moe_expert: adapter.moe_expert,
+        })
     }
 }
 
@@ -587,6 +691,46 @@ where
     .await
 }
 
+/// [`with_cached_generator_for_request`] with a cache-aware cold-load admission hook.
+///
+/// The hook runs on the cache thread only when this request is a genuine miss, immediately before a
+/// different resident key is dropped. An exact-key warm hit therefore never re-runs a pre-load gate
+/// (or evicts the generator it is about to use), while a different-key request can price the resident
+/// entry as reclaimable and then reload exactly once. Candle's imported/ComfyUI routes use this to
+/// keep their live-VRAM floor on the same lifecycle as the registered generator they now cache.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn with_cached_generator_for_request_after_cold_admission<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            ExecutionPolicy,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    with_cached_generator_for_request_after_cold_admission_using_on(
+        generator_worker(),
+        engine_id,
+        spec,
+        load_error_context,
+        incoming_reclaimable_weight_bytes,
+        cold_admission,
+        crate::inference_runtime::load,
+        run,
+    )
+    .await
+}
+
 /// [`with_cached_generator`] with the loader supplied by the caller — the seam a test injects a
 /// backend-neutral stub `Generator` through (sc-3724), so the load→progress→cancel→output contract can
 /// be driven with no tensor backend linked.
@@ -642,17 +786,20 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
 where
     R: Send + 'static,
 {
-    with_cached_generator_for_request_using_on(
+    with_cached_generator_for_request_after_cold_admission_using_on(
         generator_worker(),
         engine_id,
         spec,
         load_error_context,
+        0,
+        |_| Ok(()),
         load_generator,
         run,
     )
     .await
 }
 
+#[cfg(test)]
 async fn with_cached_generator_for_request_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
     engine_id: &'static str,
@@ -674,9 +821,50 @@ async fn with_cached_generator_for_request_using_on<R>(
 where
     R: Send + 'static,
 {
-    let key = LoadIdentity::from_load_spec(engine_id, &spec);
+    with_cached_generator_for_request_after_cold_admission_using_on(
+        worker,
+        engine_id,
+        spec,
+        load_error_context,
+        0,
+        |_| Ok(()),
+        load_generator,
+        run,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
+    worker: &mpsc::Sender<GeneratorJob>,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            ExecutionPolicy,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    let key = LoadIdentity::try_from_load_spec(engine_id, &spec).map_err(|error| {
+        crate::classify_engine_error("Generator cache source validation failed", error)
+    })?;
     let requested_policy = ExecutionPolicy::from_load_spec(&spec);
     let load_error_context = load_error_context.into();
+    let admission_spec = spec.clone();
+    let run_spec = spec.clone();
     // The loader owns the generator-specific cold-load policy. Pre-load unified-memory fit-gate +
     // residency selection (epic 10834; sc-10835 Phase 0, sc-10839 Phase 1): BEFORE crate::inference_runtime::load
     // allocates, either reject a model that can't fit this machine's unified memory (a wired
@@ -685,18 +873,35 @@ where
     // the resident sum won't fit but the staged max-single-component will. This runs only on a cold
     // miss (a warm cache hit never invokes the loader), so an already-resident model is never re-gated.
     let load = move || {
+        spec.validate_prepared_file_pins().map_err(|error| {
+            crate::classify_engine_error("Generator cold-load source validation failed", error)
+        })?;
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
+        spec.validate_prepared_file_pins().map_err(|error| {
+            crate::classify_engine_error(
+                "Generator residency-policy source validation failed",
+                error,
+            )
+        })?;
         let loaded_policy = ExecutionPolicy::from_load_spec(&spec);
         let external_committed_bytes = capture_external_committed_bytes();
         let generator = load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
+        let reclaimable_weight_bytes = match loaded_policy.offload_policy {
+            OffloadPolicy::Resident => incoming_reclaimable_weight_bytes,
+            OffloadPolicy::Sequential => 0,
+        };
         Ok(CachedGenerator {
             generator,
             loaded_policy,
             external_committed_bytes,
+            reclaimable_weight_bytes,
         })
     };
     let run = move |cached: &CachedGenerator, access| {
+        run_spec.validate_prepared_file_pins().map_err(|error| {
+            crate::classify_engine_error("Generator run source validation failed", error)
+        })?;
         let cache_state = match access {
             CacheAccess::Cold => MemoryCacheState::Cold,
             CacheAccess::Warm => MemoryCacheState::Warm,
@@ -710,7 +915,25 @@ where
             cached.external_committed_bytes,
         )
     };
-    cache_thread::run_cached_with_access(worker, key, load, run, GENERATOR_SEAM_MESSAGES).await
+    cache_thread::run_cached_with_access_after_cold_admission(
+        worker,
+        key,
+        move |resident| {
+            admission_spec
+                .validate_prepared_file_pins()
+                .map_err(|error| {
+                    crate::classify_engine_error(
+                        "Generator cold-admission source validation failed",
+                        error,
+                    )
+                })?;
+            cold_admission(resident.map_or(0, |cached| cached.reclaimable_weight_bytes))
+        },
+        load,
+        run,
+        GENERATOR_SEAM_MESSAGES,
+    )
+    .await
 }
 
 /// Run `run` against a freshly-loaded, **uncached** generator on the shared cache thread (epic 10451
@@ -959,13 +1182,12 @@ mod tests {
 
     #[test]
     fn cache_key_includes_adapter_fingerprint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let adapter = dir.path().join("style.safetensors");
+        std::fs::write(&adapter, b"adapter").expect("write adapter");
         let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
         let mut with_adapter = base.clone();
-        with_adapter.adapters = vec![AdapterSpec::new(
-            PathBuf::from("/loras/style.safetensors"),
-            0.8,
-            AdapterKind::Lora,
-        )];
+        with_adapter.adapters = vec![AdapterSpec::new(adapter, 0.8, AdapterKind::Lora)];
         let mut different_scale = with_adapter.clone();
         different_scale.adapters[0].scale = 0.9;
 
@@ -1008,61 +1230,68 @@ mod tests {
         }
     }
 
-    fn fully_populated_load_spec() -> LoadSpec {
-        let mut spec = LoadSpec::new(WeightsSource::File(PathBuf::from("/load/base.safetensors")));
+    fn fully_populated_load_spec(root: &Path) -> LoadSpec {
+        for file in [
+            "base.safetensors",
+            "control.safetensors",
+            "control-2.safetensors",
+            "control-3.safetensors",
+            "ip-adapter.safetensors",
+            "adapter-a.safetensors",
+            "adapter-b.safetensors",
+            "pid.safetensors",
+            "identity.safetensors",
+            "eva.safetensors",
+            "vae.safetensors",
+        ] {
+            std::fs::write(root.join(file), file.as_bytes()).expect("write load fixture");
+        }
+        for dir in ["gemma", "face", "text-encoder", "tokenizer"] {
+            std::fs::create_dir(root.join(dir)).expect("create load fixture directory");
+        }
+
+        let mut spec = LoadSpec::new(WeightsSource::File(root.join("base.safetensors")));
         spec.quantize = Some(Quant::Q4);
         spec.precision = Precision::Bf16;
-        spec.control = Some(WeightsSource::File(PathBuf::from(
-            "/load/control.safetensors",
-        )));
+        spec.control = Some(WeightsSource::File(root.join("control.safetensors")));
         spec.extra_controls = vec![
-            WeightsSource::File(PathBuf::from("/load/control-2.safetensors")),
-            WeightsSource::File(PathBuf::from("/load/control-3.safetensors")),
+            WeightsSource::File(root.join("control-2.safetensors")),
+            WeightsSource::File(root.join("control-3.safetensors")),
         ];
-        spec.ip_adapter = Some(WeightsSource::File(PathBuf::from(
-            "/load/ip-adapter.safetensors",
-        )));
+        spec.ip_adapter = Some(WeightsSource::File(root.join("ip-adapter.safetensors")));
         spec.adapters = vec![
-            AdapterSpec::new(
-                PathBuf::from("/load/adapter-a.safetensors"),
-                0.75,
-                AdapterKind::Lora,
-            )
-            .with_pass_scales(vec![0.25, 0.75])
-            .with_moe_expert(MoeExpert::High),
-            AdapterSpec::new(
-                PathBuf::from("/load/adapter-b.safetensors"),
-                1.25,
-                AdapterKind::Lokr,
-            )
-            .with_moe_expert(MoeExpert::Low),
+            AdapterSpec::new(root.join("adapter-a.safetensors"), 0.75, AdapterKind::Lora)
+                .with_pass_scales(vec![0.25, 0.75])
+                .with_moe_expert(MoeExpert::High),
+            AdapterSpec::new(root.join("adapter-b.safetensors"), 1.25, AdapterKind::Lokr)
+                .with_moe_expert(MoeExpert::Low),
         ];
         spec.pid = Some(gen_core::PidWeights {
-            checkpoint: WeightsSource::File(PathBuf::from("/load/pid.safetensors")),
-            gemma: WeightsSource::Dir(PathBuf::from("/load/gemma")),
+            checkpoint: WeightsSource::File(root.join("pid.safetensors")),
+            gemma: WeightsSource::Dir(root.join("gemma")),
         });
         spec.identity = Some(gen_core::IdentityWeights {
-            encoder: Some(WeightsSource::File(PathBuf::from(
-                "/load/identity.safetensors",
-            ))),
-            eva: Some(WeightsSource::File(PathBuf::from("/load/eva.safetensors"))),
-            face_dir: Some(WeightsSource::Dir(PathBuf::from("/load/face"))),
+            encoder: Some(WeightsSource::File(root.join("identity.safetensors"))),
+            eva: Some(WeightsSource::File(root.join("eva.safetensors"))),
+            face_dir: Some(WeightsSource::Dir(root.join("face"))),
         });
-        spec.text_encoder = Some(WeightsSource::Dir(PathBuf::from("/load/text-encoder")));
+        spec.text_encoder = Some(WeightsSource::Dir(root.join("text-encoder")));
         spec.components.insert(
             "tokenizer".to_owned(),
-            WeightsSource::Dir(PathBuf::from("/load/tokenizer")),
+            WeightsSource::Dir(root.join("tokenizer")),
         );
         spec.components.insert(
             "vae".to_owned(),
-            WeightsSource::File(PathBuf::from("/load/vae.safetensors")),
+            WeightsSource::File(root.join("vae.safetensors")),
         );
         spec
     }
 
     #[test]
     fn every_load_affecting_field_discriminates_load_identity() {
-        let base = fully_populated_load_spec();
+        let load_dir = tempfile::tempdir().expect("load tempdir");
+        let load_root = load_dir.path();
+        let base = fully_populated_load_spec(load_root);
         let identity = LoadIdentity::from_load_spec("provider", &base);
 
         macro_rules! assert_field_changes_identity {
@@ -1418,6 +1647,9 @@ mod tests {
 
     #[test]
     fn load_identity_includes_identity_text_encoder_and_named_components() {
+        let component_dir = tempfile::tempdir().expect("component tempdir");
+        let vae_path = component_dir.path().join("model.safetensors");
+        std::fs::write(&vae_path, b"vae").expect("write vae component");
         let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
 
         let mut identity = base.clone();
@@ -1437,16 +1669,10 @@ mod tests {
         let components = base
             .clone()
             .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")))
-            .with_component(
-                "vae",
-                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
-            );
+            .with_component("vae", WeightsSource::File(vae_path.clone()));
         let components_reversed = base
             .clone()
-            .with_component(
-                "vae",
-                WeightsSource::File(PathBuf::from("/vae/model.safetensors")),
-            )
+            .with_component("vae", WeightsSource::File(vae_path))
             .with_component("tokenizer", WeightsSource::Dir(PathBuf::from("/tokenizer")));
 
         let base_identity = LoadIdentity::from_load_spec("provider", &base);
@@ -1487,6 +1713,198 @@ mod tests {
             before, after,
             "replacing a named component at the same path must invalidate the resident generator"
         );
+    }
+
+    #[test]
+    fn cache_key_fingerprints_primary_file_and_named_companions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dit = dir.path().join("dit.safetensors");
+        let vae = dir.path().join("vae.safetensors");
+        std::fs::write(&dit, b"dit-v1").expect("write dit");
+        std::fs::write(&vae, b"vae-v1").expect("write vae");
+        let make_spec = || {
+            LoadSpec::new(WeightsSource::File(dit.clone()))
+                .with_component(
+                    gen_core::BASE_SNAPSHOT_COMPONENT,
+                    WeightsSource::Dir(dir.path().join("base")),
+                )
+                .with_component(
+                    gen_core::COMFYUI_VAE_COMPONENT,
+                    WeightsSource::File(vae.clone()),
+                )
+        };
+
+        let original = LoadIdentity::from_load_spec("qwen_image", &make_spec());
+        assert_eq!(
+            original,
+            LoadIdentity::from_load_spec("qwen_image", &make_spec()),
+            "an unchanged imported assembly must hit the cache"
+        );
+        std::fs::write(&vae, b"vae-v2-with-different-size").expect("replace vae");
+        let companion_changed = LoadIdentity::from_load_spec("qwen_image", &make_spec());
+        assert_ne!(
+            original, companion_changed,
+            "replacing a named companion must invalidate the imported generator"
+        );
+        std::fs::write(&dit, b"dit-v2-with-different-size").expect("replace dit");
+        assert_ne!(
+            companion_changed,
+            LoadIdentity::from_load_spec("qwen_image", &make_spec()),
+            "replacing the primary File must invalidate the imported generator"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_keys_detect_same_metadata_symlink_retarget_for_files_and_adapters() {
+        use std::fs::{File, FileTimes};
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, SystemTime};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("blob-a");
+        let second = dir.path().join("blob-b");
+        let selected = dir.path().join("model.safetensors");
+        std::fs::write(&first, b"same-size-a").expect("write first blob");
+        std::fs::write(&second, b"same-size-b").expect("write second blob");
+
+        // Reproduce the collision the old target-only `(len, mtime)` fingerprint could not see.
+        let common_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let times = FileTimes::new().set_modified(common_mtime);
+        File::options()
+            .write(true)
+            .open(&first)
+            .expect("open first blob")
+            .set_times(times)
+            .expect("set first mtime");
+        File::options()
+            .write(true)
+            .open(&second)
+            .expect("open second blob")
+            .set_times(times)
+            .expect("set second mtime");
+
+        symlink(&first, &selected).expect("link first blob");
+        let legacy_first = Fingerprint::of(&selected);
+        let make_file_spec = || LoadSpec::new(WeightsSource::File(selected.clone()));
+        let make_adapter_spec = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(dir.path().join("base-snapshot")));
+            spec.adapters = vec![AdapterSpec::new(selected.clone(), 0.8, AdapterKind::Lora)];
+            spec
+        };
+        let first_file_key = LoadIdentity::from_load_spec("krea_2_turbo", &make_file_spec());
+        let first_adapter_key = LoadIdentity::from_load_spec("krea_2_turbo", &make_adapter_spec());
+
+        std::fs::remove_file(&selected).expect("remove first link");
+        symlink(&second, &selected).expect("link second blob");
+        let legacy_second = Fingerprint::of(&selected);
+        assert_eq!(
+            legacy_first, legacy_second,
+            "fixture must collide under the former target-only length/mtime fingerprint"
+        );
+        assert_ne!(
+            first_file_key,
+            LoadIdentity::from_load_spec("krea_2_turbo", &make_file_spec()),
+            "retargeting the lexical checkpoint link must invalidate the resident generator"
+        );
+        assert_ne!(
+            first_adapter_key,
+            LoadIdentity::from_load_spec("krea_2_turbo", &make_adapter_spec()),
+            "retargeting an adapter link must invalidate the resident generator"
+        );
+    }
+
+    #[test]
+    fn prepared_cache_identity_is_exact_for_warm_cold_stale_and_every_file_slot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("weights.safetensors");
+        std::fs::write(&path, b"prepared-v1").expect("write v1");
+        let pin_v1 = PinnedWeightsFile::pin(&path).expect("pin v1");
+
+        let mut spec = LoadSpec::new(WeightsSource::File(path.clone()));
+        spec.control = Some(WeightsSource::File(path.clone()));
+        spec.extra_controls = vec![WeightsSource::File(path.clone())];
+        spec.ip_adapter = Some(WeightsSource::File(path.clone()));
+        spec.adapters = vec![AdapterSpec::new(path.clone(), 0.8, AdapterKind::Lora)];
+        spec.pid = Some(gen_core::PidWeights {
+            checkpoint: WeightsSource::File(path.clone()),
+            gemma: WeightsSource::File(path.clone()),
+        });
+        spec.identity = Some(gen_core::IdentityWeights {
+            encoder: Some(WeightsSource::File(path.clone())),
+            eva: Some(WeightsSource::File(path.clone())),
+            face_dir: Some(WeightsSource::File(path.clone())),
+        });
+        spec.text_encoder = Some(WeightsSource::File(path.clone()));
+        spec.components
+            .insert("overlay".to_owned(), WeightsSource::File(path.clone()));
+        spec.prepare_with_file_pins([pin_v1.clone()])
+            .expect("one deduplicated token covers every identical lexical File slot");
+
+        let key_v1 = LoadIdentity::try_from_load_spec("provider", &spec).expect("cold key v1");
+        assert_eq!(
+            key_v1,
+            LoadIdentity::try_from_load_spec("provider", &spec).expect("unchanged warm key"),
+            "an unchanged prepared token is a warm cache identity"
+        );
+        let assert_exact = |source: &CacheWeightsSource| match source {
+            CacheWeightsSource::File(_, identity) => match identity.as_ref() {
+                CacheFileIdentity::Prepared(stored) => assert_eq!(
+                    stored, &pin_v1,
+                    "cache stores the full exact prepared token"
+                ),
+                other => panic!("expected prepared File identity, got {other:?}"),
+            },
+            other => panic!("expected File identity, got {other:?}"),
+        };
+        assert_exact(&key_v1.weights);
+        assert_exact(key_v1.control.as_ref().expect("control"));
+        assert_exact(&key_v1.extra_controls[0]);
+        assert_exact(key_v1.ip_adapter.as_ref().expect("ip adapter"));
+        assert!(matches!(
+            &key_v1.adapters[0].fingerprint,
+            CacheFileIdentity::Prepared(stored) if stored == &pin_v1
+        ));
+        let (pid_checkpoint, pid_gemma) = key_v1.pid.as_ref().expect("pid");
+        assert_exact(pid_checkpoint);
+        assert_exact(pid_gemma);
+        let identity = key_v1.identity.as_ref().expect("identity");
+        assert_exact(identity.encoder.as_ref().expect("identity encoder"));
+        assert_exact(identity.eva.as_ref().expect("identity eva"));
+        assert_exact(identity.face_dir.as_ref().expect("identity face"));
+        assert_exact(key_v1.text_encoder.as_ref().expect("text encoder"));
+        assert_exact(&key_v1.components[0].1);
+
+        std::fs::write(&path, b"prepared-v2-is-longer").expect("replace weights");
+        LoadIdentity::try_from_load_spec("provider", &spec)
+            .expect_err("a stale prepared identity fails closed instead of falling back to re-pin");
+
+        let pin_v2 = PinnedWeightsFile::pin(&path).expect("pin v2");
+        // Prepared mode is intentionally sticky, so build the same load shape afresh for the new
+        // file identity rather than attempting to replace a finalized token set.
+        let mut new_spec = LoadSpec::new(WeightsSource::File(path.clone()));
+        new_spec.control = Some(WeightsSource::File(path.clone()));
+        new_spec.extra_controls = vec![WeightsSource::File(path.clone())];
+        new_spec.ip_adapter = Some(WeightsSource::File(path.clone()));
+        new_spec.adapters = vec![AdapterSpec::new(path.clone(), 0.8, AdapterKind::Lora)];
+        new_spec.pid = Some(gen_core::PidWeights {
+            checkpoint: WeightsSource::File(path.clone()),
+            gemma: WeightsSource::File(path.clone()),
+        });
+        new_spec.identity = Some(gen_core::IdentityWeights {
+            encoder: Some(WeightsSource::File(path.clone())),
+            eva: Some(WeightsSource::File(path.clone())),
+            face_dir: Some(WeightsSource::File(path.clone())),
+        });
+        new_spec.text_encoder = Some(WeightsSource::File(path.clone()));
+        new_spec
+            .components
+            .insert("overlay".to_owned(), WeightsSource::File(path));
+        new_spec
+            .prepare_with_file_pins([pin_v2])
+            .expect("new request prepares the new source identity");
+        let key_v2 = LoadIdentity::try_from_load_spec("provider", &new_spec).expect("cold key v2");
+        assert_ne!(key_v1, key_v2, "the replacement is a cold cache identity");
     }
 
     // -------------------------------------------------------------------------
@@ -1569,6 +1987,7 @@ mod tests {
                     load_shape: LoadShape::EagerMaterialization,
                 },
                 external_committed_bytes: 0,
+                reclaimable_weight_bytes: 0,
             },
         );
     }
@@ -1615,6 +2034,7 @@ mod tests {
                                 load_shape: LoadShape::DeferredMaterialization,
                             },
                             external_committed_bytes: 0,
+                            reclaimable_weight_bytes: 0,
                         })
                     },
                     |cached, access| Ok((access, cached.loaded_policy)),
@@ -1755,6 +2175,300 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn cold_admission_uses_exact_resident_credit_and_preserves_rejected_entry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || run_generator_cache_worker(rx, None));
+        let roots = tempfile::tempdir().expect("weights roots");
+        let first = roots.path().join("first");
+        let second = roots.path().join("second");
+        let sequential = roots.path().join("sequential");
+        let after_sequential = roots.path().join("after-sequential");
+        std::fs::create_dir_all(&first).expect("first weights");
+        std::fs::create_dir_all(&second).expect("second weights");
+        std::fs::create_dir_all(&sequential).expect("sequential weights");
+        std::fs::create_dir_all(&after_sequential).expect("post-sequential weights");
+        // A preselected policy keeps this cache-lifecycle test backend-neutral: the loader skips the
+        // macOS live-device fit probe, which is unavailable on headless CI.
+        let first_spec =
+            LoadSpec::new(WeightsSource::Dir(first)).with_offload_policy(OffloadPolicy::Resident);
+        let second_spec =
+            LoadSpec::new(WeightsSource::Dir(second)).with_offload_policy(OffloadPolicy::Resident);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let loads = Arc::new(AtomicUsize::new(0));
+
+        let cold_admissions = Arc::clone(&admissions);
+        let cold_loads = Arc::clone(&loads);
+        let first_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            first_spec.clone(),
+            "stub load",
+            20,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 0,
+                    "first load starts from an empty cache"
+                );
+                cold_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                cold_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("first cold request");
+        assert_eq!(first_access, MemoryCacheState::Cold);
+
+        let warm_admissions = Arc::clone(&admissions);
+        let warm_loads = Arc::clone(&loads);
+        let warm_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            first_spec.clone(),
+            "stub load",
+            20,
+            move |_| {
+                warm_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                warm_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("exact warm request");
+        assert_eq!(warm_access, MemoryCacheState::Warm);
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        let rejected_admissions = Arc::clone(&admissions);
+        let rejected_loads = Arc::clone(&loads);
+        let rejected = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            second_spec.clone(),
+            "stub load",
+            7,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 20,
+                    "different-key admission sees only the exact resident entry's credit"
+                );
+                rejected_admissions.fetch_add(1, Ordering::SeqCst);
+                Err(WorkerError::Engine(
+                    "fixture admission rejection".to_owned(),
+                ))
+            },
+            move |_id, spec| {
+                rejected_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await;
+        assert!(rejected.is_err(), "fixture admission rejects");
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "rejection never loads");
+
+        let retained_loads = Arc::clone(&loads);
+        let retained_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            first_spec,
+            "stub load",
+            20,
+            |_| panic!("the rejected replacement must leave the exact resident warm"),
+            move |_id, spec| {
+                retained_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("resident survives rejected replacement");
+        assert_eq!(retained_access, MemoryCacheState::Warm);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        let replacement_admissions = Arc::clone(&admissions);
+        let replacement_loads = Arc::clone(&loads);
+        let replacement_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            second_spec,
+            "stub load",
+            7,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 20,
+                    "accepted replacement receives the exact current entry's credit"
+                );
+                replacement_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                replacement_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("different-key replacement request");
+        assert_eq!(replacement_access, MemoryCacheState::Cold);
+        assert_eq!(admissions.load(Ordering::SeqCst), 3);
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+
+        let sequential_admissions = Arc::clone(&admissions);
+        let sequential_loads = Arc::clone(&loads);
+        let sequential_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            LoadSpec::new(WeightsSource::Dir(sequential))
+                .with_offload_policy(OffloadPolicy::Sequential),
+            "stub load",
+            100,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 7,
+                    "the outgoing resident entry retains its exact credit"
+                );
+                sequential_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                sequential_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, loaded_policy, _, _| {
+                assert_eq!(loaded_policy.offload_policy, OffloadPolicy::Sequential);
+                Ok(cache_state)
+            },
+        )
+        .await
+        .expect("sequential replacement request");
+        assert_eq!(sequential_access, MemoryCacheState::Cold);
+
+        let post_sequential_loads = Arc::clone(&loads);
+        let rejected_after_sequential =
+            with_cached_generator_for_request_after_cold_admission_using_on(
+                &tx,
+                "sc3724_stub",
+                LoadSpec::new(WeightsSource::Dir(after_sequential))
+                    .with_offload_policy(OffloadPolicy::Resident),
+                "stub load",
+                5,
+                move |resident_reclaimable_weight_bytes| {
+                    assert_eq!(
+                        resident_reclaimable_weight_bytes, 0,
+                        "a sequential entry must never expose its complete staged source floor"
+                    );
+                    Err(WorkerError::Engine(
+                        "fixture post-sequential rejection".to_owned(),
+                    ))
+                },
+                move |_id, spec| {
+                    post_sequential_loads.fetch_add(1, Ordering::SeqCst);
+                    stub_load(spec)
+                },
+                |_, cache_state, _, _, _| Ok(cache_state),
+            )
+            .await;
+        assert!(rejected_after_sequential.is_err());
+        assert_eq!(loads.load(Ordering::SeqCst), 3, "rejection never loads");
+
+        drop(tx);
+        worker.join().expect("cache worker exits");
+    }
+
+    #[tokio::test]
+    async fn prepared_spec_reaches_loader_exactly_and_drives_cold_warm_stale_new_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || run_generator_cache_worker(rx, None));
+        let temp = tempfile::tempdir().expect("weights root");
+        let path = temp.path().join("model.safetensors");
+        std::fs::write(&path, b"v1").expect("v1 writes");
+        let pin_v1 = PinnedWeightsFile::pin(&path).expect("v1 pins");
+        let mut spec_v1 = LoadSpec::new(WeightsSource::File(path.clone()))
+            .with_offload_policy(OffloadPolicy::Sequential);
+        spec_v1
+            .prepare_with_file_pins([pin_v1.clone()])
+            .expect("v1 spec prepares");
+        let loads = Arc::new(AtomicUsize::new(0));
+
+        let run_once = |spec: LoadSpec, expected: PinnedWeightsFile| {
+            let loads = Arc::clone(&loads);
+            async {
+                with_cached_generator_for_request_after_cold_admission_using_on(
+                    &tx,
+                    "sc3724_stub",
+                    spec,
+                    "stub load",
+                    0,
+                    |_| Ok(()),
+                    move |_id, received| {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(
+                            received.prepared_file_pins().get(expected.loader_path()),
+                            Some(&expected),
+                            "residency policy must preserve the exact token into runtime load"
+                        );
+                        stub_load(received)
+                    },
+                    |_, state, _, _, _| Ok(state),
+                )
+                .await
+            }
+        };
+
+        assert_eq!(
+            run_once(spec_v1.clone(), pin_v1.clone())
+                .await
+                .expect("v1 cold request"),
+            MemoryCacheState::Cold
+        );
+        assert_eq!(
+            run_once(spec_v1.clone(), pin_v1.clone())
+                .await
+                .expect("v1 warm request"),
+            MemoryCacheState::Warm
+        );
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "warm request does not reload"
+        );
+
+        std::fs::write(&path, b"v2-is-longer").expect("v2 replaces source");
+        let stale = run_once(spec_v1, pin_v1).await;
+        assert!(stale.is_err(), "stale prepared request fails closed");
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "stale request never loads");
+
+        let pin_v2 = PinnedWeightsFile::pin(&path).expect("v2 pins");
+        let mut spec_v2 =
+            LoadSpec::new(WeightsSource::File(path)).with_offload_policy(OffloadPolicy::Sequential);
+        spec_v2
+            .prepare_with_file_pins([pin_v2.clone()])
+            .expect("v2 spec prepares");
+        assert_eq!(
+            run_once(spec_v2, pin_v2).await.expect("v2 cold request"),
+            MemoryCacheState::Cold
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 2, "new identity reloads");
+
+        drop(tx);
+        worker.join().expect("cache worker exits");
     }
 
     #[test]

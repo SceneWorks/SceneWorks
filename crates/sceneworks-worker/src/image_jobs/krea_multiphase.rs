@@ -96,7 +96,7 @@ fn request_has_multiphase(request: &ImageRequest) -> bool {
 /// True when this is a Krea 2 **Raw** job carrying an explicit `advanced.phases` list and its Raw
 /// weights resolve locally — the multi-phase denoise lane (S4). Keyed on model `krea_2_raw` + a present
 /// `advanced.phases`, so EVERY job without `advanced.phases` is byte-for-byte unaffected. Placed FIRST
-/// among the `krea_2_raw` lanes in [`resolve_image_route`] so an explicit phase list takes precedence
+/// among the `krea_2_raw` lanes in [`prepare_image_route`] so an explicit phase list takes precedence
 /// over the S3 whole-job turbo-on-Raw regime and the generic Raw t2i. The lane itself rejects
 /// edit/pose/reference/PiD shapes loudly (multi-phase renders from pure noise), so the gate claims the
 /// job and surfaces a clear error rather than diverting a conflicting shape elsewhere.

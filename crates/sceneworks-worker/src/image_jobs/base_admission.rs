@@ -312,6 +312,131 @@ pub(super) async fn admit_candle_base_floor(
     }
 }
 
+/// A live-VRAM floor bound to a registered generator cache miss.
+///
+/// The runtime handle is captured on the async route before the closure crosses to the dedicated
+/// cache thread. [`Self::admit`] can then query `nvidia-smi` only when the cache reports a real miss,
+/// while the old different-key entry is still resident and the raw free-VRAM reading is meaningful.
+pub(super) struct CachedCandleBaseFloorAdmission {
+    model: String,
+    lane: &'static str,
+    gpu_id: String,
+    source_weight_bytes: u64,
+    runtime: tokio::runtime::Handle,
+}
+
+impl CachedCandleBaseFloorAdmission {
+    /// Exact conservative source-weight bytes to bind to the generator if this admission succeeds.
+    /// The transient headroom added to the incoming floor is deliberately excluded: evicting a
+    /// resident generator cannot promise to reclaim that allowance.
+    pub(super) fn reclaimable_weight_bytes(&self) -> u64 {
+        self.source_weight_bytes
+    }
+
+    /// Admit one cold load. `resident_reclaimable_weight_bytes` comes from the exact different-key
+    /// cache entry that remains alive until this gate succeeds. A historical process-global peak is
+    /// not valid credit: after large -> small, it can describe memory already returned to the driver.
+    pub(super) fn admit(self, resident_reclaimable_weight_bytes: u64) -> WorkerResult<()> {
+        let Some(floor_gb) = (self.source_weight_bytes > 0).then(|| {
+            self.source_weight_bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB
+        }) else {
+            tracing::warn!(
+                model = self.model,
+                lane = self.lane,
+                "candle base admission: explicitly un-gateable because the external checkpoint paths contain \
+                 no countable weights; admitting cold load without a floor (sc-16093/sc-18306)"
+            );
+            return Ok(());
+        };
+        let raw_budget = crate::vram_gate::apply_vram_cap(
+            self.runtime
+                .block_on(crate::gpu::nvidia_vram_budget_gb(&self.gpu_id)),
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let reclaimable_gb = resident_reclaimable_weight_bytes as f64 / BYTES_PER_GIB;
+        let budget = cached_floor_budget(raw_budget, resident_reclaimable_weight_bytes);
+        let needed = Some(floor_gb);
+        match crate::vram_gate::load_plan(needed, None, budget, false) {
+            LoadPlan::Resident => {
+                tracing::info!(
+                    model = self.model,
+                    lane = self.lane,
+                    floor_gb,
+                    replacing_resident = resident_reclaimable_weight_bytes > 0,
+                    reclaimable_gb,
+                    "candle cached-base admission: cold external checkpoint admitted on its on-disk \
+                     weights floor; activation peaks remain unmeasured (sc-18306)"
+                );
+                Ok(())
+            }
+            LoadPlan::Sequential => {
+                unreachable!("a floor-only route is never sequential-capable")
+            }
+            LoadPlan::Reject => Err(reject_message(
+                &self.model,
+                self.lane,
+                None,
+                floor_gb,
+                budget.map_or(0.0, |budget| budget.free_gb),
+                &self.gpu_id,
+                false,
+            )),
+        }
+    }
+}
+
+/// Prepare the cheap, immutable portion of a cached imported/ComfyUI floor. No GPU query or gate is
+/// performed here; those happen only from the cache's cold-load hook.
+pub(super) fn prepare_cached_candle_base_floor(
+    model: &str,
+    lane: &'static str,
+    settings: &Settings,
+    spec: &LoadSpec,
+    companion_dirs: &[&Path],
+) -> WorkerResult<CachedCandleBaseFloorAdmission> {
+    let bytes = prepared_floor_weight_bytes(lane, spec, companion_dirs)?;
+    Ok(CachedCandleBaseFloorAdmission {
+        model: model.to_owned(),
+        lane,
+        gpu_id: settings.gpu_id.clone(),
+        source_weight_bytes: bytes,
+        runtime: tokio::runtime::Handle::current(),
+    })
+}
+
+fn cached_floor_budget(
+    raw_budget: Option<crate::vram_gate::VramBudget>,
+    resident_reclaimable_weight_bytes: u64,
+) -> Option<crate::vram_gate::VramBudget> {
+    let reclaimable_gb = resident_reclaimable_weight_bytes as f64 / BYTES_PER_GIB;
+    raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb))
+}
+
+fn prepared_floor_weight_bytes(
+    lane: &str,
+    spec: &LoadSpec,
+    companion_dirs: &[&Path],
+) -> WorkerResult<u64> {
+    if !spec.prepared_file_pins().is_prepared() {
+        return Err(WorkerError::Engine(format!(
+            "{lane} admission requires a finalized prepared LoadSpec"
+        )));
+    }
+    spec.validate_prepared_file_pins().map_err(|error| {
+        crate::classify_engine_error(&format!("{lane} source validation failed"), error)
+    })?;
+    // File bytes come from the exact target fingerprints captured during lexical pinning. This
+    // deliberately does not call metadata on File slots; companion directories remain recursive
+    // because directory snapshots are outside gen-core's single-file token model.
+    let file_bytes = spec
+        .prepared_file_pins()
+        .iter()
+        .fold(0_u64, |total, (_, pin)| {
+            total.saturating_add(pin.target_fingerprint().size)
+        });
+    Ok(file_bytes.saturating_add(distinct_weight_bytes(companion_dirs)))
+}
+
 /// Imported SDXL already materializes a `LoadSpec` containing its external checkpoint,
 /// adapters, PiD weights, and caller-staged components. Price exactly those sources.
 pub(super) async fn admit_candle_load_spec_floor(
@@ -334,6 +459,97 @@ pub(super) async fn admit_candle_load_spec_floor(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn imported_file_floor_excludes_the_replaced_snapshot_transformer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let imported = temp.path().join("imported.safetensors");
+        let base = temp.path().join("base");
+        let text_encoder = base.join("text_encoder");
+        let vae = base.join("vae");
+        let replaced_transformer = base.join("transformer");
+        std::fs::create_dir_all(&text_encoder).expect("text encoder dir");
+        std::fs::create_dir_all(&vae).expect("vae dir");
+        std::fs::create_dir_all(&replaced_transformer).expect("transformer dir");
+        std::fs::write(&imported, vec![0_u8; 11]).expect("imported weights");
+        std::fs::write(text_encoder.join("model.safetensors"), vec![0_u8; 13])
+            .expect("text encoder weights");
+        std::fs::write(vae.join("model.safetensors"), vec![0_u8; 17]).expect("vae weights");
+        std::fs::write(
+            replaced_transformer.join("model.safetensors"),
+            vec![0_u8; 19],
+        )
+        .expect("snapshot transformer weights");
+
+        let consumed =
+            distinct_weight_bytes(&[imported.as_path(), text_encoder.as_path(), vae.as_path()]);
+        let recursively_priced = distinct_weight_bytes(&[imported.as_path(), base.as_path()]);
+        assert_eq!(consumed, 11 + 13 + 17);
+        assert_eq!(recursively_priced, consumed + 19);
+        assert!(
+            consumed < recursively_priced,
+            "the companion snapshot's replaced transformer must stay outside the imported-file floor"
+        );
+    }
+
+    #[test]
+    fn prepared_floor_uses_token_target_size_and_propagates_stale_source_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let imported = temp.path().join("imported.safetensors");
+        let companion = temp.path().join("text_encoder");
+        std::fs::create_dir_all(&companion).expect("companion creates");
+        std::fs::write(&imported, vec![0_u8; 11]).expect("imported weights");
+        std::fs::write(companion.join("model.safetensors"), vec![0_u8; 13])
+            .expect("companion weights");
+
+        let pin = gen_core::PinnedWeightsFile::pin(&imported).expect("primary pins");
+        assert_eq!(pin.target_fingerprint().size, 11);
+        let mut spec = LoadSpec::new(WeightsSource::File(imported.clone()));
+        spec.prepare_with_file_pins([pin]).expect("spec prepares");
+        assert_eq!(
+            prepared_floor_weight_bytes("fixture", &spec, &[companion.as_path()])
+                .expect("prepared floor accounts"),
+            24,
+            "File bytes come from the prepared target fingerprint and companions remain recursive"
+        );
+
+        std::fs::write(&imported, vec![1_u8; 17]).expect("primary replacement writes");
+        let error = prepared_floor_weight_bytes("fixture", &spec, &[companion.as_path()])
+            .expect_err("stale prepared sources propagate instead of being restatted/swallowed");
+        assert!(
+            error.to_string().contains("source validation failed")
+                || error.to_string().contains("changed after load"),
+            "unexpected stale-source error: {error}"
+        );
+    }
+
+    #[test]
+    fn cached_floor_credits_only_the_exact_current_resident_source_bytes() {
+        // Large -> small -> medium on a 24 GiB card. Raw free is 4 GiB while the current small
+        // resident occupies a conservative 4 GiB of source weights. A stale 20 GiB historical peak
+        // would clamp the budget to 24 GiB and admit the 12 GiB incoming floor even though evicting
+        // the small resident can produce only 8 GiB. Cache-bound credit must therefore reject.
+        let raw = crate::vram_gate::VramBudget {
+            free_gb: 4.0,
+            total_gb: 24.0,
+        };
+        let current_small_bytes = (4.0 * BYTES_PER_GIB) as u64;
+        let exact = cached_floor_budget(Some(raw), current_small_bytes).expect("budget");
+        assert_eq!(exact.free_gb, 8.0);
+        assert_eq!(
+            crate::vram_gate::load_plan(Some(12.0), None, Some(exact), false),
+            LoadPlan::Reject,
+            "the medium load must not receive credit for an older large resident"
+        );
+
+        let stale_historical = crate::vram_gate::with_reclaimable(raw, 20.0);
+        assert_eq!(stale_historical.free_gb, 24.0);
+        assert_eq!(
+            crate::vram_gate::load_plan(Some(12.0), None, Some(stale_historical), false),
+            LoadPlan::Resident,
+            "precondition: the stale global high-water would have over-admitted"
+        );
+    }
 
     #[test]
     fn catalog_evidence_requires_a_per_tier_row_not_the_static_minimum() {

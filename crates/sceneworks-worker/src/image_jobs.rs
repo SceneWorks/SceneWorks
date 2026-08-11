@@ -257,7 +257,7 @@ pub(crate) async fn run_image_generate_job(
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
     #[cfg(target_os = "macos")]
-    let route = resolve_image_route(&request, settings);
+    let route = prepare_image_route(&request, settings)?;
     // Whether — and from what — every image this job writes embeds its sanitized workflow
     // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
     // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
@@ -267,8 +267,12 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(target_os = "macos")]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
-        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
-        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        route.as_ref().map_or(request.count, |route| {
+            route.kind().image_count(&request, settings)
+        }) * upscale_mult,
+        route
+            .as_ref()
+            .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request)),
         workflow_source,
     );
     // Windows/CUDA candle lane: resolve the candle dispatch branch once and bake THAT branch's real
@@ -279,12 +283,16 @@ pub(crate) async fn run_image_generate_job(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let route = resolve_candle_image_route(&request, settings);
+    let route = prepare_candle_image_route(&request, settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
-        route.map_or(request.count, |route| route.image_count(&request, settings)) * upscale_mult,
-        route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request)),
+        route.as_ref().map_or(request.count, |route| {
+            route.kind().image_count(&request, settings)
+        }) * upscale_mult,
+        route
+            .as_ref()
+            .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request)),
         workflow_source,
     );
     #[cfg(all(
@@ -320,11 +328,15 @@ pub(crate) async fn run_image_generate_job(
         let route_applies_loras = {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             {
-                route.is_some_and(|route| route.applies_request_loras(&request))
+                route
+                    .as_ref()
+                    .is_some_and(|route| route.kind().applies_request_loras(&request))
             }
             #[cfg(target_os = "macos")]
             {
-                route.is_some_and(ImageRoute::applies_request_loras)
+                route
+                    .as_ref()
+                    .is_some_and(|route| route.kind().applies_request_loras())
             }
         };
         if plan.workflow_source.is_some() && route_applies_loras {
@@ -355,7 +367,7 @@ pub(crate) async fn run_image_generate_job(
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
     let handled = if let Some(route) = route {
-        match route {
+        match route.kind() {
             ImageRoute::ZImageControl => {
                 // Z-Image strict-pose (advanced.poses) → Fun-Controlnet-Union, one image per pose.
                 generate_zimage_control_stream(
@@ -530,11 +542,17 @@ pub(crate) async fn run_image_generate_job(
                 // Imported single-file Krea 2 checkpoint + strict-pose set: the trained pose
                 // control-branch overlay rides the file-loaded imported DiT (the imported twin of
                 // the `KreaControl` arm above), one pose-locked image per pose.
+                let PreparedImageRoute::KreaImportedControl(sources) = route else {
+                    unreachable!("Krea imported-control route missing its prepared sources")
+                };
                 generate_krea_imported_control_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -545,11 +563,17 @@ pub(crate) async fn run_image_generate_job(
                 // Imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): pair the
                 // imported DiT with a resident `krea_2` base tier (shared TE/VAE/tokenizer) and load via
                 // the S0b MLX native single-file entrypoint. txt2img, `count` renders each its own seed.
+                let PreparedImageRoute::KreaImported(sources) = route else {
+                    unreachable!("Krea imported route missing its prepared sources")
+                };
                 generate_krea_imported_stream(
                     api,
                     settings,
                     job,
-                    &plan,
+                    PreparedFileDispatch {
+                        plan: &plan,
+                        sources: *sources,
+                    },
                     &project_path,
                     backend,
                     &mut asset_writes,
@@ -708,7 +732,7 @@ pub(crate) async fn run_image_generate_job(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let handled = match route {
         Some(route) => {
-            match route {
+            match route.kind() {
                 // InstantID (sc-5491, epic 5480): the candle InstantID provider's bespoke path (the
                 // off-Mac sibling of the macOS `ImageRoute::InstantId` arm).
                 CandleImageRoute::InstantId => {
@@ -787,11 +811,17 @@ pub(crate) async fn run_image_generate_job(
                 // forwarded row carries the DiT/TE/VAE component paths — render the user's ComfyUI weights
                 // in place via `runtime_cuda::providers::z_image::load_from_comfyui_components`.
                 CandleImageRoute::ZimageComfyui => {
+                    let PreparedCandleImageRoute::ZimageComfyui(sources) = route else {
+                        unreachable!("Z-Image ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_zimage_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -799,11 +829,17 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::QwenImageComfyui => {
+                    let PreparedCandleImageRoute::QwenImageComfyui(sources) = route else {
+                        unreachable!("Qwen ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_qwen_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -815,11 +851,17 @@ pub(crate) async fn run_image_generate_job(
                 // weights in place via `runtime_cuda::providers::flux2::load_from_comfyui_dit` (inline-scale fp8 dequant
                 // + BFL→diffusers remap; TE/VAE/tokenizer from a resident FLUX.2-dev snapshot).
                 CandleImageRoute::Flux2Comfyui => {
+                    let PreparedCandleImageRoute::Flux2Comfyui(sources) = route else {
+                        unreachable!("FLUX.2 ComfyUI route missing its prepared sources")
+                    };
                     generate_candle_flux2_comfyui_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1054,11 +1096,17 @@ pub(crate) async fn run_image_generate_job(
                 // entrypoint. The resolver has already proved this is a non-builtin, single-file,
                 // unconditioned request; keep it distinct from the builtin registry path.
                 CandleImageRoute::KreaImported => {
+                    let PreparedCandleImageRoute::KreaImported(sources) = route else {
+                        unreachable!("Krea imported route missing its prepared sources")
+                    };
                     generate_krea_imported_stream(
                         api,
                         settings,
                         job,
-                        &plan,
+                        PreparedFileDispatch {
+                            plan: &plan,
+                            sources: *sources,
+                        },
                         &project_path,
                         backend,
                         &mut asset_writes,
@@ -1436,6 +1484,31 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
         )));
     }
     Ok(file)
+}
+
+/// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
+/// confined as directories, then their selected child is independently pinned and confined so a
+/// child symlink cannot inherit trust from its parent.
+#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
+fn resolve_prepared_adapter_file(
+    lora: &Value,
+    settings: &Settings,
+) -> WorkerResult<gen_core::PinnedWeightsFile> {
+    let raw = lora_path(lora)
+        .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
+    let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
+    let candidate = if confined.is_dir() {
+        let directory = confined;
+        crate::resolve_adapter_in_dir(&directory, declared_adapter_file(lora)).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "LoRA has no .safetensors under {}",
+                directory.display()
+            ))
+        })?
+    } else {
+        raw
+    };
+    crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
 }
 
 /// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
@@ -2905,7 +2978,7 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor, admit_candle_load_spec_floor,
+    admit_candle_base, admit_candle_load_spec_floor, prepare_cached_candle_base_floor,
     safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
@@ -2969,14 +3042,14 @@ use zimage_edit_candle::zimage_edit_candle_available;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_comfyui_candle::{generate_candle_zimage_comfyui_stream, zimage_comfyui_available};
+use zimage_comfyui_candle::generate_candle_zimage_comfyui_stream;
 // Qwen-Image txt2img from an in-place ComfyUI DiT (plain fp8_e4m3fn → bf16) — the Windows/CUDA candle
 // lane ONLY (sc-10670, epic 10451 Phase 2b). Sibling of the Z-Image comfyui lane; TE/VAE/tokenizer come
 // from a resident `SceneWorks/qwen-image-mlx` snapshot tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_available};
+use qwen_comfyui_candle::generate_candle_qwen_comfyui_stream;
 // FLUX.2-dev txt2img from an in-place ComfyUI fp8-mixed DiT (inline-scale fp8 dequant → f32, then
 // quantized onto the GPU) — the Windows/CUDA candle lane ONLY (sc-10680, epic 10451 Phase 2e). Sibling
 // of the Qwen-Image comfyui lane; the Mistral-3 TE / VAE / tokenizer come from a resident FLUX.2-dev
@@ -2984,7 +3057,7 @@ use qwen_comfyui_candle::{generate_candle_qwen_comfyui_stream, qwen_comfyui_avai
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod flux2_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use flux2_comfyui_candle::{flux2_comfyui_available, generate_candle_flux2_comfyui_stream};
+use flux2_comfyui_candle::generate_candle_flux2_comfyui_stream;
 // Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
 // epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
 // `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with

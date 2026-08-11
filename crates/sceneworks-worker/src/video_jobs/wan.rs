@@ -1337,44 +1337,22 @@ impl Default for VideoGenInput {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
-    LoadSpec {
-        weights: WeightsSource::Dir(input.model_dir.clone()),
-        quantize: input.quant,
-        precision: Precision::Bf16,
-        control: None,
-        // MultiControlNet (sc-3378) is image-only; video providers ignore it.
-        extra_controls: Vec::new(),
-        ip_adapter: None,
-        adapters: input.adapters.clone(),
-        // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
-        // providers have no PiD backbone, so never request it.
-        pid: None,
-        // Video providers are not face-ID models — no identity sub-model weights.
-        identity: None,
-        // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
-        // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
-        text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
-        // Residency policy (sc-12631). `Resident` for every path historically; the candle A14B flips it
-        // to `Sequential` (`generate_candle_video_using` → `candle_video_offload_policy`) so the two
-        // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
-        // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
-        offload_policy: input.offload_policy,
-        // Video providers retain their historical eager materialization. Deferred block streaming
-        // is currently an explicit Z-Image load shape, independent of phase residency (SC-15998).
-        load_shape: Default::default(),
-        // Named model components (epic 13657). Video providers advertise no `required_components`, so the
-        // map is empty by default. The one exception is LTX-2.3's OPTIONAL `uncensored_enhancer` (sc-2845
-        // / sc-13664): when a `useUncensoredEnhancer` job resolved the amoral 4-bit Gemma snapshot, stage
-        // it here so the provider loads it on demand instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` /
-        // HF-cache scan. Absent ⇒ empty map, the video load path unchanged.
-        components: input
-            .uncensored_enhancer_dir
-            .clone()
-            .map(|dir| {
-                BTreeMap::from([("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))])
-            })
-            .unwrap_or_default(),
-    }
+    let mut spec = LoadSpec::new(WeightsSource::Dir(input.model_dir.clone()));
+    spec.quantize = input.quant;
+    spec.precision = Precision::Bf16;
+    spec.adapters = input.adapters.clone();
+    // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` retains the provider's
+    // legacy fallback. Video providers otherwise have no image-only control/PiD/identity sources.
+    spec.text_encoder = input.text_encoder_dir.clone().map(WeightsSource::Dir);
+    // Never downgrade a Sequential policy selected by the candle A14B route.
+    spec.offload_policy = input.offload_policy;
+    // LTX-2.3's optional uncensored enhancer is the only named video component.
+    spec.components = input
+        .uncensored_enhancer_dir
+        .clone()
+        .map(|dir| BTreeMap::from([("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))]))
+        .unwrap_or_default();
+    spec
 }
 
 /// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already

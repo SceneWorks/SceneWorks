@@ -1,9 +1,10 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_gen_stream, ApiClient, GenerationOutput,
-    GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf, Quant,
-    Settings, Value, WorkerError, WorkerResult,
+    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
+    ApiClient, ColdLoadAdmission, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot,
+    JsonObject, LoadSpec, Path, PathBuf, PreparedFileDispatch, Quant, Settings, Value,
+    WeightsSource, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -20,10 +21,8 @@ use serde_json::json;
 // `modelManifestEntry` carries `family:"flux2"`, `usable:true`, `quant:"fp8_inline_scale"`, and a
 // `components[]` list whose `transformer` entry is the DiT path.
 //
-// **Candle-only**, and a **bespoke provider** (like the Qwen-Image comfyui lane): the loaded generator
-// is not registry-resolvable (its DiT is a single in-place file, not a diffusers snapshot dir), so it is
-// loaded fresh per job through `start_gen_stream`. This file is a child module of the `image_jobs`
-// module, sharing its imports.
+// **Candle-only**, but the imported assembly now uses the registered `flux2_dev` provider and its
+// normal cache/fit/residency lifecycle (sc-18306).
 
 /// The adapter/engine id recorded on candle ComfyUI FLUX.2-dev assets + telemetry (distinct from the
 /// registry `candle` flux2 txt2img and the `flux2_dev` edit/control lanes).
@@ -52,9 +51,9 @@ pub(super) const FLUX2_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["bf16", "q8", "q4"];
 pub(super) const FLUX2_COMFYUI_DEFAULT_QUANT: Quant = Quant::Q8;
 
 /// The in-place ComfyUI DiT file + the resident snapshot tier dir supplying the other components.
-struct ComfyuiFlux2Paths {
+pub(super) struct ComfyuiFlux2Paths {
     /// ComfyUI FLUX.2-dev DiT (`diffusion_models/flux2_dev_fp8mixed.safetensors`), read in place.
-    transformer: PathBuf,
+    transformer: gen_core::PinnedWeightsFile,
     /// A resident `SceneWorks/flux2-dev-mlx` tier dir (`text_encoder/ vae/ tokenizer/tokenizer.json`).
     snapshot_dir: PathBuf,
 }
@@ -63,10 +62,10 @@ struct ComfyuiFlux2Paths {
 /// `external_base_*` row. Returns `Ok(None)` when this is not a runnable ComfyUI FLUX.2-dev job (wrong
 /// family, not marked usable, no transformer component, or our FLUX.2-dev snapshot is not resident), so
 /// the router falls through rather than erroring. The DiT path is confined by
-/// `normalize_app_managed_model_path` (widened to admit the operator's external roots, sc-10668) — a
-/// payload can never point it outside a declared root (epic 4484). The snapshot dir is resolved from a
-/// fixed repo constant + our own cache (never payload-derived), so it needs no confinement.
-fn resolve_flux2_comfyui_paths(
+/// `normalize_app_managed_model_file_path`: its canonical target must stay within a declared root while
+/// the lexical entry survives for lstat-pinned re-opening (sc-18306). The snapshot dir is resolved from
+/// a fixed repo constant + our own cache (never payload-derived), so it needs no confinement.
+pub(super) fn resolve_flux2_comfyui_paths(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
@@ -110,9 +109,9 @@ fn resolve_flux2_comfyui_paths(
         return Ok(None);
     };
     Ok(Some(ComfyuiFlux2Paths {
-        transformer: crate::paths::normalize_app_managed_model_path(
+        transformer: crate::paths::pin_app_managed_model_file(
             settings,
-            transformer,
+            Path::new(transformer),
             "ComfyUI FLUX.2-dev transformer",
         )?,
         snapshot_dir,
@@ -122,11 +121,28 @@ fn resolve_flux2_comfyui_paths(
 /// True when this is a candle-runnable in-place ComfyUI FLUX.2-dev txt2img job: an `external_base_*`
 /// model whose forwarded row is a usable flux2 with a transformer component + a resident snapshot, no
 /// source image / pose (txt2img only). Mirrors the Qwen-Image comfyui availability predicate.
+#[cfg(test)]
 pub(super) fn flux2_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model.starts_with("external_base_")
-        && request.mode != "edit_image"
-        && pose_entries(request).is_empty()
-        && matches!(resolve_flux2_comfyui_paths(request, settings), Ok(Some(_)))
+    matches!(
+        prepare_flux2_comfyui_sources(request, settings),
+        Ok(Some(_))
+    )
+}
+
+/// Resolve and pin the complete source bundle for a production dispatch. The returned bundle remains
+/// owned by the route until the handler consumes it, so the external transformer cannot be re-selected
+/// after the scheduler/admission gap.
+pub(super) fn prepare_flux2_comfyui_sources(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
+    if !request.model.starts_with("external_base_")
+        || request.mode == "edit_image"
+        || !pose_entries(request).is_empty()
+    {
+        return Ok(None);
+    }
+    resolve_flux2_comfyui_paths(request, settings)
 }
 
 /// The compute quant the DiT + snapshot TE fold onto the GPU at: `advanced.quant` (`q4`/`q8`), else the
@@ -261,73 +277,84 @@ fn flux2_comfyui_raw_settings(
     raw
 }
 
-/// Real candle in-place ComfyUI FLUX.2-dev txt2img generation: resolve + confine the DiT path and
-/// resolve the snapshot tier on the async side, then `load_from_comfyui_dit` once + generate each image
-/// on the blocking thread. `request.count` images, each its own seed. FLUX.2-dev is guidance-distilled
-/// (embedded scalar, single forward — NO negative prompt / true-CFG pass). The loaded `Box<dyn
-/// Generator>` is bespoke (not registry-cached), driven like the Qwen-Image comfyui lane.
+/// Finalize the route-owned transformer token on the exact provider spec while retaining the
+/// structural companion snapshot for admission. Regression tests call this same production seam.
+pub(super) fn prepare_flux2_comfyui_load_spec(
+    paths: ComfyuiFlux2Paths,
+    quant: Quant,
+) -> WorkerResult<(LoadSpec, PathBuf)> {
+    let snapshot_dir = paths.snapshot_dir;
+    let mut spec = LoadSpec::new(WeightsSource::File(
+        paths.transformer.loader_path().to_path_buf(),
+    ))
+    .with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(snapshot_dir.clone()),
+    )
+    .with_quant(quant);
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        [paths.transformer],
+        "ComfyUI FLUX.2 source preparation failed",
+    )?;
+    Ok((spec, snapshot_dir))
+}
+
+/// Real candle in-place ComfyUI FLUX.2-dev txt2img generation through the registered `flux2_dev`
+/// provider. `request.count` images, each its own seed. FLUX.2-dev is guidance-distilled (embedded
+/// scalar, single forward — NO negative prompt / true-CFG pass).
 pub(super) async fn generate_candle_flux2_comfyui_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    plan: &ImagePlan,
+    dispatch: PreparedFileDispatch<'_, ComfyuiFlux2Paths>,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let PreparedFileDispatch {
+        plan,
+        sources: paths,
+    } = dispatch;
     let request = &plan.request;
-    let paths = resolve_flux2_comfyui_paths(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "ComfyUI FLUX.2-dev components could not be resolved (family/usable/transformer/snapshot)"
-                .to_owned(),
-        )
-    })?;
-    let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
-    let snapshot_vae = paths.snapshot_dir.join("vae");
-    admit_candle_base_floor(
-        &request.model,
-        "ComfyUI FLUX.2",
-        settings,
-        &[
-            paths.transformer.as_path(),
-            snapshot_text_encoder.as_path(),
-            snapshot_vae.as_path(),
-        ],
-    )
-    .await?;
-
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
     let guidance = flux2_comfyui_guidance(request);
     let quant = flux2_comfyui_quant(request);
     let raw_settings = flux2_comfyui_raw_settings(request, steps, guidance, quant);
+    let (spec, snapshot_dir) = prepare_flux2_comfyui_load_spec(paths, quant)?;
+    // The companion snapshot supplies TE/VAE/tokenizer/config only. Its own transformer is replaced;
+    // finalized File bytes and only the consumed companion dirs feed admission.
+    let snapshot_text_encoder = snapshot_dir.join("text_encoder");
+    let snapshot_vae = snapshot_dir.join("vae");
+    let cold_admission = prepare_cached_candle_base_floor(
+        &request.model,
+        "ComfyUI FLUX.2",
+        settings,
+        &spec,
+        &[snapshot_text_encoder.as_path(), snapshot_vae.as_path()],
+    )?;
 
     // Per-image work items: (seed, prompt) — `request.count` renders.
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+    let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
-        "flux2_comfyui",
+        "flux2_dev",
         0,
-        move || {
-            let ComfyuiFlux2Paths {
-                transformer,
-                snapshot_dir,
-            } = paths;
-            let model = runtime_cuda::providers::flux2::load_from_comfyui_dit(
-                transformer,
-                snapshot_dir,
-                Some(quant),
-            )
-            .map_err(|error| {
-                WorkerError::Engine(format!("ComfyUI FLUX.2-dev load failed: {error}"))
-            })?;
-            Ok(model)
-        },
+        spec,
+        "ComfyUI FLUX.2-dev load failed".to_owned(),
+        ColdLoadAdmission::new(
+            incoming_reclaimable_weight_bytes,
+            move |resident_reclaimable_weight_bytes| {
+                cold_admission.admit(resident_reclaimable_weight_bytes)
+            },
+        ),
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,
