@@ -177,6 +177,45 @@ where
         run(&entry.model, access)
     }
 
+    /// SCAIL-specific cold admission seam: reuse a matching resident without calling
+    /// `cold_admission`; on a miss, drop the old resident, then admit and load while this cache
+    /// thread still holds the only mutable cache reference. Existing cache users intentionally stay
+    /// on [`Self::with_model_access`]; this extra seam prevents SCAIL from doing a racy external
+    /// peek-then-act check while leaving every other loader byte-for-byte unchanged.
+    #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+    pub(crate) fn with_model_access_after_cold_evict<R>(
+        &mut self,
+        key: K,
+        cold_admission: impl FnOnce() -> WorkerResult<()>,
+        load: impl FnOnce() -> WorkerResult<M>,
+        run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R>,
+        entry_missing_msg: &str,
+    ) -> WorkerResult<R> {
+        let access = if self.entry.as_ref().is_some_and(|entry| entry.key == key) {
+            CacheAccess::Warm
+        } else {
+            // A full Candle generator/device drop returns the resident cudarc allocation to the
+            // driver. Admission therefore samples the real post-evict budget, without guessing at
+            // reclaimable bytes. A rejection deliberately leaves the single slot cold.
+            self.entry = None;
+            if self.evict_before_load {
+                release_backend_cache_after_evict();
+            }
+            cold_admission()?;
+            let model = load()?;
+            self.entry = Some(Entry {
+                key: key.clone(),
+                model,
+            });
+            CacheAccess::Cold
+        };
+
+        let Some(entry) = self.entry.as_ref() else {
+            return Err(WorkerError::Engine(entry_missing_msg.to_owned()));
+        };
+        run(&entry.model, access)
+    }
+
     /// Whether a model is currently resident. Test/introspection helper.
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
@@ -338,6 +377,57 @@ where
         .map_err(|_| WorkerError::Engine(msgs.worker_dropped.to_owned()))?
 }
 
+/// SCAIL-only sibling of [`run_cached_with_access`]. The admission closure runs on the dedicated
+/// cache worker after a true miss has dropped its resident and before the incoming loader allocates;
+/// a warm hit never invokes it. Taking an owned sender keeps the production worker and isolated race
+/// tests on the identical serialized job seam without changing the established cache APIs.
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) async fn run_cached_with_access_after_cold_evict<K, M, R>(
+    worker: mpsc::Sender<CacheJob<K, M>>,
+    key: K,
+    cold_admission: impl FnOnce() -> WorkerResult<()> + Send + 'static,
+    load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
+    run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,
+    msgs: SeamMessages,
+) -> WorkerResult<R>
+where
+    K: Clone + PartialEq + Send + 'static,
+    M: 'static,
+    R: Send + 'static,
+{
+    let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
+    let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.with_model_access_after_cold_evict(
+                key,
+                cold_admission,
+                load,
+                run,
+                msgs.entry_missing,
+            )
+        })) {
+            Ok(result) => result,
+            Err(panic) => {
+                if cache.evict().is_some() {
+                    release_backend_cache_after_evict();
+                }
+                Err(WorkerError::Engine(format!(
+                    "{}: {}",
+                    msgs.panic_reset,
+                    panic_message(panic.as_ref())
+                )))
+            }
+        };
+        let _ = reply_tx.send(result);
+    });
+    worker
+        .send(job)
+        .map_err(|_| WorkerError::Engine(msgs.worker_stopped.to_owned()))?;
+    reply_rx
+        .await
+        .map_err(|_| WorkerError::Engine(msgs.worker_dropped.to_owned()))?
+}
+
 /// Parse a cache idle-eviction window (seconds) from an env value, falling back to `default_secs`
 /// when absent/blank/unparseable. `0` disables idle eviction (returns `None`); any positive value is
 /// that many seconds.
@@ -444,6 +534,71 @@ mod tests {
             loads.get(),
             1,
             "request policy does not fragment the cache key"
+        );
+    }
+
+    #[test]
+    fn cold_admission_is_bypassed_for_an_exact_hit_and_rejection_leaves_no_entry() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct DropProbe(Rc<Cell<bool>>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let dropped = Rc::new(Cell::new(false));
+        let mut cache = CacheThread::<u32, DropProbe>::new(false);
+        cache.install(7, DropProbe(dropped.clone()));
+
+        let warm_gate_called = Cell::new(false);
+        let warm = cache
+            .with_model_access_after_cold_evict(
+                7,
+                || {
+                    warm_gate_called.set(true);
+                    Err(WorkerError::InvalidPayload(
+                        "warm gate must be bypassed".to_owned(),
+                    ))
+                },
+                || panic!("exact warm key must not load"),
+                |_model, access| Ok(access),
+                "missing",
+            )
+            .expect("exact warm key succeeds even when a cold gate would reject");
+        assert_eq!(warm, CacheAccess::Warm);
+        assert!(!warm_gate_called.get());
+        assert!(!dropped.get(), "warm access must keep the resident alive");
+
+        let load_called = Cell::new(false);
+        let rejected = cache.with_model_access_after_cold_evict(
+            8,
+            || {
+                assert!(
+                    dropped.get(),
+                    "a different resident must be dropped before admission samples free VRAM"
+                );
+                Err(WorkerError::InvalidPayload(
+                    "cold admission rejected".to_owned(),
+                ))
+            },
+            || {
+                load_called.set(true);
+                Ok(DropProbe(Rc::new(Cell::new(false))))
+            },
+            |_model, _access| Ok(()),
+            "missing",
+        );
+        assert!(matches!(rejected, Err(WorkerError::InvalidPayload(_))));
+        assert!(
+            !load_called.get(),
+            "a rejected cold miss must not start loading"
+        );
+        assert!(
+            cache.is_empty(),
+            "a rejected miss must leave no partial entry"
         );
     }
 

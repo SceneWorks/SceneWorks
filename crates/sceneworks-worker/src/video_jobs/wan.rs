@@ -1287,6 +1287,12 @@ pub(super) struct VideoGenInput {
     /// MLX (macOS) path and the resident-only LTX candle engine. SVD-XT also selects Sequential in
     /// sc-14625 for its conditioner → UNet → VAE lifecycle.
     pub(super) offload_policy: OffloadPolicy,
+    /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
+    /// SCAIL Candle sets it; every other video family leaves it `None`. It is deliberately outside
+    /// `LoadSpec`/the cache key: request-time free VRAM must be re-evaluated for a miss, while an exact
+    /// resident key (including precision/adapters/layout) bypasses the cold-load gate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    pub(super) cold_load_admission: Option<crate::generator_cache::GeneratorColdLoadAdmission>,
 }
 
 #[cfg(any(
@@ -1328,6 +1334,8 @@ impl Default for VideoGenInput {
             uncensored_enhancer_dir: None,
             comfyui: None,
             offload_policy: OffloadPolicy::Resident,
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            cold_load_admission: None,
         }
     }
 }
@@ -1795,6 +1803,8 @@ pub(super) async fn generate_video_using(
         let cancel = cancel.clone();
         let spec = video_load_spec(&input);
         let engine_id = input.engine_id;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let cold_load_admission = input.cold_load_admission.take();
         // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
         // (`load_from_comfyui_experts` — two experts read in place + remapped + dequant'd), which frees
         // any resident cached generator first; every other job takes the registry cached path. On the
@@ -1824,6 +1834,7 @@ pub(super) async fn generate_video_using(
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let result = match comfyui_load {
                 Some((high, low, te, vae, snapshot, i2v)) => {
+                    debug_assert!(cold_load_admission.is_none());
                     crate::generator_cache::with_uncached_generator(
                         move || {
                             runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts_with_offload(
@@ -1843,16 +1854,29 @@ pub(super) async fn generate_video_using(
                     )
                     .await
                 }
-                None => {
-                    crate::generator_cache::with_cached_generator_using(
-                        engine_id,
-                        spec,
-                        "video load failed",
-                        load_generator,
-                        run,
-                    )
-                    .await
-                }
+                None => match cold_load_admission {
+                    Some(admission) => {
+                        crate::generator_cache::with_cached_generator_using_cold_admission(
+                            engine_id,
+                            spec,
+                            "video load failed",
+                            admission,
+                            load_generator,
+                            run,
+                        )
+                        .await
+                    }
+                    None => {
+                        crate::generator_cache::with_cached_generator_using(
+                            engine_id,
+                            spec,
+                            "video load failed",
+                            load_generator,
+                            run,
+                        )
+                        .await
+                    }
+                },
             };
             #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
             let result = {

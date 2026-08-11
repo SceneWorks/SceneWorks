@@ -728,25 +728,40 @@ async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gat
     })
 }
 
-/// The SCAIL model directory is obtainable only through its fail-closed measured VRAM gate. Carrying
-/// the path in the return value makes admission structural: deleting the gate leaves both production
-/// arms without the value required to construct their [`VideoGenInput`].
+/// The SCAIL model directory and its one-shot cold-load admission travel together. Carrying both in
+/// this plan makes the contract structural: each production arm must attach the plan to its
+/// [`VideoGenInput`], while the shared generator cache decides atomically whether the exact key is a
+/// warm hit (bypass) or a cold miss (evict, fresh post-evict probe, gate, load).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Scail2VramPreflight {
+pub(super) struct Scail2ColdLoadPlan {
     pub(super) model_dir: PathBuf,
+    pub(super) admission: crate::generator_cache::GeneratorColdLoadAdmission,
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn scail2_vram_preflight(
+pub(super) fn scail2_cold_load_plan(
     manifest_entry: &JsonObject,
     model_dir: PathBuf,
     gpu_id: &str,
-    budget: Option<crate::vram_gate::VramBudget>,
-) -> WorkerResult<Scail2VramPreflight> {
-    match crate::vram_gate::scail2_video_fit_error(manifest_entry, gpu_id, budget) {
-        Some(error) => Err(error),
-        None => Ok(Scail2VramPreflight { model_dir }),
+) -> Scail2ColdLoadPlan {
+    let manifest_entry = manifest_entry.clone();
+    let gpu_id = gpu_id.to_owned();
+    let admission = crate::generator_cache::GeneratorColdLoadAdmission::new(move || {
+        // This executes on the dedicated cache OS thread, after a different resident has been
+        // dropped. The helper owns a private bounded runtime, so it cannot deadlock the async worker
+        // that is awaiting this cache job, and it deliberately bypasses the heartbeat's stale cache.
+        let budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&gpu_id),
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        match crate::vram_gate::scail2_video_fit_error(&manifest_entry, &gpu_id, budget) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    });
+    Scail2ColdLoadPlan {
+        model_dir,
+        admission,
     }
 }
 
@@ -1560,12 +1575,14 @@ pub(super) async fn generate_candle_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
-    let Scail2VramPreflight { model_dir } = scail2_vram_preflight(
+    let Scail2ColdLoadPlan {
+        model_dir,
+        admission,
+    } = scail2_cold_load_plan(
         &request.model_manifest_entry,
         resolve_candle_scail2_model_dir(settings)?,
         &settings.gpu_id,
-        candle_video_vram_budget(settings).await,
-    )?;
+    );
     let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_candle_scail2_conditioning(api, settings, job, request, project_path).await?;
@@ -1591,6 +1608,7 @@ pub(super) async fn generate_candle_scail2(
         scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some(scail2_engine_video_mode(&request.mode).to_owned()),
+        cold_load_admission: Some(admission),
         ..VideoGenInput::default()
     };
     let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;
@@ -1727,12 +1745,14 @@ pub(super) async fn generate_candle_scail2_replace(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    let Scail2VramPreflight { model_dir } = scail2_vram_preflight(
+    let Scail2ColdLoadPlan {
+        model_dir,
+        admission,
+    } = scail2_cold_load_plan(
         &request.model_manifest_entry,
         resolve_candle_scail2_model_dir(settings)?,
         &settings.gpu_id,
-        candle_video_vram_budget(settings).await,
-    )?;
+    );
     let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_candle_scail2_replace_conditioning(api, settings, job, request, project_path)
@@ -1751,6 +1771,7 @@ pub(super) async fn generate_candle_scail2_replace(
         fps: request.fps,
         seed: resolve_video_seed(request) as u64,
         video_mode: Some("replacement".to_owned()),
+        cold_load_admission: Some(admission),
         ..VideoGenInput::default()
     };
     let decoded = generate_video(api, settings, job, backend, &request.advanced, input).await?;

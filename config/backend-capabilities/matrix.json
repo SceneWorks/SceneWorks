@@ -43,21 +43,21 @@
     "workerAudioDispatch": "1679977fd1fbd9427572df035fd32e2644f79363eadceef90305ea54083043b1",
     "workerDispatch": "74251a96f9ae0ea50d166a2678609287c4eaaa946b35c931db6bb55e9443036e",
     "workerEngineTable": "527455e759e96d1e636532a2032e1532cef6e28debd0a7cd4d2eef6f84544bfc",
-    "workerGpuCapabilities": "8970249de8b79a835d2afd64b76f16d1b5e8736406ef0568c2f0342bf7766b49",
+    "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
     "workerImageDispatch": "cc62f0ec8aaf91270e45229239f9f2ad6a2aabef6453cd63524b7cdfae2a5605",
     "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "0884a375e5006409d6f892212e1a4cb2bb250c18a8ef11f948d3d3098f63a651",
-    "workerVideoCandle": "b08aa9195e0adcd5d9037aeb0e9ec776a4ccae3a5e5d2054942fe50da9274d9f",
+    "workerVideoCandle": "1a43ed7815a47d7db846f3313ed6fdfcc9eb85f3a5d377857fbbf6559ea00374",
     "workerVideoDispatch": "d1329d8212c2661cefbaff91d4989bbdb4f8733a8a740509124f2d6786ead2f4",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
     "workerVideoLtx": "73d76df14aadd41c4c4324bd82deb2112550d0f06cd1fa3a2037f8fa96104eba",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
-    "workerVideoScail2": "3690897d952af1c810a87ae28e2764c4875975367c6a2209f5b5c911e1c630d1",
+    "workerVideoScail2": "52f560272ff42dca5568b41e3d732d63215616cb03aa102243ed7dc67d25ace0",
     "workerVideoSeedvr2": "632d4afe9649858e8f73d226c46276a3222a2c129f2a3afabd24b0640727e0cf",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
-    "workerVideoWan": "bfec512f2f048a3a7d4bb1749d86f746fc6b2ca47888cca502cb03b6985f4dec"
+    "workerVideoWan": "7a07f964e4baa0881945c4389b4f399850d3fe6f5bf5bca1c9d807054e43f358"
   },
   "models": [
     {

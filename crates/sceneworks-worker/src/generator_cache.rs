@@ -479,6 +479,29 @@ const GENERATOR_SEAM_MESSAGES: SeamMessages = SeamMessages {
     worker_dropped: "MLX generator cache worker dropped the job result",
 };
 
+/// One fallible admission check for a true generator-cache cold miss. It is consumed on the cache
+/// worker only after a different resident has been dropped, and is never touched for an exact warm
+/// [`GeneratorCacheKey`] hit. That key already includes weight fingerprints, quant/precision,
+/// adapters, controls, offload policy, and load shape, so every field that changes resident tensors
+/// forces this cold path instead of borrowing another layout's admission.
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) struct GeneratorColdLoadAdmission {
+    gate: Box<dyn FnOnce() -> WorkerResult<()> + Send + 'static>,
+}
+
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+impl GeneratorColdLoadAdmission {
+    pub(crate) fn new(gate: impl FnOnce() -> WorkerResult<()> + Send + 'static) -> Self {
+        Self {
+            gate: Box::new(gate),
+        }
+    }
+
+    fn admit(self) -> WorkerResult<()> {
+        (self.gate)()
+    }
+}
+
 pub(crate) async fn with_cached_generator<R>(
     engine_id: &'static str,
     spec: LoadSpec,
@@ -548,6 +571,76 @@ where
         load_error_context,
         load_generator,
         move |generator, _cache_state, _load_policy, _external_committed_bytes| run(generator),
+    )
+    .await
+}
+
+/// Candle SCAIL sibling of [`with_cached_generator_using`]: an exact warm key reuses the resident
+/// without admission, while a miss evicts first and runs `cold_admission` immediately before the
+/// loader. The lookup/evict/gate/load sequence is one cache-worker job, never an external
+/// peek-then-act pair.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn with_cached_generator_using_cold_admission<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    cold_admission: GeneratorColdLoadAdmission,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(&dyn Generator) -> WorkerResult<R> + Send + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    with_cached_generator_using_cold_admission_on(
+        generator_worker().clone(),
+        engine_id,
+        spec,
+        load_error_context,
+        cold_admission,
+        load_generator,
+        run,
+    )
+    .await
+}
+
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+async fn with_cached_generator_using_cold_admission_on<R>(
+    worker: mpsc::Sender<GeneratorJob>,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    cold_admission: GeneratorColdLoadAdmission,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(&dyn Generator) -> WorkerResult<R> + Send + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    let key = GeneratorCacheKey::from_load_spec(engine_id, &spec);
+    let load_error_context = load_error_context.into();
+    let load = move || {
+        let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
+        let load_policy = spec.offload_policy;
+        let external_committed_bytes = capture_external_committed_bytes();
+        let generator = load_generator(engine_id, &spec)
+            .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
+        Ok(CachedGenerator {
+            generator,
+            load_policy,
+            external_committed_bytes,
+        })
+    };
+    cache_thread::run_cached_with_access_after_cold_evict(
+        worker,
+        key,
+        move || cold_admission.admit(),
+        load,
+        move |cached, _access| run(cached.generator.as_ref()),
+        GENERATOR_SEAM_MESSAGES,
     )
     .await
 }
@@ -1201,6 +1294,232 @@ mod tests {
             (CacheAccess::Warm, OffloadPolicy::Sequential)
         );
         assert_eq!(loads.get(), 1, "geometry-independent key loads only once");
+    }
+
+    fn start_isolated_generator_worker() -> (mpsc::Sender<GeneratorJob>, thread::JoinHandle<()>) {
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || run_generator_cache_worker(rx, None));
+        (tx, worker)
+    }
+
+    fn stub_box() -> Box<dyn Generator> {
+        Box::new(StubGenerator {
+            descriptor: stub_descriptor(),
+        })
+    }
+
+    #[test]
+    fn cold_admission_exact_key_covers_scail_precision_adapters_and_load_layout() {
+        let weights = tempfile::tempdir().expect("weights");
+        let adapter = weights.path().join("style.safetensors");
+        std::fs::write(&adapter, b"adapter").expect("adapter fixture");
+        let base = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let key = GeneratorCacheKey::from_load_spec("scail2", &base);
+        assert_eq!(
+            key,
+            GeneratorCacheKey::from_load_spec("scail2", &base),
+            "an identical resident identity is the only warm-hit shape"
+        );
+
+        let mut precision = base.clone();
+        precision.precision = Precision::Fp32;
+        let mut adapted = base.clone();
+        adapted.adapters = vec![AdapterSpec::new(adapter, 0.75, AdapterKind::Lora)];
+        let layout = base
+            .clone()
+            .with_load_shape(LoadShape::DeferredMaterialization);
+        let offload = base.clone().with_offload_policy(OffloadPolicy::Sequential);
+        for (field, changed) in [
+            ("precision", precision),
+            ("adapters", adapted),
+            ("load shape", layout),
+            ("offload policy", offload),
+        ] {
+            assert_ne!(
+                key,
+                GeneratorCacheKey::from_load_spec("scail2", &changed),
+                "changing {field} must force cold admission before a different resident loads"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cold_admission_sequence_loads_then_reuses_warm_and_rejects_a_different_key() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let weights = tempfile::tempdir().expect("weights");
+        let base = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let mut different = base.clone();
+        different.precision = Precision::Fp32;
+        let (tx, worker) = start_isolated_generator_worker();
+        let gates = Arc::new(AtomicUsize::new(0));
+        let loads = Arc::new(AtomicUsize::new(0));
+
+        let first_gates = gates.clone();
+        let first_loads = loads.clone();
+        with_cached_generator_using_cold_admission_on(
+            tx.clone(),
+            "scail2",
+            base.clone(),
+            "stub load",
+            GeneratorColdLoadAdmission::new(move || {
+                first_gates.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+            move |_id, _spec| {
+                first_loads.fetch_add(1, Ordering::SeqCst);
+                Ok(stub_box())
+            },
+            |_generator| Ok(()),
+        )
+        .await
+        .expect("first cold request is admitted and loaded");
+
+        with_cached_generator_using_cold_admission_on(
+            tx.clone(),
+            "scail2",
+            base,
+            "stub load",
+            GeneratorColdLoadAdmission::new(|| {
+                Err(WorkerError::InvalidPayload(
+                    "synthetic low-free budget".to_owned(),
+                ))
+            }),
+            |_id, _spec| panic!("same exact key must not reload"),
+            |_generator| Ok(()),
+        )
+        .await
+        .expect("same-key warm request bypasses cold-load admission");
+
+        let rejected_loads = loads.clone();
+        let rejected = with_cached_generator_using_cold_admission_on(
+            tx.clone(),
+            "scail2",
+            different,
+            "stub load",
+            GeneratorColdLoadAdmission::new(|| {
+                Err(WorkerError::InvalidPayload(
+                    "synthetic low-free budget".to_owned(),
+                ))
+            }),
+            move |_id, _spec| {
+                rejected_loads.fetch_add(1, Ordering::SeqCst);
+                Ok(stub_box())
+            },
+            |_generator| Ok(()),
+        )
+        .await;
+        assert!(matches!(rejected, Err(WorkerError::InvalidPayload(_))));
+        assert_eq!(
+            gates.load(Ordering::SeqCst),
+            1,
+            "warm hit bypassed its gate"
+        );
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "rejected miss never loaded"
+        );
+
+        let (state_tx, state_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            state_tx.send(cache.is_empty()).expect("cache state");
+        }))
+        .expect("inspect cache");
+        assert!(state_rx.recv().expect("cache state reply"));
+        drop(tx);
+        worker.join().expect("isolated cache worker exits");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cold_admission_is_serialized_behind_an_in_flight_warm_request() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let weights = tempfile::tempdir().expect("weights");
+        let base = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let mut different = base.clone();
+        different.precision = Precision::Fp32;
+        let (tx, worker) = start_isolated_generator_worker();
+        with_cached_generator_using_cold_admission_on(
+            tx.clone(),
+            "scail2",
+            base.clone(),
+            "stub load",
+            GeneratorColdLoadAdmission::new(|| Ok(())),
+            |_id, _spec| Ok(stub_box()),
+            |_generator| Ok(()),
+        )
+        .await
+        .expect("seed cold load");
+
+        let (warm_started_tx, warm_started_rx) = mpsc::channel();
+        let (warm_release_tx, warm_release_rx) = mpsc::channel();
+        let warm_tx = tx.clone();
+        let warm = tokio::spawn(async move {
+            with_cached_generator_using_cold_admission_on(
+                warm_tx,
+                "scail2",
+                base,
+                "stub load",
+                GeneratorColdLoadAdmission::new(|| {
+                    panic!("the queued exact warm hit must bypass admission")
+                }),
+                |_id, _spec| panic!("the queued exact warm hit must not reload"),
+                move |_generator| {
+                    warm_started_tx.send(()).expect("warm started");
+                    warm_release_rx
+                        .recv_timeout(Duration::from_secs(2))
+                        .expect("release warm run");
+                    Ok(())
+                },
+            )
+            .await
+        });
+        warm_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("warm request owns the cache transaction");
+
+        let gate_called = Arc::new(AtomicBool::new(false));
+        let cold_gate_called = gate_called.clone();
+        let cold_tx = tx.clone();
+        let cold = tokio::spawn(async move {
+            with_cached_generator_using_cold_admission_on(
+                cold_tx,
+                "scail2",
+                different,
+                "stub load",
+                GeneratorColdLoadAdmission::new(move || {
+                    cold_gate_called.store(true, Ordering::SeqCst);
+                    Err(WorkerError::InvalidPayload(
+                        "synthetic low-free budget".to_owned(),
+                    ))
+                }),
+                |_id, _spec| panic!("rejected queued miss must not load"),
+                |_generator| Ok(()),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !gate_called.load(Ordering::SeqCst),
+            "a queued miss cannot peek/admit while a warm run owns the cache"
+        );
+        warm_release_tx.send(()).expect("release warm request");
+        warm.await.expect("warm task joins").expect("warm succeeds");
+        let rejected = cold.await.expect("cold task joins");
+        assert!(matches!(rejected, Err(WorkerError::InvalidPayload(_))));
+        assert!(gate_called.load(Ordering::SeqCst));
+
+        let (state_tx, state_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            state_tx.send(cache.is_empty()).expect("cache state");
+        }))
+        .expect("inspect cache");
+        assert!(state_rx.recv().expect("cache state reply"));
+        drop(tx);
+        worker.join().expect("isolated cache worker exits");
     }
 
     #[test]

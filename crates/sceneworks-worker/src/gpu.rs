@@ -700,6 +700,32 @@ pub(crate) async fn nvidia_vram_budget_gb(gpu_id: &str) -> Option<crate::vram_ga
     })
 }
 
+/// Fresh, bounded NVIDIA budget probe for the serialized generator-cache cold-load transaction.
+///
+/// The cache worker is a dedicated OS thread, not a Tokio executor thread. Building a private
+/// current-thread runtime here therefore cannot block the worker runtime that owns the request, and
+/// lets [`run_bounded_command`] retain its three-second timeout/kill-on-drop contract. This bypasses
+/// [`gpu_utilization`]'s one-second heartbeat cache deliberately: SCAIL calls it only after evicting
+/// a different resident generator, so a pre-eviction sample could reject a load whose reclaimed VRAM
+/// now fits (or, worse, credit memory that was not actually returned).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(
+    gpu_id: &str,
+) -> Option<crate::vram_gate::VramBudget> {
+    if gpu_id == "cpu" {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let snapshot = runtime.block_on(query_gpu_utilization(gpu_id))?;
+    Some(crate::vram_gate::VramBudget {
+        free_gb: snapshot.memory_free_mb? as f64 / 1024.0,
+        total_gb: snapshot.memory_total_mb? as f64 / 1024.0,
+    })
+}
+
 /// Apple-Silicon unified-memory + GPU-load snapshot for the `mlx` worker, shaped
 /// like the nvidia path. Total = the machine's unified RAM (`sysctl hw.memsize`).
 /// Used = **system-wide** memory pressure from `vm_stat` (App + Wired + Compressed,

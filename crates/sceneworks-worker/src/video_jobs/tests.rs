@@ -248,48 +248,16 @@ fn request(value: Value) -> VideoRequest {
     VideoRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+/// Both SCAIL modes carry the model path and one-shot admission together into the shared generator.
+/// The generator cache, not these request arms, decides warm versus cold under its single-owner
+/// transaction; keeping the plan structural prevents either mode from regressing to a racy external
+/// peek/check or an unconditionally gated warm hit.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn scail2_preflight_returns_the_only_model_dir_an_admitted_arm_can_use() {
-    let manifest = json!({
-        "candle": {
-            "minMemoryGb": 105,
-            "vramGbByTier": { "bf16": 102.115 },
-            "vramMeasuredPixels": 399360,
-            "measured": true
-        }
-    })
-    .as_object()
-    .unwrap()
-    .clone();
-    let model_dir = PathBuf::from("model-manager/scail2/bf16");
-    let rejected = scail2_vram_preflight(
-        &manifest,
-        model_dir.clone(),
-        "0",
-        crate::vram_gate::apply_vram_cap(None, Some(104.0)),
-    );
-    assert!(matches!(rejected, Err(WorkerError::InvalidPayload(_))));
-
-    let admitted = scail2_vram_preflight(
-        &manifest,
-        model_dir.clone(),
-        "0",
-        crate::vram_gate::apply_vram_cap(None, Some(105.0)),
-    )
-    .expect("102.115 GB measured peak plus reserve fits");
-    assert_eq!(admitted.model_dir, model_dir);
-}
-
-/// Both SCAIL modes perform expensive conditioning (SAM3 and source-video decode) before entering
-/// the shared generator. Pin admission ahead of that work, and pin the returned path into the input,
-/// so deleting either call is a compile failure rather than a silently ungated route.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-#[test]
-fn both_candle_scail2_arms_gate_before_conditioning_and_consume_the_gated_path() {
+fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
     const SOURCE: &str = include_str!("candle.rs");
     assert_eq!(
-        SOURCE.matches("scail2_vram_preflight(").count(),
+        SOURCE.matches("scail2_cold_load_plan(").count(),
         3,
         "one owner function and exactly two production callers must exist"
     );
@@ -307,24 +275,12 @@ fn both_candle_scail2_arms_gate_before_conditioning_and_consume_the_gated_path()
         .split_once("/// Resolve the candle Wan-VACE diffusers snapshot dir")
         .expect("replace arm boundary")
         .0;
-    for (name, arm, conditioning) in [
-        (
-            "animate_character",
-            animate,
-            "resolve_candle_scail2_conditioning(",
-        ),
-        (
-            "replace_person",
-            replace,
-            "resolve_candle_scail2_replace_conditioning(",
-        ),
-    ] {
-        let gate = arm.find("scail2_vram_preflight(").expect("VRAM gate call");
-        let expensive = arm.find(conditioning).expect("conditioning call");
-        assert!(gate < expensive, "{name} must gate before {conditioning}");
+    for (name, arm) in [("animate_character", animate), ("replace_person", replace)] {
         assert!(
-            arm.contains("let Scail2VramPreflight { model_dir } ="),
-            "{name} must obtain the model path from admission"
+            arm.contains("let Scail2ColdLoadPlan {")
+                && arm.contains("model_dir,")
+                && arm.contains("admission,"),
+            "{name} must keep the resolved model path and cold admission together"
         );
         let input = arm
             .split_once("let input = VideoGenInput {")
@@ -332,13 +288,50 @@ fn both_candle_scail2_arms_gate_before_conditioning_and_consume_the_gated_path()
             .1;
         assert!(
             input.contains("model_dir,"),
-            "{name} must use the gated path"
+            "{name} must use the planned model path"
+        );
+        assert!(
+            input.contains("cold_load_admission: Some(admission),"),
+            "{name} must hand admission to the cache cold-miss seam"
         );
         assert!(
             !input.contains("model_dir: resolve_candle_scail2_model_dir"),
             "{name} must not retain an ungated resolver bypass"
         );
     }
+
+    let wan = include_str!("wan.rs");
+    assert!(
+        wan.contains("Some(admission) => {")
+            && wan.contains("with_cached_generator_using_cold_admission("),
+        "the shared video path must consume SCAIL admission only at the generator-cache seam"
+    );
+    let cache = include_str!("../generator_cache.rs");
+    assert!(
+        cache.contains("run_cached_with_access_after_cold_evict("),
+        "generator cache must use the serialized evict/admit/load transaction"
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn scail2_cold_admission_uses_a_fresh_bounded_probe_without_blocking_the_request_runtime() {
+    const CANDLE: &str = include_str!("candle.rs");
+    const GPU: &str = include_str!("../gpu.rs");
+    assert!(CANDLE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    let helper = GPU
+        .split_once("pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(")
+        .expect("fresh blocking NVIDIA helper")
+        .1
+        .split_once("/// Apple-Silicon unified-memory")
+        .expect("helper boundary")
+        .0;
+    assert!(helper.contains("tokio::runtime::Builder::new_current_thread()"));
+    assert!(helper.contains("query_gpu_utilization(gpu_id)"));
+    assert!(
+        !helper.contains("tokio::runtime::Handle::current()"),
+        "the cache OS thread must not block the request's Tokio runtime"
+    );
 }
 
 #[test]
@@ -6955,7 +6948,7 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
     std::fs::create_dir_all(&dir).unwrap();
-    for file in SCAIL2_TIER_FILES {
+    for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
 }
