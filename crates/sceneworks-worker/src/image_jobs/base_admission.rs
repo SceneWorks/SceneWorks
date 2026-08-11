@@ -312,6 +312,93 @@ pub(super) async fn admit_candle_base_floor(
     }
 }
 
+/// A live-VRAM floor bound to a registered generator cache miss.
+///
+/// The runtime handle is captured on the async route before the closure crosses to the dedicated
+/// cache thread. [`Self::admit`] can then query `nvidia-smi` only when the cache reports a real miss,
+/// while the old different-key entry is still resident and the raw free-VRAM reading is meaningful.
+pub(super) struct CachedCandleBaseFloorAdmission {
+    model: String,
+    lane: &'static str,
+    gpu_id: String,
+    floor_gb: Option<f64>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl CachedCandleBaseFloorAdmission {
+    /// Admit one cold load. `replacing_resident` is supplied atomically by the cache; reclaimable
+    /// credit is legal only when a different entry will actually be dropped immediately afterward.
+    pub(super) fn admit(self, replacing_resident: bool) -> WorkerResult<()> {
+        let Some(floor_gb) = self.floor_gb else {
+            tracing::warn!(
+                model = self.model,
+                lane = self.lane,
+                "candle base admission: explicitly un-gateable because the external checkpoint paths contain \
+                 no countable weights; admitting cold load without a floor (sc-16093/sc-18306)"
+            );
+            return Ok(());
+        };
+        let raw_budget = crate::vram_gate::apply_vram_cap(
+            self.runtime
+                .block_on(crate::gpu::nvidia_vram_budget_gb(&self.gpu_id)),
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let reclaimable_gb = if replacing_resident {
+            crate::vram_gate::reclaimable_pool_gb(&self.gpu_id)
+        } else {
+            0.0
+        };
+        let budget =
+            raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
+        let needed = Some(floor_gb);
+        match crate::vram_gate::load_plan(needed, None, budget, false) {
+            LoadPlan::Resident => {
+                crate::vram_gate::note_loaded_peak(&self.gpu_id, floor_gb);
+                tracing::info!(
+                    model = self.model,
+                    lane = self.lane,
+                    floor_gb,
+                    replacing_resident,
+                    reclaimable_gb,
+                    "candle cached-base admission: cold external checkpoint admitted on its on-disk \
+                     weights floor; activation peaks remain unmeasured (sc-18306)"
+                );
+                Ok(())
+            }
+            LoadPlan::Sequential => {
+                unreachable!("a floor-only route is never sequential-capable")
+            }
+            LoadPlan::Reject => Err(reject_message(
+                &self.model,
+                self.lane,
+                None,
+                floor_gb,
+                budget.map_or(0.0, |budget| budget.free_gb),
+                &self.gpu_id,
+                false,
+            )),
+        }
+    }
+}
+
+/// Prepare the cheap, immutable portion of a cached imported/ComfyUI floor. No GPU query or gate is
+/// performed here; those happen only from the cache's cold-load hook.
+pub(super) fn prepare_cached_candle_base_floor(
+    model: &str,
+    lane: &'static str,
+    settings: &Settings,
+    paths: &[&Path],
+) -> CachedCandleBaseFloorAdmission {
+    let bytes = distinct_weight_bytes(paths);
+    CachedCandleBaseFloorAdmission {
+        model: model.to_owned(),
+        lane,
+        gpu_id: settings.gpu_id.clone(),
+        floor_gb: (bytes > 0).then(|| bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB),
+        runtime: tokio::runtime::Handle::current(),
+    }
+}
+
 /// Imported SDXL already materializes a `LoadSpec` containing its external checkpoint,
 /// adapters, PiD weights, and caller-staged components. Price exactly those sources.
 pub(super) async fn admit_candle_load_spec_floor(

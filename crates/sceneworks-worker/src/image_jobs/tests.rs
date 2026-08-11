@@ -540,6 +540,332 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     assert_eq!(contexts[1].geometry, admitted.geometry);
 }
 
+/// Production-seam regression for the normal imported-Krea lane. This invokes the exact driver
+/// installed in `start_cached_gen_stream_with_request_state`, with only the heavyweight live-budget
+/// evaluator substituted. It proves that every sequential t2i/img2img/edit image is evaluated and
+/// that every resulting provider pass opens the admitted request scope, including both hires passes.
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
+    let image = |pixel| Image {
+        width: 4,
+        height: 4,
+        pixels: vec![pixel; 4 * 4 * 3],
+    };
+    let hires = HiresFixPlan {
+        width: 512,
+        height: 512,
+        steps: 1,
+        guidance: None,
+        true_cfg: None,
+        provider_reference_strength: 0.35,
+    };
+    let selection = gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        },
+    };
+
+    struct Case {
+        name: &'static str,
+        mode: &'static str,
+        conditioning: Vec<Conditioning>,
+        hires_fix: Option<HiresFixPlan>,
+        item_count: usize,
+        expected_pass_references: &'static [u32],
+    }
+    let cases = [
+        Case {
+            name: "t2i",
+            mode: "image_generation",
+            conditioning: vec![],
+            hires_fix: None,
+            // Two sequential outputs prove that the production driver evaluates each request and
+            // advances only its cache identity from Cold to Warm.
+            item_count: 2,
+            expected_pass_references: &[0, 0],
+        },
+        Case {
+            name: "img2img",
+            mode: "image_generation",
+            conditioning: vec![Conditioning::Reference {
+                image: image(1),
+                strength: Some(0.55),
+            }],
+            hires_fix: None,
+            item_count: 1,
+            expected_pass_references: &[1],
+        },
+        Case {
+            name: "edit",
+            mode: "edit_image",
+            conditioning: vec![Conditioning::MultiReference {
+                images: vec![image(1), image(2)],
+            }],
+            hires_fix: None,
+            item_count: 1,
+            expected_pass_references: &[2],
+        },
+        Case {
+            name: "edit+hires",
+            mode: "edit_image",
+            conditioning: vec![Conditioning::MultiReference {
+                images: vec![image(1), image(2)],
+            }],
+            hires_fix: Some(hires),
+            item_count: 1,
+            // First pass retains the edit sources; the refinement consumes its generated image.
+            expected_pass_references: &[2, 1],
+        },
+    ];
+
+    for case in cases {
+        let generator = HiresProbeGenerator::new();
+        let mut req = request(json!({
+            "projectId": "p",
+            "model": "community_krea",
+            "mode": case.mode,
+            "width": 4,
+            "height": 4,
+            "count": case.item_count,
+            "modelManifestEntry": { "family": "krea_2" }
+        }));
+        req.mode = case.mode.to_owned();
+        let memory_inputs =
+            krea_imported_memory_inputs(&req, &case.conditioning, case.hires_fix, 1);
+        let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+            if case.mode == "edit_image" {
+                "krea_2_turbo_edit"
+            } else {
+                "krea_2_turbo"
+            },
+            &req.model,
+            &LoadSpec::new(WeightsSource::File(PathBuf::from(
+                "/nonexistent/imported-krea-test.safetensors",
+            ))),
+            Some(&req.model_manifest_entry),
+            None,
+        );
+        let work = (0..case.item_count)
+            .map(|index| (42 + index as i64, format!("{} prompt {index}", case.name)))
+            .collect();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut evaluated_states = Vec::new();
+
+        without_mlx_cache_release_for_headless_test(|| {
+            drive_krea_imported_mlx_items(
+                &generator,
+                &memory_plan,
+                &memory_inputs,
+                gen_core::MemoryCacheState::Cold,
+                gen_core::OffloadPolicy::Resident,
+                17,
+                work,
+                req.width,
+                req.height,
+                1,
+                case.conditioning,
+                Some(1.2),
+                case.hires_fix,
+                tx,
+                CancelFlag::new(),
+                |_generator, _plan, inputs, cache_state, offload_policy, external_bytes| {
+                    evaluated_states.push(cache_state);
+                    assert_eq!(offload_policy, gen_core::OffloadPolicy::Resident);
+                    assert_eq!(external_bytes, 17);
+                    let mut context = hires_memory_context(selection);
+                    context.mode = if inputs.mode == "edit_image" {
+                        gen_core::MemoryMode::Edit
+                    } else {
+                        gen_core::MemoryMode::TextToImage
+                    };
+                    context.has_reference = inputs.has_reference;
+                    context.geometry.width = inputs.width;
+                    context.geometry.height = inputs.height;
+                    context.geometry.reference_count = inputs.reference_count;
+                    context.cache_state = cache_state;
+                    Ok(crate::mlx_fit_gate::MlxRequestEvaluation {
+                        memory: gen_core::GenerationMemory::default(),
+                        context,
+                        process_limit_bytes: None,
+                    })
+                },
+            )
+        })
+        .unwrap_or_else(|error| panic!("{} production driver: {error}", case.name));
+
+        let expected_states = std::iter::once(gen_core::MemoryCacheState::Cold)
+            .chain(
+                std::iter::repeat(gen_core::MemoryCacheState::Warm)
+                    .take(case.item_count.saturating_sub(1)),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(
+            evaluated_states, expected_states,
+            "{} must evaluate every sequential image",
+            case.name
+        );
+        let requests = generator.requests.lock().unwrap();
+        let contexts = generator.contexts.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            case.expected_pass_references.len(),
+            "{} provider pass count",
+            case.name
+        );
+        assert_eq!(
+            contexts.len(),
+            requests.len(),
+            "{} scoped passes",
+            case.name
+        );
+        for (pass, ((request, context), expected_references)) in requests
+            .iter()
+            .zip(contexts.iter())
+            .zip(case.expected_pass_references.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                request.image_reference_count(),
+                *expected_references,
+                "{} pass {} conditioning",
+                case.name,
+                pass + 1
+            );
+            assert_eq!(
+                context.geometry.reference_count,
+                *expected_references,
+                "{} pass {} request scope",
+                case.name,
+                pass + 1
+            );
+            assert_eq!(
+                (context.geometry.width, context.geometry.height),
+                (request.width, request.height),
+                "{} pass {} scoped geometry",
+                case.name,
+                pass + 1
+            );
+            assert!(
+                request.memory.is_some(),
+                "{} pass {} must carry admitted memory",
+                case.name,
+                pass + 1
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
+    let mut req = request(json!({
+        "projectId": "p",
+        "model": "community_krea",
+        "mode": "image_generation",
+        "width": 512,
+        "height": 768,
+        "count": 3,
+        "modelManifestEntry": { "family": "krea_2" }
+    }));
+    let plain = krea_imported_memory_inputs(&req, &[], None, 0);
+    assert_eq!(
+        (plain.width, plain.height, plain.reference_count),
+        (512, 768, 0)
+    );
+    assert_eq!(plain.overlay, None);
+
+    let reference = Conditioning::Reference {
+        image: Image {
+            width: 4,
+            height: 4,
+            pixels: vec![0; 4 * 4 * 3],
+        },
+        strength: Some(0.5),
+    };
+    let img2img = krea_imported_memory_inputs(&req, std::slice::from_ref(&reference), None, 1);
+    assert_eq!(img2img.reference_count, 1);
+    assert_eq!(img2img.overlay.as_deref(), Some("references:1+adapters:1"));
+
+    req.mode = "edit_image".to_owned();
+    let edit = krea_imported_memory_inputs(
+        &req,
+        &[Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 3],
+                },
+                Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![1; 3],
+                },
+            ],
+        }],
+        None,
+        2,
+    );
+    assert_eq!(edit.mode, "edit_image");
+    assert_eq!(edit.reference_count, 2);
+    assert_eq!(edit.overlay.as_deref(), Some("references:2+adapters:2"));
+
+    let hires = krea_imported_memory_inputs(
+        &req,
+        &[Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 3],
+                },
+                Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![1; 3],
+                },
+            ],
+        }],
+        Some(HiresFixPlan {
+            width: 1024,
+            height: 1536,
+            steps: 4,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.4,
+        }),
+        2,
+    );
+    assert_eq!(
+        (hires.width, hires.height, hires.reference_count),
+        (1024, 1536, 1)
+    );
+    assert_eq!(hires.overlay.as_deref(), Some("references:2+adapters:2"));
+
+    req.mode = "image_generation".to_owned();
+    let t2i_hires = krea_imported_memory_inputs(
+        &req,
+        &[],
+        Some(HiresFixPlan {
+            width: 1024,
+            height: 1536,
+            steps: 4,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.4,
+        }),
+        0,
+    );
+    assert_eq!(t2i_hires.reference_count, 1);
+    assert!(t2i_hires.has_reference);
+    assert_eq!(t2i_hires.overlay, None);
+}
+
 /// The generic lane's declared reference count must equal the count gen-core derives from the
 /// conditioning that lane really builds, for every shape it can build.
 ///
@@ -16095,25 +16421,25 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "KreaImported",
             "krea_imported.rs",
             include_str!("krea_imported.rs"),
-            "admit_candle_base_floor(",
+            "prepare_cached_candle_base_floor(",
         ),
         (
             "ZimageComfyui",
             "zimage_comfyui_candle.rs",
             include_str!("zimage_comfyui_candle.rs"),
-            "admit_candle_base_floor(",
+            "prepare_cached_candle_base_floor(",
         ),
         (
             "QwenImageComfyui",
             "qwen_comfyui_candle.rs",
             include_str!("qwen_comfyui_candle.rs"),
-            "admit_candle_base_floor(",
+            "prepare_cached_candle_base_floor(",
         ),
         (
             "Flux2Comfyui",
             "flux2_comfyui_candle.rs",
             include_str!("flux2_comfyui_candle.rs"),
-            "admit_candle_base_floor(",
+            "prepare_cached_candle_base_floor(",
         ),
         (
             "Bernini",
@@ -16129,24 +16455,37 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             .unwrap_or_else(|| {
                 panic!("{route} ({file}) has no live base-admission call `{marker}`")
             });
-        let handoff = ["start_gen_stream(", "start_cached_gen_stream("]
-            .iter()
-            .filter_map(|needle| {
-                source
-                    .lines()
-                    .enumerate()
-                    .skip(gate + 1)
-                    .find(|(_, line)| line.contains(needle) && !line.trim_start().starts_with("//"))
-                    .map(|(line, _)| line)
-            })
-            .min()
-            .unwrap_or_else(|| {
-                panic!("{route} ({file}) has no generation-stream handoff after its gate")
-            });
+        let handoff = [
+            "start_gen_stream(",
+            "start_cached_gen_stream(",
+            "start_cached_gen_stream_after_cold_admission(",
+        ]
+        .iter()
+        .filter_map(|needle| {
+            source
+                .lines()
+                .enumerate()
+                .skip(gate + 1)
+                .find(|(_, line)| line.contains(needle) && !line.trim_start().starts_with("//"))
+                .map(|(line, _)| line)
+        })
+        .min()
+        .unwrap_or_else(|| {
+            panic!("{route} ({file}) has no generation-stream handoff after its gate")
+        });
         assert!(
             gate < handoff,
             "{route} ({file}) gates after allocation begins; base admission must be pre-load (sc-16093)"
         );
+        if *marker == "prepare_cached_candle_base_floor(" {
+            assert!(
+                source.lines().any(|line| {
+                    line.contains("cold_admission.admit(replacing_resident)")
+                        && !line.trim_start().starts_with("//")
+                }),
+                "{route} ({file}) must execute its prepared floor from the cache-aware cold-load hook"
+            );
+        }
     }
 
     // Imported single-file lanes use the same provider registry and generator cache as snapshot-backed

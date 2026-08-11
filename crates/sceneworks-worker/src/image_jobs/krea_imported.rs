@@ -802,6 +802,301 @@ fn resolve_krea_imported_adapters_and_edit(
     Ok((adapters, Some(build_edit_conditioning(&sources))))
 }
 
+fn krea_imported_reference_count(conditioning: &[Conditioning]) -> u32 {
+    conditioning.iter().fold(0_u32, |count, item| {
+        let increment = match item {
+            Conditioning::Reference { .. } => 1,
+            Conditioning::MultiReference { images } => {
+                u32::try_from(images.len()).unwrap_or(u32::MAX)
+            }
+            _ => 0,
+        };
+        count.saturating_add(increment)
+    })
+}
+
+/// Request identity handed to MLX admission for the imported Krea assembly. Hires admission names
+/// the heavier final refinement (one generated-image reference); its first pass receives a derived
+/// base-size context immediately before execution.
+#[cfg(target_os = "macos")]
+fn krea_imported_memory_inputs(
+    request: &ImageRequest,
+    conditioning: &[Conditioning],
+    hires_fix: Option<HiresFixPlan>,
+    adapter_count: usize,
+) -> crate::mlx_fit_gate::MlxRequestInputs {
+    let request_reference_count = krea_imported_reference_count(conditioning);
+    let reference_count = hires_fix.map_or_else(
+        || request_reference_count,
+        |_| hires_fix_reference_count(),
+    );
+    let (width, height) =
+        hires_fix.map_or((request.width, request.height), |hires| (hires.width, hires.height));
+    let mut overlays = Vec::new();
+    // Match the generic MLX lane: geometry describes the heaviest provider pass, while overlays
+    // describe only caller-supplied request resources. A t2i hires refinement therefore has one
+    // geometry reference but no external-reference overlay; edit hires retains its source count.
+    if request_reference_count > 0 {
+        overlays.push(format!("references:{request_reference_count}"));
+    }
+    if adapter_count > 0 {
+        overlays.push(format!("adapters:{adapter_count}"));
+    }
+    crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: request.count,
+        mode: request.mode.clone(),
+        overlay: (!overlays.is_empty()).then(|| overlays.join("+")),
+        adapter_count,
+        has_reference: reference_count > 0,
+        reference_count,
+        use_pid: false,
+        has_phases: false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn krea_imported_generate_pass(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    conditioning: Vec<Conditioning>,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_context: Option<&gen_core::MemoryRunContext>,
+    preview: gen_core::PreviewSink,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let mut request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        sampler: Some(KREA_IMPORTED_SAMPLER.to_owned()),
+        conditioning,
+        text_style_gain,
+        memory,
+        preview,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_context,
+        on_progress,
+    )
+    .map_err(|error| {
+        WorkerError::Engine(format!(
+            "Krea 2 imported checkpoint generation failed: {error}"
+        ))
+    })?;
+    match output {
+        GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::Engine("Krea 2 imported checkpoint produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::Engine(
+            "Krea 2 imported checkpoint returned non-image output".to_owned(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn krea_imported_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    conditioning: &[Conditioning],
+    text_style_gain: Option<f32>,
+    hires_fix: Option<HiresFixPlan>,
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
+    preview: gen_core::PreviewSink,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let Some(hires) = hires_fix else {
+        return krea_imported_generate_pass(
+            generator,
+            prompt,
+            width,
+            height,
+            seed,
+            steps,
+            conditioning.to_vec(),
+            text_style_gain,
+            memory_evaluation.map(|evaluation| evaluation.memory),
+            memory_evaluation.map(|evaluation| &evaluation.context),
+            preview,
+            cancel,
+            on_progress,
+        );
+    };
+
+    let first_pass_context = memory_evaluation.map(|evaluation| {
+        hires_first_pass_context(
+            &evaluation.context,
+            width,
+            height,
+            krea_imported_reference_count(conditioning),
+        )
+    });
+    let combined_steps = steps.saturating_add(hires.steps);
+    let mut first_progress = |progress| match progress {
+        Progress::Step { current, .. } => on_progress(Progress::Step {
+            current,
+            total: combined_steps,
+        }),
+        Progress::Decoding => {}
+        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+    };
+    let (base_width, base_height, base_pixels) = krea_imported_generate_pass(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        conditioning.to_vec(),
+        text_style_gain,
+        memory_evaluation.map(|evaluation| evaluation.memory),
+        first_pass_context.as_ref(),
+        preview.clone(),
+        cancel,
+        &mut first_progress,
+    )?;
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Engine("generation cancelled".to_owned()));
+    }
+    let high_res_reference = fit_engine_image(
+        Image {
+            width: base_width,
+            height: base_height,
+            pixels: base_pixels,
+        },
+        hires.width,
+        hires.height,
+        "stretch",
+    )?;
+    let final_conditioning = vec![Conditioning::Reference {
+        image: high_res_reference,
+        strength: Some(hires.provider_reference_strength),
+    }];
+    let mut second_progress = |progress| match progress {
+        Progress::Step { current, .. } => on_progress(Progress::Step {
+            current: steps.saturating_add(current),
+            total: combined_steps,
+        }),
+        Progress::Decoding => on_progress(Progress::Decoding),
+        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+    };
+    krea_imported_generate_pass(
+        generator,
+        prompt,
+        hires.width,
+        hires.height,
+        seed,
+        hires.steps,
+        final_conditioning,
+        text_style_gain,
+        memory_evaluation.map(|evaluation| evaluation.memory),
+        memory_evaluation.map(|evaluation| &evaluation.context),
+        preview,
+        cancel,
+        &mut second_progress,
+    )
+}
+
+/// Exact request-state driver installed into the normal imported-Krea MLX cache callback.
+///
+/// Keeping the evaluator injectable makes the cache/admission handoff testable without loading a
+/// multi-gigabyte checkpoint, while production passes [`crate::mlx_fit_gate::evaluate_request`]
+/// directly. One evaluation is performed for every sequential image item. Hires remains one
+/// admitted request with two provider passes, and [`krea_imported_generate_one`] opens the
+/// appropriate request scope for each pass.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn drive_krea_imported_mlx_items<E>(
+    generator: &dyn Generator,
+    memory_plan: &crate::mlx_fit_gate::MlxRequestPlan,
+    memory_inputs: &crate::mlx_fit_gate::MlxRequestInputs,
+    initial_cache_state: gen_core::MemoryCacheState,
+    loaded_offload_policy: gen_core::OffloadPolicy,
+    external_committed_bytes: u64,
+    work: Vec<(i64, String)>,
+    width: u32,
+    height: u32,
+    steps: u32,
+    conditioning: Vec<Conditioning>,
+    text_style_gain: Option<f32>,
+    hires_fix: Option<HiresFixPlan>,
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    cancel: CancelFlag,
+    mut evaluate_request: E,
+) -> WorkerResult<()>
+where
+    E: FnMut(
+        &dyn Generator,
+        &crate::mlx_fit_gate::MlxRequestPlan,
+        &crate::mlx_fit_gate::MlxRequestInputs,
+        gen_core::MemoryCacheState,
+        gen_core::OffloadPolicy,
+        u64,
+    ) -> WorkerResult<crate::mlx_fit_gate::MlxRequestEvaluation>,
+{
+    let mut cache_state = initial_cache_state;
+    drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let memory_evaluation = evaluate_request(
+            generator,
+            memory_plan,
+            memory_inputs,
+            cache_state,
+            loaded_offload_policy,
+            external_committed_bytes,
+        )?;
+        cache_state = gen_core::MemoryCacheState::Warm;
+        let _request_memory_limit = memory_evaluation
+            .process_limit_bytes
+            .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+        let generated = krea_imported_generate_one(
+            generator,
+            &prompt,
+            width,
+            height,
+            seed,
+            steps,
+            &conditioning,
+            text_style_gain,
+            hires_fix,
+            Some(&memory_evaluation),
+            preview,
+            &cancel,
+            on_progress,
+        );
+        let (out_width, out_height, pixels) = match generated {
+            Ok(image) => image,
+            Err(_) if cancel.is_cancelled() => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some((seed, out_width, out_height, pixels)))
+    })
+}
+
 /// Real in-place imported single-file Krea 2 generation (epic 14015 S0c, sc-14023 + sc-14071 +
 /// sc-14111 + sc-14119): resolve the imported DiT, the resident base tier, any img2img reference, and —
 /// on the adapter-capable MLX backend — the job LoRA stack + Kontext edit conditioning, then load the
@@ -831,19 +1126,18 @@ async fn generate_krea_imported_stream(
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    {
+    let cold_admission = {
         // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
         // not be double-priced. Admit exactly the weight-bearing paths the provider consumes.
         let text_encoder = base_dir.join("text_encoder");
         let vae = base_dir.join("vae");
-        admit_candle_base_floor(
+        prepare_cached_candle_base_floor(
             &request.model,
             "Krea imported",
             settings,
             &[dit.as_path(), text_encoder.as_path(), vae.as_path()],
         )
-        .await?;
-    }
+    };
     let is_edit = request.mode == "edit_image";
 
     // img2img reference-guided latent-init (sc-14071): the SAME generic seam the builtin Krea Turbo
@@ -867,12 +1161,16 @@ async fn generate_krea_imported_stream(
     let adapter_count = adapters.len();
     #[cfg(not(target_os = "macos"))]
     let adapter_count = 0usize;
+    #[cfg(target_os = "macos")]
+    let conditioning = edit_conditioning.unwrap_or_else(|| krea_imported_conditioning(img2img));
+    #[cfg(not(target_os = "macos"))]
+    let conditioning = krea_imported_conditioning(img2img);
 
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
     let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
-    let enhance = PromptEnhance::default();
+    let text_style_gain = resolve_text_style_gain(request);
     let raw_settings = krea_imported_raw_settings(request, steps, is_edit, adapter_count);
 
     // Per-image work items: (seed, prompt) — `request.count` renders, each its own seed.
@@ -897,90 +1195,87 @@ async fn generate_krea_imported_stream(
         spec.with_adapters(adapters)
     };
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    #[cfg(target_os = "macos")]
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        engine_id,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    );
+    #[cfg(target_os = "macos")]
+    let memory_inputs =
+        krea_imported_memory_inputs(request, &conditioning, hires_fix, adapter_count);
+
+    #[cfg(target_os = "macos")]
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         "Krea 2 imported checkpoint load failed".to_owned(),
+        move |model,
+              initial_cache_state,
+              loaded_policy,
+              _requested_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            drive_krea_imported_mlx_items(
+                model,
+                &memory_plan,
+                &memory_inputs,
+                initial_cache_state,
+                loaded_policy.offload_policy,
+                external_committed_bytes,
+                work,
+                width,
+                height,
+                steps,
+                conditioning,
+                text_style_gain,
+                hires_fix,
+                tx,
+                cancel,
+                crate::mlx_fit_gate::evaluate_request,
+            )
+        },
+    );
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
+        job.id.clone(),
+        engine_id,
+        adapter_count,
+        spec,
+        "Krea 2 imported checkpoint load failed".to_owned(),
+        move |replacing_resident| cold_admission.admit(replacing_resident),
         move |model, tx, cancel| {
-            // Build the conditioning once, then clone it per rendered image: the Kontext edit
-            // `Reference`/`MultiReference` for an edit job (MLX), else the img2img `Reference` (or empty
-            // for plain t2i).
-            #[cfg(target_os = "macos")]
-            let conditioning =
-                edit_conditioning.unwrap_or_else(|| krea_imported_conditioning(img2img));
-            #[cfg(not(target_os = "macos"))]
-            let conditioning = krea_imported_conditioning(img2img);
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
-                if let Some(hires_fix) = hires_fix {
-                    let (out_width, out_height, pixels) = generate_one_with_hires(
-                        model,
-                        &prompt,
-                        width,
-                        height,
-                        seed,
-                        steps,
-                        None,
-                        None,
-                        None,
-                        &[],
-                        None,
-                        None,
-                        Some(KREA_IMPORTED_SAMPLER),
-                        None,
-                        None,
-                        None,
-                        false,
-                        None,
-                        None,
-                        None,
-                        &enhance,
-                        Some(hires_fix),
-                        preview,
-                        &cancel,
-                        on_progress,
-                    )?;
-                    return Ok(Some((seed, out_width, out_height, pixels)));
-                }
-                let request = GenerationRequest {
-                    prompt,
+                let generated = krea_imported_generate_one(
+                    model,
+                    &prompt,
                     width,
                     height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    sampler: Some(KREA_IMPORTED_SAMPLER.to_owned()),
-                    conditioning: conditioning.clone(),
+                    seed,
+                    steps,
+                    &conditioning,
+                    text_style_gain,
+                    hires_fix,
+                    None,
                     preview,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
-                let output = match model.generate(&request, &mut *on_progress) {
-                    Ok(output) => output,
+                    &cancel,
+                    on_progress,
+                );
+                let (out_width, out_height, pixels) = match generated {
+                    Ok(image) => image,
                     Err(_) if cancel.is_cancelled() => return Ok(None),
-                    Err(error) => {
-                        return Err(WorkerError::Engine(format!(
-                            "Krea 2 imported checkpoint generation failed: {error}"
-                        )));
-                    }
+                    Err(error) => return Err(error),
                 };
-                match output {
-                    GenerationOutput::Images(mut images) => {
-                        let image = images.pop().ok_or_else(|| {
-                            WorkerError::Engine(
-                                "Krea 2 imported checkpoint produced no image".to_owned(),
-                            )
-                        })?;
-                        Ok(Some((seed, image.width, image.height, image.pixels)))
-                    }
-                    _ => Err(WorkerError::Engine(
-                        "Krea 2 imported checkpoint returned non-image output".to_owned(),
-                    )),
-                }
+                Ok(Some((seed, out_width, out_height, pixels)))
             })
         },
     );

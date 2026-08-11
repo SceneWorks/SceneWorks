@@ -3726,8 +3726,16 @@ fn spec_component_bytes_with_provider_footprint(
     footprint: Option<PerComponentBytes>,
 ) -> (u64, u64, HeadroomAllowance) {
     let footprint_te = footprint.map(|fp| fp.text_encoder);
+    // A provider that accepts a primary single-file checkpoint owns the meaning of its named
+    // companions. Its footprint is the exact consumed assembly (imported DiT + companion TE/VAE),
+    // not a split of `spec.weights` alone. Treat it as authoritative so a `base_snapshot` supplying
+    // tokenizer/config does not recursively re-price the snapshot transformer the primary File
+    // replaces.
+    let provider_owned_file_footprint = matches!(&spec.weights, WeightsSource::File(_))
+        .then_some(footprint)
+        .flatten();
     let mut headroom = HeadroomAllowance::GENERIC;
-    let (mut total_bytes, te_bytes) = match &spec.weights {
+    let (mut total_bytes, mut te_bytes) = match &spec.weights {
         WeightsSource::Dir(dir) => {
             let mut total = sum_safetensors_bytes(dir);
             let te = resolve_text_encoder_bytes(footprint_te, dir);
@@ -3741,11 +3749,25 @@ fn spec_component_bytes_with_provider_footprint(
             }
             (total, te)
         }
-        // A single-file source has no diffusers component tree; honor a footprint TE if the provider
-        // somehow computed one, else 0 (resident-or-reject only).
-        WeightsSource::File(file) => (
-            std::fs::metadata(file).map_or(0, |meta| meta.len()),
-            footprint_te.unwrap_or(0),
+        // A single-file source has no component tree of its own. A File-aware provider footprint
+        // prices the complete consumed assembly; otherwise keep the primary file here and add only
+        // the well-known companion subtrees below.
+        WeightsSource::File(file) => provider_owned_file_footprint.map_or_else(
+            || {
+                (
+                    std::fs::metadata(file).map_or(0, |meta| meta.len()),
+                    footprint_te.unwrap_or(0),
+                )
+            },
+            |components| {
+                (
+                    components
+                        .text_encoder
+                        .saturating_add(components.dit)
+                        .saturating_add(components.vae),
+                    components.text_encoder,
+                )
+            },
         ),
     };
     if let Some(control) = &spec.control {
@@ -3764,7 +3786,37 @@ fn spec_component_bytes_with_provider_footprint(
     // against a real 6.52 GiB, which both under-quoted the over-budget message and let the
     // the legacy override admit tiers that do not fit. A component resolved to a path INSIDE the
     // weights dir is skipped, because the scan already counted it.
-    for source in spec.components.values() {
+    for (component_id, source) in &spec.components {
+        if provider_owned_file_footprint.is_some() {
+            // The File-aware footprint already reflects every named source the provider consumes.
+            continue;
+        }
+        if matches!(&spec.weights, WeightsSource::File(_))
+            && component_id == gen_core::BASE_SNAPSHOT_COMPONENT
+        {
+            // Compatibility fallback for a File-capable provider that has not published its
+            // footprint yet. The companion snapshot supplies TE/VAE/tokenizer/config only; its
+            // transformer is replaced by `spec.weights`. Explicit ComfyUI components replace the
+            // corresponding snapshot subtree and are counted normally on their own map entries.
+            if let WeightsSource::Dir(root) = source {
+                if !spec
+                    .components
+                    .contains_key(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT)
+                {
+                    let companion_te = sum_safetensors_bytes(&root.join("text_encoder"));
+                    total_bytes = total_bytes.saturating_add(companion_te);
+                    te_bytes = te_bytes.saturating_add(companion_te);
+                }
+                if !spec
+                    .components
+                    .contains_key(gen_core::COMFYUI_VAE_COMPONENT)
+                {
+                    total_bytes =
+                        total_bytes.saturating_add(sum_safetensors_bytes(&root.join("vae")));
+                }
+            }
+            continue;
+        }
         let inside = match source {
             WeightsSource::Dir(path) | WeightsSource::File(path) => match &spec.weights {
                 WeightsSource::Dir(root) => path.starts_with(root),
@@ -3772,7 +3824,13 @@ fn spec_component_bytes_with_provider_footprint(
             },
         };
         if !inside {
-            total_bytes = total_bytes.saturating_add(weights_source_bytes(source));
+            let component_bytes = weights_source_bytes(source);
+            total_bytes = total_bytes.saturating_add(component_bytes);
+            if matches!(&spec.weights, WeightsSource::File(_))
+                && component_id == gen_core::COMFYUI_TEXT_ENCODER_COMPONENT
+            {
+                te_bytes = te_bytes.saturating_add(component_bytes);
+            }
         }
     }
     (total_bytes, te_bytes, headroom)
@@ -11933,6 +11991,74 @@ mod tests {
         std::fs::write(dir.join("part-2.safetensors"), vec![0u8; 2000]).expect("shard 2");
         std::fs::write(dir.join("._part-1.safetensors"), vec![0u8; 999]).expect("sidecar");
         assert_eq!(weights_source_bytes(&WeightsSource::Dir(dir)), 3000);
+    }
+
+    #[test]
+    fn imported_file_plan_prices_consumed_companions_not_replaced_snapshot_transformer() {
+        let root = tempfile::tempdir().expect("imported plan tempdir");
+        let imported = root.path().join("imported.safetensors");
+        let base = root.path().join("base");
+        for component in ["text_encoder", "vae", "transformer", "tokenizer"] {
+            std::fs::create_dir_all(base.join(component)).expect("component dir");
+        }
+        std::fs::write(&imported, vec![0_u8; 11]).expect("imported DiT");
+        std::fs::write(
+            base.join("text_encoder").join("model.safetensors"),
+            vec![0_u8; 13],
+        )
+        .expect("text encoder");
+        std::fs::write(base.join("vae").join("model.safetensors"), vec![0_u8; 17]).expect("vae");
+        std::fs::write(
+            base.join("transformer").join("model.safetensors"),
+            vec![0_u8; 19],
+        )
+        .expect("replaced snapshot transformer");
+        std::fs::write(base.join("tokenizer").join("tokenizer.json"), b"{}")
+            .expect("tokenizer config");
+        std::fs::write(base.join("transformer").join("config.json"), b"{}")
+            .expect("transformer config");
+
+        let spec = LoadSpec::new(WeightsSource::File(imported))
+            .with_component(gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(base));
+        let consumed = 11 + 13 + 17;
+        let (fallback_total, fallback_te, _) =
+            spec_component_bytes_with_provider_footprint("krea_2_turbo", &spec, None);
+        assert_eq!((fallback_total, fallback_te), (consumed, 13));
+
+        let fallback = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
+            "krea_2_turbo",
+            "imported_krea",
+            &spec,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            fallback.asset_bytes, consumed,
+            "the compatibility path must enumerate only File + TE + VAE; tokenizer/config carry no \
+             tensors and the snapshot transformer is replaced"
+        );
+
+        let provider_owned = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
+            "krea_2_turbo",
+            "imported_krea",
+            &spec,
+            None,
+            None,
+            Some(PerComponentBytes {
+                text_encoder: 13,
+                dit: 11,
+                vae: 17,
+            }),
+            None,
+        );
+        assert_eq!(provider_owned.asset_bytes, consumed);
+        assert_eq!(provider_owned.asset_bytes + 19, 60);
+        assert_ne!(
+            provider_owned.asset_bytes, 60,
+            "recursively charging base_snapshot would add the unused 19-byte transformer"
+        );
     }
 
     /// The gate derives sequential-capability from each engine's REGISTERED descriptor bit

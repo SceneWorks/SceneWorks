@@ -42,13 +42,13 @@ const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
 /// the [`crate::cache_thread`] module docs; do not silently unify it away.
 const GENERATOR_EVICT_BEFORE_LOAD: bool = false;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn capture_external_committed_bytes() -> u64 {
     mlx_rs::memory::clear_cache();
     mlx_rs::memory::get_active_memory() as u64
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn capture_external_committed_bytes() -> u64 {
     0
 }
@@ -621,6 +621,44 @@ where
     .await
 }
 
+/// [`with_cached_generator_for_request`] with a cache-aware cold-load admission hook.
+///
+/// The hook runs on the cache thread only when this request is a genuine miss, immediately before a
+/// different resident key is dropped. An exact-key warm hit therefore never re-runs a pre-load gate
+/// (or evicts the generator it is about to use), while a different-key request can price the resident
+/// entry as reclaimable and then reload exactly once. Candle's imported/ComfyUI routes use this to
+/// keep their live-VRAM floor on the same lifecycle as the registered generator they now cache.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn with_cached_generator_for_request_after_cold_admission<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    cold_admission: impl FnOnce(bool) -> WorkerResult<()> + Send + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            ExecutionPolicy,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    with_cached_generator_for_request_after_cold_admission_using_on(
+        generator_worker(),
+        engine_id,
+        spec,
+        load_error_context,
+        cold_admission,
+        crate::inference_runtime::load,
+        run,
+    )
+    .await
+}
+
 /// [`with_cached_generator`] with the loader supplied by the caller — the seam a test injects a
 /// backend-neutral stub `Generator` through (sc-3724), so the load→progress→cancel→output contract can
 /// be driven with no tensor backend linked.
@@ -676,22 +714,59 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
 where
     R: Send + 'static,
 {
-    with_cached_generator_for_request_using_on(
+    with_cached_generator_for_request_after_cold_admission_using_on(
         generator_worker(),
         engine_id,
         spec,
         load_error_context,
+        |_| Ok(()),
         load_generator,
         run,
     )
     .await
 }
 
+#[cfg(test)]
 async fn with_cached_generator_for_request_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            ExecutionPolicy,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    with_cached_generator_for_request_after_cold_admission_using_on(
+        worker,
+        engine_id,
+        spec,
+        load_error_context,
+        |_| Ok(()),
+        load_generator,
+        run,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
+    worker: &mpsc::Sender<GeneratorJob>,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    cold_admission: impl FnOnce(bool) -> WorkerResult<()> + Send + 'static,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
@@ -744,7 +819,15 @@ where
             cached.external_committed_bytes,
         )
     };
-    cache_thread::run_cached_with_access(worker, key, load, run, GENERATOR_SEAM_MESSAGES).await
+    cache_thread::run_cached_with_access_after_cold_admission(
+        worker,
+        key,
+        cold_admission,
+        load,
+        run,
+        GENERATOR_SEAM_MESSAGES,
+    )
+    .await
 }
 
 /// Run `run` against a freshly-loaded, **uncached** generator on the shared cache thread (epic 10451
@@ -1891,6 +1974,103 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn cold_admission_skips_exact_warm_hit_and_runs_before_different_key_reload() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || run_generator_cache_worker(rx, None));
+        let roots = tempfile::tempdir().expect("weights roots");
+        let first = roots.path().join("first");
+        let second = roots.path().join("second");
+        std::fs::create_dir_all(&first).expect("first weights");
+        std::fs::create_dir_all(&second).expect("second weights");
+        // A preselected policy keeps this cache-lifecycle test backend-neutral: the loader skips the
+        // macOS live-device fit probe, which is unavailable on headless CI.
+        let first_spec =
+            LoadSpec::new(WeightsSource::Dir(first)).with_offload_policy(OffloadPolicy::Sequential);
+        let second_spec = LoadSpec::new(WeightsSource::Dir(second))
+            .with_offload_policy(OffloadPolicy::Sequential);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let loads = Arc::new(AtomicUsize::new(0));
+
+        let cold_admissions = Arc::clone(&admissions);
+        let cold_loads = Arc::clone(&loads);
+        let first_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            first_spec.clone(),
+            "stub load",
+            move |replacing_resident| {
+                assert!(!replacing_resident, "first load starts from an empty cache");
+                cold_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                cold_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("first cold request");
+        assert_eq!(first_access, MemoryCacheState::Cold);
+
+        let warm_admissions = Arc::clone(&admissions);
+        let warm_loads = Arc::clone(&loads);
+        let warm_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            first_spec,
+            "stub load",
+            move |_| {
+                warm_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                warm_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("exact warm request");
+        assert_eq!(warm_access, MemoryCacheState::Warm);
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        let replacement_admissions = Arc::clone(&admissions);
+        let replacement_loads = Arc::clone(&loads);
+        let replacement_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            second_spec,
+            "stub load",
+            move |replacing_resident| {
+                assert!(
+                    replacing_resident,
+                    "different-key admission must observe the entry it is about to replace"
+                );
+                replacement_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                replacement_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("different-key replacement request");
+        assert_eq!(replacement_access, MemoryCacheState::Cold);
+        assert_eq!(admissions.load(Ordering::SeqCst), 2);
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+
+        drop(tx);
+        worker.join().expect("cache worker exits");
     }
 
     #[test]

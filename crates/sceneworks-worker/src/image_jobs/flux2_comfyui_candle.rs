@@ -1,9 +1,10 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream, ApiClient,
-    GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    LoadSpec, Path, PathBuf, Quant, Settings, Value, WeightsSource, WorkerError, WorkerResult,
+    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
+    ApiClient, GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, LoadSpec, Path, PathBuf, Quant, Settings, Value, WeightsSource, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -282,7 +283,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
     // by the imported File and must not be recursively double-priced by admission.
     let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
     let snapshot_vae = paths.snapshot_dir.join("vae");
-    admit_candle_base_floor(
+    let cold_admission = prepare_cached_candle_base_floor(
         &request.model,
         "ComfyUI FLUX.2",
         settings,
@@ -291,8 +292,7 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
             snapshot_text_encoder.as_path(),
             snapshot_vae.as_path(),
         ],
-    )
-    .await?;
+    );
     let (width, height) = (request.width, request.height);
     let steps =
         resolve_advanced_or_manifest_u32(request, "steps", FLUX2_COMFYUI_DEFAULT_STEPS, 1..=50);
@@ -312,12 +312,13 @@ pub(super) async fn generate_candle_flux2_comfyui_stream(
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
         "flux2_dev",
         0,
         spec,
         "ComfyUI FLUX.2-dev load failed".to_owned(),
+        move |replacing_resident| cold_admission.admit(replacing_resident),
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,

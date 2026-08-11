@@ -1,9 +1,9 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream, ApiClient,
-    GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    LoadSpec, Path, PathBuf, Settings, Value, WeightsSource, WorkerError, WorkerResult,
+    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
+    ApiClient, GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, LoadSpec, Path, PathBuf, Settings, Value, WeightsSource, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -212,7 +212,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
     let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
     let snapshot_vae = paths.snapshot_dir.join("vae");
     let admission_vae = paths.vae.as_deref().unwrap_or(snapshot_vae.as_path());
-    admit_candle_base_floor(
+    let cold_admission = prepare_cached_candle_base_floor(
         &request.model,
         "ComfyUI Qwen-Image",
         settings,
@@ -221,8 +221,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
             snapshot_text_encoder.as_path(),
             admission_vae,
         ],
-    )
-    .await?;
+    );
     let mut spec = LoadSpec::new(WeightsSource::File(paths.transformer.clone())).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(paths.snapshot_dir.clone()),
@@ -250,12 +249,13 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
         "qwen_image",
         0,
         spec,
         "ComfyUI Qwen-Image load failed".to_owned(),
+        move |replacing_resident| cold_admission.admit(replacing_resident),
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,

@@ -1,9 +1,9 @@
 use super::huggingface_snapshot_dir;
 use super::{
-    admit_candle_base_floor, consume_gen_events, drive_gen_items, pose_entries,
-    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream, ApiClient,
-    GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    LoadSpec, Path, PathBuf, Settings, Value, WeightsSource, WorkerError, WorkerResult,
+    consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
+    resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
+    ApiClient, GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot,
+    JsonObject, LoadSpec, Path, PathBuf, Settings, Value, WeightsSource, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -152,7 +152,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
     })?;
     // The tokenizer snapshot is a structural companion, not another model to price recursively.
     // Admission counts exactly the three external weight files consumed by this assembly.
-    admit_candle_base_floor(
+    let cold_admission = prepare_cached_candle_base_floor(
         &request.model,
         "ComfyUI Z-Image",
         settings,
@@ -161,8 +161,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
             paths.text_encoder.as_path(),
             paths.vae.as_path(),
         ],
-    )
-    .await?;
+    );
     let spec = LoadSpec::new(WeightsSource::File(paths.transformer.clone()))
         .with_component(
             gen_core::BASE_SNAPSHOT_COMPONENT,
@@ -188,12 +187,13 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
         "z_image_turbo",
         0,
         spec,
         "ComfyUI Z-Image load failed".to_owned(),
+        move |replacing_resident| cold_admission.admit(replacing_resident),
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,
