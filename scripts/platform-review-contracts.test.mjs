@@ -142,6 +142,161 @@ test("Windows Krea provisioning accepts supported newer Python 3 runtimes", asyn
   );
 });
 
+// sc-18677 generalized windows-candle.yml's provisioning from "the Krea q4 snapshot" to "the
+// snapshot named by the provision_* inputs", so epic 17137 can land MiniMax-H3 weights on the
+// CUDA box for sc-17153/sc-17156's per-tier VRAM measurement. The story's acceptance criterion
+// is that a Krea dispatch "still behaves identically -- proven, not assumed". These tests are
+// that proof, and they are structural rather than prose-matching: they pin the input DEFAULTS
+// and the path-construction EXPRESSIONS, which together determine the resolved snapshot path.
+//
+// The path the old hardcoded step produced, verbatim:
+//   %USERPROFILE%\.cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\<rev>\q4
+// Every fragment below is a factor of that string. Change any one and a Krea five-rung capture
+// silently reads another directory -- or, if it is lucky, throws.
+function dispatchInputs(workflow) {
+  const start = workflow.indexOf("  workflow_dispatch:\n    inputs:\n");
+  assert.ok(start >= 0, "windows-candle.yml must keep a workflow_dispatch inputs block");
+  const end = workflow.indexOf("\nconcurrency:", start);
+  assert.ok(end > start, "could not find the end of the workflow_dispatch block");
+  const names = [];
+  const defaults = {};
+  let current = null;
+  for (const line of workflow.slice(start, end).split("\n")) {
+    const header = line.match(/^ {6}([a-z_]+):$/);
+    if (header) {
+      current = header[1];
+      names.push(current);
+      defaults[current] = undefined;
+      continue;
+    }
+    const def = current && line.match(/^ {8}default: (.*)$/);
+    if (def) defaults[current] = def[1].trim().replace(/^"|"$/g, "");
+  }
+  return { names, defaults };
+}
+
+test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+
+  // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
+  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
+  // a future story that adds an input needs the headroom this preserves.
+  assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
+
+  for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
+    assert.ok(!names.includes(gone), `${gone} was renamed; two provisioning paths must not coexist`);
+  }
+  for (const required of [
+    "provision_snapshot",
+    "provision_repository",
+    "provision_revision",
+    "provision_patterns",
+    "provision_subdir",
+    "provision_cache_dir",
+  ]) {
+    assert.ok(names.includes(required), `missing generalized input ${required}`);
+  }
+
+  // The defaults ARE the Krea dispatch. With these values and no other input set, the
+  // generalized steps must reconstruct the old hardcoded path exactly.
+  assert.equal(defaults.provision_repository, "SceneWorks/krea-2-turbo-mlx");
+  assert.equal(defaults.provision_patterns, "q4/**");
+  assert.equal(defaults.provision_subdir, "q4");
+  assert.equal(defaults.provision_cache_dir, undefined, "an empty cache dir must mean the historical location");
+});
+
+test("windows-candle rebuilds the exact Krea snapshot path from the generalized inputs", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // cache dir: %USERPROFILE%\.cache\huggingface\hub when provision_cache_dir is empty. This box
+  // sets HF_HOME=E:\huggingface, and honoring it here would relocate Krea's cache -- so the
+  // default deliberately ignores HF_HOME. A caller that wants another cache passes it in.
+  assert.match(workflow, /\$cache = Join-Path \$env:USERPROFILE '\.cache\\huggingface\\hub'/);
+  assert.doesNotMatch(
+    workflow,
+    /^\s*\$cache = .*HF_HOME/m,
+    "the default cache dir must not be derived from HF_HOME",
+  );
+
+  // models--<owner>--<name>\snapshots\<revision>[\<subdir>]
+  assert.match(workflow, /\$folder = 'models--' \+ \$env:PROVISION_REPOSITORY\.Replace\('\/', '--'\)/);
+  assert.match(workflow, /\$subdirTail = '\\' \+ \$env:PROVISION_SUBDIR\.Replace\('\/', '\\'\)/);
+  assert.match(
+    workflow,
+    /\$suffix = '\\' \+ \$folder \+ '\\snapshots\\' \+ \$env:PROVISION_REVISION \+ \$subdirTail/,
+  );
+
+  // The resolve step still asserts existence AND that the canonical path ends with that exact
+  // suffix, so a stale cache entry or a lookalike repo cannot satisfy it.
+  assert.match(workflow, /Test-Path -LiteralPath \$root -PathType Container/);
+  assert.match(
+    workflow,
+    /\$root\.EndsWith\(\$env:PROVISION_SNAPSHOT_SUFFIX, \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+
+  // The memory-adapter binaries read these env names via required_env; renaming the dispatch
+  // inputs must not rename the runtime contract (bin/candle.rs, bin/mlx.rs).
+  assert.match(workflow, /"SCENEWORKS_KREA_ROOT=\$root" \| Out-File/);
+  assert.match(workflow, /SCENEWORKS_KREA_REPOSITORY: \$\{\{ inputs\.provision_repository \}\}/);
+  assert.match(workflow, /SCENEWORKS_KREA_REVISION: \$\{\{ inputs\.provision_revision \}\}/);
+  // ...and SCENEWORKS_KREA_ROOT stays scoped to Krea, so an H3 dispatch cannot hand the
+  // five-rung adapter a MiniMax root under a Krea-shaped name.
+  assert.match(workflow, /\$isKrea = \$env:PROVISION_REPOSITORY -eq 'SceneWorks\/krea-2-turbo-mlx'/);
+  assert.match(workflow, /if \(\$isKrea\) \{\n\s*"SCENEWORKS_KREA_ROOT=\$root"/);
+});
+
+test("windows-candle keeps the five-rung guards while decoupling provisioning", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // Provisioning is now a first-class outcome: sc-17153/sc-17156 need H3 weights resident and
+  // there is no H3 five-rung fixture. The old coupling throw must be gone...
+  assert.doesNotMatch(workflow, /requires run_five_rung_reference=true/);
+  assert.match(
+    workflow,
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot \}\}/,
+  );
+  // ...but every five-rung guard it used to sit beside must survive, keyed on the new names.
+  assert.match(workflow, /throw 'inference_revision must be an exact lowercase 40-hex commit'/);
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REVISION -notmatch '\^\[0-9a-f\]\{40\}\$'/,
+  );
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REPOSITORY -ne 'SceneWorks\/krea-2-turbo-mlx'/,
+    "a five-rung capture is still only valid against the fixed Krea reference artifact",
+  );
+  assert.match(workflow, /does not match the adapter's compiled INFERENCE_PIN/);
+
+  // The resolve step must still run for a five-rung dispatch that does NOT provision.
+  assert.match(
+    workflow,
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_five_rung_reference \|\| inputs\.provision_snapshot\) \}\}/,
+  );
+});
+
+test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  // MiniMaxAI/MiniMax-H3 is ~498 GB because FL2VA/ and Ref2VA/ re-package the same components;
+  // the component set is ~210 GB. snapshot_download treats allow_patterns=[] as "everything",
+  // so an empty list is a 288 GB accident on a box that shares its disk with CI. Both the
+  // validation step and the Python body must refuse it.
+  assert.match(
+    workflow,
+    /throw 'provision_patterns must name at least one allow-pattern; an empty list would fetch the whole repository'/,
+  );
+  assert.match(workflow, /raise SystemExit\("provision_patterns resolved to an empty allow-list"\)/);
+  assert.match(workflow, /allow_patterns=patterns,/);
+
+  // A non-zero pip/python exit must fail the step: `@'...'@ | python -` does not propagate.
+  assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw "snapshot provisioning failed with exit code \$LASTEXITCODE" \}/);
+
+  // With provision_subdir empty the snapshot directory exists as soon as ANY file lands, so
+  // existence alone is not proof. Every declared component's literal prefix must be present.
+  assert.match(workflow, /provisioned snapshot is missing declared components under/);
+});
+
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(
