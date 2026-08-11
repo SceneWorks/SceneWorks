@@ -319,6 +319,23 @@ where
     )
 }
 
+/// The reclaimable-byte estimate and the gate that consumes resident-entry credit for one cold load.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct ColdLoadAdmission<A> {
+    incoming_reclaimable_weight_bytes: u64,
+    admit: A,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl<A> ColdLoadAdmission<A> {
+    fn new(incoming_reclaimable_weight_bytes: u64, admit: A) -> Self {
+        Self {
+            incoming_reclaimable_weight_bytes,
+            admit,
+        }
+    }
+}
+
 /// Cached stream whose pre-load admission belongs to the cache miss rather than the route preamble.
 /// The admission closure is invoked by the cache loader only for a cold/different-key load; an exact
 /// warm hit goes straight to `drive` without re-gating or evicting itself.
@@ -329,8 +346,7 @@ fn start_cached_gen_stream_after_cold_admission<A, D>(
     adapter_count: usize,
     spec: LoadSpec,
     load_error_context: String,
-    incoming_reclaimable_weight_bytes: u64,
-    cold_admission: A,
+    cold_admission: ColdLoadAdmission<A>,
     drive: D,
 ) -> (
     CancelFlag,
@@ -343,6 +359,10 @@ where
         + Send
         + 'static,
 {
+    let ColdLoadAdmission {
+        incoming_reclaimable_weight_bytes,
+        admit: cold_admission,
+    } = cold_admission;
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();

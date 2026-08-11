@@ -140,7 +140,7 @@ fn imported_dit_file(path: &Path) -> Option<PathBuf> {
 /// `pin_app_managed_model_file` (a payload or child symlink can never point the checkpoint outside a
 /// declared root; LAN jobs API, epic 4484), while retaining the lexical entry for lstat-pinned
 /// re-opening (sc-18306).
-#[cfg(test)]
+#[cfg(all(target_os = "macos", test))]
 fn resolve_imported_krea_dit(
     request: &ImageRequest,
     settings: &Settings,
@@ -1408,10 +1408,12 @@ async fn generate_krea_imported_stream(
         adapter_count,
         spec,
         "Krea 2 imported checkpoint load failed".to_owned(),
-        incoming_reclaimable_weight_bytes,
-        move |resident_reclaimable_weight_bytes| {
-            cold_admission.admit(resident_reclaimable_weight_bytes)
-        },
+        ColdLoadAdmission::new(
+            incoming_reclaimable_weight_bytes,
+            move |resident_reclaimable_weight_bytes| {
+                cold_admission.admit(resident_reclaimable_weight_bytes)
+            },
+        ),
         move |model, tx, cancel| {
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {

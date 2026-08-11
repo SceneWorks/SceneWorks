@@ -215,7 +215,7 @@ pub(crate) fn normalize_app_managed_model_path(
 /// pre-canonical path when it resolves to exactly the vetted file. This lets inference pin the entry
 /// with `lstat` and re-open it for transformer windows; returning only the canonical HF blob path would
 /// discard both the user-visible filename extension and the symlink-entry identity.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn normalize_app_managed_model_file_path(
     settings: &Settings,
     raw_path: &str,
@@ -232,7 +232,7 @@ pub(crate) fn normalize_app_managed_model_file_path(
 /// has selected its lone checkpoint entry. Re-running the canonical confinement check on that child
 /// is essential: a confined directory can contain a `.safetensors` symlink whose target escapes every
 /// app-managed root.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn normalize_app_managed_model_file_entry_path(
     settings: &Settings,
     raw_path: &Path,
@@ -270,6 +270,7 @@ pub(crate) fn pin_app_managed_model_file(
 /// `SCENEWORKS_CONTROLNET_KREA`, whose pre-existing contract deliberately admits an absolute
 /// operator path outside the managed roots. The exact entry/target identity is still retained and
 /// revalidated like every prepared File source.
+#[cfg(target_os = "macos")]
 pub(crate) fn pin_operator_model_file(
     raw_path: &Path,
     label: &str,

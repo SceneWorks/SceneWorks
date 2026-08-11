@@ -7663,10 +7663,7 @@ fn write_min_lora(path: &std::path::Path) {
 }
 
 /// Minimal PEFT LoKr header; `classify_adapter` recognizes the explicit network type.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(target_os = "macos")]
 fn write_min_lokr(path: &std::path::Path) {
     let header = json!({ "__metadata__": { "format": "pt", "networkType": "lokr" } });
     let header_bytes = serde_json::to_vec(&header).unwrap();

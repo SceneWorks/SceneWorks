@@ -3519,6 +3519,7 @@ pub(crate) fn classify_adapter(file: &Path) -> WorkerResult<AdapterKind> {
     Ok(AdapterKind::Lora)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<AdapterKind> {
     let header = pin
         .read_unchanged(|file| {
@@ -3539,13 +3540,15 @@ fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> WorkerResult<
 }
 
 #[derive(Debug)]
+#[cfg(any(target_os = "macos", test))]
 struct PreparedAdapters {
     specs: Vec<AdapterSpec>,
     pins: Vec<gen_core::PinnedWeightsFile>,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl PreparedAdapters {
-    #[cfg(test)]
+    #[cfg(all(target_os = "macos", test))]
     fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
@@ -3554,6 +3557,7 @@ impl PreparedAdapters {
 /// Prepared counterpart of [`resolve_adapters`]. Classification reads through the exact token that
 /// is later installed on the `LoadSpec`; repeated references to the same lexical entry share one
 /// token, while preserving every requested adapter spec and its scale/order.
+#[cfg(any(target_os = "macos", test))]
 fn resolve_prepared_adapters(
     request: &ImageRequest,
     settings: &Settings,

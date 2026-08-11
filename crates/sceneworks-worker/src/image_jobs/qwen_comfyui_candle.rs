@@ -2,9 +2,9 @@ use super::huggingface_snapshot_dir;
 use super::{
     consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
-    ApiClient, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot, JsonObject,
-    LoadSpec, Path, PathBuf, PreparedFileDispatch, Settings, Value, WeightsSource, WorkerError,
-    WorkerResult,
+    ApiClient, ColdLoadAdmission, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot,
+    JsonObject, LoadSpec, Path, PathBuf, PreparedFileDispatch, Settings, Value, WeightsSource,
+    WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -304,10 +304,12 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
         0,
         spec,
         "ComfyUI Qwen-Image load failed".to_owned(),
-        incoming_reclaimable_weight_bytes,
-        move |resident_reclaimable_weight_bytes| {
-            cold_admission.admit(resident_reclaimable_weight_bytes)
-        },
+        ColdLoadAdmission::new(
+            incoming_reclaimable_weight_bytes,
+            move |resident_reclaimable_weight_bytes| {
+                cold_admission.admit(resident_reclaimable_weight_bytes)
+            },
+        ),
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,

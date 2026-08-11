@@ -1489,10 +1489,7 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 /// Resolve and pin the exact adapter entry inference will load. Directory-valued imports are first
 /// confined as directories, then their selected child is independently pinned and confined so a
 /// child symlink cannot inherit trust from its parent.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(target_os = "macos", all(test, feature = "backend-candle")))]
 fn resolve_prepared_adapter_file(
     lora: &Value,
     settings: &Settings,
