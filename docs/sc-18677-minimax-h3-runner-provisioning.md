@@ -220,9 +220,11 @@ One coupling was removed on purpose: `provision_snapshot` no longer requires
 provisioning alone was necessarily a mistake. This epic makes it a first-class outcome — H3 weights
 must land on the box and there is no H3 five-rung fixture to run.
 
-### 4.1 One deliberate behaviour change: weights dispatches now request `real-weights`
+### 4.1 The two deliberate behaviour changes
 
-This is the single place the change does **not** preserve prior behaviour, and it is intentional.
+These are the only places the change does **not** preserve prior behaviour, and both are intentional.
+
+**(a) Weights dispatches now request `real-weights`.**
 
 `runs-on` was the flat list `[self-hosted, Windows, X64, cuda]`, so a five-rung capture could be
 scheduled onto any of the four runners in §1 — including the repo-level pair that does not carry
@@ -244,7 +246,7 @@ so a Krea dispatch resolves the same snapshot either way. It matters the day a `
 on a second machine: without the label the job lands somewhere with no snapshot and dies at the
 resolve step; with it the job queues for a box that has the weights.
 
-One further delta, smaller: provisioning-input validation now runs on
+**(b) Validation covers the five-rung-only path.** Provisioning-input validation now runs on
 `run_five_rung_reference || provision_snapshot` rather than on `provision_snapshot` alone, because
 both steps that *consume* those values run on the wider condition. A five-rung dispatch that
 explicitly clears `provision_patterns` or `provision_subdir` therefore now throws where it
