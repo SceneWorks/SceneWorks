@@ -1003,7 +1003,7 @@ mod tests {
         let mut qwen = descriptor("qwen", "mlx", true);
         qwen.denoiser_output_latent_space = Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE);
         let mut wan = descriptor("wan", "mlx", false);
-        wan.denoiser_output_latent_space = Some(&gen_core::WAN_Z16_LATENT_SPACE);
+        wan.denoiser_output_latent_space = Some(&gen_core::WAN_Z16_VIDEO_LATENT_SPACE);
         let mut flux2 = descriptor("flux2", "mlx", true);
         flux2.denoiser_output_latent_space = Some(&gen_core::FLUX2_PACKED_LATENT_SPACE);
         let unknown = descriptor("unknown", "mlx", false);
