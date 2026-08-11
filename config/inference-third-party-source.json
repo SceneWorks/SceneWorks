@@ -1,7 +1,7 @@
 {
   "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory.",
-  "inferenceRevision": "5ed990bd302cbc868c73dcbb17f2a5296843267e",
-  "auditDigest": "18c88e6e8e6481248a983f7908bff3f07c42e93260b9702867cd6166490447d8",
+  "inferenceRevision": "6d29a83dd7a97e22dc5dce0a57fdef1521d02ed6",
+  "auditDigest": "df4ecf48fe5be12fcac44e8bc6df2587b167455cca3b720509222cd57abb6ed2",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "5ed990bd302cbc868c73dcbb17f2a5296843267e",
+    "revision": "6d29a83dd7a97e22dc5dce0a57fdef1521d02ed6",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from (case-insensitive)",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 547,
-    "populationSha256": "bf2fe5b0811049f9fc31112e2802309263b16f582fd380de02138bb0d654c247"
+    "matchedFiles": 548,
+    "populationSha256": "d08ea09a71b762315762aa10fab2b47d19ddd3353668aa23888a45109fe3c220"
   },
   "portedSourceAreas": [
     {
@@ -76,6 +76,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-stable-audio-3",
+      "pathPrefix": "crates/audio/candle-audio-stable-audio-3/src/",
+      "provenance": "SamplerKind::recommended is a behavioral port of upstream's variant-specific sampler-selection rule.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Independently written Rust selects the upstream-recommended sampler by model variant; the candidate inventory pins the exact source blob and normalized marker without identifying copied expressive source."
     },
     {
       "id": "architecture:crates/audio/candle-audio-whisper",
