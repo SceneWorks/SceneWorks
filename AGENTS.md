@@ -10,6 +10,10 @@
 - Follow [FEATURE_DEVELOPMENT.md](FEATURE_DEVELOPMENT.md) for epic integration
   branches, story PR targets, mirrored inference work, final merge ordering, and
   the CI protections required before using this workflow.
+- Read its *Current state* section before assuming anything about branch
+  protection. As of 2026-08-11 the repositories deliberately differ: SceneWorks
+  has no merge queue anywhere, inference still queues `main` and every feature
+  branch. Queue staging/activation/recovery procedures are inference-only.
 
 ## Pull Requests
 
