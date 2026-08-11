@@ -17,10 +17,20 @@ spend a self-hosted lane discovering it.
 
 ## 1. The runner (AC2)
 
-Both `cuda`-labelled runners registered to `SceneWorks/SceneWorks` — `cuda-windows-3` (agent 23)
-and `cuda-windows-4` (agent 24) — are listener processes on **one physical box**,
-`MICHAEL-TRX50`, running as `MICHAEL-TRX50\Michael`. So "the runner's GPU" is this box's GPU, and
-two concurrent jobs share it.
+The `cuda` pool is **four** runners across **two registration levels**, and they are all listener
+processes on **one physical box**, `MICHAEL-TRX50`, running as `MICHAEL-TRX50\Michael`. So "the
+runner's GPU" is this box's GPU, and concurrent jobs share it.
+
+| Runner | Level | Install | Labels |
+| --- | --- | --- | --- |
+| `cuda-windows` (2313) | **org** | `D:\actions-runner` | `self-hosted, Windows, X64, cuda, `**`real-weights`** |
+| `cuda-windows-2` (2619) | **org** | `D:\actions-runner-2` | `self-hosted, Windows, X64, cuda, `**`real-weights`** |
+| `cuda-windows-3` (23) | repo | `D:\actions-runner-3` | `self-hosted, Windows, X64, cuda` |
+| `cuda-windows-4` (24) | repo | `D:\actions-runner-4` | `self-hosted, Windows, X64, cuda` |
+
+`gh api repos/SceneWorks/SceneWorks/actions/runners` reports only the repo-level pair, which is how
+this pool gets undercounted — the org-level pair is where a `real-weights` job belongs and is the
+half this lane never asked for. That is fixed here (§4.1).
 
 | Fact | Value |
 | --- | --- |
@@ -202,7 +212,31 @@ One coupling was removed on purpose: `provision_snapshot` no longer requires
 provisioning alone was necessarily a mistake. This epic makes it a first-class outcome — H3 weights
 must land on the box and there is no H3 five-rung fixture to run.
 
-### 4.1 How "identical" was proven
+### 4.1 One deliberate behaviour change: weights dispatches now request `real-weights`
+
+This is the single place the change does **not** preserve prior behaviour, and it is intentional.
+
+`runs-on` was the flat list `[self-hosted, Windows, X64, cuda]`, so a five-rung capture could be
+scheduled onto any of the four runners in §1 — including the repo-level pair that does not carry
+`real-weights`. It is now conditional, exactly mirroring `macos-mlx.yml:450`:
+
+```yaml
+runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference))
+             && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]')
+             || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
+```
+
+The Mac lane has done this since it grew a weights dispatch; this lane's lack of it is the
+asymmetry epic 17137 recorded as *"no `weights` label and no HF provisioning input — unlike the Mac
+lane"*. Ordinary PR and push runs are untouched and keep the full four-runner pool, so the ~24m
+lane loses no throughput.
+
+**Observable effect today: none.** All four runners are on the same box and share the same caches,
+so a Krea dispatch resolves the same snapshot either way. It matters the day a `cuda` runner joins
+on a second machine: without the label the job lands somewhere with no snapshot and dies at the
+resolve step; with it the job queues for a box that has the weights.
+
+### 4.2 How "identical" was proven
 
 **Executed, not asserted.** The PowerShell step bodies were extracted from the YAML and run locally
 against the real caches, with a simulated `GITHUB_ENV` carried between steps exactly as Actions does.
@@ -262,6 +296,30 @@ tier.
 - **bf16 — reachable ONLY sequentially.** Co-resident is not a measurement question: the weights
   alone overrun the card by 26.19 GB before a single activation is allocated, so sc-17153 should not
   spend a lane on it. Sequential fits at 77.32 GB with 25.32 GB for activations.
+
+### 5.1 The AdaLN evict makes the bf16 sequential verdict comfortable, not marginal
+
+The sequential table above is deliberately conservative: it assumes both VAEs are co-resident with a
+*whole* DiT. The epic's headline memory lever changes that. `adaln_proj` is **26.021 GB of the
+66.280 GB DiT (39.3%)** and is a function of timestep only, so sc-17145 precomputes all 18
+modulation vectors for the entire schedule and then evicts those weights; sc-18665 makes that evict
+a typed memory-resident exclusion so the ladder's arithmetic can actually see it.
+
+With the phases ordered TE → (evict) → DiT load + AdaLN precompute → (evict AdaLN) → denoise → VAE
+decode, the bf16 stage peaks are:
+
+| Stage | Resident | GB |
+| --- | --- | ---: |
+| text encode | TE alone | 51.506 |
+| DiT load + AdaLN precompute | full DiT | **66.280** |
+| denoise | DiT − AdaLN | 40.260 |
+| VAE decode | DiT − AdaLN + VAEs | 51.303 |
+
+Peak **66.280 GB — 64.6% of the card, 36.36 GB of headroom.** That is the number that matters for
+whether bf16 is worth measuring, and it is comfortable rather than marginal. The 77.324 GB figure in
+§5 remains the correct *conservative* bound for a provider that has not implemented the evict, and
+the 25.32 GB headroom there is still positive — so bf16-sequential is reachable either way. Neither
+number changes the resident verdict: co-resident bf16 is out by 26.19 GB.
 
 **These are weights floors, not peaks.** `vramGbByTier` is the max across the whole generate and
 "the denoise peak dominates"; for a joint audio+video model at video sequence lengths, attention

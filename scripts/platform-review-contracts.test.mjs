@@ -276,6 +276,29 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
   );
 });
 
+test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
+  const candle = await source(".github/workflows/windows-candle.yml");
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+
+  // The MLX lane is the template: base labels for ordinary runs, plus a weights label for a
+  // dispatch that needs real weights on disk. Assert the template still looks like that, so this
+  // guard cannot outlive the convention it mirrors.
+  assert.match(mlx, /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.run_memory_calibration \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","macOS","ARM64","nax","weights"\]'\)/);
+
+  // The `cuda` pool spans two registration levels and only the org-level half carries
+  // `real-weights`; a provisioning job on the other half finds no snapshot.
+  assert.match(
+    candle,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
+  );
+  // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
+  // available pool for this ~24m lane in half for no coverage.
+  assert.doesNotMatch(
+    candle,
+    /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
+  );
+});
+
 test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   // MiniMaxAI/MiniMax-H3 is ~498 GB because FL2VA/ and Ref2VA/ re-package the same components;

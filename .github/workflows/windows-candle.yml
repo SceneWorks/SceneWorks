@@ -299,7 +299,20 @@ jobs:
   candle-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [self-hosted, Windows, X64, cuda]
+    # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
+    # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
+    # adds `weights` for `run_memory_calibration || run_five_rung_reference` and is the convention
+    # this lane was missing -- the asymmetry epic 17137 recorded as "no weights label and no HF
+    # provisioning input, unlike the Mac lane".
+    #
+    # It matters because the `cuda` pool is FOUR runners across TWO registration levels: org-level
+    # `cuda-windows` / `cuda-windows-2` carry `real-weights`, repo-level `cuda-windows-3` /
+    # `cuda-windows-4` do NOT. All four happen to be listener processes on the same physical box
+    # today, so this narrowing changes nothing observable right now. It is what keeps a weights job
+    # correct the day a `cuda` runner is added on a second machine: without it the job lands on a
+    # box with no snapshot and fails at the resolve step, which is loud but wasteful; with it the
+    # job simply queues for a box that has the weights.
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
