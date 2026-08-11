@@ -3946,6 +3946,7 @@ fn smoke_generate_one(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -4131,6 +4132,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_p| {},
@@ -4421,6 +4423,7 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4494,6 +4497,7 @@ fn boogu_q4_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4563,6 +4567,7 @@ fn klein_tier_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4624,6 +4629,7 @@ fn ideogram_4_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4783,6 +4789,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -4841,6 +4848,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -5215,6 +5223,7 @@ fn smoke_generate_one_true_cfg(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -5575,6 +5584,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -6207,8 +6217,7 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
     ] {
         let error =
             parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
-                .err()
-                .expect("invalid settings reject")
+                .expect_err("invalid settings reject")
                 .to_string();
         assert!(error.contains(expected), "{error}");
     }
@@ -7228,6 +7237,7 @@ fn flux2_edit_real_weights_generates_one_image() {
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -10058,6 +10068,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         None,
         conditioning,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -10193,6 +10204,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
                 None,
                 conditioning,
                 &PromptEnhance::default(),
+                gen_core::PromptEnhancementSink::default(),
                 gen_core::PreviewSink::default(),
                 &cancel,
                 &mut |p| {
@@ -10863,6 +10875,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -11057,6 +11070,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
@@ -11183,6 +11197,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -11385,6 +11400,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -15869,6 +15885,7 @@ fn sc_8253_8278_identity_angle_ab() {
                         strength: None,
                     }],
                     &PromptEnhance::default(),
+                    gen_core::PromptEnhancementSink::default(),
                     gen_core::PreviewSink::default(),
                     &cancel,
                     &mut |_| {},

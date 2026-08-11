@@ -4,23 +4,23 @@
   "summary": {
     "modelCount": 91,
     "cellCount": 868,
-    "mlxOnlyCellCount": 214,
+    "mlxOnlyCellCount": 213,
     "candleOnlyCellCount": 37,
     "exceptionCount": 0
   },
   "sources": {
-    "apiContractEntry": "12c73682cf9c4810e38e172953ae92787fa39b79ef06420bcedeb16b6e549fa0",
+    "apiContractEntry": "226179446141f90d51d34d24863215b2755b8ef9be950303b61c1ffbbf0407c0",
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
-    "apiGeneration": "6d91fe0874135dbda3b40192bd0dee53f869e493c58d3627a2beec4cdfeaa1be",
-    "apiValidation": "84f992aa4aa573b363a8428d320738c53b6e4b36078af5110c6852a15b2254eb",
-    "descriptorAudioFacts": "6977bbbc0b584fffc89a68d1939e92789b1533c45cc35806797dc6a48d5bfb69",
-    "descriptorCandleFacts": "d584718f767f06e4fc983ab38a0a4340683b470eb649011904c449fc4e8fa845",
-    "descriptorCandleRuntime": "c2a3f6526aa44eeee1b990531488f1ff9961fa43f010648d7da680f352ae107c",
-    "descriptorMlxFacts": "0135e9702a6e2d539c7becca66dd38aa60de5337fe8d0f6702b39b02fb7b336f",
-    "descriptorMlxRuntime": "37dfe34a5508cc5dbbefbb7f30c3cc1d9fa8bee1eda5dea7718621528b6d0af6",
-    "descriptorPreviewFacts": "70591717bc69b7ba62e0c833b94aec3da1519b731f4a3925482fd4396a35aded",
+    "apiGeneration": "fdf2170b59442994679decea4516c80658c2c407326d6f6a72444ead30e30ff6",
+    "apiValidation": "4057d142373904f43546de63248b2dd9cd016998df901664921051fd80df7be2",
+    "descriptorAudioFacts": "bd7b7a5cc78b5c775e22dfa1ab3100deeb1f8f1bf34eb3ed13bd5afabacdbc9a",
+    "descriptorCandleFacts": "8824eac45d6bb26ce95a09becb515c73d678050388564528ab1715ca01b220da",
+    "descriptorCandleRuntime": "8f9298c9d252799258f8c86de63c3a8a6853405b7fbaabcf44a20c43eb5e5788",
+    "descriptorMlxFacts": "d1c40fdf5e0168168ad1d8224916d9487eaa3a08e14e389e3d69c4c2e4723da9",
+    "descriptorMlxRuntime": "b6331d4040c44747d9611e252e020ee5a7f018e5ec89e0027b7e98270e7d89e2",
+    "descriptorPreviewFacts": "74dfd4631ce36098315e383a767cd36a067dedd6e94ad6aa99783595e32455ea",
     "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
-    "manifest": "693b42b5464c235ada92d5d06ac92a982216d2dbeda2a2a4cdf6ff984e0c9eed",
+    "manifest": "9948236cb24e219715d164ba326f8f384a5002f800209208b9072c9bcd0237df",
     "routerCandle": "a51ba528a710428b1f77dadda6f8cbbdab2b34549ce6bf07d02b1f83d4111eb0",
     "routerCatalog": "135bff1a323dd59e7318864f454e711e9a56253aeba9b148a36fdc816991e19a",
     "routerGaps": "e2b2fa7a5fe90832ff46f6de3fdf29a71c28ef5ed5e63b0faebe2dfbf51b99f1",
@@ -44,7 +44,7 @@
     "workerDispatch": "74251a96f9ae0ea50d166a2678609287c4eaaa946b35c931db6bb55e9443036e",
     "workerEngineTable": "ba4fbcc655cecf0d7c7235e4f894638a6c1a1d5c02837f82dc387929e5819c4d",
     "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
-    "workerImageDispatch": "cc62f0ec8aaf91270e45229239f9f2ad6a2aabef6453cd63524b7cdfae2a5605",
+    "workerImageDispatch": "dcedfeb127a1ad3a4f95f0a13dba9159123ddded7b600cfcf27d2b80ae6bea1f",
     "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "0884a375e5006409d6f892212e1a4cb2bb250c18a8ef11f948d3d3098f63a651",
@@ -1089,11 +1089,7 @@
         {
           "capability": "prompt_enhancement",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18474",
-            "url": "https://app.shortcut.com/trefry/story/18474"
-          }
+          "candle": true
         },
         {
           "capability": "style_variations",

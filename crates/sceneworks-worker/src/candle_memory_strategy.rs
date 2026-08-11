@@ -850,7 +850,7 @@ fn evaluate_shared_image_inner(
     let mut current_verified = Vec::with_capacity(verified.len());
     let mut current_closure_digests = Vec::with_capacity(closure_digests.len());
     if let Some(current_calibration) = calibration {
-        for (candidate, closure_digest) in verified.into_iter().zip(closure_digests.into_iter()) {
+        for (candidate, closure_digest) in verified.into_iter().zip(closure_digests) {
             if candidate.calibration_fingerprint == current_calibration.fingerprint {
                 current_verified.push(candidate);
                 current_closure_digests.push(closure_digest);

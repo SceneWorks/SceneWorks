@@ -7019,6 +7019,26 @@ fn candle_tier_fit(
     }
 }
 
+/// FLUX.2-dev's caption-upsample lifecycle has exact bounded high-waters only for the Q4 and Q8
+/// turnkey tiers. `predicted_peak_gb` intentionally falls back to `minMemoryGb` for legacy sparse
+/// manifests, but doing that here would admit the unmeasured 113 GB BF16 tier at the 48 GB Q4 floor.
+/// Keep this route-specific until another provider rotates its calibration identity and needs the
+/// same evidence rule.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn validate_candle_tier_memory_evidence(
+    model: &str,
+    manifest_entry: &JsonObject,
+    tier: &str,
+) -> WorkerResult<()> {
+    if model == "flux2_dev" && !has_candle_tier_peak_row(manifest_entry, tier) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model} cannot run the resolved {tier} Candle tier because no current caption-aware \
+             candle.vramGbByTier evidence exists for it; select Q4/Q8 or update SceneWorks"
+        )));
+    }
+    Ok(())
+}
+
 /// Carry the legacy Candle fit gate's resident/staged choice into the request-scoped runtime
 /// contract. The load-time policy remains populated for compatibility with older and non-image
 /// providers, but current image providers use this bit as the sole lifecycle authority.
@@ -8275,6 +8295,11 @@ async fn generate_candle_stream(
         &request.model_manifest_entry,
         nvfp4_sel,
     );
+    validate_candle_tier_memory_evidence(
+        &request.model,
+        &request.model_manifest_entry,
+        tier,
+    )?;
     let requested_tier = tier;
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
     // maintaining a second engine-id allowlist in the worker. The capability bit is the provider's

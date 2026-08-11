@@ -874,8 +874,9 @@ fn default_tier_key_mirrors_the_production_resolver() {
 /// a manifest edit that drops the flux2 `vramGbByTier` / `sequentialPeakGb` makes `predicted_*` return
 /// `None` → the whole gate goes INERT for flux2 (the exact "candle block missing" failure the story
 /// targets). Exercises the same `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation the worker honors via
-/// `apply_vram_cap`. Gated to the candle lane where `vram_gate` compiles (sc-10920 measured q4/q8;
-/// bf16 + klein are carried, and are asserted to reject on real cards, which is the intended outcome).
+/// `apply_vram_cap`. Gated to the candle lane where `vram_gate` compiles. SC-18474 replaces the old
+/// FLUX.2-dev estimates with bounded caption-aware q4/q8 route high-waters; BF16 remains absent until
+/// it has fresh evidence. Klein retains its separate historical gate.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
@@ -892,44 +893,62 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
         "flux2_dev candle block present (absent ⇒ fit-gate inert for flux2)"
     );
 
-    // Measured q4 (sc-10920): resident 44.0 / sequential 35.6, each + the gate's 2 GB headroom.
+    // SC-18474 bounded q4 high-water: 42.7 GB for edit, plus the gate's 2 GB headroom. The
+    // caption-aware captures do not prove a lower sequential peak, so both rows remain 44.7 GB.
     let q4_res = predicted_peak_gb(dev_entry, "q4").expect("q4 resident predicted");
     let q4_seq = predicted_sequential_peak_gb(dev_entry, "q4").expect("q4 sequential predicted");
-    assert!((q4_res - 46.0).abs() < 1e-6, "q4 resident 44.0 + 2 headroom, got {q4_res}");
-    assert!((q4_seq - 37.6).abs() < 1e-6, "q4 sequential 35.6 + 2 headroom, got {q4_seq}");
-    assert!(q4_seq < q4_res, "sequential is the lower peak");
+    assert!((q4_res - 44.7).abs() < 1e-6, "q4 resident 42.7 + 2 headroom, got {q4_res}");
+    assert!((q4_seq - 44.7).abs() < 1e-6, "q4 sequential 42.7 + 2 headroom, got {q4_seq}");
+    assert_eq!(q4_seq, q4_res, "no smaller caption-aware sequential peak is claimed");
 
-    // A 96 GB card fits q4 resident outright — no offload.
-    let card96 = apply_vram_cap(None, Some(96.0));
-    assert_eq!(fit_decision(Some(q4_res), card96), FitDecision::Fits);
+    // The conservative supported tier is 48 GB and fits q4 resident outright.
+    assert_eq!(dev_entry["candle"]["minMemoryGb"], 48);
+    let card48 = apply_vram_cap(None, Some(48.0));
+    assert_eq!(fit_decision(Some(q4_res), card48), FitDecision::Fits);
 
-    // Emulate a 40 GB card: resident 46 won't fit, but sequential 37.6 does → OFFLOAD, run sequentially.
+    // A 40 GB card cannot fit either row. Offload is attempted, then fails closed on the same
+    // caption-aware high-water rather than falling through to an obsolete v2 ladder rung.
     let card40 = apply_vram_cap(None, Some(40.0));
     let at40 = resolve_offload(fit_decision(Some(q4_res), card40), /* sequential_capable */ true);
     assert!(matches!(at40, FitDecision::Offload { .. }), "40 GB → offload, got {at40:?}");
-    assert_eq!(sequential_overflow_gb(Some(q4_seq), card40), None, "sequential fits 40 GB → run");
+    assert_eq!(
+        sequential_overflow_gb(Some(q4_seq), card40),
+        Some(q4_seq),
+        "sequential high-water still exceeds 40 GB"
+    );
 
-    // Emulate a 30 GB card: even the sequential 37.6 peak won't fit → REJECT-before-OOM (sc-10856 gate).
+    // A 30 GB card is also rejected before load.
     let card30 = apply_vram_cap(None, Some(30.0));
     let at30 = resolve_offload(fit_decision(Some(q4_res), card30), true);
     assert!(matches!(at30, FitDecision::Offload { .. }), "30 GB → offload attempt, got {at30:?}");
     assert_eq!(
         sequential_overflow_gb(Some(q4_seq), card30),
         Some(q4_seq),
-        "sequential 37.6 > 30 GB → reject carrying the number"
+        "sequential 44.7 > 30 GB → reject carrying the number"
     );
 
-    // Measured q8 is present too (resident 70.7 / sequential 64.9 + headroom).
-    assert!((predicted_peak_gb(dev_entry, "q8").unwrap() - 72.7).abs() < 1e-6);
-    assert!((predicted_sequential_peak_gb(dev_entry, "q8").unwrap() - 66.9).abs() < 1e-6);
+    // Q8 uses the larger 70.8 GB route high-water plus headroom and therefore starts at the next
+    // supported 80 GB tier; again, no smaller sequential peak is claimed.
+    assert!((predicted_peak_gb(dev_entry, "q8").unwrap() - 72.8).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(dev_entry, "q8").unwrap() - 72.8).abs() < 1e-6);
 
-    // The carried bf16 tier (128 / 97) rejects on a 96 GB card even sequentially — the intended outcome
-    // (113 GB dense weights can't run off-Mac), reject-before-OOM instead of a silent load-time OOM.
-    let bf16_seq = predicted_sequential_peak_gb(dev_entry, "bf16").expect("bf16 sequential carried");
     assert_eq!(
-        sequential_overflow_gb(Some(bf16_seq), card96),
-        Some(bf16_seq),
-        "bf16 sequential 99 > 96 GB → reject"
+        predicted_peak_gb(dev_entry, "bf16"),
+        Some(48.0),
+        "the legacy static fallback exists, so route admission must reject the missing tier row"
+    );
+    assert_eq!(predicted_sequential_peak_gb(dev_entry, "bf16"), None);
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "q4")
+            .is_ok()
+    );
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "q8")
+            .is_ok()
+    );
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "bf16")
+            .is_err()
     );
 
     // klein carries a candle block so ITS fit-gate is live: on a 16 GB epic-target card klein rejects

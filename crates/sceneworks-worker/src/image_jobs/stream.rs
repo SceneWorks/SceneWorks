@@ -184,6 +184,10 @@ where
 /// Prompt-reporting sibling of [`drive_gen_items`]. Kept separate so the additive inference
 /// contract changes only the FLUX.2-dev-capable generic lanes; every other producer remains source-
 /// and behavior-identical.
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
 fn drive_gen_items_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,

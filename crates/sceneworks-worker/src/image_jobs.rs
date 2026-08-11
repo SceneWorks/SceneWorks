@@ -3000,7 +3000,7 @@ mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
     admit_candle_base, admit_candle_base_floor, admit_candle_load_spec_floor,
-    safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
+    has_candle_tier_peak_row, safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —

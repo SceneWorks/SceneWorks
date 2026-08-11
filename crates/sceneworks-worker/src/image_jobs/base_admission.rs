@@ -128,7 +128,7 @@ fn reject_message(
     ))
 }
 
-fn has_tier_peak_row(entry: &JsonObject, tier: &str) -> bool {
+pub(super) fn has_candle_tier_peak_row(entry: &JsonObject, tier: &str) -> bool {
     let rows = entry
         .get("candle")
         .and_then(|candle| candle.get("vramGbByTier"))
@@ -166,7 +166,7 @@ pub(super) async fn admit_candle_base(
         &request.model_manifest_entry,
         nvfp4_selected(request, nvfp4_host_eligible(), Some(resolved_dir)),
     );
-    if !has_tier_peak_row(evidence_entry, tier) {
+    if !has_candle_tier_peak_row(evidence_entry, tier) {
         if let Some(reason) = unmeasured_reason {
             tracing::warn!(
                 model = %request.model,
@@ -341,7 +341,7 @@ mod tests {
             .as_object()
             .unwrap()
             .clone();
-        assert!(!has_tier_peak_row(&static_only, "q4"));
+        assert!(!has_candle_tier_peak_row(&static_only, "q4"));
 
         let evidenced = json!({
             "candle": { "vramGbByTier": { "q4": 18.0, "q8": 24.0 } }
@@ -349,12 +349,12 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        assert!(has_tier_peak_row(&evidenced, "q4"));
+        assert!(has_candle_tier_peak_row(&evidenced, "q4"));
         assert!(
-            has_tier_peak_row(&evidenced, NVFP4_TIER),
+            has_candle_tier_peak_row(&evidenced, NVFP4_TIER),
             "NVFP4 conservatively reuses the catalog q8 row, matching predicted_peak_gb"
         );
-        assert!(!has_tier_peak_row(&evidenced, "bf16"));
+        assert!(!has_candle_tier_peak_row(&evidenced, "bf16"));
     }
 
     #[test]

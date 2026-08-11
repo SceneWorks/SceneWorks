@@ -340,8 +340,8 @@ fn flux2_edit_generate_one(
     image_guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
     enhance: &PromptEnhance,
-    preview: gen_core::PreviewSink,
     prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -624,8 +624,8 @@ async fn generate_flux2_edit_stream(
                         image_guidance,
                         conditioning,
                         &enhance,
-                        preview,
                         prompt_enhancement.for_prompt(&prompt),
+                        preview,
                         &cancel,
                         on_progress,
                     )?;
