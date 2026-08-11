@@ -7444,7 +7444,7 @@
       // 70.8 GB. These are bounded route high-waters, NOT 1024 calibration records. `vramMeasuredPixels`
       // therefore stays honest at 256², and the old v2 1024 ladder bindings below remain historical only:
       // the live v3 provider fingerprint rejects them before selection. The static rows use the largest
-      // measured high-water per tier; the common gate adds its 2 GB reserve, yielding conservative host
+      // observed high-water per tier; the common gate adds its 2 GB reserve, yielding conservative host
       // tiers of 48 GB for Q4 and 80 GB for Q8. No BF16 row is published without fresh evidence.
       "candle": {
         // Historical SC-15833 Q4 base-only CUDA ladder bindings. Keep their exact 5ffd revision,
@@ -7540,7 +7540,7 @@
         "vramGbByTier": { "q4": 42.7, "q8": 70.8 },
         "vramMeasuredPixels": 65536,
         "sequentialPeakGb": { "q4": 42.7, "q8": 70.8 },
-        "measured": true
+        "measured": false
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",
