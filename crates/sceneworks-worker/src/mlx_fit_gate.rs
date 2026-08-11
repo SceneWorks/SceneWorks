@@ -5460,6 +5460,7 @@ mod tests {
     fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerator {
         RequestGenerator {
             descriptor: gen_core::ModelDescriptor {
+                denoiser_output_latent_space: None,
                 id: "mage_flow",
                 family: "test",
                 backend: "mlx",
@@ -6045,6 +6046,7 @@ mod tests {
             .collect();
         RequestGenerator {
             descriptor: gen_core::ModelDescriptor {
+                denoiser_output_latent_space: None,
                 id: "fixture_provider",
                 family: "test",
                 backend: "mlx",
@@ -6742,6 +6744,7 @@ mod tests {
         fn generator(contract: MemoryProviderContract) -> RequestGenerator {
             RequestGenerator {
                 descriptor: gen_core::ModelDescriptor {
+                    denoiser_output_latent_space: None,
                     id: "krea_2_turbo",
                     family: "krea",
                     backend: "mlx",
@@ -6890,6 +6893,7 @@ mod tests {
         fn generator(contract: MemoryProviderContract) -> RequestGenerator {
             RequestGenerator {
                 descriptor: gen_core::ModelDescriptor {
+                    denoiser_output_latent_space: None,
                     id: "sdxl",
                     family: "sdxl",
                     backend: "mlx",

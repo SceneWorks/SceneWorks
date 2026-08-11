@@ -79,10 +79,12 @@
 //!    invisible to all three *without editing the media discovery at all*; a sibling
 //!    `capabilities.candle.audio.json` would be picked up by the glob's `*`, which does cross a dot.
 //!
-//! The media files' schema is deliberately **unchanged**: `capabilities.mlx.json` can only be
-//! re-dumped on a Mac, so a schema change made off-Mac would strand it at the old shape with no lane
-//! able to fix it. The audio file instead carries its own [`AudioCapabilityFacts::registry`]
-//! discriminator, so a file can never be mistaken for the other kind regardless of where it sits.
+//! Media files deliberately carry no registry discriminator: `capabilities.mlx.json` can only be
+//! re-dumped on a Mac, so the audio lane must remain distinguishable without rewriting that file.
+//! Optional descriptor facts may still extend each engine row when both backend-owned dumps are
+//! regenerated from the corresponding linked registries. The audio file instead carries its own
+//! [`AudioCapabilityFacts::registry`] discriminator, so a file can never be mistaken for the other
+//! kind regardless of where it sits.
 //!
 //! Only **generators** carry [`gen_core::Capabilities`], so only they are dumped. The audio lane's
 //! other provider kinds — `openvoice_v2` (an `AudioTransform`), `chatterbox_ve` (a `VoiceEmbedder`),
@@ -158,8 +160,133 @@ pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "mlx"];
 /// is the hole sc-17119's backend-level coverage passed straight over.
 pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];
 
-/// One engine's weights-free preview facts, as written to a per-backend facts file.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// A latent grid's spatial pixel compression, serialized without backend-specific types.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpatialCompressionFact {
+    pub height: u16,
+    pub width: u16,
+}
+
+/// Whether the decoder seam receives the native latent grid or a patch-packed one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum LatentPatchLayoutFact {
+    Unpacked,
+    Packed { patch_height: u8, patch_width: u8 },
+}
+
+/// Temporal pixel-to-latent law. Kept explicit so a still-image z16 space never compares equal to
+/// Wan's numerically normalized but causally compressed z16 video space.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LatentTemporalLawFact {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "causal-4x")]
+    Causal4x,
+    #[serde(rename = "causal-6x")]
+    Causal6x,
+    #[serde(rename = "causal-8x")]
+    Causal8x,
+}
+
+/// Stable normalization identity at the denoiser-to-decoder seam.
+///
+/// Fixed per-channel vectors carry a string hash because a 64-bit JSON number cannot be compared
+/// exactly by JavaScript. Learned vectors deliberately carry no content hash, preserving gen-core's
+/// fail-closed rule instead of claiming two independently loaded checkpoints are compatible.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum LatentNormalizationFact {
+    Identity,
+    Affine {
+        scale_bits: u32,
+        shift_bits: u32,
+    },
+    PerChannel {
+        identity: String,
+        channels: u16,
+        content_hash: String,
+    },
+    LearnedPerChannel {
+        identity: String,
+    },
+}
+
+/// Complete backend-neutral identity of a tensor at a denoiser-to-decoder boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatentSpaceFact {
+    pub channels: u16,
+    pub spatial_compression: SpatialCompressionFact,
+    pub patch_layout: LatentPatchLayoutFact,
+    pub temporal_law: LatentTemporalLawFact,
+    pub normalization: LatentNormalizationFact,
+}
+
+impl From<&gen_core::LatentSpace> for LatentSpaceFact {
+    fn from(space: &gen_core::LatentSpace) -> Self {
+        let patch_layout = match space.patch_layout {
+            gen_core::LatentPatchLayout::Unpacked => LatentPatchLayoutFact::Unpacked,
+            gen_core::LatentPatchLayout::Packed {
+                patch_height,
+                patch_width,
+            } => LatentPatchLayoutFact::Packed {
+                patch_height,
+                patch_width,
+            },
+        };
+        let temporal_law = match space.temporal_law {
+            gen_core::LatentTemporalLaw::None => LatentTemporalLawFact::None,
+            gen_core::LatentTemporalLaw::Causal4x => LatentTemporalLawFact::Causal4x,
+            gen_core::LatentTemporalLaw::Causal6x => LatentTemporalLawFact::Causal6x,
+            gen_core::LatentTemporalLaw::Causal8x => LatentTemporalLawFact::Causal8x,
+        };
+        let normalization = match space.normalization {
+            gen_core::LatentNormalization::Identity => LatentNormalizationFact::Identity,
+            gen_core::LatentNormalization::Affine {
+                scale_bits,
+                shift_bits,
+            } => LatentNormalizationFact::Affine {
+                scale_bits,
+                shift_bits,
+            },
+            gen_core::LatentNormalization::PerChannel(stats) => {
+                LatentNormalizationFact::PerChannel {
+                    identity: stats.identity.to_owned(),
+                    channels: stats.channels,
+                    content_hash: format!("fnv1a64:{:016x}", stats.content_hash),
+                }
+            }
+            gen_core::LatentNormalization::LearnedPerChannel { identity } => {
+                LatentNormalizationFact::LearnedPerChannel {
+                    identity: identity.to_owned(),
+                }
+            }
+        };
+        Self {
+            channels: space.channels,
+            spatial_compression: SpatialCompressionFact {
+                height: space.spatial_compression.height,
+                width: space.spatial_compression.width,
+            },
+            patch_layout,
+            temporal_law,
+            normalization,
+        }
+    }
+}
+
+/// One engine's weights-free capability facts, as written to a per-backend facts file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineFact {
     /// The gen-core registry id (`ModelDescriptor::id`) — the join key stage 2 resolves
@@ -169,10 +296,14 @@ pub struct EngineFact {
     pub modality: String,
     /// `Capabilities::supports_preview` — whether this engine emits `PreviewSink` frames.
     pub supports_preview: bool,
+    /// Exact denoiser output contract. Missing remains unknown and therefore incompatible with
+    /// every decoder; no consumer may infer it from the engine id or family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denoiser_output_latent_space: Option<LatentSpaceFact>,
 }
 
 /// Provenance stamped onto every facts file so a stale dump is detectable without rebuilding.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FactsProvenance {
     /// The inference revision the descriptors were read from — the same constant
@@ -184,7 +315,7 @@ pub struct FactsProvenance {
 }
 
 /// One backend's complete, weights-free engine facts.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineCapabilityFacts {
     /// `"mlx"` | `"candle"` — `ModelDescriptor::backend`.
@@ -204,8 +335,8 @@ impl EngineCapabilityFacts {
 
 /// The `registry` discriminator every audio facts file carries.
 ///
-/// Media facts files carry **no** `registry` key — deliberately, because adding one would change
-/// their bytes and `capabilities.mlx.json` can only be re-dumped on a Mac. So "has
+/// Media facts files carry **no** `registry` key — deliberately, because that discriminator is
+/// owned by the audio lane. So "has
 /// `registry: audio`" is the test for an audio file, and its absence means media.
 pub const AUDIO_REGISTRY_LABEL: &str = "audio";
 
@@ -213,8 +344,8 @@ pub const AUDIO_REGISTRY_LABEL: &str = "audio";
 ///
 /// Structurally [`EngineCapabilityFacts`] plus the [`AUDIO_REGISTRY_LABEL`] discriminator, so a file
 /// that ends up in the wrong directory is still self-describing. A distinct type rather than a flag
-/// on the media struct for exactly that reason: the media schema must not move.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// on the media struct for exactly that reason: the two registry namespaces must stay distinct.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioCapabilityFacts {
     /// Always [`AUDIO_REGISTRY_LABEL`]. Serialized first so the discriminator is the first line of
@@ -306,6 +437,9 @@ fn group_by_backend(
                 id: descriptor.id.to_owned(),
                 modality: modality_label(&descriptor.modality).to_owned(),
                 supports_preview: descriptor.capabilities.supports_preview,
+                denoiser_output_latent_space: descriptor
+                    .denoiser_output_latent_space
+                    .map(LatentSpaceFact::from),
             });
     }
     for (backend, engines) in &mut by_backend {
@@ -531,6 +665,7 @@ mod tests {
         modality: gen_core::Modality,
     ) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
+            denoiser_output_latent_space: None,
             id,
             family: id,
             backend,
@@ -713,10 +848,9 @@ mod tests {
 
     // The discriminator is what keeps a misplaced file from being read as the other kind, so assert
     // it is actually IN the bytes rather than only on the struct. Media files carry no `registry`
-    // key at all — deliberately, since changing their schema would strand capabilities.mlx.json,
-    // which only a Mac can re-dump.
+    // key at all; their optional engine-level descriptor facts do not change that namespace rule.
     #[test]
-    fn audio_json_is_discriminated_and_media_json_is_unchanged() {
+    fn audio_json_is_discriminated_and_media_json_has_no_registry_key() {
         let audio = audio_facts_from_descriptors(
             &[audio_descriptor("kokoro_82m", false)],
             "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
@@ -730,6 +864,9 @@ mod tests {
         assert_eq!(json["backend"], "candle");
         assert_eq!(json["engines"][0]["modality"], "audio");
         assert_eq!(json["engines"][0]["supportsPreview"], false);
+        assert!(json["engines"][0]
+            .get("denoiserOutputLatentSpace")
+            .is_none());
 
         let media = facts_from_descriptors(
             &[descriptor("krea_2_turbo", "candle", true)],
@@ -741,7 +878,7 @@ mod tests {
             serde_json::from_str(&facts_json(&media[0]).expect("serializes")).expect("parses");
         assert!(
             media_json.get("registry").is_none(),
-            "the media schema must not move: capabilities.mlx.json can only be re-dumped on a Mac"
+            "media facts must remain distinguishable from the audio registry"
         );
     }
 
@@ -865,5 +1002,69 @@ mod tests {
         assert_eq!(parsed["engines"][0]["id"], "krea_2_turbo");
         assert_eq!(parsed["engines"][0]["supportsPreview"], true);
         assert_eq!(parsed["engines"][0]["modality"], "image");
+    }
+
+    #[test]
+    fn latent_space_facts_are_exact_fail_closed_and_round_trip() {
+        let mut qwen = descriptor("qwen", "mlx", true);
+        qwen.denoiser_output_latent_space = Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE);
+        let mut wan = descriptor("wan", "mlx", false);
+        wan.denoiser_output_latent_space = Some(&gen_core::WAN_Z16_VIDEO_LATENT_SPACE);
+        let mut flux2 = descriptor("flux2", "mlx", true);
+        flux2.denoiser_output_latent_space = Some(&gen_core::FLUX2_PACKED_LATENT_SPACE);
+        let mut mochi = descriptor("mochi", "mlx", false);
+        mochi.denoiser_output_latent_space = Some(&gen_core::MOCHI_VIDEO_LATENT_SPACE);
+        let mut ltx = descriptor("ltx", "mlx", false);
+        ltx.denoiser_output_latent_space = Some(&gen_core::LTX_VIDEO_LATENT_SPACE);
+        let unknown = descriptor("unknown", "mlx", false);
+
+        let facts = facts_from_descriptors(
+            &[qwen, wan, flux2, mochi, ltx, unknown],
+            "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "cargo run …",
+        )
+        .expect("facts");
+        let json = facts_json(&facts[0]).expect("serializes");
+        let round_trip: EngineCapabilityFacts =
+            serde_json::from_str(&json).expect("typed facts deserialize");
+        assert_eq!(round_trip, facts[0]);
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parses");
+        let engine = |id: &str| {
+            parsed["engines"]
+                .as_array()
+                .expect("engine array")
+                .iter()
+                .find(|engine| engine["id"] == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+        };
+        let qwen = &engine("qwen")["denoiserOutputLatentSpace"];
+        let wan = &engine("wan")["denoiserOutputLatentSpace"];
+        assert_eq!(qwen["channels"], 16);
+        assert_eq!(qwen["patchLayout"]["kind"], "unpacked");
+        assert_eq!(qwen["temporalLaw"], "none");
+        assert_eq!(wan["temporalLaw"], "causal-4x");
+        assert_eq!(
+            engine("mochi")["denoiserOutputLatentSpace"]["temporalLaw"],
+            "causal-6x"
+        );
+        assert_eq!(
+            engine("ltx")["denoiserOutputLatentSpace"]["temporalLaw"],
+            "causal-8x"
+        );
+        assert_eq!(qwen["normalization"], wan["normalization"]);
+        assert!(qwen["normalization"]["contentHash"]
+            .as_str()
+            .expect("string hash")
+            .starts_with("fnv1a64:"));
+        assert_eq!(
+            engine("flux2")["denoiserOutputLatentSpace"]["patchLayout"]["kind"],
+            "packed"
+        );
+        assert_eq!(
+            engine("flux2")["denoiserOutputLatentSpace"]["normalization"]["kind"],
+            "learnedPerChannel"
+        );
+        assert!(engine("unknown").get("denoiserOutputLatentSpace").is_none());
     }
 }

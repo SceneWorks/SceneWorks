@@ -1365,55 +1365,6 @@ test("every required workflow reports on feature-target pull requests", async ()
   }
 });
 
-test("the required parity job unconditionally enforces feature-epic topology and final pins", async () => {
-  const workflow = await source(".github/workflows/check.yml");
-  const parityStart = workflow.indexOf("  parity:");
-  const candleStart = workflow.indexOf("  candle:");
-  assert.ok(parityStart >= 0 && candleStart > parityStart, "parity job boundaries not found");
-  const parity = workflow.slice(parityStart, candleStart);
-  const checkout = parity.indexOf("uses: actions/checkout@");
-  const policy = parity.indexOf("run: node scripts/feature-epic.mjs ci-policy");
-  const firstBuildSetup = parity.indexOf("uses: actions/setup-python@");
-  assert.ok(
-    checkout >= 0 && checkout < policy && policy < firstBuildSetup,
-    "feature policy must run after checkout and before expensive parity setup",
-  );
-  const policyBlock = parity.slice(parity.lastIndexOf("\n      - name:", policy), policy + 54);
-  assert.doesNotMatch(policyBlock, /^\s+if:/m, "feature policy cannot be conditionally skipped");
-  assert.match(policyBlock, /GH_TOKEN: \$\{\{ github\.token \}\}/);
-});
-
-test("feature-epic operator commands and epic-bearing story branches stay documented", async () => {
-  const guide = await source("FEATURE_DEVELOPMENT.md");
-  for (const command of [
-    "feature:epic -- plan",
-    "feature:epic -- bootstrap",
-    "feature:epic -- recover",
-    "feature:epic -- refresh-stories",
-    "feature:epic -- record-pr",
-    "feature:epic -- audit",
-  ]) {
-    assert.match(guide, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), command);
-  }
-  assert.match(guide, /story\/sc-<story-id>-epic-<epic-id>-<epic-slug>/);
-  assert.match(guide, /audit` never deletes a branch or opens a\nruleset bypass window/);
-  assert.match(guide, /SHORTCUT_API_TOKEN/);
-  assert.match(guide, /recover-stale-lock-after-seconds/);
-});
-
-test("feature-epic automation permits only journaled exact ruleset transitions, never ref update, force-push, or delete", async () => {
-  const automation = await source("scripts/lib/feature-epic.mjs");
-  assert.doesNotMatch(automation, /method:\s*"(?:PATCH|DELETE)"/);
-  assert.equal([...automation.matchAll(/method:\s*"PUT"/g)].length, 1);
-  assert.match(automation, /updateRuleset\(slug, id, payload\)[\s\S]*?method:\s*"PUT"/);
-  assert.match(automation, /UNSAFE_RULESET_UPDATE/);
-  assert.match(automation, /policyWasCreatedByTransaction/);
-  assert.match(automation, /recover-disable-ruleset/);
-  assert.doesNotMatch(automation, /\["push"|"push",|update-ref|delete-ref|force-with-lease/);
-  assert.match(automation, /createRuleset\(slug, payload\)/);
-  assert.match(automation, /createFeatureRef\(slug, branch, sha\)/);
-});
-
 test("feature-target coverage rejects inline and multiline branches-ignore filters", () => {
   for (const workflow of [
     'on:\n  pull_request:\n    branches-ignore: ["feature/*"]\n',

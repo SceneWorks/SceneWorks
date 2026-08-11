@@ -560,9 +560,10 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
-  // Only retained q8 fixture records can be re-stamped synthetically: SC-18353's physical q4/bf16
-  // receipts are closure-bound to their validated source sessions and must remain historical rather
-  // than being forged current. Pinned as the SET, not a count, so no sibling can slip through.
+  // SC-18311 changes the shared gen-core contract and therefore the provider compile closure. The
+  // older SC-18353 q4/bf16 receipts must remain historical; this fixture deliberately re-stamps only
+  // the retained q8 rung-4 records. Pinned as the SET, not a count: neither admitting a stale sibling
+  // nor losing one of the explicitly refreshed q8 bindings may read as green.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
@@ -574,7 +575,8 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
-  // and also includes SC-18237's production-deferred pair. Exact counts keep that fact visible.
+  // and also includes SC-18237's production-deferred pair. Exact counts keep that fact visible while
+  // ensuring the stale q4/bf16 receipts cannot be promoted by a manifest-only restamp.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
@@ -617,7 +619,7 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
 });
 
-test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async () => {
+test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keeps stale captures historical", async () => {
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
@@ -666,7 +668,7 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async 
           cell.evidence.currentEnvironmentVerification.length === 0 &&
           cell.evidence.historicalVerification.length === 2,
       ),
-    "the exact 768 and 1024 captures must remain historical after the provider closure moves",
+    "the exact 768 and 1024 captures must remain visible but cannot survive SC-18311's closure change as current",
   );
 });
 
@@ -2556,12 +2558,12 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.equal(
     verifiedQwen(promotedQwen),
     2,
-    "the retained q8 fixture must verify only its two exact rung-4 bindings",
+    "only the explicitly re-stamped q8 rung-4 records may verify after the shared contract changes",
   );
   assert.equal(
     verifiedQwen(shipped),
     0,
-    "the shipped Qwen captures must demote after their provider closure changes",
+    "SC-18311 moves the Qwen provider closure, so every shipped capture is historical until recaptured",
   );
 
   const evidenceOnlyZ = await buildMatrix({
@@ -2899,11 +2901,11 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, currently admits no coordinates: the exact
-  // inference closure changed, so the Qwen SC-18237/SC-18353 and FLUX.2 SC-18218 captures are all
-  // historical at this pin. Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, currently admits nothing: SC-18311 changes
+  // the shared gen-core contract and moves the Qwen and FLUX.2 provider closures, so their prior
+  // captures are historical until they are re-run. Two facts keep this assertion useful:
   //
-  //   1. It is exact: no historical Qwen/FLUX.2 or sibling-rung row may join.
+  //   1. It is exact: no historical Qwen or FLUX.2 row may survive the closure change as current.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm being empty therefore cannot elide anything.
@@ -2916,7 +2918,7 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       .map((cell) => cell.id)
       .sort(),
     [],
-    "the superseded SC-18237/SC-18353 Qwen and SC-18218 FLUX.2 captures are historical",
+    "the SC-18311 closure change must demote every prior Qwen and FLUX.2 capture to historical",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),

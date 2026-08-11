@@ -3910,6 +3910,7 @@ mod candle_image_load_shape_tests {
             Self {
                 observed_stage_residency,
                 descriptor: gen_core::ModelDescriptor {
+                    denoiser_output_latent_space: None,
                     id: "legacy_fallback_fixture",
                     family: "test",
                     backend: "candle",

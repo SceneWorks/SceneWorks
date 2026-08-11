@@ -1781,6 +1781,7 @@ impl ArmProbe {
             *seen_spec.lock().unwrap() = Some(spec.clone());
             Ok(Box::new(ProbeGenerator {
                 descriptor: gen_core::ModelDescriptor {
+                    denoiser_output_latent_space: None,
                     // Leaked so the descriptor's `&'static str` id reflects the engine actually
                     // asked for; the probe outlives nothing, so the leak is bounded by the test.
                     id: Box::leak(engine_id.to_owned().into_boxed_str()),
