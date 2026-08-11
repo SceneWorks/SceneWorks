@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 908d0529 is the SC-18311 merge on the epic inference feature branch and includes the preceding SC-18306 merge. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against the prior b965641e audit, every candidate path, source-area classification, normalized provenance marker, and crate prefix remains unchanged; 38 existing candidate source blobs changed. The b965641e..908d0529 delta changes no NOTICE, LICENSE, or production include_str!/include_bytes! site and adds no production Rust crate.",
-  "inferenceRevision": "908d05298f2e8d6bd1ad6dcff4358e32994b9d4a",
-  "auditDigest": "f2c57fd220e487c437e55bbf777b4c2227ca9febcec6207653ca9f33a7170d8f",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. 84b1b7b9 is the SC-18321 harness merge on the epic inference feature branch, atop SC-18311 and SC-18306. The exact scanner found 624 provenance candidates and 94 production-Rust crate prefixes. Against 908d0529, every candidate path, source-area classification, normalized provenance marker, and crate prefix remains unchanged; 13 existing candidate source blobs changed. The 908d0529..84b1b7b9 delta changes no NOTICE or LICENSE file and adds no production Rust crate. It adds two production include_str! sites for the same first-party MLX benchmark matrix; both are classified below.",
+  "inferenceRevision": "84b1b7b9963a2f4b3e9ca2f714a01287d8094d64",
+  "auditDigest": "c4f7ef5aaf18336c68bf15decdfd1726b2917d02226caadf820d9071a8af86c5",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "908d05298f2e8d6bd1ad6dcff4358e32994b9d4a",
+    "revision": "84b1b7b9963a2f4b3e9ca2f714a01287d8094d64",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 624,
-    "populationSha256": "f7b39a0b542d3806cd456ef1e63447c9a644da7f0965d672188761b3b5763d2a"
+    "populationSha256": "8704f1228ab3cdd6eee3b9b38e0393ee1bdb64a28346c9c5d1c9369130a991e1"
   },
   "portedSourceAreas": [
     {
@@ -678,6 +678,18 @@
   ],
   "includeSites": [
     {
+      "source": "crates/bundles/runtime-macos/src/bin/mlx_perf_bench.rs:39",
+      "included": "../../benchmarks/mlx-perf-matrix-v1.json",
+      "disposition": "first-party-source",
+      "evidence": "SceneWorks-authored required-all MLX benchmark matrix embedded as the CLI's checked default; no third-party source or data."
+    },
+    {
+      "source": "crates/bundles/runtime-macos/src/perf_bench.rs:30",
+      "included": "../benchmarks/mlx-perf-matrix-v1.json",
+      "disposition": "first-party-source",
+      "evidence": "The same SceneWorks-authored MLX benchmark matrix embedded for fail-closed contract validation; no third-party source or data."
+    },
+    {
       "source": "crates/audio/candle-audio-kokoro/src/g2p.rs:67",
       "included": "resources/cmudict.dict",
       "disposition": "artifact",
@@ -818,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "908d05298f2e8d6bd1ad6dcff4358e32994b9d4a",
+    "revision": "84b1b7b9963a2f4b3e9ca2f714a01287d8094d64",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 94,
     "cratePopulationSha256": "0f90a97ddc2bd94c98a9e90e664b136fe0d0199588ea7fe1134db9c566eb39dc"

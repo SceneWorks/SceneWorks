@@ -1,34 +1,119 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "908d05298f2e8d6bd1ad6dcff4358e32994b9d4a",
+    "inferenceRevision": "84b1b7b9963a2f4b3e9ca2f714a01287d8094d64",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
     {
       "id": "anima_aesthetic",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "anima_base",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "anima_turbo",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "bernini",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "bernini_renderer",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "boogu_image",
@@ -376,7 +461,24 @@
     {
       "id": "krea_2_turbo_edit",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "lens",
@@ -425,42 +527,156 @@
     {
       "id": "ltx_2_3_distilled",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 32,
+          "width": 32
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-8x",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "ltx-2.3-per-channel-statistics"
+        }
+      }
     },
     {
       "id": "mage_flow",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "identity"
+        }
+      }
     },
     {
       "id": "mage_flow_base",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "identity"
+        }
+      }
     },
     {
       "id": "mage_flow_edit",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "identity"
+        }
+      }
     },
     {
       "id": "mage_flow_edit_base",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "identity"
+        }
+      }
     },
     {
       "id": "mage_flow_edit_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "identity"
+        }
+      }
     },
     {
       "id": "mage_flow_turbo",
       "modality": "image",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "identity"
+        }
+      }
     },
     {
       "id": "mochi_1",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 12,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-6x",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "mochi-1-config-per-channel-statistics"
+        }
+      }
     },
     {
       "id": "qwen_image",
@@ -487,17 +703,66 @@
     {
       "id": "sana_1600m",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 32,
+        "spatialCompression": {
+          "height": 32,
+          "width": 32
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1054081276,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "sana_sprint_1600m",
       "modality": "image",
-      "supportsPreview": true
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 32,
+        "spatialCompression": {
+          "height": 32,
+          "width": 32
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1054081276,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "scail2_14b",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
     },
     {
       "id": "sd3_5_large",
@@ -586,17 +851,65 @@
     {
       "id": "seedvr2",
       "modality": "both",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1063930508,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "seedvr2_3b",
       "modality": "both",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1063930508,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "seedvr2_7b",
       "modality": "both",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1063930508,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "sensenova_u1_8b",
@@ -611,7 +924,23 @@
     {
       "id": "svd_xt",
       "modality": "video",
-      "supportsPreview": false
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 4,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1044022664,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "wan2_2_i2v_14b",

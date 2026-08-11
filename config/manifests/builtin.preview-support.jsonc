@@ -7,10 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "908d05298f2e8d6bd1ad6dcff4358e32994b9d4a"
+      "inferenceRevision": "84b1b7b9963a2f4b3e9ca2f714a01287d8094d64"
     },
     "mlx": {
-      "inferenceRevision": "908d05298f2e8d6bd1ad6dcff4358e32994b9d4a"
+      "inferenceRevision": "84b1b7b9963a2f4b3e9ca2f714a01287d8094d64"
     }
   },
   "models": {

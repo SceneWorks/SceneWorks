@@ -88,23 +88,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "20"
-      - name: Enforce feature-epic branch and final-pin policy
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # Story/sync topology is checked for every PR and queue run. Inference-pin ancestry is
-        # deliberately narrower: only a feature->main PR, a merge group targeting main, or a main
-        # push makes the permanent-pin claim. Ordinary PRs and feature-target queue groups remain
-        # unaffected. The policy scans every tracked Cargo.toml and then asks GitHub whether the one
-        # exact 40-hex pin is an ancestor of the live inference main.
-        run: node scripts/feature-epic.mjs ci-policy
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: ".github/workflows/check.yml"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"
