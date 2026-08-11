@@ -805,6 +805,7 @@ test("inventory refresh journals additive live scope and freezes on final-PR int
 
   f.shortcut.storyValues = f.shortcut.storyValues.filter(({ id }) => id !== 18418);
   f.shortcut.epicValue.stats.num_stories_total = f.shortcut.storyValues.length;
+  const beforeRemoval = readFileSync(f.statePath, "utf8");
   assert.throws(
     () => refreshStoryInventory(
       f.statePath,
@@ -813,6 +814,7 @@ test("inventory refresh journals additive live scope and freezes on final-PR int
     ),
     /additive-only.*sc-18418/,
   );
+  assert.equal(readFileSync(f.statePath, "utf8"), beforeRemoval);
   assert.deepEqual(loadState(f.statePath).expectedStories, refreshed.expectedStories);
 
   f.shortcut.storyValues.unshift({
@@ -836,6 +838,7 @@ test("inventory refresh journals additive live scope and freezes on final-PR int
     },
     base: { ref: "main", repo: { full_name: REPOSITORIES.sceneworks.slug } },
   });
+  const beforeFreeze = readFileSync(f.statePath, "utf8");
   assert.throws(
     () => refreshStoryInventory(
       f.statePath,
@@ -844,6 +847,7 @@ test("inventory refresh journals additive live scope and freezes on final-PR int
     ),
     /inventory is frozen.*final-integration PR intent/,
   );
+  assert.equal(readFileSync(f.statePath, "utf8"), beforeFreeze);
   const drifted = auditState(
     f.statePath,
     f.reportPath,
@@ -852,6 +856,279 @@ test("inventory refresh journals additive live scope and freezes on final-PR int
   assert.equal(drifted.gates.shortcutInventoryMatches, false);
   assert.equal(drifted.gates.noOpenTrainPullRequests, false);
   assert.equal(drifted.cleanup.eligible, false);
+});
+
+test("adopted inventory refresh migrates the legacy sentinel without changing immutable evidence", (t) => {
+  const f = fixture(t);
+  const state = adoptionPlanFixture(f);
+  const laterClock = () => new Date("2026-08-10T18:00:00Z");
+  mergedAdoptionPr(f, state, {
+    number: 2500,
+    head: "story/sc-18418-feature-epic-ci",
+    base: "main",
+  });
+  adoptPullRequest(
+    f.statePath,
+    { repo: "sceneworks", number: 2500, disposition: "precanonical-story" },
+    { github: f.github, clock: laterClock },
+  );
+  for (const [number, head] of [
+    [2501, "story/sc-18419-epic-18304-pipeline-flexibility-mlx-perf"],
+    [2502, "sync/sc-18304-main-2026-08-10-2"],
+  ]) {
+    f.github.prs.set(`sceneworks:${number}`, {
+      html_url: `https://github.com/SceneWorks/SceneWorks/pull/${number}`,
+      state: "closed",
+      head: {
+        ref: head,
+        sha: state.repositories.sceneworks.adoptedFeatureSha,
+        repo: { full_name: REPOSITORIES.sceneworks.slug },
+      },
+      base: {
+        ref: state.featureBranch,
+        repo: { full_name: REPOSITORIES.sceneworks.slug },
+      },
+      merged_at: "2026-08-10T17:00:00Z",
+      merge_commit_sha: state.repositories.sceneworks.adoptedFeatureSha,
+    });
+    recordEvidence(
+      f.statePath,
+      { repo: "sceneworks", number },
+      { github: f.github, clock: laterClock },
+    );
+  }
+
+  const legacy = loadState(f.statePath);
+  delete legacy.shortcut.inventoryFreezePolicy;
+  legacy.shortcut.inventoryFrozenAt = legacy.createdAt;
+  writeJsonAtomic(f.statePath, legacy);
+  const before = loadState(f.statePath);
+  const immutableEvidence = (value) => ({
+    createdAt: value.createdAt,
+    repositories: value.repositories,
+    policies: value.policies,
+    inferencePin: value.inferencePin,
+    requiredContexts: value.requiredContexts,
+    pullRequests: value.pullRequests,
+    adoptedPullRequests: value.adoptedPullRequests,
+    finalPullRequests: value.finalPullRequests,
+    privilegedRuns: value.privilegedRuns,
+    deployments: value.deployments,
+    transaction: value.transaction,
+  });
+
+  f.shortcut.storyValues.push({
+    ...structuredClone(f.shortcut.storyValues[0]),
+    id: 19000,
+    name: "Added to an adopted train",
+    workflow_state_id: 999,
+  });
+  f.shortcut.epicValue.stats.num_stories_total = f.shortcut.storyValues.length;
+  const beforeInvalidRefresh = readFileSync(f.statePath, "utf8");
+  assert.throws(
+    () => refreshStoryInventory(
+      f.statePath,
+      { apply: true },
+      { github: f.github, shortcut: f.shortcut, clock: laterClock },
+    ),
+    /unknown workflow state/,
+  );
+  assert.equal(readFileSync(f.statePath, "utf8"), beforeInvalidRefresh);
+
+  f.shortcut.storyValues.at(-1).workflow_state_id = 30;
+  const { state: refreshed, refresh } = refreshStoryInventory(
+    f.statePath,
+    { apply: true },
+    { github: f.github, shortcut: f.shortcut, clock: laterClock },
+  );
+  assert.equal(refreshed.shortcut.inventoryFreezePolicy, "final-pr-intent-v1");
+  assert.equal(refreshed.shortcut.inventoryFrozenAt, null);
+  assert.equal(refresh.inventoryFreezeMigration, "adoption-created-at-v0");
+  assert.deepEqual(refresh.added, ["sc-19000"]);
+  assert.deepEqual(immutableEvidence(refreshed), immutableEvidence(before));
+
+  const report = auditState(
+    f.statePath,
+    f.reportPath,
+    { github: f.github, shortcut: f.shortcut, clock: laterClock },
+  );
+  assert.equal(report.expectedStories["sc-19000"], false);
+  assert.equal(report.gates.allExpectedStoriesMerged, false);
+  assert.equal(report.gates.allAdoptedReceiptsExact, true);
+  assert.equal(report.gates.adoptedBaselineVerified, true);
+});
+
+test("inventory refresh fails byte-identically when a closed final PR appears before save", (t) => {
+  const f = fixture(t);
+  const state = planFixture(f);
+  f.shortcut.storyValues.push({
+    ...structuredClone(f.shortcut.storyValues[0]),
+    id: 19000,
+    name: "Raced by final integration",
+  });
+  f.shortcut.epicValue.stats.num_stories_total = f.shortcut.storyValues.length;
+  const before = readFileSync(f.statePath, "utf8");
+  const originalPullRequests = f.github.pullRequests.bind(f.github);
+  let sceneWorksFinalScans = 0;
+  f.github.pullRequests = (slug, query = {}) => {
+    if (slug === REPOSITORIES.sceneworks.slug && query.head) {
+      sceneWorksFinalScans += 1;
+      if (sceneWorksFinalScans === 2) {
+        f.github.prs.set("sceneworks:2999", {
+          html_url: "https://github.com/SceneWorks/SceneWorks/pull/2999",
+          state: "closed",
+          head: {
+            ref: state.featureBranch,
+            sha: state.repositories.sceneworks.plannedMainSha,
+            repo: { full_name: REPOSITORIES.sceneworks.slug },
+          },
+          base: { ref: "main", repo: { full_name: REPOSITORIES.sceneworks.slug } },
+        });
+      }
+    }
+    return originalPullRequests(slug, query);
+  };
+  assert.throws(
+    () => refreshStoryInventory(
+      f.statePath,
+      { apply: true },
+      { github: f.github, shortcut: f.shortcut, clock },
+    ),
+    /inventory is frozen.*final-integration PR intent/,
+  );
+  assert.equal(sceneWorksFinalScans, 2);
+  assert.equal(readFileSync(f.statePath, "utf8"), before);
+});
+
+test("final receipts canonicalize a legacy adopted freeze to the earliest intent", (t) => {
+  const f = fixture(t);
+  const state = adoptionPlanFixture(f);
+  const legacy = loadState(f.statePath);
+  delete legacy.shortcut.inventoryFreezePolicy;
+  legacy.shortcut.inventoryFrozenAt = legacy.createdAt;
+  writeJsonAtomic(f.statePath, legacy);
+  const finalNumber = 2600;
+  f.github.prs.set(`sceneworks:${finalNumber}`, {
+    html_url: `https://github.com/SceneWorks/SceneWorks/pull/${finalNumber}`,
+    state: "open",
+    head: {
+      ref: state.featureBranch,
+      sha: state.repositories.sceneworks.adoptedFeatureSha,
+      repo: { full_name: REPOSITORIES.sceneworks.slug },
+    },
+    base: { ref: "main", repo: { full_name: REPOSITORIES.sceneworks.slug } },
+  });
+  const finalClock = () => new Date("2026-08-10T19:00:00Z");
+  const receipt = recordEvidence(
+    f.statePath,
+    { repo: "sceneworks", number: finalNumber },
+    { github: f.github, clock: finalClock },
+  );
+  const frozen = loadState(f.statePath);
+  assert.equal(frozen.shortcut.inventoryFreezePolicy, "final-pr-intent-v1");
+  assert.equal(frozen.shortcut.inventoryFrozenAt, receipt.recordedAt);
+
+  delete frozen.shortcut.inventoryFreezePolicy;
+  frozen.shortcut.inventoryFrozenAt = frozen.createdAt;
+  writeJsonAtomic(f.statePath, frozen);
+  assert.equal(loadState(f.statePath).shortcut.inventoryFrozenAt, frozen.createdAt);
+  const pairedFinalNumber = 2601;
+  f.github.prs.set(`inference:${pairedFinalNumber}`, {
+    html_url: `https://github.com/SceneWorks/inference/pull/${pairedFinalNumber}`,
+    state: "open",
+    head: {
+      ref: state.featureBranch,
+      sha: state.repositories.inference.adoptedFeatureSha,
+      repo: { full_name: REPOSITORIES.inference.slug },
+    },
+    base: { ref: "main", repo: { full_name: REPOSITORIES.inference.slug } },
+  });
+  const pairedFinalClock = () => new Date("2026-08-10T20:00:00Z");
+  const pairedReceipt = recordEvidence(
+    f.statePath,
+    { repo: "inference", number: pairedFinalNumber },
+    { github: f.github, clock: pairedFinalClock },
+  );
+  const pairedFrozen = loadState(f.statePath);
+  assert.notEqual(pairedReceipt.recordedAt, receipt.recordedAt);
+  assert.equal(pairedFrozen.shortcut.inventoryFreezePolicy, "final-pr-intent-v1");
+  assert.equal(pairedFrozen.shortcut.inventoryFrozenAt, receipt.recordedAt);
+
+  f.github.prs.delete(`sceneworks:${finalNumber}`);
+  f.github.prs.delete(`inference:${pairedFinalNumber}`);
+  f.shortcut.storyValues.push({
+    ...structuredClone(f.shortcut.storyValues[0]),
+    id: 19000,
+    name: "Too late after a recorded final PR",
+  });
+  f.shortcut.epicValue.stats.num_stories_total = f.shortcut.storyValues.length;
+  const before = readFileSync(f.statePath, "utf8");
+  assert.throws(
+    () => refreshStoryInventory(
+      f.statePath,
+      { apply: true },
+      { github: f.github, shortcut: f.shortcut, clock: pairedFinalClock },
+    ),
+    /inventory is frozen.*final-integration PR intent/,
+  );
+  assert.equal(readFileSync(f.statePath, "utf8"), before);
+});
+
+test("state validation limits legacy adoption-freeze compatibility to its exact shape", async (t) => {
+  await t.test("unknown freeze policy", (t) => {
+    const f = fixture(t);
+    adoptionPlanFixture(f);
+    const state = loadState(f.statePath);
+    state.shortcut.inventoryFreezePolicy = "unknown-policy";
+    writeJsonAtomic(f.statePath, state);
+    assert.throws(() => loadState(f.statePath), /Shortcut inventory evidence/);
+  });
+  await t.test("markerless null-frozen adoption state", (t) => {
+    const f = fixture(t);
+    adoptionPlanFixture(f);
+    const state = loadState(f.statePath);
+    delete state.shortcut.inventoryFreezePolicy;
+    writeJsonAtomic(f.statePath, state);
+    assert.throws(() => loadState(f.statePath), /lacks its freeze policy or exact legacy sentinel/);
+  });
+  await t.test("create-mode adoption sentinel", (t) => {
+    const f = fixture(t);
+    planFixture(f);
+    const state = loadState(f.statePath);
+    delete state.shortcut.inventoryFreezePolicy;
+    state.shortcut.inventoryFrozenAt = state.createdAt;
+    writeJsonAtomic(f.statePath, state);
+    assert.throws(() => loadState(f.statePath), /freeze policy|final-integration PR intent/);
+  });
+  await t.test("adoption sentinel after a refresh", (t) => {
+    const f = fixture(t);
+    adoptionPlanFixture(f);
+    f.shortcut.storyValues.push({
+      ...structuredClone(f.shortcut.storyValues[0]),
+      id: 19000,
+      name: "First additive refresh",
+    });
+    f.shortcut.epicValue.stats.num_stories_total = f.shortcut.storyValues.length;
+    refreshStoryInventory(
+      f.statePath,
+      { apply: true },
+      { github: f.github, shortcut: f.shortcut, clock },
+    );
+    const state = loadState(f.statePath);
+    delete state.shortcut.inventoryFreezePolicy;
+    state.shortcut.inventoryFrozenAt = state.createdAt;
+    writeJsonAtomic(f.statePath, state);
+    assert.throws(() => loadState(f.statePath), /freeze policy|final-integration PR intent/);
+  });
+  await t.test("arbitrary adoption freeze time", (t) => {
+    const f = fixture(t);
+    adoptionPlanFixture(f);
+    const state = loadState(f.statePath);
+    delete state.shortcut.inventoryFreezePolicy;
+    state.shortcut.inventoryFrozenAt = "2026-08-10T11:00:00.000Z";
+    writeJsonAtomic(f.statePath, state);
+    assert.throws(() => loadState(f.statePath), /freeze policy|final-integration PR intent/);
+  });
 });
 
 test("state validation rejects a tampered Shortcut inventory-refresh chain", (t) => {
@@ -1138,7 +1415,8 @@ test("adopt-existing plans immutable protected heads and bootstraps without remo
   const f = fixture(t);
   const state = adoptionPlanFixture(f);
   assert.equal(state.mode, "adopt-existing");
-  assert.equal(state.shortcut.inventoryFrozenAt, new Date(EPOCH).toISOString());
+  assert.equal(state.shortcut.inventoryFreezePolicy, "final-pr-intent-v1");
+  assert.equal(state.shortcut.inventoryFrozenAt, null);
   for (const key of Object.keys(REPOSITORIES)) {
     assert.equal(state.repositories[key].adoptedFeatureSha, state.repositories[key].plannedMainSha);
     assert.equal(

@@ -79,6 +79,8 @@ const SHORTCUT_WORKFLOW_STATE_TYPES = new Set(["backlog", "unstarted", "started"
 const PULL_REQUEST_LIST_JQ =
   '.[] | {number, state, html_url, head: {ref: .head.ref}, base: {ref: .base.ref}} | @base64';
 const PLAN_MODES = new Set(["create", "adopt-existing"]);
+const INVENTORY_FREEZE_POLICY = "final-pr-intent-v1";
+const LEGACY_ADOPTION_FREEZE_MIGRATION = "adoption-created-at-v0";
 const ADOPTION_DISPOSITIONS = new Set([
   "precanonical-story",
   "historical-train",
@@ -723,6 +725,23 @@ function validateAdoptedPullRequestReceipt(state, receipt) {
   );
 }
 
+function finalInventoryFreezeAt(state) {
+  return state.pullRequests
+    .filter(({ kind }) => kind === "final")
+    .map(({ recordedAt }) => recordedAt)
+    .sort((left, right) => evidenceTimestamp(left) - evidenceTimestamp(right))[0] ?? null;
+}
+
+function hasLegacyAdoptionInventoryFreeze(state) {
+  return (
+    state.mode === "adopt-existing" &&
+    state.shortcut?.inventoryFreezePolicy === undefined &&
+    state.shortcut?.inventoryFrozenAt === state.createdAt &&
+    Array.isArray(state.shortcut?.refreshes) &&
+    state.shortcut.refreshes.length === 0
+  );
+}
+
 export function validateState(state) {
   if (!state || state.schemaVersion !== STATE_VERSION) {
     refuse(`unsupported or missing state schema version`, "INVALID_STATE");
@@ -757,6 +776,8 @@ export function validateState(state) {
     !state.shortcut.workflowStates ||
     typeof state.shortcut.workflowStates !== "object" ||
     Array.isArray(state.shortcut.workflowStates) ||
+    (state.shortcut.inventoryFreezePolicy !== undefined &&
+      state.shortcut.inventoryFreezePolicy !== INVENTORY_FREEZE_POLICY) ||
     (state.shortcut.inventoryFrozenAt !== null &&
       (typeof state.shortcut.inventoryFrozenAt !== "string" ||
         !Number.isFinite(evidenceTimestamp(state.shortcut.inventoryFrozenAt)))) ||
@@ -773,6 +794,16 @@ export function validateState(state) {
       refuse("state contains malformed Shortcut workflow-state evidence", "STATE_SHORTCUT_CONFLICT");
     }
   }
+  if (
+    state.mode === "adopt-existing" &&
+    state.shortcut.inventoryFreezePolicy !== INVENTORY_FREEZE_POLICY &&
+    !hasLegacyAdoptionInventoryFreeze(state)
+  ) {
+    refuse(
+      "state adopted Shortcut inventory lacks its freeze policy or exact legacy sentinel",
+      "STATE_SHORTCUT_CONFLICT",
+    );
+  }
   let inventoryCursor = [...state.expectedStories];
   let workflowStateCursor = structuredClone(state.shortcut.workflowStates);
   let laterRefreshAt = Number.POSITIVE_INFINITY;
@@ -788,6 +819,12 @@ export function validateState(state) {
       !Array.isArray(refresh.removed) ||
       refresh.removed.length !== 0 ||
       !Array.isArray(refresh.workflowStateChanges) ||
+      (refresh.inventoryFreezeMigration !== undefined &&
+        refresh.inventoryFreezeMigration !== null &&
+        (refresh.inventoryFreezeMigration !== LEGACY_ADOPTION_FREEZE_MIGRATION ||
+          state.mode !== "adopt-existing" ||
+          state.shortcut.inventoryFreezePolicy !== INVENTORY_FREEZE_POLICY ||
+          index !== 0)) ||
       (refresh.epicUpdatedAt !== null &&
         (typeof refresh.epicUpdatedAt !== "string" ||
           !Number.isFinite(evidenceTimestamp(refresh.epicUpdatedAt))))
@@ -987,16 +1024,13 @@ export function validateState(state) {
     }
     pullRequestKeys.add(key);
   }
-  const finalIntentTimes = state.pullRequests
-    .filter(({ kind }) => kind === "final")
-    .map(({ recordedAt }) => recordedAt)
-    .sort((left, right) => evidenceTimestamp(left) - evidenceTimestamp(right));
-  const expectedInventoryFreeze = state.mode === "adopt-existing"
-    ? state.createdAt
-    : finalIntentTimes[0] ?? null;
-  if (state.shortcut.inventoryFrozenAt !== expectedInventoryFreeze) {
+  const expectedInventoryFreeze = finalInventoryFreezeAt(state);
+  if (
+    !hasLegacyAdoptionInventoryFreeze(state) &&
+    state.shortcut.inventoryFrozenAt !== expectedInventoryFreeze
+  ) {
     refuse(
-      "state Shortcut inventory freeze does not match immutable adoption/final intent",
+      "state Shortcut inventory freeze does not match final-integration PR intent",
       "STATE_SHORTCUT_CONFLICT",
     );
   }
@@ -2177,14 +2211,15 @@ export function inspectShortcutEpic(shortcut, epic, expectedStories) {
   };
 }
 
-function plannedShortcutRecord(snapshot, inventoryFrozenAt = null) {
+function plannedShortcutRecord(snapshot) {
   return {
     epicId: snapshot.epic.id,
     epicUrl: snapshot.epic.appUrl,
     epicUpdatedAt: snapshot.epic.updatedAt,
     inventoryDigest: snapshot.inventory.digest,
     workflowStates: snapshot.workflowStates,
-    inventoryFrozenAt,
+    inventoryFreezePolicy: INVENTORY_FREEZE_POLICY,
+    inventoryFrozenAt: null,
     refreshes: [],
   };
 }
@@ -2458,10 +2493,7 @@ function createPlanUnlocked(
     expectedStories: stories,
     workspaceParent,
     deploymentRequired: Boolean(deploymentRequired),
-    shortcut: plannedShortcutRecord(
-      shortcutSnapshot,
-      mode === "adopt-existing" ? createdAt : null,
-    ),
+    shortcut: plannedShortcutRecord(shortcutSnapshot),
     createdAt,
     updatedAt: createdAt,
     phase: "planned",
@@ -2543,17 +2575,12 @@ function liveFinalIntegrationPullRequests(github, state) {
   });
 }
 
-function refreshStoryInventoryUnlocked(
-  statePath,
-  { apply = false } = {},
-  { github = new GitHubClient(), shortcut = new ShortcutClient(), clock = () => new Date() } = {},
-) {
-  if (!apply) refuse("refresh-stories is read-only unless --apply is explicit", "APPLY_REQUIRED");
-  const state = loadState(statePath);
+function assertShortcutInventoryMutable(state, github) {
   const finalPrEvidence = state.pullRequests.filter(({ kind }) => kind === "final");
   const liveFinalPrs = liveFinalIntegrationPullRequests(github, state);
+  const legacyAdoptionFreeze = hasLegacyAdoptionInventoryFreeze(state);
   if (
-    state.shortcut.inventoryFrozenAt !== null ||
+    (state.shortcut.inventoryFrozenAt !== null && !legacyAdoptionFreeze) ||
     Object.values(state.finalPullRequests).some(Boolean) ||
     finalPrEvidence.length > 0 ||
     liveFinalPrs.length > 0
@@ -2563,6 +2590,17 @@ function refreshStoryInventoryUnlocked(
       "SHORTCUT_INVENTORY_FROZEN",
     );
   }
+  return { legacyAdoptionFreeze };
+}
+
+function refreshStoryInventoryUnlocked(
+  statePath,
+  { apply = false } = {},
+  { github = new GitHubClient(), shortcut = new ShortcutClient(), clock = () => new Date() } = {},
+) {
+  if (!apply) refuse("refresh-stories is read-only unless --apply is explicit", "APPLY_REQUIRED");
+  const state = loadState(statePath);
+  const { legacyAdoptionFreeze } = assertShortcutInventoryMutable(state, github);
 
   const snapshot = inspectShortcutEpic(shortcut, state.epic, undefined);
   if (!snapshot.gates.epicNotArchived) {
@@ -2592,6 +2630,9 @@ function refreshStoryInventoryUnlocked(
     state.shortcut.workflowStates,
     snapshot.workflowStates,
   );
+  // Shortcut enumeration can be slow. Re-scan GitHub immediately before the
+  // atomic state write so a final PR created during that window fails closed.
+  assertShortcutInventoryMutable(state, github);
   const refresh = {
     at: nowIso(clock),
     previousDigest: state.shortcut.inventoryDigest,
@@ -2599,6 +2640,9 @@ function refreshStoryInventoryUnlocked(
     added,
     removed,
     workflowStateChanges,
+    inventoryFreezeMigration: legacyAdoptionFreeze
+      ? LEGACY_ADOPTION_FREEZE_MIGRATION
+      : null,
     epicUpdatedAt: snapshot.epic.updatedAt,
   };
   state.expectedStories = next;
@@ -2606,6 +2650,8 @@ function refreshStoryInventoryUnlocked(
   state.shortcut.epicUpdatedAt = snapshot.epic.updatedAt;
   state.shortcut.inventoryDigest = snapshot.inventory.digest;
   state.shortcut.workflowStates = snapshot.workflowStates;
+  state.shortcut.inventoryFreezePolicy = INVENTORY_FREEZE_POLICY;
+  if (legacyAdoptionFreeze) state.shortcut.inventoryFrozenAt = null;
   state.shortcut.refreshes.push(refresh);
   saveState(statePath, state, clock);
   return { state, refresh };
@@ -3910,7 +3956,8 @@ function recordEvidenceUnlocked(
       refuse(`${fixed.slug} final PR merge evidence changed`, "FINAL_PR_CONFLICT");
     }
     state.finalPullRequests[repo] = existingPointer?.mergeCommit ? existingPointer : pointer;
-    state.shortcut.inventoryFrozenAt ??= receipt.recordedAt;
+    state.shortcut.inventoryFrozenAt = finalInventoryFreezeAt(state);
+    state.shortcut.inventoryFreezePolicy = INVENTORY_FREEZE_POLICY;
   }
 
   if (runReceipts.length > 0) {

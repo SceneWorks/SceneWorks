@@ -201,7 +201,9 @@ adopted heads, verifies the recorded wildcard and exact active/effective policy
 IDs and digests, and binds the SceneWorks inference pin to both inference
 baselines by ancestry. Adoption never creates or updates a ref or ruleset;
 `bootstrap` only revalidates that frozen evidence and clones the exact adopted
-heads. Any drift requires a new plan.
+heads. Any drift requires a new plan. These immutable repository baselines do
+not freeze Shortcut scope: additive live stories may still be journaled until
+final integration begins.
 
 Record every already-merged PR needed to explain pre-automation history with an
 explicit immutable disposition:
@@ -235,10 +237,12 @@ npm run feature:epic -- refresh-stories \
 ```
 
 The refresh journals the previous and next inventory digests, every added or
-removed id, and every workflow-state-map change. Removals and cross-epic moves
-fail closed. Any live or recorded PR from the feature branch freezes the
-inventory permanently; post-freeze drift remains visible as a failed audit
-gate rather than being adopted.
+removed id, every workflow-state-map change, and any legacy adoption-freeze
+migration. Removals and cross-epic moves fail closed. Any open or closed
+final-integration PR whose head is the canonical feature branch, or its recorded
+PR intent, freezes the inventory permanently. Story and sync PRs do not freeze
+additive scope. Post-freeze drift remains visible as a failed audit gate rather
+than being adopted.
 
 Every command that reads or writes the state/report transaction holds an
 exclusive sibling lock for its full lifetime. A crashed same-host lock is
