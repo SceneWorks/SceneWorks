@@ -213,12 +213,56 @@ function cargoUpdate(sha) {
   execFileSync("cargo", ["update", ...spec], { cwd: repoRoot, stdio: "inherit" });
 }
 
+function verifyCargoLockCurrent(root = repoRoot, run = execFileSync) {
+  console.log("$ cargo metadata --locked --format-version 1");
+  run("cargo", ["metadata", "--locked", "--format-version", "1"], {
+    cwd: root,
+    // Keep the successful metadata document out of the operator log, but preserve Cargo's
+    // actionable error when the manifest and lockfile disagree.
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+}
+
+function reconcileCargoLock(
+  sha,
+  manifestsAlreadyPinned,
+  {
+    readLock = () => readFileSync(LOCKFILE, "utf8"),
+    update = cargoUpdate,
+    verify = verifyCargoLockCurrent,
+  } = {},
+) {
+  // `cargo update -p` is not a byte-idempotent verifier when Cargo.lock already contains duplicate
+  // registry versions. Cargo can alternate which locked `windows-sys` / `proc-macro-crate` package
+  // an unchanged dependency edge names even though it reports "Locking 0 packages". Only invoke
+  // the mutating command for a real manifest transition or a stale inference source. Once the
+  // target revision is present everywhere, `cargo metadata --locked` is the non-mutating proof that
+  // the checked-in lock still satisfies the manifests.
+  if (!manifestsAlreadyPinned || lockHasStaleInferenceRevision(sha, readLock())) {
+    update(sha);
+    return "updated";
+  }
+  verify();
+  return "verified";
+}
+
 function distinctResolutions(crate) {
   // One `cargo tree` over both platform bundles (--target all), so macOS + CUDA resolutions are
   // visible even off-macOS -- the same data source check-gen-core-skew.sh uses.
   const tree = execFileSync(
     "cargo",
-    ["tree", "-p", "sceneworks-worker", "--features", "backend-candle", "--target", "all", "--prefix", "none"],
+    [
+      "tree",
+      "-p",
+      "sceneworks-worker",
+      "--features",
+      "backend-candle",
+      "--target",
+      "all",
+      "--locked",
+      "--prefix",
+      "none",
+    ],
     { cwd: repoRoot, encoding: "utf8" },
   );
   return new Set(
@@ -564,6 +608,55 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
     ),
   );
+  let lockFixture = duplicateLock;
+  let lockUpdates = 0;
+  let lockVerifications = 0;
+  const reconcileFixture = (manifestsAlreadyPinned) =>
+    reconcileCargoLock(SHA, manifestsAlreadyPinned, {
+      readLock: () => lockFixture,
+      // Model Cargo's problematic behavior directly: another update of an already-current lock
+      // would change unrelated bytes. The second reconciliation must therefore verify, not call
+      // this mutator again.
+      update: () => {
+        lockUpdates += 1;
+        lockFixture =
+          duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT) +
+          `# unrelated-edge-form-${lockUpdates}\n`;
+      },
+      verify: () => {
+        lockVerifications += 1;
+      },
+    });
+  reconcileFixture(false);
+  const lockAfterTransition = lockFixture;
+  reconcileFixture(true);
+  check(
+    "a second exact-pin reconciliation verifies without rewriting lock bytes",
+    lockUpdates === 1 && lockVerifications === 1 && lockFixture === lockAfterTransition,
+  );
+  let staleLockRepairs = 0;
+  reconcileCargoLock(SHA, true, {
+    readLock: () => duplicateLock,
+    update: () => {
+      staleLockRepairs += 1;
+    },
+    verify: () => {},
+  });
+  check(
+    "a stale lock is repaired even when manifests already carry the target pin",
+    staleLockRepairs === 1,
+  );
+  let metadataInvocation = null;
+  verifyCargoLockCurrent("/self-test/repo", (command, args, options) => {
+    metadataInvocation = { command, args, options };
+  });
+  check(
+    "current-lock verification resolves the full locked graph without mutating it",
+    metadataInvocation?.command === "cargo" &&
+      metadataInvocation?.args.join(" ") === "metadata --locked --format-version 1" &&
+      metadataInvocation?.options.cwd === "/self-test/repo" &&
+      !metadataInvocation?.args.includes("--no-deps"),
+  );
   let stampThrew = false;
   try {
     repinSemanticProvenance(`const OTHER: &str = "x";`, SHA);
@@ -801,11 +894,11 @@ function main() {
   // early-return on the manifests alone, so a tree whose manifests were correct but whose
   // `Cargo.lock` still carried the previous revision could never self-heal -- re-running the script
   // just said "already pinned" and did nothing. That is precisely the state a partially-applied bump
-  // leaves behind. Fall through to `cargoUpdate()` + `verifyNoSkew()` instead: both are cheap, and
-  // running them unconditionally makes the script idempotent AND verifying rather than idempotent
-  // and blind. `lockHasStaleInferenceRevision` narrows the report to the case that actually needs
-  // repair; it deliberately does NOT gate the skew check, which catches divergences (gen-core,
-  // pmetal-mlx-rs) that no revision-string comparison can see.
+  // leaves behind. `reconcileCargoLock()` still repairs that case, but does not misuse
+  // `cargo update -p` as a verifier once the lock is current: Cargo can alternate unrelated duplicate
+  // dependency edges on otherwise identical update runs. The clean path uses `cargo metadata
+  // --locked` instead, then `verifyNoSkew()` catches divergences (gen-core, pmetal-mlx-rs) that no
+  // revision-string comparison can see.
   // Captured before anything is written: after the rewrite loop below the previous revision is gone
   // from the tree, and `verifyFlux2AuditWindow` needs it to tell a bump that MOVES the pin out of
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
@@ -850,7 +943,7 @@ function main() {
     writeFileSync(m.path, m.bumped);
     console.log(`  wrote ${m.path}`);
   }
-  cargoUpdate(sha);
+  reconcileCargoLock(sha, manifestsAlreadyPinned);
   verifyNoSkew();
   regenerateMemoryMatrix();
   verifyLicenseAudit();
