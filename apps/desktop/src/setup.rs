@@ -3805,6 +3805,7 @@ mod path_tests {
     fn packaged_macos_bundle_rejects_incomplete_external_copy() {
         let root = bundle_fixture_root("incomplete-copy");
         let bundle = root.join("SceneWorks.app");
+        let expected_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
         let resources = bundle.join("Contents").join("Resources");
         std::fs::create_dir_all(&resources).expect("create bundle resources");
 
@@ -3812,7 +3813,7 @@ mod path_tests {
             .expect_err("missing sidecar must stop startup actionably");
         assert!(
             error.contains("SceneWorks.app is incomplete")
-                && error.contains("Contents/MacOS/sceneworks-api"),
+                && error.contains(&expected_sidecar.display().to_string()),
             "unexpected incomplete-bundle error: {error}"
         );
 
@@ -3824,12 +3825,14 @@ mod path_tests {
         let root = bundle_fixture_root("missing-resources");
         let bundle = root.join("SceneWorks.app");
         let api_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
+        let expected_resources = bundle.join("Contents").join("Resources");
         touch(&api_sidecar);
 
         let error = packaged_macos_bundle_paths(&bundle, Some(api_sidecar), None)
             .expect_err("missing resources must stop startup actionably");
         assert!(
-            error.contains("SceneWorks.app is incomplete") && error.contains("Contents/Resources"),
+            error.contains("SceneWorks.app is incomplete")
+                && error.contains(&expected_resources.display().to_string()),
             "unexpected incomplete-bundle error: {error}"
         );
 
