@@ -256,6 +256,51 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(checkbox("Enhance prompt").checked).toBe(true);
   });
 
+  it("clears replayed enhancement on Candle character routes and cannot submit it with a reference", async () => {
+    const reference = {
+      id: "asset_flux_character",
+      type: "image",
+      projectId: "project_1",
+      displayName: "Flux character",
+      status: {},
+      file: { path: "assets/images/flux-character.png", mimeType: "image/png" },
+    };
+    const character = {
+      id: "character_flux",
+      name: "Flux character",
+      looks: [],
+      approvedReferences: [{ assetId: reference.id, asset: reference }],
+    };
+    const recipe = everyKnobRecipe();
+    recipe.mode = "character_image";
+    recipe.model = FLUX2_DEV.id;
+    recipe.normalizedSettings = {
+      ...recipe.normalizedSettings,
+      characterId: character.id,
+    };
+    recipe.rawAdapterSettings = {
+      enhancePrompt: true,
+      referenceAssetId: reference.id,
+    };
+    const createImageJob = vi.fn(async () => ({ id: "job-flux-character" }));
+    await render(
+      baseContext({
+        assets: [reference],
+        characters: [character],
+        createImageJob,
+        studioLaunch: launch(recipe),
+      }),
+    );
+
+    expect(checkbox("Enhance prompt")).toBeUndefined();
+    expect(persistedStudioSettings().enhancePrompt).toBe(false);
+    await click(buttonByText("Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.mode).toBe("character_image");
+    expect(payload.referenceAssetId).toBe(reference.id);
+    expect(payload.advanced).not.toHaveProperty("enhancePrompt");
+  });
+
   it("leaves the boolean decoders OFF when the recipe did not record them", async () => {
     // `buildImageJobAdvanced` emits these only when they are on, so an absent key means the run had
     // them off — inheriting the user's own sticky toggle would replay someone else's recipe with a

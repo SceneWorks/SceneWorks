@@ -1002,29 +1002,37 @@ async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
         );
     }
 
-    for (model, advanced, detail) in [
-        (
-            "flux2_klein_9b",
-            json!({ "enhancePrompt": true }),
-            "FLUX.2-Klein",
-        ),
-        (
-            "flux2_dev",
-            json!({ "enhancePrompt": true, "poses": [{ "id": "pose-1" }] }),
-            "strict control",
-        ),
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        body("flux2_klein_9b", json!({ "enhancePrompt": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|value| value.contains("FLUX.2-Klein")));
+
+    for strict_control in [
+        json!({ "poses": [{ "id": "pose-1" }] }),
+        json!({ "controlWeights": { "overlayId": "flux2-depth" } }),
+        json!({ "controlImage": "asset-1" }),
+        json!({ "controlMode": "depth" }),
     ] {
+        let mut advanced = strict_control.as_object().unwrap().clone();
+        advanced.insert("enhancePrompt".to_owned(), json!(true));
         let (status, error) = request(
             app.clone(),
             "POST",
             "/api/v1/image/jobs",
-            body(model, advanced),
+            body("flux2_dev", Value::Object(advanced)),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
         assert!(error["detail"]
             .as_str()
-            .is_some_and(|value| value.contains(detail)));
+            .is_some_and(|value| value.contains("strict control")));
     }
 
     // Retry and duplicate validate the exact shallow-merged payload they will enqueue. A valid dev

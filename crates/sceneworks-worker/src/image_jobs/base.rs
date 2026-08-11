@@ -4833,6 +4833,11 @@ fn prompt_enhancement_fact(
                     "enhanced prompt report unexpectedly carried a fallback reason".to_owned(),
                 ));
             }
+            if report.effective_prompt == report.original_prompt {
+                return Err(WorkerError::Engine(
+                    "enhanced prompt report did not rewrite the original prompt".to_owned(),
+                ));
+            }
             ("enhanced", None)
         }
         gen_core::PromptEnhancementOutcome::Fallback => {

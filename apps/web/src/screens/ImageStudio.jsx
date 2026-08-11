@@ -897,8 +897,9 @@ export function ImageStudio() {
   const hostMemory = useHostMemory();
   const activeBackend = macCapabilities?.macGatingActive ? "mlx" : "candle";
   // Route-aware prompt enhancement: both native FLUX.2-dev base/edit providers implement it, while
-  // Klein, an unknown backend, and the separate strict-control provider fail closed. `posePayload`
-  // is the strict-pose route even when the control panel itself is not open (character recipe replay).
+  // Candle's unsupported character/reference aliases, Klein, an unknown backend, and the separate
+  // strict-control provider fail closed. `posePayload` is the strict-pose route even when the control
+  // panel itself is not open (character recipe replay).
   const promptEnhanceStrictControlActive =
     posePayload.length > 0 ||
     (controlActive && activeControlMode !== "pose") ||

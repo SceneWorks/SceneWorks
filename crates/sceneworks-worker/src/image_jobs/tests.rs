@@ -6221,14 +6221,23 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
         .unwrap_err()
         .to_string()
         .contains("FLUX.2-Klein"));
-    let strict = request(json!({
-        "model": "flux2_dev",
-        "advanced": { "enhancePrompt": true, "poses": [{ "id": "pose-1" }] }
-    }));
-    assert!(validate_prompt_enhancement_request(&strict)
-        .unwrap_err()
-        .to_string()
-        .contains("strict control"));
+    for strict_control in [
+        json!({ "poses": [{ "id": "pose-1" }] }),
+        json!({ "controlWeights": { "overlayId": "flux2-depth" } }),
+        json!({ "controlImage": "asset-1" }),
+        json!({ "controlMode": "depth" }),
+    ] {
+        let mut advanced = strict_control.as_object().unwrap().clone();
+        advanced.insert("enhancePrompt".to_owned(), json!(true));
+        let strict = request(json!({
+            "model": "flux2_dev",
+            "advanced": advanced,
+        }));
+        assert!(validate_prompt_enhancement_request(&strict)
+            .unwrap_err()
+            .to_string()
+            .contains("strict control"));
+    }
 }
 
 #[cfg(any(
@@ -6273,6 +6282,20 @@ fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly()
     .to_string()
     .contains("did not match"));
     assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not rewrite"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "   ".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("must contain"));
+    assert!(prompt_enhancement_fact(
         gen_core::PromptEnhancementReport::fallback(
             "a fox".to_owned(),
             "unsafe\nreason".to_owned(),
@@ -6282,6 +6305,13 @@ fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly()
     .unwrap_err()
     .to_string()
     .contains("safe bounded reason"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::absent("a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("absent outcome"));
 }
 
 #[cfg(any(
@@ -6359,6 +6389,49 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
         .unwrap_err()
         .to_string()
         .contains("did not match"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not rewrite"));
+
+    // Reports may arrive out of order for a batch, but each image must consume only the report
+    // bound to its own index and requested prompt.
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        1,
+        "an owl".to_owned(),
+        enhanced("an owl", "a moonlit owl"),
+    )
+    .expect("second image report is accepted first");
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox in snowfall"),
+    )
+    .expect("first image report is accepted second");
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 0).unwrap()["effectivePrompt"],
+        "a fox in snowfall"
+    );
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 1).unwrap()["effectivePrompt"],
+        "a moonlit owl"
+    );
 }
 
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
@@ -16403,6 +16476,73 @@ mod preview_stream_tests {
             rx.try_recv().is_err(),
             "the second frame must be dropped when the channel is full, not queued or blocked on"
         );
+    }
+
+    #[test]
+    fn scored_reported_driver_keeps_prompt_and_likeness_facts_isolated_per_image() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
+        let items = [
+            ("a fox", "a red fox in snow", 11_i64, 0.91_f64),
+            ("an owl", "a moonlit owl in flight", 12_i64, 0.73_f64),
+        ];
+        drive_gen_items_scored_reported(
+            tx,
+            items,
+            |_index, (original, effective, seed, likeness), _preview, reports, _progress| {
+                reports
+                    .for_prompt(original)
+                    .emit(gen_core::PromptEnhancementReport::enhanced(
+                        original.to_owned(),
+                        effective.to_owned(),
+                    ));
+                let face_likeness = json!({ "score": likeness })
+                    .as_object()
+                    .expect("likeness fact object")
+                    .clone();
+                Ok(Some((seed, 1, 1, vec![0_u8; 3], Some(face_likeness))))
+            },
+        )
+        .expect("weights-free scored edit carrier completes");
+
+        for (expected_index, (original, effective, seed, likeness)) in items.into_iter().enumerate()
+        {
+            match rx.try_recv().expect("prompt report precedes its image") {
+                GenEvent::PromptEnhancement {
+                    index,
+                    expected_prompt,
+                    report,
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(expected_prompt, original);
+                    assert_eq!(
+                        prompt_enhancement_fact(report, &expected_prompt).unwrap()
+                            ["effectivePrompt"],
+                        effective
+                    );
+                }
+                other => panic!(
+                    "expected a prompt-enhancement event, got {}",
+                    gen_event_name(&other)
+                ),
+            }
+            match rx
+                .try_recv()
+                .expect("scored image follows its prompt report")
+            {
+                GenEvent::Image {
+                    index,
+                    seed: actual_seed,
+                    face_likeness,
+                    ..
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(actual_seed, seed);
+                    assert_eq!(face_likeness.unwrap()["score"], likeness);
+                }
+                other => panic!("expected a scored image, got {}", gen_event_name(&other)),
+            }
+        }
+        assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
     }
 
     fn gen_event_name(event: &GenEvent) -> &'static str {

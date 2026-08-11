@@ -226,6 +226,23 @@ describe("buildImageJobRequest", () => {
     expect(request.advanced).not.toHaveProperty("strength");
   });
 
+  it("keeps a character reference but fails closed on a stale unsupported enhancement state", () => {
+    const request = buildImageJobRequest(
+      img2imgPidState({
+        mode: "character_image",
+        referenceAssetId: "character-ref",
+        supportsImg2img: false,
+        img2imgReferenceAssetId: null,
+        // The route gate has already turned false, but React may not have committed the effect that
+        // clears the sticky checkbox state yet. The submit builder must remain independently safe.
+        promptEnhance: false,
+        enhancePrompt: true,
+      }),
+    );
+    expect(request.referenceAssetId).toBe("character-ref");
+    expect(request.advanced).not.toHaveProperty("enhancePrompt");
+  });
+
   // Krea 2 multi-phase denoise round-trip (epic 13879 S5, sc-13885): a krea_2_raw t2i job with the
   // editor active carries the serialized `advanced.phases` verbatim, and the phase LoRA indices
   // point into the request's OWN `loras` array — the SAME order the worker resolves to
