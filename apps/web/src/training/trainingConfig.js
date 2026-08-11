@@ -244,7 +244,10 @@ export function mergeCustomizedConfigDraft(seeded, current = {}, customizedField
 //
 // sc-10492 dropped both as noise; sc-10501 brought the errors back and this is where
 // that distinction became the app's vocabulary rather than one screen's helper.
-export function configValidation(configDraft, { activeDataset, selectedTarget, datasetNotReady = false } = {}) {
+export function configValidation(
+  configDraft,
+  { activeDataset, selectedTarget, datasetNotReady = false, missingControlModels = [] } = {},
+) {
   const issues = [];
   if (!selectedTarget) {
     issues.push(issue.requirement("target", "Select a training target"));
@@ -286,6 +289,21 @@ export function configValidation(configDraft, { activeDataset, selectedTarget, d
   // would only repeat it. field is null: the fix is in Data Sets, not an input on this form.
   if (datasetNotReady) {
     issues.push(issue.error(null, "This dataset isn’t ready to train yet — open Data Sets to add or fix images."));
+  }
+  // A ControlNet run renders its per-image condition with a preprocessor model, and those resolvers
+  // are cache-only since epic 17625 — a missing one is a job-time failure, not a mid-run download.
+  // So it is part of "can this job run" and belongs in the one validity summary that gates Start,
+  // exactly like `datasetNotReady` above, rather than a separate `disabled` term that could drift
+  // from what the panel says. field is null: the fix is a download in the panel's notice, not an
+  // input on this form — ConfigureJobPanel renders the offer right below the ControlNet note.
+  if (missingControlModels.length > 0) {
+    const names = missingControlModels.map((model) => model?.name ?? model?.id).filter(Boolean);
+    issues.push(
+      issue.error(
+        null,
+        `Install ${names.join(" and ")} to render this run's control condition.`,
+      ),
+    );
   }
   return issues;
 }

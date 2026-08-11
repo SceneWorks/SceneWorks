@@ -66,18 +66,26 @@ mod prelude {
         ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError,
         WorkerResult, WorkerStatus, CANCEL_MESSAGE,
     };
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[allow(unused_imports)]
+    pub(super) use super::{classify_adapter, lora_path};
     #[cfg(target_os = "macos")]
     #[allow(unused_imports)]
-    pub(super) use super::{
-        classify_adapter, load_reference_image, lora_path, resolve_mlx_dense_quant, AdapterKind,
-        MoeExpert,
-    };
+    pub(super) use super::{load_reference_image, resolve_mlx_dense_quant, AdapterKind, MoeExpert};
 }
 
 // Real MLX Wan2.2 generation (macOS, sc-3034). `runtime-macos` explicitly includes all three Wan
 // registrations in its validated media catalog.
 #[cfg(target_os = "macos")]
-use crate::image_jobs::{classify_adapter, load_reference_image, lora_path};
+use crate::image_jobs::load_reference_image;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use crate::image_jobs::{classify_adapter, lora_path};
 // epic 3720 (sc-3724): the backend-neutral generation contract types come from `gen_core` while the
 // compile-time runtime bundle decides which backend catalog this module loads from.
 // Backend-neutral contract types shared by the macOS MLX video path AND the Windows candle video

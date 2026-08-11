@@ -167,6 +167,20 @@ const completedJob = {
   },
 };
 
+// The DWPose catalog entry as the API renders it (`type: "utility"`, one download row carrying
+// both ONNX graphs). `installState` is what the Create tab's provisioning gate reads.
+function dwposeModel(overrides = {}) {
+  return {
+    id: "dwpose_pose_detector",
+    name: "DWPose Pose Detector",
+    type: "utility",
+    capabilities: [],
+    installState: "installed",
+    downloadSizeLabel: "330 MB",
+    ...overrides,
+  };
+}
+
 function makeContext(overrides = {}) {
   return {
     token: "test-token",
@@ -176,6 +190,7 @@ function makeContext(overrides = {}) {
     importAsset: vi.fn(),
     requestedGpu: "auto",
     jobs: [completedJob],
+    models: [dwposeModel()],
     ...overrides,
   };
 }
@@ -384,5 +399,85 @@ describe("PoseLibraryScreen — Create tab", () => {
     // Cancelled → the detected poses + edits stay put.
     expect(container.textContent).toContain("Review 1 candidate");
     expect(document.body.querySelector('input[list="pose-category-suggestions"]')).toBeTruthy();
+  });
+
+  // DWPose provisioning gate. The worker's resolver is cache-only since sc-17634, so without this
+  // the only way to discover a missing detector was to fire a pose_detect job and read its failure
+  // — from a screen that offered no way to install it.
+  describe("DWPose provisioning gate", () => {
+    it("replaces the create flow with a download offer when the detector is missing", async () => {
+      await render(makeContext({ models: [dwposeModel({ installState: "missing" })] }));
+      await click(document.body.querySelector("#pose-library-tab-create"));
+
+      const panel = document.body.querySelector("#pose-library-panel-create");
+      expect(panel.querySelector(".model-availability-gate")).toBeTruthy();
+      expect(panel.textContent).toContain("needs the DWPose detector");
+      expect(panel.textContent).toContain("DWPose Pose Detector");
+      expect(panel.textContent).toContain("330 MB");
+      // The create flow itself is unmounted — no way to stage photos for a job that cannot run.
+      expect(byText("Add images")).toBeFalsy();
+      expect(panel.textContent).not.toContain("Generate poses");
+    });
+
+    it("enqueues the detector download from the gate", async () => {
+      const createModelDownloadJob = vi.fn(async () => ({ id: "job_dl_1", status: "queued" }));
+      await render(
+        makeContext({ models: [dwposeModel({ installState: "missing" })], createModelDownloadJob }),
+      );
+      await click(document.body.querySelector("#pose-library-tab-create"));
+      await click(exactBtn("Download"));
+
+      expect(createModelDownloadJob).toHaveBeenCalledTimes(1);
+      expect(createModelDownloadJob.mock.calls[0][0]).toMatchObject({ id: "dwpose_pose_detector" });
+    });
+
+    it("shows progress for an in-flight detector download instead of a second Download", async () => {
+      await render(
+        makeContext({
+          models: [dwposeModel({ installState: "missing" })],
+          jobs: [
+            completedJob,
+            {
+              id: "job_dl_1",
+              type: "model_download",
+              status: "downloading",
+              progress: 0.42,
+              payload: { modelId: "dwpose_pose_detector" },
+            },
+          ],
+        }),
+      );
+      await click(document.body.querySelector("#pose-library-tab-create"));
+
+      expect(exactBtn("Download")).toBeFalsy();
+      expect(exactBtn("downloading")).toBeTruthy();
+    });
+
+    // A torn install fails to load exactly like a missing one, so it gates too.
+    it("gates an incomplete install", async () => {
+      await render(makeContext({ models: [dwposeModel({ installState: "incomplete" })] }));
+      await click(document.body.querySelector("#pose-library-tab-create"));
+
+      expect(document.body.querySelector(".model-availability-gate")).toBeTruthy();
+    });
+
+    it("renders the create flow when the detector is installed", async () => {
+      await render();
+      await click(document.body.querySelector("#pose-library-tab-create"));
+
+      expect(document.body.querySelector(".model-availability-gate")).toBeNull();
+      expect(byText("Add images")).toBeTruthy();
+    });
+
+    // Absent entry ⇒ ready: `models` is [] before the catalog lands (and on an API too old to
+    // declare the entry), and gating on "not found" would flash the gate over — or permanently
+    // hide — a working install.
+    it("stays available when the catalog doesn't declare the detector", async () => {
+      await render(makeContext({ models: [] }));
+      await click(document.body.querySelector("#pose-library-tab-create"));
+
+      expect(document.body.querySelector(".model-availability-gate")).toBeNull();
+      expect(byText("Add images")).toBeTruthy();
+    });
   });
 });

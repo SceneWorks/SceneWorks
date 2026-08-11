@@ -19,12 +19,17 @@ use crate::jobs_store::routing::{
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
-/// carrying `request.loras` stays on the candle lane instead of being refused. Today only the Wan-14B
-/// MoE engines qualify: `candle-gen-wan`'s `wan14b` descriptor sets `supports_lora`, and the worker's
-/// `candle_resolve_wan_adapters` applies each LoRA (including an external ComfyUI file) per MoE expert.
-/// The wan-5B TI2V / LTX / SVD providers advertise no LoRA slot (sc-10539). Mirror of the candle-gen
-/// descriptors — kept in lockstep the same way `CANDLE_VIDEO_ROUTED_MODELS` mirrors the routed engines.
-pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
+/// carrying `request.loras` stays on the candle lane instead of being refused. Wan-14B applies
+/// adapters per MoE expert, while LTX installs additive residuals on its video-attention projections
+/// for both the packed Q4 base and dense Eros checkpoint. Wan-5B, SVD, and Mochi advertise no LoRA
+/// slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
+/// `CANDLE_VIDEO_ROUTED_MODELS` mirrors the routed engines.
+pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
+    "wan_2_2_t2v_14b",
+    "wan_2_2_i2v_14b",
+    "ltx_2_3",
+    "ltx_2_3_eros",
+];
 
 /// Does this image job belong on the candle (Windows/CUDA) image lane (epic 3672, sc-3678)? The base
 /// `generate_candle_stream` drives plain text-to-image, and the bespoke lanes branched out below add
@@ -465,11 +470,10 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     {
         return false;
     }
-    // User LoRAs on the candle video lane are gated by the provider descriptor: the Wan-14B MoE
-    // engines (`wan_2_2_t2v_14b` / `wan_2_2_i2v_14b`) advertise `supports_lora` and their worker path
-    // (`candle_resolve_wan_adapters`) applies each `request.loras` entry from its file path — so a wan-14B
-    // job carrying user LoRAs stays on candle. Every other candle video provider (wan-5B TI2V, LTX, SVD)
-    // advertises no LoRA slot, so a LoRA there is refused here and remains queued (epic 8283). sc-10539.
+    // User LoRAs on the candle video lane are gated by the provider descriptor. Wan-14B and LTX
+    // advertise `supports_lora`, and their worker paths apply each `request.loras` entry from its
+    // file path. Wan-5B, SVD, and Mochi advertise no LoRA slot, so a LoRA there is refused here
+    // rather than being silently ignored.
     if !CANDLE_VIDEO_LORA_MODELS.contains(&model)
         && payload
             .get("loras")

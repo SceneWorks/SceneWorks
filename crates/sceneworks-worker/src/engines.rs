@@ -2084,6 +2084,19 @@ mod tests {
         assert_eq!(pinned_image_stride("definitely_not_an_engine"), None);
     }
 
+    /// The API's Candle routing table mirrors this provider fact. Pin it at the registry boundary so
+    /// a future inference-runtime bump cannot silently reintroduce the old "LTX has no LoRA slot"
+    /// assumption while SceneWorks continues routing adapter-bearing jobs here.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_ltx_descriptor_advertises_user_lora_inference() {
+        let descriptor = video_descriptor("ltx_2_3")
+            .expect("ltx_2_3 must resolve to the candle ltx_2_3_distilled descriptor");
+        assert_eq!(descriptor.id, "ltx_2_3_distilled");
+        assert!(descriptor.capabilities.supports_lora);
+        assert!(!descriptor.capabilities.supports_lokr);
+    }
+
     /// sc-11991 (epic 1788): `mochi_1` resolves through THIS module to a real gen-core descriptor on
     /// the active backend — the story's acceptance criterion, asserted directly.
     ///

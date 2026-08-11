@@ -92,7 +92,38 @@ png = "0.18"
 # cannot silently widen each other. Keep the `=` pin — `ort` is a pre-release and upstream
 # treats rc-to-rc as freely breaking; rc.13 removed the deprecated `*ExecutionProvider`
 # aliases, a source break that a patch-shaped version bump gives no warning about.
-ort = { version = "=2.0.0-rc.13", features = ["load-dynamic", "download-binaries"] }
+#
+# `default-features = false` exists for ONE reason: to hold `api-26` instead of the `api-27` that
+# rc.13's defaults carry. `ort`'s api-N features are ADDITIVE, so the default cannot be lowered by
+# adding anything — dropping the default set and re-listing it is the only way to select a version.
+# Every other default is re-enabled verbatim below, so this is a pure API-version pin, not a
+# feature diet. Re-check the upstream `default = [...]` on any rc bump.
+#
+# Why 26 and not "the newest": `MINOR_VERSION` (= `ort_sys::ORT_API_VERSION`) is the ONNX Runtime
+# API version the `load-dynamic` loader demands of the dylib it dlopens — it hard-errors with
+# `BadVersion` when the runtime's minor is LOWER. We ship onnxruntime 1.26.0 (the desktop
+# provisioners + `stage-onnxruntime.py`, bound to this pin by the `const _: () = assert!(…)` beside
+# `PROVISIONED_ONNXRUNTIME_MINOR` in `pose_jobs.rs`), so the ceiling is 26 and matching it exactly
+# is the only value that neither rejects our own runtime nor logs a forward-compat warning.
+#
+# rc.13 arrived via a dependabot group bump (#2092) and silently raised this floor 24 -> 27, which
+# is not a compile error anywhere: it fails at RUNTIME, in the user's pose/upscale/person job, as
+# "Failed to load ONNX Runtime dylib: BadVersion". Bumping the runtime instead is NOT the escape
+# hatch it looks like — onnxruntime-gpu 1.27 moved its CUDA EP to CUDA 13 (`nvidia-*-cu13`), and
+# every other DLL the provisioners stage, plus cudarc/candle, is CUDA 12.9. Lifting the floor above
+# 26 therefore means migrating the whole GPU runtime to CUDA 13, not swapping one wheel.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    # rc.13's default set, verbatim, EXCEPT `api-27` -> `api-26`.
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-native",
+    "copy-dylibs",
+    "api-26",
+    # …plus the one non-default feature both call sites need.
+    "load-dynamic",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -114,4 +145,4 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "f41a85b67a504a56e170d55534b8a05b5fa9f7fc" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "3f7931cd69812ff6c398096b3c7c6625df36ae59" }

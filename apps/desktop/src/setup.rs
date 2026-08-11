@@ -1,9 +1,16 @@
-//! First-run Python venv bootstrap + startup orchestration (sc-1348).
+//! First-run provisioning + startup orchestration (sc-1348).
 //!
 //! The frontend setup screen calls the `start_setup` command once it is ready to
-//! receive events; this provisions the uv-managed venv (streaming progress),
-//! then spawns the API sidecar, health-gates it, and navigates the window to the
-//! local API. `start_setup` is also the retry entry point.
+//! receive events; this seeds the builtin catalog, runs the platform's first-run
+//! GPU provisioning (streaming progress), then spawns the API sidecar, health-gates
+//! it, and navigates the window to the local API. `start_setup` is also the retry
+//! entry point.
+//!
+//! There is no Python venv on any platform: macOS went MLX-only (epic 3482,
+//! sc-3492/sc-3493) and off-Mac went candle-only (epic 5483 Phase 7, sc-5563). The
+//! slot the uv-managed venv bootstrap used to occupy now holds the CUDA runtime
+//! download on Windows/Linux (`cuda_provision` / `linux_cuda_provision`) — see
+//! `run_startup`.
 
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
 use std::ffi::OsString;
