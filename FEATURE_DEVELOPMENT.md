@@ -42,15 +42,17 @@ release is a separate process and is not defined here.
 | --- | --- | --- |
 | `main` | Completed features and normal development | Permanent, protected |
 | `feature/sc-<epic-id>-<epic-slug>` | Combined implementation of one epic | Epic start through verified main merge |
-| `story/sc-<story-id>-<story-slug>` | One story in the epic | Story start through verified feature-branch merge |
+| `story/sc-<story-id>-epic-<epic-id>-<epic-slug>` | One story in the epic | Story start through verified feature-branch merge |
 | `sync/sc-<epic-id>-main-<date>` | Reviewed synchronization of `main` into a feature branch | Delete after merge |
 | `release/next` | Candidate for the next release | Governed by `RELEASING.md` |
 
-Use lower-case kebab-case slugs. Shortcut story ids are globally unique, so a
-story branch does not need the epic id in its name. Do not try to nest story
-branches below the exact feature branch name, such as
-`feature/sc-123-name/sc-456-story`: Git refs cannot contain both a branch and a
-directory at the same path.
+Use lower-case kebab-case slugs. The story branch must repeat the owning epic id
+and the feature branch's canonical slug exactly. For example,
+`feature/sc-123-name` accepts `story/sc-456-epic-123-name`; a Shortcut-generated
+branch name or a story-title slug is not sufficient unless it already matches
+this repository policy. Do not try to nest story branches below the exact
+feature branch name, such as `feature/sc-123-name/sc-456-story`: Git refs cannot
+contain both a branch and a directory at the same path.
 
 If one story changes both repositories, use the same story branch name in
 SceneWorks and inference. A branch name records ownership; the Shortcut epic
@@ -128,8 +130,9 @@ Treat each story as a small PR even though its base is an epic branch.
 2. Revalidate that the story is still required and that its dependencies are
    already integrated or explicitly ordered.
 3. Move the story to In Progress immediately before editing.
-4. Create `story/sc-<story-id>-<story-slug>` from the latest remote feature
-   branch in an isolated worktree or clone.
+4. Create `story/sc-<story-id>-epic-<epic-id>-<epic-slug>` from the latest remote
+   feature branch in an isolated worktree or clone. The epic id and slug must
+   match the target feature branch exactly.
 5. Implement the complete story, focused regression tests, generated artifacts,
    and required cross-repository work. Do not silently defer required capability.
 6. Run focused checks and the complete applicable repository gates.
@@ -139,7 +142,7 @@ Treat each story as a small PR even though its base is an epic branch.
    ```bash
    gh pr create \
      --base feature/sc-<epic-id>-<epic-slug> \
-     --head story/sc-<story-id>-<story-slug>
+     --head story/sc-<story-id>-epic-<epic-id>-<epic-slug>
    ```
 
 9. Merge through the feature branch's required checks. Neither repository has a
