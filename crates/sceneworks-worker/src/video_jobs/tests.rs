@@ -6899,7 +6899,10 @@ fn wan_moe_sibling_pairs_high_and_low() {
 
 /// Minimal valid safetensors (8-byte LE header length + JSON header), optionally stamping
 /// `__metadata__.networkType` so `classify_adapter` can distinguish peft LoKr from plain LoRA.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn write_lora_fixture(path: &Path, network_type: Option<&str>) {
     let mut meta = serde_json::Map::new();
     meta.insert("format".to_owned(), json!("pt"));
@@ -10335,6 +10338,48 @@ mod candle_video_label_tests {
         ] {
             assert!(is_candle_video_engine(model), "{model}");
         }
+    }
+
+    #[test]
+    fn candle_ltx_user_lora_resolves_and_reaches_the_load_spec() {
+        let data_dir_guard = tempfile::Builder::new()
+            .prefix("sw_candle_ltx_lora_")
+            .tempdir()
+            .expect("temp data dir");
+        let data_dir = data_dir_guard.path();
+        let lora_dir = data_dir.join("loras");
+        std::fs::create_dir_all(&lora_dir).unwrap();
+        let lora = lora_dir.join("style.safetensors");
+        write_lora_fixture(&lora, None);
+        let settings = Settings {
+            data_dir: data_dir.to_path_buf(),
+            ..Settings::from_env()
+        };
+        let request = request(json!({
+            "projectId": "p",
+            "model": "ltx_2_3",
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "loras": [{ "path": lora.to_string_lossy(), "weight": "0.55" }],
+        }));
+
+        let adapters = resolve_ltx_user_adapters(&settings, &request)
+            .expect("Candle LTX user LoRA should resolve");
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].path, lora.canonicalize().unwrap());
+        assert_eq!(adapters[0].kind, gen_core::AdapterKind::Lora);
+        assert!((adapters[0].scale - 0.55).abs() < 1e-6);
+        assert!(adapters[0].pass_scales.is_none());
+
+        let input = VideoGenInput {
+            engine_id: "ltx_2_3_distilled",
+            adapters,
+            ..VideoGenInput::default()
+        };
+        let spec = video_load_spec(&input);
+        assert_eq!(spec.adapters.len(), 1);
+        assert_eq!(spec.adapters[0].path, lora.canonicalize().unwrap());
+        assert!((spec.adapters[0].scale - 0.55).abs() < 1e-6);
     }
 
     #[test]

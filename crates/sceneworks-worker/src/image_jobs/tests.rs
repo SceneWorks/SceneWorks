@@ -15019,7 +15019,8 @@ fn krea_imported_control_mlx_gpu_smoke() {
         )
         .expect("render the DWPose skeleton for the pose entry")
     };
-    let render = |label: &str, control: Image, scale: f32| {
+    let mut cache_state = gen_core::MemoryCacheState::Cold;
+    let mut render = |label: &str, control: Image, scale: f32| {
         let mut request = GenerationRequest {
             prompt: prompt.clone(),
             width: w,
@@ -15052,11 +15053,12 @@ fn krea_imported_control_mlx_gpu_smoke() {
             model.as_ref(),
             &memory_plan,
             &memory_inputs,
-            gen_core::MemoryCacheState::Warm,
+            cache_state,
             gen_core::OffloadPolicy::Resident,
             0,
         )
         .unwrap_or_else(|error| panic!("[{label}] fit gate refused the pose request: {error}"));
+        cache_state = gen_core::MemoryCacheState::Warm;
         let out = crate::memory_strategy::generate_with_scope(
             model.as_ref(),
             &mut request,

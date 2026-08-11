@@ -232,32 +232,38 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && grep -q 'sm_120\.cubin' /tmp/worker-elf.txt \
     && grep -q 'sm_120\.ptx' /tmp/worker-ptx.txt
 
-# --- Candle GPU worker runtime (CUDA-12) -------------------------------------
-# The off-Mac torch replacement: Docker GPU inference runs on the native candle/CUDA
-# worker, not the Python torch worker. The CUDA-runtime base provides cudart/cublas/
-# cublasLt for candle; the `ort` CV-aux lanes (DWPose/YOLO/Real-ESRGAN, sc-6209) get a
-# version-matched onnxruntime-gpu + its cuDNN-9 / cuFFT / nvJitLink / nvRTC deps from
-# PyPI, dlopened via ORT_DYLIB_PATH (the `ort` crate links load-dynamic).
+# --- onnxruntime staging (the only stage that has a Python interpreter) -------
+# pip is just the delivery mechanism for onnxruntime-gpu's shared libraries: PyPI is
+# where NVIDIA and Microsoft publish the exact CUDA-12 build set we pin, but nothing at
+# container runtime imports any of it — the `ort` crate dlopens libonnxruntime.so and
+# ld.so resolves the rest off LD_LIBRARY_PATH. So the venv is built HERE and only its
+# .so tree is copied forward, keeping the shipped worker image free of a Python
+# interpreter entirely (epic 3482).
 #
-# ubuntu24.04 (Python 3.12) on purpose: onnxruntime-gpu >= 1.24 (the `ort` rc.12 floor
-# / ORT API 24) ships no cp310 Linux wheel, so the 22.04 base's Python 3.10 caps at
-# 1.23.2 and can't satisfy it; cp312 has 1.26.0. The builder stays on 22.04 (it needs
-# no Python) — its older-glibc binary runs fine on 24.04 (glibc is backward-compatible).
-FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle
+# ubuntu24.04 (Python 3.12) on purpose, and matching the runtime base that hard-codes
+# this venv's site-packages path: onnxruntime-gpu >= 1.26 (the `ort` API floor — see
+# below) ships no cp310 Linux wheel, so a 22.04 base's Python 3.10 caps at 1.23.2 and
+# can't satisfy it; cp312 has 1.26.0. The wheels are manylinux, so the libraries they
+# carry run on the CUDA runtime base unchanged.
+FROM ubuntu:24.04 AS ort-builder
 ENV DEBIAN_FRONTEND=noninteractive
-# ffmpeg: candle video lanes encode mp4. python3/venv: stage onnxruntime-gpu (model
-# downloads are the native in-process path, no hf CLI — sc-12227 / sc-12232).
-# libgomp1: onnxruntime's OpenMP runtime.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates curl ffmpeg python3 python3-venv libgomp1 \
+    && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # onnxruntime-gpu + the CUDA-12 deps its providers_cuda needs that the CUDA-runtime
 # base doesn't ship — cuDNN-9 (incl. lazily-loaded sub-engines), cuFFT, nvJitLink,
 # nvRTC. onnxruntime-gpu does NOT declare these as hard deps (they sit behind its
-# `cuda`/`cudnn` extras), so request them explicitly (sc-6209). 1.26.0 matches the
-# `ort` crate rc.12 (ORT API 24); validated on RTX PRO 6000 with cuDNN-cu12 9.23.
+# `cuda`/`cudnn` extras), so request them explicitly (sc-6209). 1.26.0 matches the ORT
+# API version the `ort` crate requests (its `api-26` feature, pinned in the workspace
+# Cargo.toml); validated on RTX PRO 6000 with cuDNN-cu12 9.23. The two are bound at
+# COMPILE time by `PROVISIONED_ONNXRUNTIME_MINOR` in crates/sceneworks-worker/src/
+# pose_jobs.rs — the crate's floor is set by that api-N FEATURE, not by its rc version,
+# so re-read it after any `ort` bump rather than assuming a version maps to an API.
+#
+# Do not "just bump" this to 1.27+: that release moved the CUDA execution provider to
+# CUDA 13 (`nvidia-*-cu13`), which is incompatible with the CUDA 12.9 base and the
+# cu12 pins below.
 #
 # The four nvidia-*-cu12 versions below are PINNED to exactly match the desktop CUDA
 # provisioner (apps/desktop/src/cuda_provision.rs COMPONENTS table, REDIST_VERSION
@@ -266,6 +272,11 @@ RUN apt-get update \
 # cuDNN 10.x / floating-range drift (sc-13611). Each also satisfies onnxruntime-gpu
 # 1.26.0's own declared ranges (cudnn~=9.0, cufft~=11.0, cuda-nvrtc~=12.0) and the
 # CUDA 12.9 runtime base. Pip --require-hashes hardening is tracked in sc-14078.
+#
+# Keep this path identical to the ENV of the same name in rust-worker-candle: the
+# libonnxruntime.so symlink written below is ABSOLUTE, so it only resolves if the tree
+# lands back at the same place. `test -d` fails the build loudly if a base-image Python
+# bump ever moves the venv's site-packages out from under the hard-coded 3.12.
 ENV ORT_PY_SITE=/opt/ort/lib/python3.12/site-packages
 ARG ONNXRUNTIME_GPU_VERSION=1.26.0
 # Mirror apps/desktop/src/cuda_provision.rs — keep in lockstep if that manifest bumps.
@@ -274,6 +285,7 @@ ARG NVIDIA_CUFFT_CU12_VERSION=11.4.1.4
 ARG NVIDIA_NVJITLINK_CU12_VERSION=12.9.86
 ARG NVIDIA_CUDA_NVRTC_CU12_VERSION=12.9.86
 RUN python3 -m venv /opt/ort \
+    && test -d "${ORT_PY_SITE}" \
     && /opt/ort/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/ort/bin/pip install --no-cache-dir \
         "onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}" \
@@ -285,6 +297,39 @@ RUN python3 -m venv /opt/ort \
     && test -n "${ORT_SO}" \
     && ln -sf "${ORT_SO}" "${ORT_PY_SITE}/onnxruntime/capi/libonnxruntime.so"
 
+# The packaging machinery pip installs alongside the wheels is pure Python that only an
+# interpreter would ever read, and the runtime stage has none — drop it here rather than
+# copy it forward. Only the venv's shared objects are load-bearing downstream.
+RUN rm -rf "${ORT_PY_SITE}"/pip "${ORT_PY_SITE}"/pip-*.dist-info \
+        "${ORT_PY_SITE}"/setuptools "${ORT_PY_SITE}"/setuptools-*.dist-info \
+        "${ORT_PY_SITE}"/pkg_resources "${ORT_PY_SITE}"/_distutils_hack \
+        "${ORT_PY_SITE}"/distutils-precedence.pth
+
+# --- Candle GPU worker runtime (CUDA-12) -------------------------------------
+# The off-Mac torch replacement: Docker GPU inference runs on the native candle/CUDA
+# worker, not the Python torch worker. The CUDA-runtime base provides cudart/cublas/
+# cublasLt for candle; the `ort` CV-aux lanes (DWPose/YOLO/Real-ESRGAN, sc-6209) get a
+# version-matched onnxruntime-gpu + its cuDNN-9 / cuFFT / nvJitLink / nvRTC deps from
+# the ort-builder stage above, dlopened via ORT_DYLIB_PATH (`ort` links load-dynamic).
+#
+# ubuntu24.04 base. The candle builder stays on 22.04 — its older-glibc binary runs fine
+# on 24.04 (glibc is backward-compatible).
+FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle
+ENV DEBIAN_FRONTEND=noninteractive
+# ffmpeg: candle video lanes encode mp4. libgomp1: onnxruntime's OpenMP runtime.
+# No Python: the onnxruntime libraries arrive pre-staged from ort-builder, and model
+# downloads are the native in-process path with no hf CLI (sc-12227 / sc-12232). Don't
+# add python3/python3-venv back here — nothing in the container would run them.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl ffmpeg libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same absolute path the venv was built at, so the staged libonnxruntime.so symlink
+# still resolves. What lands here is shared objects, not an importable package.
+ENV ORT_PY_SITE=/opt/ort/lib/python3.12/site-packages
+COPY --from=ort-builder ${ORT_PY_SITE} ${ORT_PY_SITE}
+
 # Point the `ort` crate (load-dynamic) at the staged onnxruntime, and tell ort_cuda
 # where the CUDA-12 runtime (base) + cuDNN-9 (pip wheel) live. LD_LIBRARY_PATH is the
 # Linux analogue of the Windows PATH-prepend in ort_cuda::preload_cuda_dylibs — the
@@ -293,7 +338,9 @@ ENV ORT_DYLIB_PATH=${ORT_PY_SITE}/onnxruntime/capi/libonnxruntime.so
 ENV SCENEWORKS_ORT_CUDA_DIR=/usr/local/cuda/lib64
 ENV SCENEWORKS_ORT_CUDNN_DIR=${ORT_PY_SITE}/nvidia/cudnn/lib
 ENV LD_LIBRARY_PATH=${ORT_PY_SITE}/onnxruntime/capi:${ORT_PY_SITE}/nvidia/cudnn/lib:${ORT_PY_SITE}/nvidia/cufft/lib:${ORT_PY_SITE}/nvidia/nvjitlink/lib:${ORT_PY_SITE}/nvidia/cuda_nvrtc/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
-ENV PATH="/opt/ort/bin:${PATH}"
+# Resolve the cross-stage COPY at BUILD time: a dangling symlink here would otherwise
+# only surface as a failed dlopen on the first DWPose/YOLO job in a running pod.
+RUN test -e "${ORT_DYLIB_PATH}"
 
 COPY --from=candle-builder /out/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
 

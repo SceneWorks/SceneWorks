@@ -3,8 +3,11 @@ import { API_BASE_URL, apiFetch, isAbortError, withMediaTicket } from "../api.js
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
+import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { useAppContext, useAppStatic } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
+import { POSE_DETECT_MODEL_ID } from "../constants.js";
+import { downloadOffersFor, modelInstallComplete, poseDetectModelUsable } from "../modelEligibility.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { GLOBAL_POSES_PROJECT_ID } from "../poseLibrary.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -118,7 +121,19 @@ function annotateDuplicates(built, existingPoses) {
 // The "Create" tab body: pick photos (DatasetAddDialog), run DWPose, then review,
 // categorize, and save one whole-body pose per detected person to the store.
 function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
-  const { token, activeProject, assets = [], characters = [], requestedGpu, jobs = [] } = useAppContext();
+  const {
+    token,
+    activeProject,
+    assets = [],
+    characters = [],
+    requestedGpu,
+    jobs = [],
+    models = [],
+    macCapabilities = DEFAULT_MAC_CAPABILITIES,
+    createModelDownloadJob,
+    jobAction,
+    setActiveView,
+  } = useAppContext();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
   const [phase, setPhase] = useState("idle"); // idle | detecting | review
@@ -326,10 +341,53 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
     }
   }, [candidates, token, onSaved, resetSession]);
 
+  // DWPose provisioning gate. Since sc-17634 the detector is a Model-Manager install and the
+  // worker's resolver is cache-only, so a machine without it could only learn that by firing a
+  // pose_detect job and reading its failure ("The DWPose pose detector is not installed …") out of
+  // the panel's error line — a dead end, because the Pose Library offers no way to install it.
+  // Check the catalog up front and render the same shared download gate the Studios use instead.
+  const poseDetectModel = useMemo(
+    () => models.find((entry) => entry.id === POSE_DETECT_MODEL_ID),
+    [models],
+  );
+  // Absent entry ⇒ READY, the inverse of the Studios' `Boolean(model) && …`. Two reasons: `models`
+  // is [] for the first render (and in contexts that don't supply a catalog at all), so gating on
+  // "not found" would flash the gate over a perfectly good install every mount; and an API too old
+  // to declare the entry still has a worker that resolves the graphs, so hiding the tab there would
+  // remove a working feature. Only a catalog that positively reports missing/incomplete gates.
+  const poseDetectReady =
+    !poseDetectModel ||
+    (modelInstallComplete(poseDetectModel) && poseDetectModelUsable(poseDetectModel, macCapabilities));
+  const poseDetectOffers = useMemo(
+    () => downloadOffersFor(models, poseDetectModelUsable, macCapabilities),
+    [models, macCapabilities],
+  );
+  const modelDownloadJobs = useMemo(
+    () => (jobs ?? []).filter((job) => job.type === "model_download"),
+    [jobs],
+  );
+
   return (
     <div aria-labelledby="pose-library-tab-create" hidden={hidden} id="pose-library-panel-create" role="tabpanel">
       {!activeProject ? (
         <div className="empty-panel">Open a workspace to create poses from photos.</div>
+      ) : !poseDetectReady ? (
+        /* Rendered as a BRANCH rather than as a wrapper around `.pose-create`, so the whole
+           create flow (sources, staged uploads, review) is unmounted while the detector is
+           missing — there is no half-usable state where photos can be staged for a job that
+           cannot run. `ready={false}` is the same card every Studio's gate renders. */
+        <ModelAvailabilityGate
+          ready={false}
+          eyebrow="Required model not installed"
+          title="Creating poses from photos needs the DWPose detector"
+          description="Pose detection runs locally on the native worker: person boxes plus 133 whole-body keypoints. It’s a one-time install — the same detector also powers OpenPose control conditioning, ControlNet pose training and catalog pose analysis."
+          offers={poseDetectOffers}
+          downloadJobs={modelDownloadJobs}
+          onDownload={createModelDownloadJob}
+          onOpenModels={setActiveView ? () => setActiveView("Models") : undefined}
+          onOpenQueue={setActiveView ? () => setActiveView("Queue") : undefined}
+          onCancelJob={jobAction ? (job) => jobAction(job, "cancel") : undefined}
+        />
       ) : (
         <div className="pose-create">
           {error ? <p className="inline-warning">{error}</p> : null}

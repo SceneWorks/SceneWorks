@@ -636,8 +636,9 @@ pub(crate) fn classify_candle_video_gap(payload: &Map<String, Value>) -> Unsuppo
         Some(model),
         "advanced / conditioned video mode",
         "this video_generate mode is not candle-eligible on this model (candle serves base \
-         text-to-video, the 14B I2V + SVD image-to-video, and Wan-VACE extend/bridge/replace); \
-         other conditioned modes + LoRAs have no candle path off-Mac.",
+         text-to-video, LTX + Wan-14B user LoRAs, the 14B I2V + SVD image-to-video, and Wan-VACE \
+         extend/bridge/replace); other conditioned modes and provider-incompatible LoRAs have no \
+         candle path off-Mac.",
         Some("epic 5481"),
     )
 }

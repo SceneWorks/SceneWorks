@@ -371,3 +371,73 @@ describe("ConfigureJobPanel full base fine-tune", () => {
     expect(factor).toBeTruthy();
   });
 });
+
+// ControlNet preprocessor provisioning. The panel must both SHOW the offer and have the run
+// blocked; those are two different wires (the notice prop vs the validation context), and getting
+// only one right is the failure this covers — an offer beside a live Start button, or a dead Start
+// button with nothing on screen explaining it.
+describe("ConfigureJobPanel — missing control preprocessor", () => {
+  const CONTROL_TARGET = {
+    id: "krea_pose_control",
+    name: "Krea Pose Control",
+    outputKind: "control_branch",
+    defaults: { advanced: { controlType: "pose" } },
+  };
+  const DWPOSE = {
+    id: "dwpose_pose_detector",
+    name: "DWPose Pose Detector",
+    installState: "missing",
+    downloadSizeLabel: "330 MB",
+  };
+
+  it("offers the download and blocks Start training", () => {
+    const missingControlModels = [DWPOSE];
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          selectedTarget: CONTROL_TARGET,
+          missingControlModels,
+          // The real rules, with the same list the notice renders — so the button and the offer
+          // cannot disagree.
+          configValidity: validityFor(VALID_DRAFT, {
+            activeDataset: DATASET,
+            selectedTarget: CONTROL_TARGET,
+            missingControlModels,
+          }),
+          onDownloadModel: noop,
+        })}
+      />,
+    );
+    expect(container.querySelector(".required-models-notice")).toBeTruthy();
+    expect(container.textContent).toContain("DWPose Pose Detector");
+    expect(container.textContent).toContain("Pose ControlNet training");
+    const start = [...container.querySelectorAll("button")].find((el) =>
+      el.textContent.includes("Start training"),
+    );
+    expect(start).toBeTruthy();
+    expect(start.disabled).toBe(true);
+  });
+
+  it("renders no notice for a provisioned ControlNet run", () => {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          selectedTarget: CONTROL_TARGET,
+          missingControlModels: [],
+          configValidity: validityFor(VALID_DRAFT, {
+            activeDataset: DATASET,
+            selectedTarget: CONTROL_TARGET,
+            missingControlModels: [],
+          }),
+        })}
+      />,
+    );
+    expect(container.querySelector(".required-models-notice")).toBeNull();
+  });
+
+  // A LoRA target renders no condition at all, so it must never see this.
+  it("renders no notice for a LoRA target", () => {
+    mount(<ConfigureJobPanel {...baseProps({ missingControlModels: [] })} />);
+    expect(container.querySelector(".required-models-notice")).toBeNull();
+  });
+});

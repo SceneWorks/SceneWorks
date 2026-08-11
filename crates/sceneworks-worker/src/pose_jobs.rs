@@ -122,6 +122,51 @@ const DWPOSE_LEGACY_DATA_DIR_ROOT: &str = "cache/dwpose";
 const DWPOSE_LEGACY_RTMLIB_ROOT: &str = ".cache/rtmlib/hub/checkpoints";
 const DETECTOR_ID: &str = "rtmw-dw-x-l/ort";
 
+/// The ONNX Runtime minor version SceneWorks actually ships. Four pin sites, all `1.26.0`:
+///
+/// * `apps/desktop/src/cuda_provision.rs` — the Windows `onnxruntime-gpu` wheel + `REDIST_VERSION`;
+/// * `apps/desktop/src/linux_cuda_provision.rs` — the Linux sibling;
+/// * `apps/desktop/scripts/stage-onnxruntime.py` — the macOS CoreML dylib bundled into the app;
+/// * `docker/rust.Dockerfile` — `ONNXRUNTIME_GPU_VERSION`.
+///
+/// Bump this only together with all four.
+const PROVISIONED_ONNXRUNTIME_MINOR: u32 = 26;
+
+/// `ort` must not request a newer ONNX Runtime API than the runtime we provision.
+///
+/// `ort`'s `load-dynamic` loader compares [`ort::MINOR_VERSION`] (= `ort_sys::ORT_API_VERSION`,
+/// selected by whichever `api-N` feature is enabled) against the dylib's own minor and returns
+/// `LoadError::BadVersion` when the dylib is LOWER. Nothing about that mismatch is otherwise
+/// visible before shipping: it surfaces only when a user runs a pose / person / upscale job, as
+///
+/// > Failed to load ONNX Runtime dylib: BadVersion { version_str: "1.26.0", … }
+///
+/// which is exactly what shipped when dependabot's group bump (#2092) moved `ort` rc.12 -> rc.13
+/// and, with it, the default `api-24` -> `api-27` — every `ort` surface on every platform broken by
+/// a bump that compiled clean and passed CI.
+///
+/// So it is a `const` assertion, not a `#[test]`: this is checked by every `cargo build`/`check` of
+/// this module, including the candle typecheck lane, which never RUNS tests (it cannot link without
+/// a real libcuda). A test would have been silent in precisely the lane that first compiles this
+/// code off-Mac. `<=` and not `==`: shipping a runtime NEWER than the requested API is fine (ORT's
+/// C API is forward compatible and `ort` only logs); requesting an API newer than the runtime is
+/// the fatal direction.
+///
+/// # Fixing a failure here
+///
+/// The tempting fix — bump the provisioned wheel — is usually the wrong one. onnxruntime-gpu 1.27
+/// moved its CUDA execution provider to CUDA 13 (`nvidia-*-cu13`), while every other DLL the
+/// provisioners stage, and cudarc/candle besides, is CUDA 12.9. Raising
+/// [`PROVISIONED_ONNXRUNTIME_MINOR`] means migrating the whole GPU runtime, not swapping one wheel.
+/// Pinning `ort`'s `api-N` feature back down (workspace `Cargo.toml`) is the cheap direction.
+const _: () = assert!(
+    ort::MINOR_VERSION <= PROVISIONED_ONNXRUNTIME_MINOR,
+    "`ort` requests a newer ONNX Runtime API than SceneWorks provisions (see \
+     PROVISIONED_ONNXRUNTIME_MINOR above): every pose / person / upscale job would fail at runtime \
+     with `BadVersion`. Pin the `ort` api-N feature down in the workspace Cargo.toml, or bump all \
+     four provisioning sites — but read the CUDA-13 note above before choosing the latter."
+);
+
 /// The hardware execution provider this build registers before the CPU fallback:
 /// CoreML on macOS (sc-3487), CUDA off-Mac on the candle GPU-worker lane (sc-5496).
 /// Reported as the result `detector.device` for observability.

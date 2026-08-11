@@ -2,6 +2,7 @@
 use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{
+    ltx::resolve_ltx_user_adapters,
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
         mochi_vram_precheck, resolve_mochi_model_dir, validate_mochi_mode, MOCHI_REPO,
@@ -22,7 +23,8 @@ use super::{
 
 // ---------------------------------------------------------------------------
 // Candle (Windows/CUDA) video lane (sc-5097, epic 5095). The candle wan/ltx providers serve a narrow
-// **txt2video-only** first slice (no image/VACE conditioning, audio, LoRA, or quant). This is the
+// **txt2video-only** first slice (no image/VACE conditioning or on-the-fly quant). LTX and Wan-14B
+// accept provider-native user LoRAs; Wan-5B, SVD, and Mochi do not. This is the
 // video sibling of the candle image lane (image_jobs.rs `generate_candle_stream`): it builds a
 // `VideoGenInput` and drives the SAME neutral streaming harness (`generate_video` →
 // `run_loaded_video_generation` → the registry-resolved candle generator), reusing the shared
@@ -946,10 +948,13 @@ pub(super) async fn generate_candle_video_using(
     // Wan Lightning toggle + adapters (sc-10138): self-heal the A14B Lightning distill pair when the
     // toggle is on, then resolve the adapter specs (Lightning + user LoRAs, per-expert on the MoE). The
     // candle Wan engine applies these additively on a packed q4/q8 tier (candle-gen sc-10094/10095) or
-    // folds them on a dense tier. `Vec::new()` for the non-Wan (ltx) engine.
+    // folds them on a dense tier. Candle LTX consumes the same user adapter specs as MLX through its
+    // additive attention-projection path; SVD and Mochi keep an empty adapter stack.
     let adapters = if is_wan {
         ensure_wan_lightning_present(api, settings, job, request, engine_id).await?;
         resolve_wan_adapters(settings, request, engine_id)?
+    } else if is_ltx {
+        resolve_ltx_user_adapters(settings, request)?
     } else {
         Vec::new()
     };
