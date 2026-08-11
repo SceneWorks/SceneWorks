@@ -3560,9 +3560,7 @@ async fn cuda_device_preflight(app: &AppHandle) -> Result<(), String> {
     if !candle_runtime_present(app) {
         return Ok(());
     }
-    let command = app
-        .shell()
-        .sidecar("sceneworks-api")
+    let command = api_sidecar_command(app)
         .map_err(|error| format!("locate api for GPU check: {error}"))?
         .env("SCENEWORKS_GPU_CHECK", "1");
     let command = apply_candle_loader_env(app, command);
@@ -3759,15 +3757,11 @@ mod path_tests {
         LinuxDesktopPaths::resolve(|name| env.get(name).cloned())
     }
 
-    fn bundle_fixture_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sceneworks-gh-2259-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ))
+    fn bundle_fixture(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("sceneworks-gh-2259-{label}-"))
+            .tempdir()
+            .expect("create isolated bundle fixture")
     }
 
     fn touch(path: &Path) {
@@ -3778,8 +3772,8 @@ mod path_tests {
 
     #[test]
     fn packaged_macos_bundle_uses_native_external_volume_paths() {
-        let root = bundle_fixture_root("external-volume");
-        let bundle = root.join("External Drive").join("SceneWorks.app");
+        let root = bundle_fixture("external-volume");
+        let bundle = root.path().join("External Drive").join("SceneWorks.app");
         let api_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
         let resources = bundle.join("Contents").join("Resources");
         touch(&api_sidecar);
@@ -3797,14 +3791,12 @@ mod path_tests {
                 resources,
             })
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
     fn packaged_macos_bundle_rejects_incomplete_external_copy() {
-        let root = bundle_fixture_root("incomplete-copy");
-        let bundle = root.join("SceneWorks.app");
+        let root = bundle_fixture("incomplete-copy");
+        let bundle = root.path().join("SceneWorks.app");
         let expected_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
         let resources = bundle.join("Contents").join("Resources");
         std::fs::create_dir_all(&resources).expect("create bundle resources");
@@ -3816,14 +3808,12 @@ mod path_tests {
                 && error.contains(&expected_sidecar.display().to_string()),
             "unexpected incomplete-bundle error: {error}"
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
     fn packaged_macos_bundle_rejects_missing_resources() {
-        let root = bundle_fixture_root("missing-resources");
-        let bundle = root.join("SceneWorks.app");
+        let root = bundle_fixture("missing-resources");
+        let bundle = root.path().join("SceneWorks.app");
         let api_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
         let expected_resources = bundle.join("Contents").join("Resources");
         touch(&api_sidecar);
@@ -3835,8 +3825,6 @@ mod path_tests {
                 && error.contains(&expected_resources.display().to_string()),
             "unexpected incomplete-bundle error: {error}"
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
@@ -3857,8 +3845,8 @@ mod path_tests {
     fn foundation_resolves_external_bundle_sidecar_and_resources() {
         use objc2_foundation::{NSBundle, NSURL};
 
-        let root = bundle_fixture_root("foundation-external-volume");
-        let bundle_path = root.join("External Drive").join("SceneWorks.app");
+        let root = bundle_fixture("foundation-external-volume");
+        let bundle_path = root.path().join("External Drive").join("SceneWorks.app");
         let contents = bundle_path.join("Contents");
         let macos = contents.join("MacOS");
         let resources = contents.join("Resources");
@@ -3889,8 +3877,6 @@ mod path_tests {
                 resources,
             })
         );
-
-        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
