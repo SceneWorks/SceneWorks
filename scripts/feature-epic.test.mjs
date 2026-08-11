@@ -227,6 +227,19 @@ class BareGitHub {
     }
   }
 
+  epicFeatureRefs(slug, epic) {
+    const prefix = `refs/heads/feature/${epic}-`;
+    const output = run(
+      "git",
+      ["for-each-ref", "--format=%(refname) %(objectname)", `${prefix}*`],
+      { cwd: this.origin(slug) },
+    );
+    return output.split(/\r?\n/).filter(Boolean).map((line) => {
+      const [ref, sha] = line.split(" ");
+      return { branch: ref.slice("refs/heads/".length), sha };
+    });
+  }
+
   createFeatureRef(slug, branch, sha) {
     const key = this.key(slug);
     this.mutations.push({ type: "create-ref", repo: key, branch, sha });
@@ -635,6 +648,10 @@ function sideCommit(origin, file = "divergent.txt") {
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+function setRemoteFeatureRef(f, repo, branch, sha) {
+  run("git", ["update-ref", `refs/heads/${branch}`, sha], { cwd: f.origins[repo] });
 }
 
 test("branch names carry both Shortcut ownership ids and reject default-like feature refs", () => {
@@ -1600,6 +1617,195 @@ test("ruleset discovery exhausts every GitHub page and fails closed on repeated 
   });
 });
 
+test("detailed ruleset normalization fails closed when bypass_actors visibility is missing", async (t) => {
+  await t.test("create planning", (t) => {
+    const f = fixture(t);
+    delete f.github.ruleSets.sceneworks[0].bypass_actors;
+    assert.throws(
+      () => planFixture(f),
+      /must include an explicit bypass_actors array/,
+    );
+    assert.deepEqual(f.github.mutations, []);
+  });
+
+  await t.test("adoption planning", (t) => {
+    const f = fixture(t);
+    installActivePolicyPair(f);
+    const expectedName = featurePolicyPayloads(
+      "inference",
+      "feature/sc-18304-pipeline-flexibility-mlx-perf",
+      "sc-18304",
+    ).exactQueue.name;
+    const exact = f.github.ruleSets.inference.find(
+      ({ name }) => name === expectedName,
+    );
+    delete exact.bypass_actors;
+    assert.throws(
+      () => planFixture(f, { adoptExisting: true }),
+      /must include an explicit bypass_actors array/,
+    );
+    assert.deepEqual(f.github.mutations, []);
+  });
+
+  await t.test("live audit", (t) => {
+    const f = fixture(t);
+    planFixture(f);
+    bootstrap(f.statePath, { apply: true }, { github: f.github, git: f.git, clock });
+    delete f.github.ruleSets.sceneworks[0].bypass_actors;
+    const report = auditState(
+      f.statePath,
+      f.reportPath,
+      { github: f.github, shortcut: f.shortcut, clock },
+    );
+    assert.equal(report.bootstrap.policies.sceneworks.ok, false);
+    assert.match(
+      report.bootstrap.policies.sceneworks.error,
+      /must include an explicit bypass_actors array/,
+    );
+  });
+});
+
+test("feature-ref discovery exhausts pages and validates every canonical identity", async (t) => {
+  const slug = REPOSITORIES.sceneworks.slug;
+  const epic = "sc-18304";
+  const path =
+    `repos/${slug}/git/matching-refs/heads/feature%2Fsc-18304-?per_page=100`;
+  const featureRef = (index, branch = `feature/${epic}-candidate-${index}`) => ({
+    ref: `refs/heads/${branch}`,
+    object: { type: "commit", sha: index.toString(16).padStart(40, "0") },
+  });
+  const firstPage = Array.from({ length: 100 }, (_, index) => featureRef(index + 1));
+  const pageTwoRef = featureRef(101, "feature/sc-18304-pipeline-flexibility-mlx-perf");
+
+  await t.test("page two is returned", () => {
+    const process = new FakeGhProcess((args) => {
+      assert.equal(args[1], path);
+      return [firstPage, [pageTwoRef]];
+    });
+    const refs = new GitHubClient(process).epicFeatureRefs(slug, epic);
+    assert.equal(refs.length, 101);
+    assert.deepEqual(refs.at(-1), {
+      branch: "feature/sc-18304-pipeline-flexibility-mlx-perf",
+      sha: pageTwoRef.object.sha,
+    });
+    assert.ok(process.calls[0].includes("--paginate"));
+    assert.ok(process.calls[0].includes("--slurp"));
+  });
+
+  await t.test("repeated ref across pages is rejected", () => {
+    const process = new FakeGhProcess(() => [[pageTwoRef], [pageTwoRef]]);
+    assert.throws(
+      () => new GitHubClient(process).epicFeatureRefs(slug, epic),
+      /invalid or repeated feature ref/,
+    );
+  });
+
+  await t.test("malformed page and ref are rejected", () => {
+    assert.throws(
+      () => new GitHubClient(new FakeGhProcess(() => [{ not: "a page" }]))
+        .epicFeatureRefs(slug, epic),
+      /malformed feature-ref page/,
+    );
+    assert.throws(
+      () => new GitHubClient(new FakeGhProcess(() => [[{
+        ref: "refs/heads/feature/sc-18304-malformed",
+        object: { type: "tag", sha: "a".repeat(40) },
+      }]])).epicFeatureRefs(slug, epic),
+      /malformed feature ref/,
+    );
+  });
+});
+
+test("planning rejects alternate or duplicate same-epic feature refs in either repository", async (t) => {
+  await t.test("create mode alternate candidate", (t) => {
+    const f = fixture(t);
+    setRemoteFeatureRef(f, "inference", "feature/sc-18304-alternate", f.inferenceMain);
+    assert.throws(() => planFixture(f), /create mode requires no live sc-18304 feature refs/);
+    assert.equal(existsSync(f.statePath), false);
+    assert.deepEqual(f.github.mutations, []);
+  });
+
+  await t.test("create mode matching pair", (t) => {
+    const f = fixture(t);
+    const branch = "feature/sc-18304-pipeline-flexibility-mlx-perf";
+    setRemoteFeatureRef(f, "sceneworks", branch, f.sceneWorksMain);
+    setRemoteFeatureRef(f, "inference", branch, f.inferenceMain);
+    assert.throws(() => planFixture(f), /create mode requires no live sc-18304 feature refs/);
+    assert.equal(existsSync(f.statePath), false);
+    assert.deepEqual(f.github.mutations, []);
+  });
+
+  await t.test("adoption mode duplicate candidate", (t) => {
+    const f = fixture(t);
+    installActivePolicyPair(f);
+    setRemoteFeatureRef(f, "sceneworks", "feature/sc-18304-alternate", f.sceneWorksMain);
+    assert.throws(
+      () => planFixture(f, { adoptExisting: true }),
+      /requires one identical named sc-18304 feature ref/,
+    );
+    assert.equal(existsSync(f.statePath), false);
+    assert.deepEqual(f.github.mutations, []);
+  });
+});
+
+test("effective branch-rule discovery is exhaustive and rejects malformed or repeated identities", async (t) => {
+  const slug = REPOSITORIES.sceneworks.slug;
+  const branch = "feature/sc-18304-pipeline-flexibility-mlx-perf";
+  const path = `repos/${slug}/rules/branches/${encodeURIComponent(branch)}?per_page=100`;
+  const unrelated = Array.from({ length: 100 }, (_, index) => ({
+    ruleset_id: 10_000 + index,
+    type: "creation",
+  }));
+  const required = [
+    { ruleset_id: 11, type: "non_fast_forward" },
+    { ruleset_id: 11, type: "pull_request" },
+    { ruleset_id: 11, type: "required_status_checks" },
+    { ruleset_id: 12, type: "deletion" },
+    { ruleset_id: 13, type: "merge_queue" },
+  ];
+  const audit = {
+    wildcardBase: { id: 11 },
+    deletionGuard: { id: 12 },
+    exactQueue: { id: 13, enforcement: "active" },
+  };
+
+  await t.test("effective verification consumes page two", () => {
+    const process = new FakeGhProcess((args) => {
+      assert.equal(args[1], path);
+      return [unrelated, required];
+    });
+    const client = new GitHubClient(process);
+    assert.deepEqual(
+      verifyEffectiveFeaturePolicies(client, "sceneworks", branch, audit).rulesetIds,
+      [11, 12, 13],
+    );
+    assert.ok(process.calls[0].includes("--paginate"));
+    assert.ok(process.calls[0].includes("--slurp"));
+  });
+
+  await t.test("repeated identity across pages is rejected", () => {
+    const repeated = required[0];
+    const client = new GitHubClient(new FakeGhProcess(() => [[repeated], [repeated]]));
+    assert.throws(
+      () => client.branchRules(slug, branch),
+      /repeated effective rule 11:non_fast_forward/,
+    );
+  });
+
+  await t.test("malformed page and rule are rejected", () => {
+    assert.throws(
+      () => new GitHubClient(new FakeGhProcess(() => [{ rules: [] }]))
+        .branchRules(slug, branch),
+      /malformed effective-rule page/,
+    );
+    assert.throws(
+      () => new GitHubClient(new FakeGhProcess(() => [[{ ruleset_id: 11 }]]))
+        .branchRules(slug, branch),
+      /malformed effective rule/,
+    );
+  });
+});
+
 test("live pull-request discovery exhausts every GitHub page and rejects repeated evidence", () => {
   const encode = (value) => Buffer.from(JSON.stringify({
     state: "closed",
@@ -1906,6 +2112,130 @@ test("bootstrap revalidates both planned main check matrices before its first mu
     assert.equal(unchanged.phase, "planned");
     assert.deepEqual(unchanged.transaction.policyMutations, []);
     assert.deepEqual(unchanged.transaction.remoteMutations, []);
+  });
+});
+
+test("post-plan partial, divergent, or matching feature refs block every first mutation", async (t) => {
+  const scenarios = [
+    {
+      name: "partial pair",
+      install(f, state) {
+        setRemoteFeatureRef(
+          f,
+          "sceneworks",
+          state.featureBranch,
+          state.repositories.sceneworks.plannedMainSha,
+        );
+      },
+    },
+    {
+      name: "divergent pair",
+      install(f, state) {
+        setRemoteFeatureRef(
+          f,
+          "sceneworks",
+          state.featureBranch,
+          sideCommit(f.origins.sceneworks, "divergent-scene.txt"),
+        );
+        setRemoteFeatureRef(
+          f,
+          "inference",
+          state.featureBranch,
+          sideCommit(f.origins.inference, "divergent-inference.txt"),
+        );
+      },
+    },
+    {
+      name: "matching pair",
+      install(f, state) {
+        for (const key of Object.keys(REPOSITORIES)) {
+          setRemoteFeatureRef(
+            f,
+            key,
+            state.featureBranch,
+            state.repositories[key].plannedMainSha,
+          );
+        }
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, (t) => {
+      const f = fixture(t);
+      const state = planFixture(f);
+      scenario.install(f, state);
+      assert.throws(
+        () => bootstrap(f.statePath, { apply: true }, { github: f.github, git: f.git, clock }),
+        /create mode requires no live sc-18304 feature refs/,
+      );
+      assert.deepEqual(f.github.mutations, [], "no policy or ref mutation preceded refusal");
+      const unchanged = loadState(f.statePath);
+      assert.equal(unchanged.phase, "planned");
+      assert.deepEqual(unchanged.transaction.policyMutations, []);
+      assert.deepEqual(unchanged.transaction.remoteMutations, []);
+    });
+  }
+});
+
+test("bootstrap and recovery never adopt externally created exact ref pairs", async (t) => {
+  await t.test("pair appearing after preflight but before ref creation", (t) => {
+    const f = fixture(t);
+    const state = planFixture(f);
+    const createRuleset = f.github.createRuleset.bind(f.github);
+    let createdPolicies = 0;
+    f.github.createRuleset = (slug, payload) => {
+      const created = createRuleset(slug, payload);
+      createdPolicies += 1;
+      if (createdPolicies === Object.keys(REPOSITORIES).length) {
+        for (const key of Object.keys(REPOSITORIES)) {
+          setRemoteFeatureRef(
+            f,
+            key,
+            state.featureBranch,
+            state.repositories[key].plannedMainSha,
+          );
+        }
+      }
+      return created;
+    };
+    assert.throws(
+      () => bootstrap(f.statePath, { apply: true }, { github: f.github, git: f.git, clock }),
+      /no matching state-owned create-ref intent or record/,
+    );
+    assert.deepEqual(
+      f.github.mutations.map(({ type }) => type),
+      ["create-ruleset", "create-ruleset"],
+      "external refs were neither recorded nor activated",
+    );
+    const interrupted = loadState(f.statePath);
+    assert.deepEqual(interrupted.transaction.remoteMutations, []);
+    assert.equal(Object.values(interrupted.repositories).every(({ remoteRef }) => remoteRef === null), true);
+  });
+
+  await t.test("recovery sees an external pair without a create-ref journal", (t) => {
+    const f = fixture(t);
+    const state = planFixture(f);
+    installStagedPolicyPair(f, state);
+    state.phase = "recovery-required";
+    state.transaction.recoveryReason = "simulated policy-only interruption";
+    writeJsonAtomic(f.statePath, state);
+    for (const key of Object.keys(REPOSITORIES)) {
+      setRemoteFeatureRef(
+        f,
+        key,
+        state.featureBranch,
+        state.repositories[key].plannedMainSha,
+      );
+    }
+    assert.throws(
+      () => recover(f.statePath, { complete: true }, { github: f.github, git: f.git, clock }),
+      /no matching state-owned create-ref intent or record/,
+    );
+    assert.deepEqual(f.github.mutations, []);
+    const interrupted = loadState(f.statePath);
+    assert.deepEqual(interrupted.transaction.remoteMutations, []);
+    assert.equal(Object.values(interrupted.repositories).every(({ remoteRef }) => remoteRef === null), true);
   });
 });
 
@@ -2248,7 +2578,7 @@ test("bootstrap refuses stale main, pre-existing partial refs, divergent refs, a
     f.github.createFeatureRef(REPOSITORIES.sceneworks.slug, state.featureBranch, state.repositories.sceneworks.plannedMainSha);
     assert.throws(
       () => bootstrap(f.statePath, { apply: true }, { github: f.github, git: f.git, clock }),
-      /exactly one mirrored/,
+      /create mode requires no live sc-18304 feature refs/,
     );
   });
   await t.test("divergent feature ref", (t) => {
@@ -2258,7 +2588,7 @@ test("bootstrap refuses stale main, pre-existing partial refs, divergent refs, a
     run("git", ["update-ref", `refs/heads/${state.featureBranch}`, newer], { cwd: f.origins.sceneworks });
     assert.throws(
       () => bootstrap(f.statePath, { apply: true }, { github: f.github, git: f.git, clock }),
-      /not planned/,
+      /create mode requires no live sc-18304 feature refs/,
     );
   });
   await t.test("dirty state-owned clone", (t) => {
@@ -2414,7 +2744,7 @@ test("recover refuses a plan with no transaction or an unrecorded existing ref",
     f.github.createFeatureRef(REPOSITORIES.sceneworks.slug, state.featureBranch, state.repositories.sceneworks.plannedMainSha);
     assert.throws(
       () => recover(f.statePath, { complete: true }, { github: f.github, git: f.git, clock }),
-      /not a state-recorded matching ref/,
+      /no matching state-owned create-ref intent or record/,
     );
   });
 });

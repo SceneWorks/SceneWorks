@@ -216,11 +216,23 @@ function normalizedRule(rule) {
 }
 
 export function normalizeRuleset(ruleset) {
+  if (
+    !ruleset ||
+    typeof ruleset !== "object" ||
+    Array.isArray(ruleset) ||
+    !Object.hasOwn(ruleset, "bypass_actors") ||
+    !Array.isArray(ruleset.bypass_actors)
+  ) {
+    refuse(
+      "detailed ruleset payload must include an explicit bypass_actors array",
+      "INVALID_RULESET_PAYLOAD",
+    );
+  }
   return sortObject({
     name: ruleset?.name,
     target: ruleset?.target,
     enforcement: ruleset?.enforcement,
-    bypass_actors: ruleset?.bypass_actors ?? [],
+    bypass_actors: [...ruleset.bypass_actors],
     conditions: {
       ref_name: {
         include: [...(ruleset?.conditions?.ref_name?.include ?? [])].sort(),
@@ -1340,6 +1352,51 @@ export class GitHubClient {
     }
   }
 
+  epicFeatureRefs(slug, epic) {
+    epic = normalizeEpic(epic);
+    const prefix = `feature/${epic}-`;
+    const path =
+      `repos/${slug}/git/matching-refs/heads/${encodeURIComponent(prefix)}?per_page=100`;
+    const seen = new Set();
+    return this.apiPages(path, {
+      headers: ["Accept: application/vnd.github+json"],
+    }).flatMap((page) => {
+      if (!Array.isArray(page)) {
+        refuse(
+          `GitHub returned a malformed feature-ref page for ${slug} ${epic}`,
+          "INVALID_PAGINATION_RESPONSE",
+        );
+      }
+      return page.map((entry) => {
+        const refPrefix = "refs/heads/";
+        const branch = typeof entry?.ref === "string" && entry.ref.startsWith(refPrefix)
+          ? entry.ref.slice(refPrefix.length)
+          : null;
+        const sha = entry?.object?.sha;
+        if (
+          !branch ||
+          !branch.startsWith(prefix) ||
+          entry?.object?.type !== "commit" ||
+          !SHA_RE.test(sha ?? "")
+        ) {
+          refuse(
+            `GitHub returned a malformed feature ref for ${slug} ${epic}`,
+            "INVALID_PAGINATION_RESPONSE",
+          );
+        }
+        const parsed = assertSafeFeatureBranch(branch);
+        if (parsed.epic !== epic || seen.has(branch)) {
+          refuse(
+            `GitHub returned an invalid or repeated feature ref for ${slug} ${epic}`,
+            "INVALID_PAGINATION_RESPONSE",
+          );
+        }
+        seen.add(branch);
+        return { branch, sha };
+      });
+    });
+  }
+
   createFeatureRef(slug, branch, sha) {
     return this.api(`repos/${slug}/git/refs`, {
       method: "POST",
@@ -1374,7 +1431,43 @@ export class GitHubClient {
   }
 
   branchRules(slug, branch) {
-    return this.api(`repos/${slug}/rules/branches/${encodeURIComponent(branch)}`) ?? [];
+    const path = `repos/${slug}/rules/branches/${encodeURIComponent(branch)}?per_page=100`;
+    const seen = new Set();
+    return this.apiPages(path, {
+      headers: ["Accept: application/vnd.github+json"],
+    }).flatMap((page) => {
+      if (!Array.isArray(page)) {
+        refuse(
+          `GitHub returned a malformed effective-rule page for ${slug} ${branch}`,
+          "INVALID_PAGINATION_RESPONSE",
+        );
+      }
+      return page.map((rule) => {
+        if (
+          !rule ||
+          typeof rule !== "object" ||
+          Array.isArray(rule) ||
+          !Number.isSafeInteger(rule.ruleset_id) ||
+          rule.ruleset_id <= 0 ||
+          typeof rule.type !== "string" ||
+          rule.type.length === 0
+        ) {
+          refuse(
+            `GitHub returned a malformed effective rule for ${slug} ${branch}`,
+            "INVALID_PAGINATION_RESPONSE",
+          );
+        }
+        const identity = `${rule.ruleset_id}:${rule.type}`;
+        if (seen.has(identity)) {
+          refuse(
+            `GitHub returned a repeated effective rule ${identity} for ${slug} ${branch}`,
+            "INVALID_PAGINATION_RESPONSE",
+          );
+        }
+        seen.add(identity);
+        return rule;
+      });
+    });
   }
 
   cargoManifests(slug, sha) {
@@ -2096,6 +2189,88 @@ function plannedShortcutRecord(snapshot, inventoryFrozenAt = null) {
   };
 }
 
+function normalizeEpicFeatureRefInventory(value, repo, epic) {
+  if (!Array.isArray(value)) {
+    refuse(
+      `${REPOSITORIES[repo].slug} feature-ref inventory is not an array`,
+      "INVALID_FEATURE_REF_INVENTORY",
+    );
+  }
+  const seen = new Set();
+  return value.map((entry) => {
+    const branch = entry?.branch;
+    const sha = entry?.sha;
+    if (typeof branch !== "string" || !SHA_RE.test(sha ?? "")) {
+      refuse(
+        `${REPOSITORIES[repo].slug} feature-ref inventory contains a malformed entry`,
+        "INVALID_FEATURE_REF_INVENTORY",
+      );
+    }
+    const parsed = assertSafeFeatureBranch(branch);
+    if (parsed.epic !== epic || seen.has(branch)) {
+      refuse(
+        `${REPOSITORIES[repo].slug} feature-ref inventory contains a wrong-epic or repeated ref`,
+        "INVALID_FEATURE_REF_INVENTORY",
+      );
+    }
+    seen.add(branch);
+    return { branch, sha };
+  });
+}
+
+function liveEpicFeatureRefTopology(github, epic, branch) {
+  const candidates = {};
+  for (const [key, fixed] of Object.entries(REPOSITORIES)) {
+    candidates[key] = normalizeEpicFeatureRefInventory(
+      github.epicFeatureRefs(fixed.slug, epic),
+      key,
+      epic,
+    );
+  }
+  const exact = Object.fromEntries(
+    Object.entries(REPOSITORIES).map(([key, fixed]) => [
+      key,
+      github.featureSha(fixed.slug, branch),
+    ]),
+  );
+  for (const key of Object.keys(REPOSITORIES)) {
+    if (exact[key] !== null && !SHA_RE.test(exact[key] ?? "")) {
+      refuse(
+        `${REPOSITORIES[key].slug} returned a malformed exact feature ref`,
+        "INVALID_FEATURE_REF_INVENTORY",
+      );
+    }
+    const enumerated = candidates[key].find((entry) => entry.branch === branch) ?? null;
+    if ((enumerated?.sha ?? null) !== exact[key]) {
+      refuse(
+        `${REPOSITORIES[key].slug} returned inconsistent exhaustive and exact feature-ref views`,
+        "INCONSISTENT_FEATURE_REF_VIEW",
+      );
+    }
+  }
+  return { candidates, exact };
+}
+
+function describeFeatureRefTopology(topology) {
+  return Object.entries(REPOSITORIES).flatMap(([key, fixed]) =>
+    topology.candidates[key].map(({ branch, sha }) => `${fixed.slug}:${branch}@${sha}`),
+  ).join(", ") || "none";
+}
+
+function assertCreateFeatureRefsAbsent(github, epic, branch) {
+  const topology = liveEpicFeatureRefTopology(github, epic, branch);
+  if (
+    Object.values(topology.candidates).some((entries) => entries.length > 0) ||
+    Object.values(topology.exact).some((sha) => sha !== null)
+  ) {
+    refuse(
+      `create mode requires no live ${epic} feature refs; found ${describeFeatureRefTopology(topology)}`,
+      "EXISTING_TRAIN_REQUIRES_ADOPTION",
+    );
+  }
+  return topology;
+}
+
 function createPlanUnlocked(
   {
     epic,
@@ -2132,21 +2307,23 @@ function createPlanUnlocked(
   }
 
   const createdAt = nowIso(clock);
-  const existingRefs = Object.fromEntries(
-    Object.entries(REPOSITORIES).map(([key, fixed]) => [key, github.featureSha(fixed.slug, branch)]),
-  );
-  const existingRefCount = Object.values(existingRefs).filter(Boolean).length;
-  if (mode === "adopt-existing" && existingRefCount !== Object.keys(REPOSITORIES).length) {
-    refuse(
-      `adopt-existing requires both mirrored feature refs; found ${existingRefCount}`,
-      "ADOPTION_REQUIRES_REF_PAIR",
+  const refTopology = mode === "create"
+    ? assertCreateFeatureRefsAbsent(github, epic, branch)
+    : liveEpicFeatureRefTopology(github, epic, branch);
+  const existingRefs = refTopology.exact;
+  if (mode === "adopt-existing") {
+    const validPair = Object.keys(REPOSITORIES).every(
+      (key) =>
+        refTopology.candidates[key].length === 1 &&
+        refTopology.candidates[key][0].branch === branch &&
+        refTopology.candidates[key][0].sha === existingRefs[key],
     );
-  }
-  if (mode === "create" && existingRefCount !== 0) {
-    refuse(
-      "feature refs already exist; re-run plan with explicit --adopt-existing after verifying the protected train",
-      "EXISTING_TRAIN_REQUIRES_ADOPTION",
-    );
+    if (!validPair) {
+      refuse(
+        `adopt-existing requires one identical named ${epic} feature ref in each repository; found ${describeFeatureRefTopology(refTopology)}`,
+        "ADOPTION_REQUIRES_REF_PAIR",
+      );
+    }
   }
 
   const repositories = {};
@@ -2458,6 +2635,45 @@ function liveRefs(state, github) {
       github.featureSha(fixed.slug, state.featureBranch),
     ]),
   );
+}
+
+function liveCreateRefTopology(state, github) {
+  const topology = liveEpicFeatureRefTopology(github, state.epic, state.featureBranch);
+  const alternates = Object.entries(REPOSITORIES).flatMap(([key, fixed]) =>
+    topology.candidates[key]
+      .filter(({ branch }) => branch !== state.featureBranch)
+      .map(({ branch, sha }) => `${fixed.slug}:${branch}@${sha}`),
+  );
+  if (alternates.length > 0) {
+    refuse(
+      `live ${state.epic} feature-ref topology contains alternate candidates: ${alternates.join(", ")}`,
+      "DUPLICATE_CANONICAL_REF",
+    );
+  }
+  return topology;
+}
+
+function createRefJournalOwns(state, key, sha) {
+  const expectedRef = `refs/heads/${state.featureBranch}`;
+  return state.transaction.remoteMutations.some(
+    (mutation) =>
+      mutation.repo === key &&
+      mutation.ref === expectedRef &&
+      mutation.sha === sha &&
+      ["create-ref", "recover-create-ref"].includes(mutation.action) &&
+      ["intent", "created", "failed", "reconciled"].includes(mutation.status),
+  );
+}
+
+function assertLiveCreateRefsOwned(state, refs) {
+  for (const key of Object.keys(REPOSITORIES)) {
+    if (refs[key] && !createRefJournalOwns(state, key, refs[key])) {
+      refuse(
+        `${REPOSITORIES[key].slug} live create-mode feature ref has no matching state-owned create-ref intent or record`,
+        "UNOWNED_CREATE_REF",
+      );
+    }
+  }
 }
 
 function livePolicyAudits(state, github) {
@@ -2911,6 +3127,9 @@ function assertPreMutationPlanValid(state, github) {
   if (transactionHasMutated(state)) return;
   assertMainsUnchanged(state, github);
   assertRequiredMainChecks(github, state.repositories, state.requiredContexts);
+  if (state.mode === "create") {
+    assertCreateFeatureRefsAbsent(github, state.epic, state.featureBranch);
+  }
 }
 
 function assertAdoptedPlanValid(state, github) {
@@ -3093,6 +3312,12 @@ function createFeatureRefWithJournal(statePath, state, key, action, github, cloc
       "ACTIVE_QUEUE_BLOCKS_CREATE_REF",
     );
   }
+  if (github.featureSha(fixed.slug, state.featureBranch) !== null) {
+    refuse(
+      `${fixed.slug} create-ref target appeared before its state-owned creation intent`,
+      "UNOWNED_CREATE_REF",
+    );
+  }
   const mutation = {
     action,
     repo: key,
@@ -3151,8 +3376,10 @@ function bootstrapUnlocked(
     clock,
     () => assertPreMutationPlanValid(state, github),
   );
-  const refs = liveRefs(state, github);
+  const refTopology = liveCreateRefTopology(state, github);
+  const refs = refTopology.exact;
   assertRecordedRefConsistency(state, refs);
+  assertLiveCreateRefsOwned(state, refs);
   const present = Object.values(refs).filter(Boolean).length;
   if (present === 1) {
     refuse("exactly one mirrored feature ref exists; use recover --complete", "PARTIAL_REMOTE_PAIR");
@@ -3218,8 +3445,10 @@ function recoverUnlocked(
     clock,
     () => assertPreMutationPlanValid(state, github),
   );
-  const refs = liveRefs(state, github);
+  const refTopology = liveCreateRefTopology(state, github);
+  const refs = refTopology.exact;
   assertRecordedRefConsistency(state, refs);
+  assertLiveCreateRefsOwned(state, refs);
   const missing = Object.keys(REPOSITORIES).filter((key) => !refs[key]);
   if (missing.length === 1) {
     const key = missing[0];
