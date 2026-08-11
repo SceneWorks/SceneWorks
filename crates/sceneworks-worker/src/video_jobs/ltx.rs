@@ -617,16 +617,32 @@ pub(super) fn resolve_ltx_adapters(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<Vec<AdapterSpec>> {
-    if request.loras.len() > MAX_JOB_LORAS {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
-        )));
-    }
     let mut specs = Vec::with_capacity(request.loras.len() + 1);
     // The auto distill LoRA is the model's base recipe (per-pass 1.0/0.4); user LoRAs stack on top.
     if let Some(distill) = resolve_ltx_distill_adapter(settings, request)? {
         specs.push(distill);
     }
+    specs.extend(resolve_ltx_user_adapters(settings, request)?);
+    Ok(specs)
+}
+
+/// Resolve user-selected LTX video LoRAs for both native providers. MLX and Candle consume the same
+/// PEFT attention-projection files and strengths. Candle has one distilled denoise pass, so this
+/// shared resolver deliberately excludes the MLX-only two-pass 10Eros distill recipe above.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn resolve_ltx_user_adapters(
+    settings: &Settings,
+    request: &VideoRequest,
+) -> WorkerResult<Vec<AdapterSpec>> {
+    if request.loras.len() > MAX_JOB_LORAS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
+        )));
+    }
+    let mut specs = Vec::with_capacity(request.loras.len());
     for lora in &request.loras {
         let path = lora_path(lora).ok_or_else(|| {
             WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())

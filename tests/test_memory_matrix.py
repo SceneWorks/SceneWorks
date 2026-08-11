@@ -330,22 +330,26 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     ]
     # Three independent sources of "current", kept separate so one lane cannot mask another:
     #
-    #   - SC-18353 records measured at the live pin;
-    #   - records whose captured provider closure still matches the live provider closure
-    #     (SC-18237's two Qwen q8 rows);
+    #   - SC-18353 and SC-18237 records whose captured provider closure still matches the live
+    #     provider closure;
     #   - the audited FLUX.2 window, current only while its audited revision IS the live pin.
     measured_at_live_pin = {
         record["id"]
         for record in calibration["records"]
         if record["repositories"]["inference"]["revision"] == live_pin_match.group(1)
     }
-    # This set is derived from the PIN, which sc-17774 retired as the currency term in favour of the
-    # provider's compile closure. The two coincided while nothing had moved; they no longer do.
-    #
-    # SC-18353 ran thirteen exact physical Qwen bf16/q4 records at 014134e3. Pin the immutable ids so
-    # unrelated live-pin evidence cannot silently enter this closed capture set; SC-18237's q8 pair
-    # remains current by provider closure even though it was measured at the prior pin.
-    assert measured_at_live_pin == {
+    # SC-18353 ran thirteen exact physical Qwen bf16/q4 records at 014134e3. Pin both the capture
+    # revision and immutable ids so unrelated evidence cannot silently enter this closed capture
+    # set. Currency is checked separately by provider closure below, so advancing the repository pin
+    # without changing Qwen's closure does not re-date or invalidate these records.
+    sc_18353_capture_revision = "014134e3035ad7e4eca5c2ed7bded2375dc3c071"
+    sc_18353_record_ids = {
+        record["id"]
+        for record in calibration["records"]
+        if record["repositories"]["inference"]["revision"]
+        == sc_18353_capture_revision
+    }
+    assert sc_18353_record_ids == {
         "imc-08e925c50d9c290ed53d",
         "imc-0e00924d96eeaf12be17",
         "imc-277c04656961710d29e0",
@@ -361,9 +365,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "imc-ea87169a3ea1fd340791",
     }
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
-    # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
-    # with nothing measured at the live pin there is nothing to classify, and the moment a record
-    # does appear there it must be `current` or this fails.
+    # and dated elsewhere. Stated as a subset so the implication survives the set being empty: with
+    # nothing measured at the live pin there is nothing to classify, and the moment a record does
+    # appear there it must be `current` or this fails.
     assert {
         run["semantics"]
         for run in matrix["calibrationRuns"]
@@ -376,7 +380,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     unbound_decode_edges = {
         record["id"]
         for record in calibration["records"]
-        if record["id"] in measured_at_live_pin
+        if record["id"] in sc_18353_record_ids
         and record["strategy"]["rung"] == "bounded_decode"
         and record["sweep"]["cases"][0]["parameters"].get("decodeTileEdge") != 512
     }
