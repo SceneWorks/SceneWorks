@@ -376,6 +376,20 @@ test("windows-candle validates every provisioning input that reaches a path", as
     "provisioning-input validation must cover the five-rung-only path that also consumes them",
   );
   assert.match(workflow, /throw 'provision_subdir must not traverse out of the snapshot'/);
+  // The root sentinel. GitHub substitutes an input's `default` for any empty dispatch value, so
+  // `-f provision_subdir=` resolves to `q4`, not to "no subdir" (proved by run 31509409586).
+  // The default must stay `q4` to keep a Krea dispatch identical, so without '.' a
+  // root-resolved model like MiniMax-H3 cannot be expressed at all.
+  assert.match(
+    workflow,
+    /if \(\$env:PROVISION_SUBDIR -and \$env:PROVISION_SUBDIR -ne '\.'\) \{/,
+    "'.' must mean the snapshot root; an empty input cannot override a non-empty default",
+  );
+  assert.match(
+    workflow,
+    /description: "Tier\/subdirectory under the snapshot the resolve step must prove\. Use '\.' for a model whose components sit at the snapshot ROOT/,
+    "the sentinel must be documented on the input the operator actually reads",
+  );
   assert.match(
     workflow,
     /throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/,

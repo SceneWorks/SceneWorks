@@ -184,7 +184,7 @@ on:
         type: string
         default: "q4/**"
       provision_subdir:
-        description: "Tier/subdirectory under the snapshot the resolve step must prove. Empty resolves the snapshot root."
+        description: "Tier/subdirectory under the snapshot the resolve step must prove. Use '.' for a model whose components sit at the snapshot ROOT (H3); an empty value cannot override this default."
         required: false
         type: string
         default: "q4"
@@ -532,8 +532,17 @@ jobs:
           $cache = $env:PROVISION_CACHE_DIR_INPUT
           if (-not $cache) { $cache = Join-Path $env:USERPROFILE '.cache\huggingface\hub' }
           $folder = 'models--' + $env:PROVISION_REPOSITORY.Replace('/', '--')
+          # '.' is the ROOT sentinel, and it is load-bearing rather than cosmetic. GitHub applies
+          # an input's `default` whenever the dispatch supplies an empty value, so
+          # `-f provision_subdir=` does NOT mean "no subdir" -- it silently becomes `q4`. Run
+          # 31509409586 proved it: H3 provisioned correctly, then the resolve step looked for
+          # ...\snapshots\939557dc...\q4 and threw. Because the default has to stay `q4` to keep a
+          # Krea dispatch identical, a model whose components sit at the snapshot root is
+          # otherwise INEXPRESSIBLE. Empty is still honored for any caller that can send it.
           $subdirTail = ''
-          if ($env:PROVISION_SUBDIR) { $subdirTail = '\' + $env:PROVISION_SUBDIR.Replace('/', '\') }
+          if ($env:PROVISION_SUBDIR -and $env:PROVISION_SUBDIR -ne '.') {
+            $subdirTail = '\' + $env:PROVISION_SUBDIR.Replace('/', '\')
+          }
           $suffix = '\' + $folder + '\snapshots\' + $env:PROVISION_REVISION + $subdirTail
           Add-Content -Path $env:GITHUB_ENV -Value "PROVISION_CACHE_DIR=$cache"
           Add-Content -Path $env:GITHUB_ENV -Value "PROVISION_SNAPSHOT_SUFFIX=$suffix"

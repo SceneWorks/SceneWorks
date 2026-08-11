@@ -160,6 +160,12 @@ Notes on the selection:
 E:\huggingface\hub\models--MiniMaxAI--MiniMax-H3\snapshots\939557dc319dd91227e30195a763f272ba7f8765
 ```
 
+**Written by run [31509409586](https://github.com/SceneWorks/SceneWorks/actions/runs/31509409586)
+and verified present on disk afterwards** — ten component directories (`transformer`,
+`text_encoder`, `vae`, `audio_vae`, `tokenizer`, `processor`, `scheduler`, `audio_scheduler`,
+`FL2VA`, `Ref2VA`) plus `LICENSE`, `model_index.json` and `modular_model_index.json`. This is an
+observation, not a projection; before that run the cache held only the older `6818f6c3…` snapshot.
+
 The resolve step proves it with **three** assertions, not one, and throws on each:
 
 1. the resolved directory exists;
@@ -421,11 +427,51 @@ So the correct consequences are:
 | Pattern set selects 64 files / 144.051 GB, no leakage | `filter_repo_objects` against the live file list |
 | Krea path is character-identical | step bodies executed locally with a simulated `GITHUB_ENV` |
 | Contract tests cannot rot | 10/10 mutations go red |
-| Dispatch provisions and resolves H3 | §8 |
+| Snapshot written at the pinned revision, then verified on disk | run 31509409586's `Provision exact snapshot` step; directory listing after it |
+| Patched quant kernels really work on sm_120 | `cuda_quant_smoke` (un-`#[ignore]`d) passing in run 31509409586 |
+| Dispatch resolves the snapshot | §8 — **see §8.1; the first run failed and why** |
 
 ---
 
-## 8. Dispatch run (AC4)
+## 8. Dispatch runs (AC4)
 
 <!-- sc-18677:dispatch-evidence -->
-_Recorded on the story and filled in here once the dispatch completes._
+
+| Run | Head SHA | Runner | Outcome |
+| --- | --- | --- | --- |
+| [31509409586](https://github.com/SceneWorks/SceneWorks/actions/runs/31509409586) | `ad072c06` | `cuda-windows-2` | **provisioned, resolve failed** — found the §8.1 bug |
+| [_pending_](#) | — | — | — |
+
+Run 31509409586 confirmed the substance and found a real defect, which is the outcome worth having.
+What it established:
+
+- The conditional `runs-on` works: the job landed on `cuda-windows-2`, an **org-level** runner
+  carrying `real-weights` (§4.1), rather than the repo-level half.
+- `Provision exact snapshot` **succeeded**, writing
+  `E:\huggingface\hub\models--MiniMaxAI--MiniMax-H3\snapshots\939557dc319dd91227e30195a763f272ba7f8765`
+  with all 13 allow-patterns, in **3.5 seconds** — the blob-dedup prediction in §2.2 holding exactly.
+  All ten component directories plus the three root files are present.
+- `Test the candle GPU worker (backend-candle)` passed, which runs the un-`#[ignore]`d
+  `cuda_quant_smoke` against the patched candle-kernels on the real sm_120 GPU. That is the §1.2
+  claim measured rather than argued: quantized matmul does not silently return zeros here, so a
+  q4/q8 measurement on this box can be trusted.
+- `Resolve exact snapshot` **failed**, correctly and loudly, for the reason in §8.1.
+
+### 8.1 The bug it found: an empty input cannot override a non-empty default
+
+The dispatch passed `-f provision_subdir=`, intending "this model's components are at the snapshot
+root". **GitHub substitutes an input's `default` for any empty dispatch value**, so
+`provision_subdir` arrived as `q4`, the suffix became
+`…\snapshots\939557dc…\q4`, and the resolve step threw because no such directory exists.
+
+The default cannot simply become empty — it has to stay `q4` for a Krea dispatch to resolve
+identically (§4.2). So without a sentinel, **a root-resolved model is inexpressible**, and this
+story's own model is one. `.` now means the snapshot root.
+
+Two things are worth recording about how this was missed, because both are reusable:
+
+- The local harness (§4.2) injected `provision_subdir: ""` straight into the step environment,
+  bypassing GitHub's default substitution entirely. It has since been taught that rule, and a case
+  reproducing this exact failure is now in the set.
+- The contract tests could not have caught it either: they assert the default **is** `q4`, which was
+  true and correct. The gap was between two things that were each individually right.
