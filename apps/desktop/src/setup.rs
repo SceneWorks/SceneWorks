@@ -799,6 +799,130 @@ fn readiness_message(elapsed: Duration) -> String {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacosBundlePaths {
+    api_sidecar: PathBuf,
+    resources: PathBuf,
+}
+
+/// Validate the native paths for a packaged macOS app bundle.
+///
+/// Keep the filesystem portion separate from NSBundle so external-volume paths
+/// and incomplete copies are regression-testable on every CI platform. A
+/// non-bundle path is the normal `cargo run` / test case and deliberately falls
+/// back to Tauri's staged development sidecar and resource directory.
+#[cfg(any(target_os = "macos", test))]
+fn packaged_macos_bundle_paths(
+    bundle_path: &Path,
+    api_sidecar: Option<PathBuf>,
+    resources: Option<PathBuf>,
+) -> Result<Option<MacosBundlePaths>, String> {
+    let is_app_bundle = bundle_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("app"));
+    if !is_app_bundle {
+        return Ok(None);
+    }
+
+    let expected_sidecar = bundle_path
+        .join("Contents")
+        .join("MacOS")
+        .join("sceneworks-api");
+    let api_sidecar = api_sidecar.filter(|path| path.is_file()).ok_or_else(|| {
+        format!(
+            "SceneWorks.app is incomplete: the bundled engine is missing at {}. \
+             Copy the complete app from the SceneWorks disk image again or reinstall it.",
+            expected_sidecar.display()
+        )
+    })?;
+    let expected_resources = bundle_path.join("Contents").join("Resources");
+    let resources = resources.filter(|path| path.is_dir()).ok_or_else(|| {
+        format!(
+            "SceneWorks.app is incomplete: the bundled resources are missing at {}. \
+             Copy the complete app from the SceneWorks disk image again or reinstall it.",
+            expected_resources.display()
+        )
+    })?;
+    Ok(Some(MacosBundlePaths {
+        api_sidecar,
+        resources,
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_url_path(url: &objc2_foundation::NSURL) -> Option<PathBuf> {
+    url.to_file_path()
+}
+
+/// Resolve one app through Foundation's native bundle APIs.
+/// `URLForAuxiliaryExecutable` and `resourceURL` remain tied to the bundle
+/// without reconstructing them from Tauri's cached `current_exe`, a path source
+/// that is fragile across external-volume and symlink spellings.
+#[cfg(target_os = "macos")]
+fn macos_bundle_paths(
+    bundle: &objc2_foundation::NSBundle,
+) -> Result<Option<MacosBundlePaths>, String> {
+    use objc2_foundation::NSString;
+
+    let bundle_url = bundle.bundleURL();
+    let Some(bundle_path) = macos_url_path(&bundle_url) else {
+        return Ok(None);
+    };
+    let executable_name = NSString::from_str("sceneworks-api");
+    let api_sidecar = bundle
+        .URLForAuxiliaryExecutable(&executable_name)
+        .as_deref()
+        .and_then(macos_url_path);
+    let resources = bundle.resourceURL().as_deref().and_then(macos_url_path);
+    packaged_macos_bundle_paths(&bundle_path, api_sidecar, resources)
+}
+
+/// Resolve the app that contains the running desktop executable. Kept as a
+/// separate seam so tests can exercise Foundation against a fixture bundle.
+#[cfg(target_os = "macos")]
+fn macos_native_bundle_paths() -> Result<Option<MacosBundlePaths>, String> {
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    macos_bundle_paths(&bundle)
+}
+
+/// Build the command used for every `sceneworks-api` launch.
+///
+/// On packaged macOS builds, NSBundle is the authority for the live app
+/// bundle. This avoids reconstructing the executable's sibling from Tauri's
+/// cached, canonical `current_exe`, the fragile path source implicated by the
+/// external-volume launch failure in GH #2259. Dev/test builds and every
+/// non-macOS platform retain Tauri's staged-sidecar behavior.
+#[cfg(target_os = "macos")]
+fn api_sidecar_command(app: &AppHandle) -> Result<Command, String> {
+    if let Some(paths) = macos_native_bundle_paths()? {
+        return Ok(app.shell().command(paths.api_sidecar));
+    }
+    app.shell()
+        .sidecar("sceneworks-api")
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn api_sidecar_command(app: &AppHandle) -> Result<Command, String> {
+    app.shell()
+        .sidecar("sceneworks-api")
+        .map_err(|error| error.to_string())
+}
+
+/// Locate bundled resources through the same authority as the packaged API
+/// executable. Tauri's macOS `resource_dir` is also reconstructed from its
+/// cached `current_exe`, so using it after fixing only the sidecar would leave
+/// the engine without its metallib, ffmpeg, or ONNX Runtime (GH #2259).
+fn bundled_resources_dir(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(paths) = macos_native_bundle_paths()? {
+        return Ok(Some(paths.resources));
+    }
+    Ok(app.path().resource_dir().ok())
+}
+
 /// Resolve the ffmpeg binary the Rust worker shells out to (frame sampling,
 /// frame extract, timeline export, video-gen audio mux — all via
 /// `media_jobs::run_ffmpeg`, which honors `SCENEWORKS_FFMPEG`). The desktop ships
@@ -807,18 +931,18 @@ fn readiness_message(elapsed: Duration) -> String {
 /// dir, so a packaged Python-free Mac still works — epic 3482, sc-3767). Returns
 /// None when it isn't bundled (pre-bundle / dev — caller then leaves
 /// `SCENEWORKS_FFMPEG` unset → PATH ffmpeg).
-fn resolve_bundled_ffmpeg(app: &AppHandle) -> Option<String> {
-    if let Ok(resources) = app.path().resource_dir() {
+fn resolve_bundled_ffmpeg(app: &AppHandle) -> Result<Option<String>, String> {
+    if let Some(resources) = bundled_resources_dir(app)? {
         let bundled = resources.join("ffmpeg").join(if cfg!(windows) {
             "ffmpeg.exe"
         } else {
             "ffmpeg"
         });
         if bundled.exists() {
-            return Some(bundled.to_string_lossy().to_string());
+            return Ok(Some(bundled.to_string_lossy().to_string()));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Resolve the onnxruntime dynamic library the Rust worker's DWPose pose detector
@@ -829,14 +953,14 @@ fn resolve_bundled_ffmpeg(app: &AppHandle) -> Option<String> {
 /// (pre-bundle / dev). macOS-only — pose detection on the Rust worker is macOS-only,
 /// so this returns None elsewhere.
 #[cfg(target_os = "macos")]
-fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
-    if let Ok(resources) = app.path().resource_dir() {
+fn resolve_bundled_onnxruntime(app: &AppHandle) -> Result<Option<String>, String> {
+    if let Some(resources) = bundled_resources_dir(app)? {
         let bundled = resources.join("onnxruntime").join("libonnxruntime.dylib");
         if bundled.exists() {
-            return Some(bundled.to_string_lossy().to_string());
+            return Ok(Some(bundled.to_string_lossy().to_string()));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Resolve MLX's compiled Metal shader library (`mlx.metallib`), which the
@@ -852,14 +976,14 @@ fn resolve_bundled_onnxruntime(app: &AppHandle) -> Option<String> {
 /// resolution applies (caller then leaves `PMETAL_METALLIB_PATH` unset). macOS-only —
 /// MLX is the macOS inference backend.
 #[cfg(target_os = "macos")]
-fn resolve_bundled_metallib(app: &AppHandle) -> Option<String> {
-    if let Ok(resources) = app.path().resource_dir() {
+fn resolve_bundled_metallib(app: &AppHandle) -> Result<Option<String>, String> {
+    if let Some(resources) = bundled_resources_dir(app)? {
         let bundled = resources.join("mlx").join("mlx.metallib");
         if bundled.exists() {
-            return Some(bundled.to_string_lossy().to_string());
+            return Ok(Some(bundled.to_string_lossy().to_string()));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Resolve the CUDA-enabled onnxruntime DLL the candle worker's `ort` paths (DWPose
@@ -872,8 +996,9 @@ fn resolve_bundled_metallib(app: &AppHandle) -> Option<String> {
 /// non-candle / dev path never reaches the candle worker that consumes it. Windows-only
 /// (the candle GPU worker is Windows-gated here).
 #[cfg(target_os = "windows")]
-fn resolve_bundled_onnxruntime(_app: &AppHandle) -> Option<String> {
-    crate::cuda_provision::onnxruntime_dll_if_present().map(|dll| dll.to_string_lossy().to_string())
+fn resolve_bundled_onnxruntime(_app: &AppHandle) -> Result<Option<String>, String> {
+    Ok(crate::cuda_provision::onnxruntime_dll_if_present()
+        .map(|dll| dll.to_string_lossy().to_string()))
 }
 
 /// Resolve the CUDA runtime redistributable DLL directory (sc-5560). The candle
@@ -1206,9 +1331,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
         );
     }
     let hf_home = huggingface_home().to_string_lossy().into_owned();
-    let mut command = app
-        .shell()
-        .sidecar("sceneworks-api")
+    let mut command = api_sidecar_command(app)
         .map_err(|error| format!("locate api: {error}"))?
         // Loopback/dynamic by default; 0.0.0.0/fixed-port in LAN mode (epic 4484).
         .env("SCENEWORKS_API_HOST", bind.host)
@@ -1265,13 +1388,13 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     }
     // The in-process utility worker shells out to ffmpeg; point it at the bundled
     // static binary (sc-3767) since the desktop has no system ffmpeg on PATH.
-    if let Some(ffmpeg) = resolve_bundled_ffmpeg(app) {
+    if let Some(ffmpeg) = resolve_bundled_ffmpeg(app)? {
         command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
     }
     // DWPose pose detection (sc-3487) loads onnxruntime dynamically; point `ort` at
     // the bundled CoreML-enabled dylib so a packaged Python-free Mac can detect poses.
     #[cfg(target_os = "macos")]
-    if let Some(ort_dylib) = resolve_bundled_onnxruntime(app) {
+    if let Some(ort_dylib) = resolve_bundled_onnxruntime(app)? {
         command = command.env("ORT_DYLIB_PATH", ort_dylib);
     }
     // MLX loads its Metal shader library (mlx.metallib) at runtime; point the pmetal
@@ -1281,7 +1404,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // too (e.g. the native YOLO11 person detector), so it needs this — not just the
     // separately-spawned MLX GPU worker below.
     #[cfg(target_os = "macos")]
-    if let Some(metallib) = resolve_bundled_metallib(app) {
+    if let Some(metallib) = resolve_bundled_metallib(app)? {
         command = command.env("PMETAL_METALLIB_PATH", metallib);
     }
     // The candle (Windows/CUDA) worker's cudarc dynamic-linking `LoadLibrary`s the
@@ -1997,7 +2120,7 @@ fn supervise_worker(
                 }
                 SupervisorAction::Spawn(url) => url,
             };
-            let sidecar = match app.shell().sidecar("sceneworks-api") {
+            let sidecar = match api_sidecar_command(&app) {
                 Ok(command) => command,
                 Err(error) => {
                     append_log(
@@ -2294,19 +2417,19 @@ fn supervise_mlx_worker(app: AppHandle) {
             }
             // The worker muxes generated video with ffmpeg; the desktop ships no
             // system ffmpeg, so point it at the bundled binary (as spawn_api does).
-            if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app) {
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app)? {
                 command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
             }
             // This is the worker that advertises `pose_detect` (epic 3482, sc-3487);
             // point `ort` at the bundled CoreML onnxruntime dylib it dlopens.
-            if let Some(ort_dylib) = resolve_bundled_onnxruntime(ctx.app) {
+            if let Some(ort_dylib) = resolve_bundled_onnxruntime(ctx.app)? {
                 command = command.env("ORT_DYLIB_PATH", ort_dylib);
             }
             // This is the process that runs MLX generation; point the pmetal resolver
             // at the bundled Metal shader library so a packaged Mac (no build tree, no
             // ~/.cache/pmetal) finds it instead of failing "Failed to load the default
             // metallib" on first MLX use (sc-10349, as spawn_api does).
-            if let Some(metallib) = resolve_bundled_metallib(ctx.app) {
+            if let Some(metallib) = resolve_bundled_metallib(ctx.app)? {
                 command = command.env("PMETAL_METALLIB_PATH", metallib);
             }
             // Lazy credentials (sc-5891): instead of reading the keychain here and
@@ -2428,7 +2551,7 @@ fn supervise_candle_worker(app: AppHandle) {
                 // version-matched CUDA-12 runtime + cuDNN-9 (staged by build-sidecar.mjs);
                 // `ort_cuda::preload_cuda_dylibs` preloads them + puts the dir on the
                 // loader search path so cuDNN's lazily-loaded sub-engine DLLs resolve.
-                if let Some(ort_dylib) = resolve_bundled_onnxruntime(ctx.app) {
+                if let Some(ort_dylib) = resolve_bundled_onnxruntime(ctx.app)? {
                     let cuda = cuda_dir.to_string_lossy().to_string();
                     command = command
                         .env("ORT_DYLIB_PATH", ort_dylib)
@@ -2444,7 +2567,7 @@ fn supervise_candle_worker(app: AppHandle) {
             }
             // The worker muxes generated video with ffmpeg; point it at the bundled
             // binary when staged (else it falls back to PATH ffmpeg), as spawn_api does.
-            if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app) {
+            if let Some(ffmpeg) = resolve_bundled_ffmpeg(ctx.app)? {
                 command = command.env("SCENEWORKS_FFMPEG", ffmpeg);
             }
             if let Some(token) = crate::settings::read_hf_token()? {
@@ -3306,9 +3429,7 @@ fn linux_cuda_preflight() -> Result<(), String> {
 /// (relayed verbatim onto the setup screen), or a fallback if the probe produced none.
 #[cfg(target_os = "macos")]
 async fn metal_preflight(app: &AppHandle) -> Result<(), String> {
-    let mut command = app
-        .shell()
-        .sidecar("sceneworks-api")
+    let mut command = api_sidecar_command(app)
         .map_err(|error| format!("locate api for GPU check: {error}"))?
         .env("SCENEWORKS_GPU_CHECK", "1");
     // The probe's `astype`+`eval` dispatches a real MLX kernel, which loads MLX's
@@ -3319,7 +3440,7 @@ async fn metal_preflight(app: &AppHandle) -> Result<(), String> {
     // library not found" and the setup screen relays it — stranding every fresh
     // install on the first screen (sc-10353). Keeps the probe's spawn context
     // identical to the worker's, as this fn's own contract states.
-    if let Some(metallib) = resolve_bundled_metallib(app) {
+    if let Some(metallib) = resolve_bundled_metallib(app)? {
         command = command.env("PMETAL_METALLIB_PATH", metallib);
     }
     let output = command
@@ -3622,10 +3743,13 @@ pub async fn start_setup(app: AppHandle) {
 
 #[cfg(test)]
 mod path_tests {
-    use super::{huggingface_cache_env, select_huggingface_home, LinuxDesktopPaths};
+    use super::{
+        huggingface_cache_env, packaged_macos_bundle_paths, select_huggingface_home,
+        LinuxDesktopPaths, MacosBundlePaths,
+    };
     use std::collections::HashMap;
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn resolve(values: &[(&str, &str)]) -> Result<LinuxDesktopPaths, String> {
         let env = values
@@ -3633,6 +3757,137 @@ mod path_tests {
             .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
             .collect::<HashMap<_, _>>();
         LinuxDesktopPaths::resolve(|name| env.get(name).cloned())
+    }
+
+    fn bundle_fixture_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sceneworks-gh-2259-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ))
+    }
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("fixture parent"))
+            .expect("create fixture parent");
+        std::fs::write(path, b"fixture").expect("write fixture file");
+    }
+
+    #[test]
+    fn packaged_macos_bundle_uses_native_external_volume_paths() {
+        let root = bundle_fixture_root("external-volume");
+        let bundle = root.join("External Drive").join("SceneWorks.app");
+        let api_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
+        let resources = bundle.join("Contents").join("Resources");
+        touch(&api_sidecar);
+        std::fs::create_dir_all(&resources).expect("create bundle resources");
+
+        assert_eq!(
+            packaged_macos_bundle_paths(
+                &bundle,
+                Some(api_sidecar.clone()),
+                Some(resources.clone())
+            )
+            .expect("complete app bundle resolves"),
+            Some(MacosBundlePaths {
+                api_sidecar,
+                resources,
+            })
+        );
+
+        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
+    }
+
+    #[test]
+    fn packaged_macos_bundle_rejects_incomplete_external_copy() {
+        let root = bundle_fixture_root("incomplete-copy");
+        let bundle = root.join("SceneWorks.app");
+        let resources = bundle.join("Contents").join("Resources");
+        std::fs::create_dir_all(&resources).expect("create bundle resources");
+
+        let error = packaged_macos_bundle_paths(&bundle, None, Some(resources))
+            .expect_err("missing sidecar must stop startup actionably");
+        assert!(
+            error.contains("SceneWorks.app is incomplete")
+                && error.contains("Contents/MacOS/sceneworks-api"),
+            "unexpected incomplete-bundle error: {error}"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
+    }
+
+    #[test]
+    fn packaged_macos_bundle_rejects_missing_resources() {
+        let root = bundle_fixture_root("missing-resources");
+        let bundle = root.join("SceneWorks.app");
+        let api_sidecar = bundle.join("Contents").join("MacOS").join("sceneworks-api");
+        touch(&api_sidecar);
+
+        let error = packaged_macos_bundle_paths(&bundle, Some(api_sidecar), None)
+            .expect_err("missing resources must stop startup actionably");
+        assert!(
+            error.contains("SceneWorks.app is incomplete") && error.contains("Contents/Resources"),
+            "unexpected incomplete-bundle error: {error}"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
+    }
+
+    #[test]
+    fn non_bundle_development_launch_keeps_tauri_fallback() {
+        assert_eq!(
+            packaged_macos_bundle_paths(
+                Path::new("/workspace/target/debug/sceneworks-desktop"),
+                None,
+                None,
+            )
+            .expect("unbundled development path is valid"),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foundation_resolves_external_bundle_sidecar_and_resources() {
+        use objc2_foundation::{NSBundle, NSURL};
+
+        let root = bundle_fixture_root("foundation-external-volume");
+        let bundle_path = root.join("External Drive").join("SceneWorks.app");
+        let contents = bundle_path.join("Contents");
+        let macos = contents.join("MacOS");
+        let resources = contents.join("Resources");
+        let desktop = macos.join("sceneworks-desktop");
+        let api_sidecar = macos.join("sceneworks-api");
+        touch(&desktop);
+        touch(&api_sidecar);
+        std::fs::create_dir_all(&resources).expect("create bundle resources");
+        std::fs::write(
+            contents.join("Info.plist"),
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>sceneworks-desktop</string>
+<key>CFBundleIdentifier</key><string>net.trefry.sceneworks.fixture</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+</dict></plist>
+"#,
+        )
+        .expect("write fixture Info.plist");
+
+        let bundle_url = NSURL::from_file_path(&bundle_path).expect("fixture bundle URL");
+        let bundle = NSBundle::bundleWithURL(&bundle_url).expect("load fixture bundle");
+        assert_eq!(
+            super::macos_bundle_paths(&bundle).expect("Foundation resolves complete bundle"),
+            Some(MacosBundlePaths {
+                api_sidecar,
+                resources,
+            })
+        );
+
+        std::fs::remove_dir_all(root).expect("remove isolated bundle fixture");
     }
 
     #[test]
