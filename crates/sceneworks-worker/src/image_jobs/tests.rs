@@ -2332,12 +2332,12 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         "\nasync fn generate_stub_stream(",
     );
     assert_eq!(
-        run_job.matches("resolve_candle_image_route(").count(),
+        run_job.matches("prepare_candle_image_route(").count(),
         1,
-        "candle route must be resolved exactly once per job"
+        "candle route and payload File tokens must be prepared exactly once per job"
     );
     let route_binding = run_job
-        .find("let route = resolve_candle_image_route")
+        .find("let route = prepare_candle_image_route")
         .expect("one route binding");
     let plan_use = run_job[route_binding..]
         .find("ImagePlan::with_count_and_adapter")
@@ -2352,14 +2352,15 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let candle_route_wiring = &run_job[route_binding..route_binding + dispatch_use];
     assert!(
         candle_route_wiring.contains(
-            "route.map_or(request.count, |route| route.image_count(&request, settings))",
+            "route.as_ref().map_or(request.count, |route| {\n            route.kind().image_count(&request, settings)\n        })",
         ),
-        "the resolved candle route must supply the effective image count"
+        "the prepared candle route must supply the effective image count"
     );
     assert!(
-        candle_route_wiring
-            .contains("route.map_or(STUB_ADAPTER, |route| route.adapter_label(&request))"),
-        "the resolved candle route must supply the adapter label"
+        candle_route_wiring.contains(
+            "route\n            .as_ref()\n            .map_or(STUB_ADAPTER, |route| route.kind().adapter_label(&request))",
+        ),
+        "the prepared candle route must supply the adapter label"
     );
 
     let base = include_str!("base.rs");
@@ -6749,6 +6750,271 @@ fn krea_control_payload_overlay_path_confines_to_app_root() {
     assert!(resolved.is_file());
 }
 
+/// sc-18306: imported Krea must retain the payload's lexical control-overlay entry in the prepared
+/// token. Canonicalizing the HF-style snapshot symlink first loses the entry identity and creates an
+/// authorize-then-pin race.
+#[cfg(target_os = "macos")]
+#[test]
+fn krea_imported_payload_control_overlay_pins_the_lexical_entry() {
+    use std::os::unix::fs::symlink;
+
+    let data = tempfile::tempdir().expect("data root");
+    let outside = tempfile::tempdir().expect("outside root");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+
+    let blobs = data.path().join("hub/blobs");
+    let snapshot = data.path().join("hub/snapshots/revision");
+    std::fs::create_dir_all(&blobs).expect("blob dir");
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+    let first_blob = blobs.join("first");
+    let second_blob = blobs.join("second");
+    std::fs::write(&first_blob, b"first-overlay").expect("first blob");
+    std::fs::write(&second_blob, b"second-overlay-is-different").expect("second blob");
+    let lexical = snapshot.join("overlay.safetensors");
+    symlink(&first_blob, &lexical).expect("snapshot symlink");
+
+    let selected = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": lexical.display().to_string() } }
+    }));
+    let pin = pin_krea_imported_payload_control_overlay(&settings, &selected)
+        .expect("confined payload pins")
+        .expect("existing payload is selected");
+    assert_eq!(
+        pin.loader_path(),
+        lexical.as_path(),
+        "the extension-bearing snapshot entry, not its canonical blob, is retained"
+    );
+    assert_eq!(
+        pin.canonical_target_path(),
+        first_blob.canonicalize().expect("first blob canonical")
+    );
+
+    let base = data.path().join("base");
+    std::fs::create_dir_all(&base).expect("base dir");
+    let mut spec =
+        LoadSpec::new(WeightsSource::Dir(base)).with_control(WeightsSource::File(lexical.clone()));
+    spec.prepare_with_file_pins([pin])
+        .expect("prepared control token");
+    std::fs::remove_file(&lexical).expect("replace snapshot entry");
+    symlink(&second_blob, &lexical).expect("retarget snapshot entry");
+    assert!(
+        spec.validate_prepared_file_pins().is_err(),
+        "retargeting the lexical entry invalidates the prepared spec"
+    );
+
+    let outside_entry = outside.path().join("outside-entry.safetensors");
+    symlink(&first_blob, &outside_entry).expect("outside-to-inside symlink");
+    let escape = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": outside_entry.display().to_string() } }
+    }));
+    let error = pin_krea_imported_payload_control_overlay(&settings, &escape)
+        .expect_err("an outside lexical entry is rejected even when its target is inside");
+    assert!(error.to_string().contains("app-managed"), "{error}");
+
+    let missing = data.path().join("models/missing-overlay.safetensors");
+    let missing_request = request(json!({
+        "projectId": "p",
+        "advanced": { "controlWeights": { "path": missing.display().to_string() } }
+    }));
+    assert!(
+        pin_krea_imported_payload_control_overlay(&settings, &missing_request)
+            .expect("a confined missing payload preserves hosted fallback")
+            .is_none()
+    );
+}
+
+/// Production route preparation must own the imported DiT token across the scheduler/admission
+/// awaits. Retargeting the lexical entry after selection therefore invalidates the exact token moved
+/// into dispatch; the handler may not silently pin the replacement.
+#[cfg(target_os = "macos")]
+#[test]
+fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
+    use std::os::unix::fs::symlink;
+
+    let data = tempfile::tempdir().expect("data root");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+
+    let blobs = data.path().join("models/blobs");
+    let snapshot = data.path().join("models/snapshot");
+    std::fs::create_dir_all(&blobs).expect("blob dir");
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+    let first = blobs.join("first");
+    let second = blobs.join("second");
+    std::fs::write(&first, b"first-transformer").expect("first weights");
+    std::fs::write(&second, b"second-transformer-is-different").expect("second weights");
+    let lexical = snapshot.join("transformer.safetensors");
+    symlink(&first, &lexical).expect("initial lexical entry");
+
+    let selected = request(json!({
+        "projectId": "p",
+        "model": "imported_krea_route_pin",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": lexical.display().to_string()
+        }
+    }));
+    let prepared = prepare_image_route(&selected, &settings)
+        .expect("route preparation succeeds")
+        .expect("imported route selected");
+    assert_eq!(prepared.kind(), ImageRoute::KreaImported);
+
+    // Stand in for any number of awaits between route selection and dispatch.
+    std::thread::yield_now();
+    std::fs::remove_file(&lexical).expect("replace lexical entry");
+    symlink(&second, &lexical).expect("retarget lexical entry");
+
+    let PreparedImageRoute::KreaImported(sources) = prepared else {
+        panic!("prepared route lost its imported source bundle")
+    };
+    let PreparedKreaImportedSources {
+        dit_pin,
+        prepared_adapters,
+    } = *sources;
+    let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()));
+    let error = crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        std::iter::once(dit_pin).chain(prepared_adapters.pins),
+        "test imported route",
+    )
+    .expect_err("dispatch rejects a retargeted prepared entry");
+    assert!(
+        error.to_string().contains("changed") || error.to_string().contains("identity"),
+        "unexpected validation error: {error}"
+    );
+}
+
+/// The strict-pose imported route owns three independently mutable payload classes: the primary DiT,
+/// control overlay, and ordered LoRA/LoKr stack. Prove the production route carries the exact lexical
+/// token for every non-primary file and that replacing either the overlay or either adapter is rejected.
+#[cfg(target_os = "macos")]
+#[test]
+fn prepared_krea_imported_control_route_owns_overlay_and_adapter_tokens() {
+    let data = tempfile::tempdir().expect("data root");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+
+    let model_dir = data.path().join("models/imported-krea");
+    let adapter_dir = data.path().join("loras/imported-krea");
+    std::fs::create_dir_all(&model_dir).expect("model dir");
+    std::fs::create_dir_all(&adapter_dir).expect("adapter dir");
+    let dit = model_dir.join("transformer.safetensors");
+    let control = model_dir.join("pose-control.safetensors");
+    let lora = adapter_dir.join("style-lora.safetensors");
+    let lokr = adapter_dir.join("style-lokr.safetensors");
+    std::fs::write(&dit, b"selected-transformer").expect("DiT fixture");
+    std::fs::write(&control, b"selected-control").expect("control fixture");
+    write_min_lora(&lora);
+    write_min_lokr(&lokr);
+
+    let selected = request(json!({
+        "projectId": "p",
+        "model": "imported_krea_control_route_pin",
+        "loras": [
+            { "path": lora.display().to_string(), "weight": 0.6 },
+            { "path": lokr.display().to_string(), "weight": 0.8 }
+        ],
+        "advanced": {
+            "poses": [{ "id": "pose_1" }],
+            "controlWeights": { "path": control.display().to_string() }
+        },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "modelPath": dit.display().to_string()
+        }
+    }));
+    let prepared = prepare_image_route(&selected, &settings)
+        .expect("route preparation succeeds")
+        .expect("imported control route selected");
+    assert_eq!(prepared.kind(), ImageRoute::KreaImportedControl);
+    let PreparedImageRoute::KreaImportedControl(sources) = prepared else {
+        panic!("prepared route lost its imported-control source bundle")
+    };
+    let PreparedKreaImportedControlSources {
+        dit_pin,
+        control_pin,
+        prepared_adapters,
+    } = *sources;
+
+    assert_eq!(dit_pin.loader_path(), dit.as_path());
+    assert_eq!(control_pin.loader_path(), control.as_path());
+    assert_eq!(prepared_adapters.specs.len(), 2);
+    assert_eq!(prepared_adapters.pins.len(), 2);
+    assert_eq!(prepared_adapters.specs[0].path, lora);
+    assert_eq!(prepared_adapters.specs[1].path, lokr);
+    assert!(matches!(prepared_adapters.specs[0].kind, AdapterKind::Lora));
+    assert!(matches!(prepared_adapters.specs[1].kind, AdapterKind::Lokr));
+    let mut adapter_paths = prepared_adapters
+        .pins
+        .iter()
+        .map(|pin| pin.loader_path().to_path_buf())
+        .collect::<Vec<_>>();
+    adapter_paths.sort();
+    let mut expected_adapter_paths = vec![lora.clone(), lokr.clone()];
+    expected_adapter_paths.sort();
+    assert_eq!(adapter_paths, expected_adapter_paths);
+
+    // Stand in for the async admission preamble, then replace each non-primary selected class.
+    std::thread::yield_now();
+    std::fs::remove_file(&control).expect("remove selected control");
+    std::fs::write(&control, b"replacement-control-is-different").expect("replace control");
+    assert!(
+        control_pin.ensure_unchanged().is_err(),
+        "the prepared control token must reject replacement"
+    );
+    {
+        let lora_pin = prepared_adapters
+            .pins
+            .iter()
+            .find(|pin| pin.loader_path() == lora)
+            .expect("LoRA token");
+        let lokr_pin = prepared_adapters
+            .pins
+            .iter()
+            .find(|pin| pin.loader_path() == lokr)
+            .expect("LoKr token");
+        std::fs::remove_file(&lora).expect("remove selected LoRA");
+        std::fs::write(&lora, b"replacement-lora-is-different-and-longer")
+            .expect("replace selected LoRA");
+        assert!(
+            lora_pin.ensure_unchanged().is_err(),
+            "the prepared LoRA token must reject replacement"
+        );
+        std::fs::remove_file(&lokr).expect("remove selected LoKr");
+        std::fs::write(&lokr, b"replacement-lokr-is-different-and-longer")
+            .expect("replace selected LoKr");
+        assert!(
+            lokr_pin.ensure_unchanged().is_err(),
+            "the prepared LoKr token must reject replacement"
+        );
+    }
+
+    let PreparedAdapters {
+        specs: adapters,
+        pins: adapter_pins,
+    } = prepared_adapters;
+    let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()))
+        .with_control(WeightsSource::File(control_pin.loader_path().to_path_buf()))
+        .with_adapters(adapters);
+    assert!(
+        crate::paths::prepare_load_spec_with_file_pins(
+            &mut spec,
+            std::iter::once(dit_pin)
+                .chain(std::iter::once(control_pin))
+                .chain(adapter_pins),
+            "test imported control route",
+        )
+        .is_err(),
+        "production spec finalization must reject replaced non-primary entries"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn flux2_control_raw_settings_records_control_recipe() {
@@ -7390,6 +7656,19 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
 ))]
 fn write_min_lora(path: &std::path::Path) {
     let header = json!({ "__metadata__": { "format": "pt" } });
+    let header_bytes = serde_json::to_vec(&header).unwrap();
+    let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
+    buffer.extend_from_slice(&header_bytes);
+    std::fs::write(path, buffer).unwrap();
+}
+
+/// Minimal PEFT LoKr header; `classify_adapter` recognizes the explicit network type.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn write_min_lokr(path: &std::path::Path) {
+    let header = json!({ "__metadata__": { "format": "pt", "networkType": "lokr" } });
     let header_bytes = serde_json::to_vec(&header).unwrap();
     let mut buffer = (header_bytes.len() as u64).to_le_bytes().to_vec();
     buffer.extend_from_slice(&header_bytes);
@@ -9296,6 +9575,183 @@ fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
     assert_eq!(
         resolve_candle_image_route(&sdxl_pose, &settings),
         Some(CandleImageRoute::PoseReject),
+    );
+}
+
+/// Every candle File route must carry its prepared identity through the async preamble. Replacing a
+/// payload-selected entry after route selection must fail at the exact production spec-finalization
+/// seam for Krea, Z-Image, Qwen-Image, and FLUX.2; no handler may resolve the replacement.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
+    let root = tempfile::tempdir().expect("test root");
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).expect("hub");
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let external = root.path().join("external");
+    std::fs::create_dir_all(&external).expect("external root");
+
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().join("data");
+    settings.external_model_roots = vec![external.clone()];
+    settings.backend_candle_enabled = true;
+
+    // Seed only the structural companions each route requires. Payload-selected weight files live in
+    // the explicit external root below and are the identities exercised by this test.
+    let z_snapshot = hub.join("models--Tongyi-MAI--Z-Image-Turbo/snapshots/installed/tokenizer");
+    std::fs::create_dir_all(&z_snapshot).expect("Z tokenizer dir");
+    std::fs::write(z_snapshot.join("tokenizer.json"), b"{}").expect("Z tokenizer");
+    for cache in [
+        "models--SceneWorks--qwen-image-mlx",
+        "models--SceneWorks--flux2-dev-mlx",
+    ] {
+        let tier = hub.join(cache).join("snapshots/installed/bf16");
+        for relative in [
+            "text_encoder/model.safetensors",
+            "vae/model.safetensors",
+            "tokenizer/tokenizer.json",
+        ] {
+            let path = tier.join(relative);
+            std::fs::create_dir_all(path.parent().expect("companion parent"))
+                .expect("companion dir");
+            std::fs::write(path, b"fixture").expect("companion file");
+        }
+    }
+
+    let make_file = |name: &str| {
+        let path = external.join(name);
+        std::fs::write(&path, b"selected-source").expect("selected source");
+        path
+    };
+    let replace = |path: &Path| {
+        std::fs::remove_file(path).expect("remove selected entry");
+        std::fs::write(path, b"replacement-source-is-different").expect("replacement source");
+    };
+
+    let krea = make_file("krea.safetensors");
+    let request_krea = request(json!({
+        "projectId": "p", "model": "external_base_krea", "count": 1,
+        "modelManifestEntry": { "family": "krea_2", "modelPath": krea.display().to_string() }
+    }));
+    let route = prepare_candle_image_route(&request_krea, &settings)
+        .expect("Krea route preparation")
+        .expect("Krea route");
+    assert_eq!(route.kind(), CandleImageRoute::KreaImported);
+    std::thread::yield_now();
+    replace(&krea);
+    let PreparedCandleImageRoute::KreaImported(sources) = route else {
+        panic!("Krea route lost its source bundle")
+    };
+    let PreparedKreaImportedSources { dit_pin } = *sources;
+    let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()));
+    assert!(
+        crate::paths::prepare_load_spec_with_file_pins(&mut spec, [dit_pin], "test Krea route")
+            .is_err(),
+        "Krea dispatch must reject the replacement"
+    );
+
+    let z_dit = make_file("z-dit.safetensors");
+    let z_te = make_file("z-te.safetensors");
+    let z_vae = make_file("z-vae.safetensors");
+    let request_z = request(json!({
+        "projectId": "p", "model": "external_base_z", "count": 1,
+        "modelManifestEntry": {
+            "family": "z-image", "usable": true,
+            "components": [
+                {"role": "transformer", "path": z_dit.display().to_string()},
+                {"role": "text_encoder", "path": z_te.display().to_string()},
+                {"role": "vae", "path": z_vae.display().to_string()}
+            ]
+        }
+    }));
+    let route = prepare_candle_image_route(&request_z, &settings)
+        .expect("Z route preparation")
+        .expect("Z route");
+    assert_eq!(route.kind(), CandleImageRoute::ZimageComfyui);
+    let PreparedCandleImageRoute::ZimageComfyui(sources) = route else {
+        panic!("Z route lost its source bundle")
+    };
+    {
+        let pins = sources.prepared_file_pins();
+        assert_eq!(pins.len(), 3, "Z route must retain DiT, TE, and VAE");
+        assert_eq!(pins[0].loader_path(), z_dit.as_path());
+        assert_eq!(pins[1].loader_path(), z_te.as_path());
+        assert_eq!(pins[2].loader_path(), z_vae.as_path());
+        std::thread::yield_now();
+        replace(&z_dit);
+        assert!(pins[0].ensure_unchanged().is_err(), "Z DiT replacement");
+        replace(&z_te);
+        assert!(pins[1].ensure_unchanged().is_err(), "Z TE replacement");
+        replace(&z_vae);
+        assert!(pins[2].ensure_unchanged().is_err(), "Z VAE replacement");
+    }
+    assert!(
+        zimage_comfyui_candle::prepare_zimage_comfyui_load_spec(*sources).is_err(),
+        "Z-Image dispatch must reject replaced payload-selected components"
+    );
+
+    let qwen_dit = make_file("qwen-dit.safetensors");
+    let qwen_vae = make_file("qwen-vae.safetensors");
+    let request_qwen = request(json!({
+        "projectId": "p", "model": "external_base_qwen", "count": 1,
+        "modelManifestEntry": {
+            "family": "qwen-image", "usable": true,
+            "components": [
+                {"role": "transformer", "path": qwen_dit.display().to_string()},
+                {"role": "vae", "path": qwen_vae.display().to_string()}
+            ]
+        }
+    }));
+    let route = prepare_candle_image_route(&request_qwen, &settings)
+        .expect("Qwen route preparation")
+        .expect("Qwen route");
+    assert_eq!(route.kind(), CandleImageRoute::QwenImageComfyui);
+    let PreparedCandleImageRoute::QwenImageComfyui(sources) = route else {
+        panic!("Qwen route lost its source bundle")
+    };
+    {
+        let pins = sources.prepared_file_pins();
+        assert_eq!(pins.len(), 2, "Qwen route must retain DiT and optional VAE");
+        assert_eq!(pins[0].loader_path(), qwen_dit.as_path());
+        assert_eq!(pins[1].loader_path(), qwen_vae.as_path());
+        std::thread::yield_now();
+        replace(&qwen_dit);
+        assert!(pins[0].ensure_unchanged().is_err(), "Qwen DiT replacement");
+        replace(&qwen_vae);
+        assert!(
+            pins[1].ensure_unchanged().is_err(),
+            "Qwen optional VAE replacement"
+        );
+    }
+    assert!(
+        qwen_comfyui_candle::prepare_qwen_comfyui_load_spec(*sources).is_err(),
+        "Qwen dispatch must reject replaced payload-selected components"
+    );
+
+    let flux_dit = make_file("flux2-dit.safetensors");
+    let request_flux = request(json!({
+        "projectId": "p", "model": "external_base_flux2", "count": 1,
+        "modelManifestEntry": {
+            "family": "flux2", "usable": true,
+            "components": [{"role": "transformer", "path": flux_dit.display().to_string()}]
+        }
+    }));
+    let route = prepare_candle_image_route(&request_flux, &settings)
+        .expect("FLUX.2 route preparation")
+        .expect("FLUX.2 route");
+    assert_eq!(route.kind(), CandleImageRoute::Flux2Comfyui);
+    std::thread::yield_now();
+    replace(&flux_dit);
+    let PreparedCandleImageRoute::Flux2Comfyui(sources) = route else {
+        panic!("FLUX.2 route lost its source bundle")
+    };
+    assert!(
+        flux2_comfyui_candle::prepare_flux2_comfyui_load_spec(
+            *sources,
+            flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+        )
+        .is_err(),
+        "FLUX.2 dispatch must reject the replacement"
     );
 }
 
@@ -14875,8 +15331,8 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
     }
 }
 
-/// On the MLX imported lane, `resolve_krea_imported_adapters_and_edit` resolves the job LoRA stack
-/// (sc-14111) and, for an `edit_image` job, enforces the R5 identity-edit-LoRA requirement (sc-14119,
+/// On the MLX imported lane, route preparation resolves the job LoRA stack (sc-14111) while
+/// `resolve_krea_imported_edit_conditioning` enforces the R5 identity-edit-LoRA requirement (sc-14119,
 /// epic 10871) BEFORE any reference I/O — the bare transformer cannot edit without the
 /// `krea2_identity_edit` LoRA (the source conditioning is inert without it), mirroring the builtin
 /// `generate_krea_edit_stream`. A plain t2i job (no loras) resolves to an empty adapter stack + no edit
@@ -14894,8 +15350,9 @@ fn imported_edit_requires_the_identity_edit_lora() {
         "projectId": "p", "model": "kreamania_variant5", "prompt": "a cat",
         "modelManifestEntry": base.clone()
     }));
-    let (adapters, edit) =
-        resolve_krea_imported_adapters_and_edit(&t2i, &settings, dir.path()).expect("t2i resolves");
+    let adapters = resolve_prepared_adapters(&t2i, &settings).expect("t2i adapters resolve");
+    let edit = resolve_krea_imported_edit_conditioning(&t2i, &settings, dir.path())
+        .expect("t2i conditioning resolves");
     assert!(adapters.is_empty(), "a t2i job has no adapters");
     assert!(edit.is_none(), "a t2i job has no edit conditioning");
 
@@ -14904,7 +15361,7 @@ fn imported_edit_requires_the_identity_edit_lora() {
         "projectId": "p", "model": "kreamania_variant5", "mode": "edit_image",
         "sourceAssetId": "s", "modelManifestEntry": base.clone()
     }));
-    let err = resolve_krea_imported_adapters_and_edit(&edit_no_lora, &settings, dir.path())
+    let err = resolve_krea_imported_edit_conditioning(&edit_no_lora, &settings, dir.path())
         .expect_err("edit without the identity-edit LoRA is rejected");
     assert!(
         matches!(err, WorkerError::InvalidPayload(msg) if msg.contains("Identity Edit LoRA")),
@@ -16553,10 +17010,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         if *marker == "prepare_cached_candle_base_floor(" {
             assert!(
                 source.lines().any(|line| {
-                    line.contains("cold_admission.admit(replacing_resident)")
+                    line.contains("cold_admission.admit(resident_reclaimable_weight_bytes)")
                         && !line.trim_start().starts_with("//")
                 }),
-                "{route} ({file}) must execute its prepared floor from the cache-aware cold-load hook"
+                "{route} ({file}) must execute its prepared floor with the exact resident-entry credit"
             );
         }
     }
@@ -16606,8 +17063,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // is the production form, so prose mentioning a variant cannot inflate this set.
     let base = include_str!("base.rs");
     let resolver = base
-        .split_once("fn resolve_candle_image_route(")
-        .expect("resolve_candle_image_route must exist")
+        .split_once("fn resolve_candle_image_route_with_prepared_availability(")
+        .expect("resolve_candle_image_route_with_prepared_availability must exist")
         .1
         .split_once("\n}\n")
         .expect("resolve_candle_image_route must end at a top-level brace")

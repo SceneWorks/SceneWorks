@@ -329,6 +329,7 @@ fn start_cached_gen_stream_after_cold_admission<A, D>(
     adapter_count: usize,
     spec: LoadSpec,
     load_error_context: String,
+    incoming_reclaimable_weight_bytes: u64,
     cold_admission: A,
     drive: D,
 ) -> (
@@ -337,7 +338,7 @@ fn start_cached_gen_stream_after_cold_admission<A, D>(
     tokio::task::JoinHandle<WorkerResult<()>>,
 )
 where
-    A: FnOnce(bool) -> WorkerResult<()> + Send + 'static,
+    A: FnOnce(u64) -> WorkerResult<()> + Send + 'static,
     D: FnOnce(&dyn Generator, tokio::sync::mpsc::Sender<GenEvent>, CancelFlag) -> WorkerResult<()>
         + Send
         + 'static,
@@ -356,6 +357,7 @@ where
             engine_id,
             spec,
             load_error_context,
+            incoming_reclaimable_weight_bytes,
             cold_admission,
             move |generator,
                   _cache_state,

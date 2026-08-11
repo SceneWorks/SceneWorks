@@ -26,6 +26,13 @@ struct CachedGenerator {
     /// Process-global MLX active bytes that predated this cached generator. Request admission must
     /// never mistake these unrelated allocations for already-resident generator weights.
     external_committed_bytes: u64,
+    /// Conservative source-weight bytes bound to this exact resident cache entry. Candle File-route
+    /// admission may credit only these bytes before replacing the entry; a process-global peak can
+    /// describe an older, larger model and over-admit the incoming load. Ordinary entries use zero
+    /// until their route supplies an exact cache-bound value. Sequential entries expose zero: their
+    /// complete source floor includes staged components that the provider may already have dropped,
+    /// so it is not a proved lower bound on the entry's current resident VRAM.
+    reclaimable_weight_bytes: u64,
 }
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -696,7 +703,8 @@ pub(crate) async fn with_cached_generator_for_request_after_cold_admission<R>(
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
-    cold_admission: impl FnOnce(bool) -> WorkerResult<()> + Send + 'static,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
     run: impl FnOnce(
             &dyn Generator,
             MemoryCacheState,
@@ -715,6 +723,7 @@ where
         engine_id,
         spec,
         load_error_context,
+        incoming_reclaimable_weight_bytes,
         cold_admission,
         crate::inference_runtime::load,
         run,
@@ -782,6 +791,7 @@ where
         engine_id,
         spec,
         load_error_context,
+        0,
         |_| Ok(()),
         load_generator,
         run,
@@ -816,6 +826,7 @@ where
         engine_id,
         spec,
         load_error_context,
+        0,
         |_| Ok(()),
         load_generator,
         run,
@@ -829,7 +840,8 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
-    cold_admission: impl FnOnce(bool) -> WorkerResult<()> + Send + 'static,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
@@ -875,10 +887,15 @@ where
         let external_committed_bytes = capture_external_committed_bytes();
         let generator = load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
+        let reclaimable_weight_bytes = match loaded_policy.offload_policy {
+            OffloadPolicy::Resident => incoming_reclaimable_weight_bytes,
+            OffloadPolicy::Sequential => 0,
+        };
         Ok(CachedGenerator {
             generator,
             loaded_policy,
             external_committed_bytes,
+            reclaimable_weight_bytes,
         })
     };
     let run = move |cached: &CachedGenerator, access| {
@@ -901,7 +918,7 @@ where
     cache_thread::run_cached_with_access_after_cold_admission(
         worker,
         key,
-        move |replacing_resident| {
+        move |resident| {
             admission_spec
                 .validate_prepared_file_pins()
                 .map_err(|error| {
@@ -910,7 +927,7 @@ where
                         error,
                     )
                 })?;
-            cold_admission(replacing_resident)
+            cold_admission(resident.map_or(0, |cached| cached.reclaimable_weight_bytes))
         },
         load,
         run,
@@ -1970,6 +1987,7 @@ mod tests {
                     load_shape: LoadShape::EagerMaterialization,
                 },
                 external_committed_bytes: 0,
+                reclaimable_weight_bytes: 0,
             },
         );
     }
@@ -2016,6 +2034,7 @@ mod tests {
                                 load_shape: LoadShape::DeferredMaterialization,
                             },
                             external_committed_bytes: 0,
+                            reclaimable_weight_bytes: 0,
                         })
                     },
                     |cached, access| Ok((access, cached.loaded_policy)),
@@ -2159,7 +2178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cold_admission_skips_exact_warm_hit_and_runs_before_different_key_reload() {
+    async fn cold_admission_uses_exact_resident_credit_and_preserves_rejected_entry() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
@@ -2168,14 +2187,18 @@ mod tests {
         let roots = tempfile::tempdir().expect("weights roots");
         let first = roots.path().join("first");
         let second = roots.path().join("second");
+        let sequential = roots.path().join("sequential");
+        let after_sequential = roots.path().join("after-sequential");
         std::fs::create_dir_all(&first).expect("first weights");
         std::fs::create_dir_all(&second).expect("second weights");
+        std::fs::create_dir_all(&sequential).expect("sequential weights");
+        std::fs::create_dir_all(&after_sequential).expect("post-sequential weights");
         // A preselected policy keeps this cache-lifecycle test backend-neutral: the loader skips the
         // macOS live-device fit probe, which is unavailable on headless CI.
         let first_spec =
-            LoadSpec::new(WeightsSource::Dir(first)).with_offload_policy(OffloadPolicy::Sequential);
-        let second_spec = LoadSpec::new(WeightsSource::Dir(second))
-            .with_offload_policy(OffloadPolicy::Sequential);
+            LoadSpec::new(WeightsSource::Dir(first)).with_offload_policy(OffloadPolicy::Resident);
+        let second_spec =
+            LoadSpec::new(WeightsSource::Dir(second)).with_offload_policy(OffloadPolicy::Resident);
         let admissions = Arc::new(AtomicUsize::new(0));
         let loads = Arc::new(AtomicUsize::new(0));
 
@@ -2186,8 +2209,12 @@ mod tests {
             "sc3724_stub",
             first_spec.clone(),
             "stub load",
-            move |replacing_resident| {
-                assert!(!replacing_resident, "first load starts from an empty cache");
+            20,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 0,
+                    "first load starts from an empty cache"
+                );
                 cold_admissions.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -2206,8 +2233,9 @@ mod tests {
         let warm_access = with_cached_generator_for_request_after_cold_admission_using_on(
             &tx,
             "sc3724_stub",
-            first_spec,
+            first_spec.clone(),
             "stub load",
+            20,
             move |_| {
                 warm_admissions.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -2224,6 +2252,53 @@ mod tests {
         assert_eq!(admissions.load(Ordering::SeqCst), 1);
         assert_eq!(loads.load(Ordering::SeqCst), 1);
 
+        let rejected_admissions = Arc::clone(&admissions);
+        let rejected_loads = Arc::clone(&loads);
+        let rejected = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            second_spec.clone(),
+            "stub load",
+            7,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 20,
+                    "different-key admission sees only the exact resident entry's credit"
+                );
+                rejected_admissions.fetch_add(1, Ordering::SeqCst);
+                Err(WorkerError::Engine(
+                    "fixture admission rejection".to_owned(),
+                ))
+            },
+            move |_id, spec| {
+                rejected_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await;
+        assert!(rejected.is_err(), "fixture admission rejects");
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "rejection never loads");
+
+        let retained_loads = Arc::clone(&loads);
+        let retained_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            first_spec,
+            "stub load",
+            20,
+            |_| panic!("the rejected replacement must leave the exact resident warm"),
+            move |_id, spec| {
+                retained_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("resident survives rejected replacement");
+        assert_eq!(retained_access, MemoryCacheState::Warm);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
         let replacement_admissions = Arc::clone(&admissions);
         let replacement_loads = Arc::clone(&loads);
         let replacement_access = with_cached_generator_for_request_after_cold_admission_using_on(
@@ -2231,10 +2306,11 @@ mod tests {
             "sc3724_stub",
             second_spec,
             "stub load",
-            move |replacing_resident| {
-                assert!(
-                    replacing_resident,
-                    "different-key admission must observe the entry it is about to replace"
+            7,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 20,
+                    "accepted replacement receives the exact current entry's credit"
                 );
                 replacement_admissions.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -2248,8 +2324,66 @@ mod tests {
         .await
         .expect("different-key replacement request");
         assert_eq!(replacement_access, MemoryCacheState::Cold);
-        assert_eq!(admissions.load(Ordering::SeqCst), 2);
+        assert_eq!(admissions.load(Ordering::SeqCst), 3);
         assert_eq!(loads.load(Ordering::SeqCst), 2);
+
+        let sequential_admissions = Arc::clone(&admissions);
+        let sequential_loads = Arc::clone(&loads);
+        let sequential_access = with_cached_generator_for_request_after_cold_admission_using_on(
+            &tx,
+            "sc3724_stub",
+            LoadSpec::new(WeightsSource::Dir(sequential))
+                .with_offload_policy(OffloadPolicy::Sequential),
+            "stub load",
+            100,
+            move |resident_reclaimable_weight_bytes| {
+                assert_eq!(
+                    resident_reclaimable_weight_bytes, 7,
+                    "the outgoing resident entry retains its exact credit"
+                );
+                sequential_admissions.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            move |_id, spec| {
+                sequential_loads.fetch_add(1, Ordering::SeqCst);
+                stub_load(spec)
+            },
+            |_, cache_state, loaded_policy, _, _| {
+                assert_eq!(loaded_policy.offload_policy, OffloadPolicy::Sequential);
+                Ok(cache_state)
+            },
+        )
+        .await
+        .expect("sequential replacement request");
+        assert_eq!(sequential_access, MemoryCacheState::Cold);
+
+        let post_sequential_loads = Arc::clone(&loads);
+        let rejected_after_sequential =
+            with_cached_generator_for_request_after_cold_admission_using_on(
+                &tx,
+                "sc3724_stub",
+                LoadSpec::new(WeightsSource::Dir(after_sequential))
+                    .with_offload_policy(OffloadPolicy::Resident),
+                "stub load",
+                5,
+                move |resident_reclaimable_weight_bytes| {
+                    assert_eq!(
+                        resident_reclaimable_weight_bytes, 0,
+                        "a sequential entry must never expose its complete staged source floor"
+                    );
+                    Err(WorkerError::Engine(
+                        "fixture post-sequential rejection".to_owned(),
+                    ))
+                },
+                move |_id, spec| {
+                    post_sequential_loads.fetch_add(1, Ordering::SeqCst);
+                    stub_load(spec)
+                },
+                |_, cache_state, _, _, _| Ok(cache_state),
+            )
+            .await;
+        assert!(rejected_after_sequential.is_err());
+        assert_eq!(loads.load(Ordering::SeqCst), 3, "rejection never loads");
 
         drop(tx);
         worker.join().expect("cache worker exits");
@@ -2281,6 +2415,7 @@ mod tests {
                     "sc3724_stub",
                     spec,
                     "stub load",
+                    0,
                     |_| Ok(()),
                     move |_id, received| {
                         loads.fetch_add(1, Ordering::SeqCst);

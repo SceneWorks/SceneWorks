@@ -163,12 +163,13 @@ where
     /// [`Self::with_model_access`] with a hook that runs only for a genuine miss, while the previous
     /// resident entry is still alive. A live-memory gate can therefore observe the raw budget before
     /// replacement, account for the entry the cache is about to drop, and avoid touching an exact-key
-    /// warm hit. The hook receives whether a different entry is resident, so reclaim credit is never
-    /// invented on an empty cold start. The entry is cleared only after admission succeeds.
+    /// warm hit. The hook receives the different resident model itself (or `None` on an empty cold
+    /// start), so callers can credit only metadata bound to that exact entry rather than a stale
+    /// process-global high-water. The entry is cleared only after admission succeeds.
     pub(crate) fn with_model_access_after_cold_admission<R>(
         &mut self,
         key: K,
-        cold_admission: impl FnOnce(bool) -> WorkerResult<()>,
+        cold_admission: impl FnOnce(Option<&M>) -> WorkerResult<()>,
         load: impl FnOnce() -> WorkerResult<M>,
         run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R>,
         entry_missing_msg: &str,
@@ -176,7 +177,7 @@ where
         let access = if self.entry.as_ref().is_some_and(|entry| entry.key == key) {
             CacheAccess::Warm
         } else {
-            cold_admission(self.entry.is_some())?;
+            cold_admission(self.entry.as_ref().map(|entry| &entry.model))?;
             self.entry = None;
             if self.evict_before_load {
                 release_backend_cache_after_evict();
@@ -333,7 +334,7 @@ where
 pub(crate) async fn run_cached_with_access_after_cold_admission<K, M, R>(
     worker: &mpsc::Sender<CacheJob<K, M>>,
     key: K,
-    cold_admission: impl FnOnce(bool) -> WorkerResult<()> + Send + 'static,
+    cold_admission: impl FnOnce(Option<&M>) -> WorkerResult<()> + Send + 'static,
     load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
     run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,
     msgs: SeamMessages,

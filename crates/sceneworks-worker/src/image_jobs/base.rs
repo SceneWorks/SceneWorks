@@ -152,7 +152,7 @@ enum ImageRoute {
 }
 
 /// Image model ids the MLX router HAS a bespoke strict-pose control lane for — each is claimed by an
-/// `… _control_available` arm in [`resolve_image_route`] BEFORE the generic `mlx_available` txt2img arm,
+/// `… _control_available` arm in [`prepare_image_route`] BEFORE the generic `mlx_available` txt2img arm,
 /// but only when its control base/overlay resolves locally. This is the SINGLE source for the
 /// fall-through reject: a wired family that reached the fall-through means its control base is absent
 /// (its lane's local weight-gate failed) → [`ImageRoute::PoseControlBaseMissing`], never silent txt2img.
@@ -181,7 +181,7 @@ const WIRED_MLX_POSE_FAMILIES: &[&str] = &[
 
 /// The production FLUX strict-control router, expressed as the exact base-model → dedicated
 /// provider mapping used by the two `..._control_available` arms below. Keeping this pure seam next
-/// to [`resolve_image_route`] lets source-bound audits ask the router whether a model really has a
+/// to [`prepare_image_route`] lets source-bound audits ask the router whether a model really has a
 /// strict-control lane instead of attaching arbitrary control bytes to a base provider.
 ///
 /// Chroma, FLUX.1 Schnell, and FLUX.2 Klein deliberately resolve to `None`: none ships a control
@@ -196,7 +196,12 @@ pub(crate) fn mlx_flux_strict_control_engine_id(model: &str) -> Option<&'static 
 }
 
 #[cfg(target_os = "macos")]
-fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
+fn resolve_image_route_with_imported_availability(
+    request: &ImageRequest,
+    settings: &Settings,
+    imported_control_available: bool,
+    imported_available: bool,
+) -> Option<ImageRoute> {
     if zimage_control_available(request, settings) {
         Some(ImageRoute::ZImageControl)
     } else if zimage_base_control_available(request, settings) {
@@ -252,13 +257,13 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
         // additive) — turbo-on-Raw img2img is out of scope for this t2i story (sc-13883). The t2i
         // sibling of the `krea_edit_available` arm above.
         Some(ImageRoute::KreaTurboOnRaw)
-    } else if krea_imported_control_available(request, settings) {
+    } else if imported_control_available {
         // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch
         // rides the file-loaded imported DiT (the imported twin of the `KreaControl` arm above).
         // Checked BEFORE the plain imported arm so a pose set renders one pose-locked image per
         // pose instead of falling into per-image t2i (which would silently drop the poses).
         Some(ImageRoute::KreaImportedControl)
-    } else if krea_imported_available(request, settings) {
+    } else if imported_available {
         // An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
         // `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
         // assembly lane. A builtin Krea id never claims this (`resolve_imported_krea_dit` returns `None`
@@ -316,6 +321,70 @@ fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<Im
     } else {
         None
     }
+}
+
+/// Test-facing pure route probe. Production uses [`prepare_image_route`] so payload-selected File
+/// sources stay pinned from selection through dispatch instead of being resolved a second time after
+/// the async preamble.
+#[cfg(all(target_os = "macos", test))]
+fn resolve_image_route(request: &ImageRequest, settings: &Settings) -> Option<ImageRoute> {
+    resolve_image_route_with_imported_availability(
+        request,
+        settings,
+        krea_imported_control_available(request, settings),
+        krea_imported_available(request, settings),
+    )
+}
+
+#[cfg(target_os = "macos")]
+enum PreparedImageRoute {
+    Plain(ImageRoute),
+    KreaImported(Box<PreparedKreaImportedSources>),
+    KreaImportedControl(Box<PreparedKreaImportedControlSources>),
+}
+
+#[cfg(target_os = "macos")]
+impl PreparedImageRoute {
+    fn kind(&self) -> ImageRoute {
+        match self {
+            Self::Plain(route) => *route,
+            Self::KreaImported(_) => ImageRoute::KreaImported,
+            Self::KreaImportedControl(_) => ImageRoute::KreaImportedControl,
+        }
+    }
+}
+
+/// Resolve the production route and retain every payload-selected File token it owns. Selection is
+/// synchronous and fallible; the resulting route value survives all later awaits and is consumed by
+/// the matching handler.
+#[cfg(target_os = "macos")]
+fn prepare_image_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedImageRoute>> {
+    let imported_control = prepare_krea_imported_control_sources(request, settings)?;
+    let imported = if imported_control.is_none() {
+        prepare_krea_imported_sources(request, settings)?
+    } else {
+        None
+    };
+    let Some(kind) = resolve_image_route_with_imported_availability(
+        request,
+        settings,
+        imported_control.is_some(),
+        imported.is_some(),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(match kind {
+        ImageRoute::KreaImportedControl => PreparedImageRoute::KreaImportedControl(
+            Box::new(imported_control.expect("prepared imported-control route lost its sources")),
+        ),
+        ImageRoute::KreaImported => PreparedImageRoute::KreaImported(Box::new(
+            imported.expect("prepared imported route lost its sources"),
+        )),
+        route => PreparedImageRoute::Plain(route),
+    }))
 }
 
 #[cfg(target_os = "macos")]
@@ -516,7 +585,7 @@ enum CandleImageRoute {
 }
 
 /// Candle-routed image model ids that HAVE a bespoke worker strict-pose control lane — each is claimed
-/// by an `else if …_control_available(…)` arm in [`resolve_candle_image_route`] BEFORE the generic
+/// by an `else if …_control_available(…)` arm in [`prepare_candle_image_route`] BEFORE the generic
 /// txt2img arm, but only when its control base snapshot resolves locally. This is the SINGLE source for
 /// (a) the fall-through reject branch below (a wired family reaching the fall-through means its control
 /// base is absent → [`CandleImageRoute::PoseControlBaseMissing`], never silent txt2img) and (b) the
@@ -635,15 +704,41 @@ impl CandleImageRoute {
     }
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+enum PreparedCandleImageRoute {
+    Plain(CandleImageRoute),
+    KreaImported(Box<PreparedKreaImportedSources>),
+    ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
+    QwenImageComfyui(Box<qwen_comfyui_candle::ComfyuiQwenPaths>),
+    Flux2Comfyui(Box<flux2_comfyui_candle::ComfyuiFlux2Paths>),
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl PreparedCandleImageRoute {
+    fn kind(&self) -> CandleImageRoute {
+        match self {
+            Self::Plain(route) => *route,
+            Self::KreaImported(_) => CandleImageRoute::KreaImported,
+            Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
+            Self::QwenImageComfyui(_) => CandleImageRoute::QwenImageComfyui,
+            Self::Flux2Comfyui(_) => CandleImageRoute::Flux2Comfyui,
+        }
+    }
+}
+
 /// Run the candle image dispatch predicate ladder ONCE and return the [`CandleImageRoute`] (or `None`
 /// when candle is disabled / no candle engine matches → the job stubs). Mirrors the historical inline
 /// `else if settings.backend_candle_enabled && <predicate>` ladder EXACTLY — same predicate order,
 /// same `backend_candle_enabled` gating, same handler per family — so routing is byte-identical
 /// (sc-8828). Pure decision: no I/O, no generation.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn resolve_candle_image_route(
+fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
     settings: &Settings,
+    imported_available: bool,
+    zimage_comfyui_available: bool,
+    qwen_comfyui_available: bool,
+    flux2_comfyui_available: bool,
 ) -> Option<CandleImageRoute> {
     if !settings.backend_candle_enabled {
         return None;
@@ -724,21 +819,21 @@ fn resolve_candle_image_route(
         // for this t2i story (sc-13883). The candle twin of the MLX `resolve_image_route` `KreaTurboOnRaw`
         // arm; placed AFTER the edit lane, BEFORE the generic txt2img arm.
         Some(CandleImageRoute::KreaTurboOnRaw)
-    } else if krea_imported_available(request, settings) {
+    } else if imported_available {
         // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
         // this bespoke route must claim them before the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
     } else if sdxl_imported_available(request, settings) {
         Some(CandleImageRoute::SdxlImported)
-    } else if zimage_comfyui_available(request, settings) {
+    } else if zimage_comfyui_available {
         // In-place ComfyUI Z-Image base (sc-10668): an `external_base_*` id, so it matches no
         // `is_candle_engine` arm below — route it here off the forwarded `modelManifestEntry`.
         Some(CandleImageRoute::ZimageComfyui)
-    } else if qwen_comfyui_available(request, settings) {
+    } else if qwen_comfyui_available {
         // In-place ComfyUI Qwen-Image base (sc-10670): sibling of the Z-Image comfyui lane — an
         // `external_base_*` id routed off the forwarded row (family=="qwen-image", usable).
         Some(CandleImageRoute::QwenImageComfyui)
-    } else if flux2_comfyui_available(request, settings) {
+    } else if flux2_comfyui_available {
         // In-place ComfyUI FLUX.2-dev base (sc-10680): sibling of the Qwen-Image comfyui lane — an
         // `external_base_*` id routed off the forwarded row (family=="flux2", usable).
         Some(CandleImageRoute::Flux2Comfyui)
@@ -774,6 +869,75 @@ fn resolve_candle_image_route(
     } else {
         None
     }
+}
+
+/// Test-facing pure route probe. Production uses [`prepare_candle_image_route`] so imported File
+/// tokens remain owned across admission and dispatch.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle", test))]
+fn resolve_candle_image_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<CandleImageRoute> {
+    resolve_candle_image_route_with_prepared_availability(
+        request,
+        settings,
+        krea_imported_available(request, settings),
+        zimage_comfyui_candle::zimage_comfyui_available(request, settings),
+        qwen_comfyui_candle::qwen_comfyui_available(request, settings),
+        flux2_comfyui_candle::flux2_comfyui_available(request, settings),
+    )
+}
+
+/// Resolve a production candle route while retaining each payload-selected File token through every
+/// later await. Only the route that wins the existing predicate order consumes its prepared bundle.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn prepare_candle_image_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedCandleImageRoute>> {
+    if !settings.backend_candle_enabled {
+        return Ok(None);
+    }
+    let imported = prepare_krea_imported_sources(request, settings)?;
+    let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources(request, settings)?;
+    let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources(request, settings)?;
+    let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources(request, settings)?;
+    let Some(kind) = resolve_candle_image_route_with_prepared_availability(
+        request,
+        settings,
+        imported.is_some(),
+        zimage.is_some(),
+        qwen.is_some(),
+        flux2.is_some(),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(match kind {
+        CandleImageRoute::KreaImported => PreparedCandleImageRoute::KreaImported(
+            Box::new(imported.expect("prepared imported route lost its sources")),
+        ),
+        CandleImageRoute::ZimageComfyui => PreparedCandleImageRoute::ZimageComfyui(
+            Box::new(zimage.expect("prepared Z-Image route lost its sources")),
+        ),
+        CandleImageRoute::QwenImageComfyui => PreparedCandleImageRoute::QwenImageComfyui(
+            Box::new(qwen.expect("prepared Qwen route lost its sources")),
+        ),
+        CandleImageRoute::Flux2Comfyui => PreparedCandleImageRoute::Flux2Comfyui(
+            Box::new(flux2.expect("prepared FLUX.2 route lost its sources")),
+        ),
+        route => PreparedCandleImageRoute::Plain(route),
+    }))
+}
+
+/// Couples a route-owned File source bundle to the immutable generation plan without widening the
+/// uniform stream-handler signatures. The bundle is moved into the handler exactly once.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct PreparedFileDispatch<'a, Sources> {
+    plan: &'a ImagePlan,
+    sources: Sources,
 }
 
 /// How a native edit job batches its iterations (sc-8946 (F-144): renamed from `Flux2Grouping` and
@@ -6807,7 +6971,7 @@ async fn generate_stream(
 /// Whether `model` is served by the Candle backend's generic built-in image lane.
 ///
 /// The scheduler's generated catalog is the source of truth. `bernini_image` is the sole built-in
-/// exception: the scheduler routes it to Candle, but [`resolve_candle_image_route`] sends it through
+/// exception: the scheduler routes it to Candle, but [`prepare_candle_image_route`] sends it through
 /// the dedicated still-image Bernini lane before reaching this gate. Dynamic `external_base_*` ids
 /// are likewise claimed by manifest-driven bespoke routes and never appear in the built-in catalog.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

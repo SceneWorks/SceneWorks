@@ -321,15 +321,25 @@ pub(super) struct CachedCandleBaseFloorAdmission {
     model: String,
     lane: &'static str,
     gpu_id: String,
-    floor_gb: Option<f64>,
+    source_weight_bytes: u64,
     runtime: tokio::runtime::Handle,
 }
 
 impl CachedCandleBaseFloorAdmission {
-    /// Admit one cold load. `replacing_resident` is supplied atomically by the cache; reclaimable
-    /// credit is legal only when a different entry will actually be dropped immediately afterward.
-    pub(super) fn admit(self, replacing_resident: bool) -> WorkerResult<()> {
-        let Some(floor_gb) = self.floor_gb else {
+    /// Exact conservative source-weight bytes to bind to the generator if this admission succeeds.
+    /// The transient headroom added to the incoming floor is deliberately excluded: evicting a
+    /// resident generator cannot promise to reclaim that allowance.
+    pub(super) fn reclaimable_weight_bytes(&self) -> u64 {
+        self.source_weight_bytes
+    }
+
+    /// Admit one cold load. `resident_reclaimable_weight_bytes` comes from the exact different-key
+    /// cache entry that remains alive until this gate succeeds. A historical process-global peak is
+    /// not valid credit: after large -> small, it can describe memory already returned to the driver.
+    pub(super) fn admit(self, resident_reclaimable_weight_bytes: u64) -> WorkerResult<()> {
+        let Some(floor_gb) = (self.source_weight_bytes > 0).then(|| {
+            self.source_weight_bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB
+        }) else {
             tracing::warn!(
                 model = self.model,
                 lane = self.lane,
@@ -343,22 +353,16 @@ impl CachedCandleBaseFloorAdmission {
                 .block_on(crate::gpu::nvidia_vram_budget_gb(&self.gpu_id)),
             crate::vram_gate::cuda_vram_cap_gb(),
         );
-        let reclaimable_gb = if replacing_resident {
-            crate::vram_gate::reclaimable_pool_gb(&self.gpu_id)
-        } else {
-            0.0
-        };
-        let budget =
-            raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
+        let reclaimable_gb = resident_reclaimable_weight_bytes as f64 / BYTES_PER_GIB;
+        let budget = cached_floor_budget(raw_budget, resident_reclaimable_weight_bytes);
         let needed = Some(floor_gb);
         match crate::vram_gate::load_plan(needed, None, budget, false) {
             LoadPlan::Resident => {
-                crate::vram_gate::note_loaded_peak(&self.gpu_id, floor_gb);
                 tracing::info!(
                     model = self.model,
                     lane = self.lane,
                     floor_gb,
-                    replacing_resident,
+                    replacing_resident = resident_reclaimable_weight_bytes > 0,
                     reclaimable_gb,
                     "candle cached-base admission: cold external checkpoint admitted on its on-disk \
                      weights floor; activation peaks remain unmeasured (sc-18306)"
@@ -395,9 +399,17 @@ pub(super) fn prepare_cached_candle_base_floor(
         model: model.to_owned(),
         lane,
         gpu_id: settings.gpu_id.clone(),
-        floor_gb: (bytes > 0).then(|| bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB),
+        source_weight_bytes: bytes,
         runtime: tokio::runtime::Handle::current(),
     })
+}
+
+fn cached_floor_budget(
+    raw_budget: Option<crate::vram_gate::VramBudget>,
+    resident_reclaimable_weight_bytes: u64,
+) -> Option<crate::vram_gate::VramBudget> {
+    let reclaimable_gb = resident_reclaimable_weight_bytes as f64 / BYTES_PER_GIB;
+    raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb))
 }
 
 fn prepared_floor_weight_bytes(
@@ -508,6 +520,34 @@ mod tests {
             error.to_string().contains("source validation failed")
                 || error.to_string().contains("changed after load"),
             "unexpected stale-source error: {error}"
+        );
+    }
+
+    #[test]
+    fn cached_floor_credits_only_the_exact_current_resident_source_bytes() {
+        // Large -> small -> medium on a 24 GiB card. Raw free is 4 GiB while the current small
+        // resident occupies a conservative 4 GiB of source weights. A stale 20 GiB historical peak
+        // would clamp the budget to 24 GiB and admit the 12 GiB incoming floor even though evicting
+        // the small resident can produce only 8 GiB. Cache-bound credit must therefore reject.
+        let raw = crate::vram_gate::VramBudget {
+            free_gb: 4.0,
+            total_gb: 24.0,
+        };
+        let current_small_bytes = (4.0 * BYTES_PER_GIB) as u64;
+        let exact = cached_floor_budget(Some(raw), current_small_bytes).expect("budget");
+        assert_eq!(exact.free_gb, 8.0);
+        assert_eq!(
+            crate::vram_gate::load_plan(Some(12.0), None, Some(exact), false),
+            LoadPlan::Reject,
+            "the medium load must not receive credit for an older large resident"
+        );
+
+        let stale_historical = crate::vram_gate::with_reclaimable(raw, 20.0);
+        assert_eq!(stale_historical.free_gb, 24.0);
+        assert_eq!(
+            crate::vram_gate::load_plan(Some(12.0), None, Some(stale_historical), false),
+            LoadPlan::Resident,
+            "precondition: the stale global high-water would have over-admitted"
         );
     }
 

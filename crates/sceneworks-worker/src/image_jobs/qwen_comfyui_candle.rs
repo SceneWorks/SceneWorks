@@ -2,8 +2,9 @@ use super::huggingface_snapshot_dir;
 use super::{
     consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
-    ApiClient, GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, LoadSpec, Path, PathBuf, Settings, Value, WeightsSource, WorkerError, WorkerResult,
+    ApiClient, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot, JsonObject,
+    LoadSpec, Path, PathBuf, PreparedFileDispatch, Settings, Value, WeightsSource, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -48,7 +49,7 @@ const QWEN_COMFYUI_SNAPSHOT_TIERS: &[&str] = &["bf16", "q8", "q4"];
 
 /// The in-place ComfyUI DiT file + the resident snapshot tier dir supplying the other components,
 /// plus the optional in-place tree VAE (sc-10830).
-struct ComfyuiQwenPaths {
+pub(super) struct ComfyuiQwenPaths {
     /// ComfyUI Qwen-Image DiT (`diffusion_models/qwen_image_*_fp8_e4m3fn.safetensors`), read in place.
     transformer: gen_core::PinnedWeightsFile,
     /// A resident `SceneWorks/qwen-image-mlx` tier dir (`text_encoder/ vae/ tokenizer/tokenizer.json`).
@@ -59,6 +60,16 @@ struct ComfyuiQwenPaths {
     vae: Option<gen_core::PinnedWeightsFile>,
 }
 
+#[cfg(test)]
+impl ComfyuiQwenPaths {
+    /// Exact payload-selected File tokens retained by the production route, in provider-spec order.
+    pub(super) fn prepared_file_pins(&self) -> Vec<&gen_core::PinnedWeightsFile> {
+        std::iter::once(&self.transformer)
+            .chain(self.vae.iter())
+            .collect()
+    }
+}
+
 /// Resolve the ComfyUI Qwen-Image DiT path + the resident snapshot tier from the forwarded
 /// `external_base_*` row. Returns `Ok(None)` when this is not a runnable ComfyUI Qwen-Image job (wrong
 /// family, not marked usable, no transformer component, or our Qwen-Image snapshot is not resident), so
@@ -66,7 +77,7 @@ struct ComfyuiQwenPaths {
 /// `normalize_app_managed_model_file_path`: its canonical target must stay within a declared root while
 /// the lexical entry survives for lstat-pinned re-opening (sc-18306). The snapshot dir is resolved from
 /// a fixed repo constant + our own cache (never payload-derived), so it needs no confinement.
-fn resolve_qwen_comfyui_paths(
+pub(super) fn resolve_qwen_comfyui_paths(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiQwenPaths>> {
@@ -140,11 +151,25 @@ fn resolve_qwen_comfyui_paths(
 /// True when this is a candle-runnable in-place ComfyUI Qwen-Image txt2img job: an `external_base_*`
 /// model whose forwarded row is a usable qwen-image with a transformer component + a resident snapshot,
 /// no source image / pose (txt2img only). Mirrors the Z-Image comfyui availability predicate.
+#[cfg(test)]
 pub(super) fn qwen_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model.starts_with("external_base_")
-        && request.mode != "edit_image"
-        && pose_entries(request).is_empty()
-        && matches!(resolve_qwen_comfyui_paths(request, settings), Ok(Some(_)))
+    matches!(prepare_qwen_comfyui_sources(request, settings), Ok(Some(_)))
+}
+
+/// Resolve and pin the complete source bundle for a production dispatch. The returned bundle is
+/// retained across the async preamble and consumed by the handler, closing the selection-to-load
+/// retarget window for the payload-selected transformer entry.
+pub(super) fn prepare_qwen_comfyui_sources(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiQwenPaths>> {
+    if !request.model.starts_with("external_base_")
+        || request.mode == "edit_image"
+        || !pose_entries(request).is_empty()
+    {
+        return Ok(None);
+    }
+    resolve_qwen_comfyui_paths(request, settings)
 }
 
 /// Flat telemetry recorded on candle ComfyUI Qwen-Image assets. Qwen-Image base is non-distilled, so
@@ -172,6 +197,36 @@ fn qwen_comfyui_raw_settings(
     raw
 }
 
+/// Finalize the route-owned File tokens on the exact provider spec and retain the structural snapshot
+/// facts admission needs. This is the production selection-to-load boundary used by regression tests.
+pub(super) fn prepare_qwen_comfyui_load_spec(
+    paths: ComfyuiQwenPaths,
+) -> WorkerResult<(LoadSpec, PathBuf, bool)> {
+    let snapshot_dir = paths.snapshot_dir;
+    let has_imported_vae = paths.vae.is_some();
+    let mut spec = LoadSpec::new(WeightsSource::File(
+        paths.transformer.loader_path().to_path_buf(),
+    ))
+    .with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(snapshot_dir.clone()),
+    );
+    if let Some(vae) = paths.vae.as_ref() {
+        spec = spec.with_component(
+            gen_core::COMFYUI_VAE_COMPONENT,
+            WeightsSource::File(vae.loader_path().to_path_buf()),
+        );
+    }
+    let mut pins = vec![paths.transformer];
+    pins.extend(paths.vae);
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        pins,
+        "ComfyUI Qwen-Image source preparation failed",
+    )?;
+    Ok((spec, snapshot_dir, has_imported_vae))
+}
+
 /// Read the requested true-CFG guidance scale from `advanced.guidanceScale` (JSON number or numeric
 /// string). `None` ⇒ the candle-gen Qwen-Image engine default (`DEFAULT_GUIDANCE`). The external-base
 /// row is in no `MODEL_TABLE`, so `resolve_guidance` (which needs a `ResolvedModel`) does not apply —
@@ -195,44 +250,23 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    plan: &ImagePlan,
+    dispatch: PreparedFileDispatch<'_, ComfyuiQwenPaths>,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let PreparedFileDispatch {
+        plan,
+        sources: paths,
+    } = dispatch;
     let request = &plan.request;
-    let paths = resolve_qwen_comfyui_paths(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "ComfyUI Qwen-Image components could not be resolved (family/usable/transformer/snapshot)"
-                .to_owned(),
-        )
-    })?;
-    let mut spec = LoadSpec::new(WeightsSource::File(
-        paths.transformer.loader_path().to_path_buf(),
-    ))
-    .with_component(
-        gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(paths.snapshot_dir.clone()),
-    );
-    if let Some(vae) = paths.vae.as_ref() {
-        spec = spec.with_component(
-            gen_core::COMFYUI_VAE_COMPONENT,
-            WeightsSource::File(vae.loader_path().to_path_buf()),
-        );
-    }
-    let mut pins = vec![paths.transformer];
-    pins.extend(paths.vae.clone());
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        pins,
-        "ComfyUI Qwen-Image source preparation failed",
-    )?;
+    let (spec, snapshot_dir, has_imported_vae) = prepare_qwen_comfyui_load_spec(paths)?;
     // Price finalized File tokens plus only the companion directories the provider consumes. The
     // snapshot transformer is replaced; an imported VAE also replaces the snapshot VAE.
-    let snapshot_text_encoder = paths.snapshot_dir.join("text_encoder");
-    let snapshot_vae = paths.snapshot_dir.join("vae");
+    let snapshot_text_encoder = snapshot_dir.join("text_encoder");
+    let snapshot_vae = snapshot_dir.join("vae");
     let mut companion_paths = vec![snapshot_text_encoder];
-    if paths.vae.is_none() {
+    if !has_imported_vae {
         companion_paths.push(snapshot_vae);
     }
     let companion_refs = companion_paths
@@ -262,6 +296,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+    let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
 
     let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
@@ -269,7 +304,10 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
         0,
         spec,
         "ComfyUI Qwen-Image load failed".to_owned(),
-        move |replacing_resident| cold_admission.admit(replacing_resident),
+        incoming_reclaimable_weight_bytes,
+        move |resident_reclaimable_weight_bytes| {
+            cold_admission.admit(resident_reclaimable_weight_bytes)
+        },
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,

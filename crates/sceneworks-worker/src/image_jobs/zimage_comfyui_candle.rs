@@ -2,8 +2,9 @@ use super::huggingface_snapshot_dir;
 use super::{
     consume_gen_events, drive_gen_items, pose_entries, prepare_cached_candle_base_floor,
     resolve_advanced_or_manifest_u32, resolve_seed, start_cached_gen_stream_after_cold_admission,
-    ApiClient, GenerationOutput, GenerationRequest, ImagePlan, ImageRequest, JobSnapshot,
-    JsonObject, LoadSpec, Path, PathBuf, Settings, Value, WeightsSource, WorkerError, WorkerResult,
+    ApiClient, GenerationOutput, GenerationRequest, ImageRequest, JobSnapshot, JsonObject,
+    LoadSpec, Path, PathBuf, PreparedFileDispatch, Settings, Value, WeightsSource, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -33,11 +34,19 @@ const ZIMAGE_COMFYUI_DEFAULT_STEPS: u32 = 8;
 const ZIMAGE_COMFYUI_TOKENIZER_REPO: &str = "Tongyi-MAI/Z-Image-Turbo";
 
 /// The three in-place ComfyUI component files + our tokenizer dir, all confined.
-struct ComfyuiZImagePaths {
+pub(super) struct ComfyuiZImagePaths {
     transformer: gen_core::PinnedWeightsFile,
     text_encoder: gen_core::PinnedWeightsFile,
     vae: gen_core::PinnedWeightsFile,
     tokenizer_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl ComfyuiZImagePaths {
+    /// Exact payload-selected File tokens retained by the production route, in provider-spec order.
+    pub(super) fn prepared_file_pins(&self) -> [&gen_core::PinnedWeightsFile; 3] {
+        [&self.transformer, &self.text_encoder, &self.vae]
+    }
 }
 
 /// Resolve the ComfyUI Z-Image component paths from the forwarded `external_base_*` row. Returns
@@ -46,7 +55,7 @@ struct ComfyuiZImagePaths {
 /// path is confined by `normalize_app_managed_model_file_path` (widened to admit the operator's
 /// external roots, sc-10668) — a payload can never point a component outside a declared root, while
 /// the lexical path is retained for lstat-pinned re-opening (sc-18306).
-fn resolve_zimage_comfyui_paths(
+pub(super) fn resolve_zimage_comfyui_paths(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiZImagePaths>> {
@@ -107,11 +116,28 @@ fn resolve_zimage_comfyui_paths(
 /// True when this is a candle-runnable in-place ComfyUI Z-Image txt2img job: an `external_base_*` model
 /// whose forwarded row is a usable z-image with all three component paths, no source image / pose (the
 /// candle Z-Image comfyui lane is txt2img only). Mirrors the edit/control availability predicates.
+#[cfg(test)]
 pub(super) fn zimage_comfyui_available(request: &ImageRequest, settings: &Settings) -> bool {
-    request.model.starts_with("external_base_")
-        && request.mode != "edit_image"
-        && pose_entries(request).is_empty()
-        && matches!(resolve_zimage_comfyui_paths(request, settings), Ok(Some(_)))
+    matches!(
+        prepare_zimage_comfyui_sources(request, settings),
+        Ok(Some(_))
+    )
+}
+
+/// Resolve and pin the complete source bundle for a production dispatch. Unlike the boolean routing
+/// probe, the caller keeps this value alive across the async job preamble and moves it into the
+/// handler, so the lexical component entries cannot be re-selected after admission.
+pub(super) fn prepare_zimage_comfyui_sources(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiZImagePaths>> {
+    if !request.model.starts_with("external_base_")
+        || request.mode == "edit_image"
+        || !pose_entries(request).is_empty()
+    {
+        return Ok(None);
+    }
+    resolve_zimage_comfyui_paths(request, settings)
 }
 
 /// Flat telemetry recorded on candle ComfyUI Z-Image assets. No guidance — Z-Image-Turbo is distilled.
@@ -131,31 +157,17 @@ fn zimage_comfyui_raw_settings(request: &ImageRequest, steps: u32) -> JsonObject
     raw
 }
 
-/// Real candle in-place ComfyUI Z-Image txt2img generation through the registered `z_image_turbo`
-/// provider. `request.count` images, each its own seed. Z-Image-Turbo is distilled (no CFG / negative
-/// prompt).
-pub(super) async fn generate_candle_zimage_comfyui_stream(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-    plan: &ImagePlan,
-    project_path: &Path,
-    backend: &str,
-    asset_writes: &mut Vec<Value>,
-) -> WorkerResult<()> {
-    let request = &plan.request;
-    let paths = resolve_zimage_comfyui_paths(request, settings)?.ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "ComfyUI Z-Image components could not be resolved (family/usable/components)"
-                .to_owned(),
-        )
-    })?;
+/// Finalize the route-owned File tokens on the exact provider spec. Kept separate from generation so
+/// selection-to-dispatch retarget tests exercise the same boundary as production.
+pub(super) fn prepare_zimage_comfyui_load_spec(
+    paths: ComfyuiZImagePaths,
+) -> WorkerResult<LoadSpec> {
     let mut spec = LoadSpec::new(WeightsSource::File(
         paths.transformer.loader_path().to_path_buf(),
     ))
     .with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(paths.tokenizer_dir.clone()),
+        WeightsSource::Dir(paths.tokenizer_dir),
     )
     .with_component(
         gen_core::COMFYUI_TEXT_ENCODER_COMPONENT,
@@ -170,6 +182,27 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         [paths.transformer, paths.text_encoder, paths.vae],
         "ComfyUI Z-Image source preparation failed",
     )?;
+    Ok(spec)
+}
+
+/// Real candle in-place ComfyUI Z-Image txt2img generation through the registered `z_image_turbo`
+/// provider. `request.count` images, each its own seed. Z-Image-Turbo is distilled (no CFG / negative
+/// prompt).
+pub(super) async fn generate_candle_zimage_comfyui_stream(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    dispatch: PreparedFileDispatch<'_, ComfyuiZImagePaths>,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+) -> WorkerResult<()> {
+    let PreparedFileDispatch {
+        plan,
+        sources: paths,
+    } = dispatch;
+    let request = &plan.request;
+    let spec = prepare_zimage_comfyui_load_spec(paths)?;
     // The tokenizer snapshot is structural; all weight files are priced from finalized tokens.
     let cold_admission =
         prepare_cached_candle_base_floor(&request.model, "ComfyUI Z-Image", settings, &spec, &[])?;
@@ -184,6 +217,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+    let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
 
     let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
         job.id.clone(),
@@ -191,7 +225,10 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         0,
         spec,
         "ComfyUI Z-Image load failed".to_owned(),
-        move |replacing_resident| cold_admission.admit(replacing_resident),
+        incoming_reclaimable_weight_bytes,
+        move |resident_reclaimable_weight_bytes| {
+            cold_admission.admit(resident_reclaimable_weight_bytes)
+        },
         move |model, tx, cancel| {
             drive_gen_items(
                 tx,

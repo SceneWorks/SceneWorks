@@ -258,6 +258,21 @@ fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(Strin
     Ok((repo, file))
 }
 
+/// Extract the payload's lexical `advanced.controlWeights.path` without resolving it. Imported File
+/// routes hand this exact entry to `pin_app_managed_model_file`; canonicalizing first would erase the
+/// symlink/path-component identity the prepared token must retain (sc-18306).
+fn krea_control_payload_overlay_raw_path(request: &ImageRequest) -> Option<PathBuf> {
+    request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object)
+        .and_then(|cw| cw.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Confine a payload-supplied `advanced.controlWeights.path` to an app-managed root (sc-11168 / F-006).
 /// The API writes this key for a studio-trained / registered LOCAL overlay (B4/sc-10165), but the value
 /// arrives untrusted across the LAN boundary (epic 4484), so — like every other on-disk model input — it
@@ -270,20 +285,12 @@ fn krea_control_payload_overlay_path(
     settings: &Settings,
     request: &ImageRequest,
 ) -> WorkerResult<Option<PathBuf>> {
-    let Some(path) = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object)
-        .and_then(|cw| cw.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(path) = krea_control_payload_overlay_raw_path(request) else {
         return Ok(None);
     };
     Ok(Some(crate::paths::normalize_app_managed_model_path(
         settings,
-        path,
+        path.to_string_lossy().as_ref(),
         "Krea control overlay",
     )?))
 }
