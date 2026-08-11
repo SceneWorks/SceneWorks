@@ -3438,6 +3438,9 @@ function recoverUnlocked(
   if (state.phase === "planned") {
     refuse("planned state has no partial transaction; start with bootstrap --apply", "NOTHING_TO_RECOVER");
   }
+  const prePolicyRefTopology = liveCreateRefTopology(state, github);
+  assertRecordedRefConsistency(state, prePolicyRefTopology.exact);
+  assertLiveCreateRefsOwned(state, prePolicyRefTopology.exact);
   const policies = recoverPolicies(
     statePath,
     state,

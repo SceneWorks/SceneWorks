@@ -2275,6 +2275,47 @@ test("ruleset failure persists a policy-only partial and recover completes polic
   );
 });
 
+test("policy-pair recovery refuses external refs before creating the missing policy", (t) => {
+  const f = fixture(t);
+  const planned = planFixture(f);
+  f.github.failRulesetFor = "inference";
+  assert.throws(
+    () => bootstrap(f.statePath, { apply: true }, { github: f.github, git: f.git, clock }),
+    /injected ruleset failure/,
+  );
+  const partial = loadState(f.statePath);
+  assert.ok(partial.policies.sceneworks.exactQueue.id);
+  assert.equal(partial.policies.inference.exactQueue.id, null);
+  assert.deepEqual(partial.transaction.remoteMutations, []);
+
+  for (const key of Object.keys(REPOSITORIES)) {
+    setRemoteFeatureRef(
+      f,
+      key,
+      planned.featureBranch,
+      planned.repositories[key].plannedMainSha,
+    );
+  }
+  f.github.failRulesetFor = null;
+  const mutationsBeforeRecovery = structuredClone(f.github.mutations);
+  assert.throws(
+    () => recover(f.statePath, { complete: true }, { github: f.github, git: f.git, clock }),
+    /no matching state-owned create-ref intent or record/,
+  );
+  assert.deepEqual(
+    f.github.mutations,
+    mutationsBeforeRecovery,
+    "ref ownership refusal preceded missing-policy creation",
+  );
+  const refused = loadState(f.statePath);
+  assert.equal(refused.policies.inference.exactQueue.id, null);
+  assert.equal(
+    refused.transaction.policyMutations.some(({ action }) => action === "recover-create-ruleset"),
+    false,
+  );
+  assert.deepEqual(refused.transaction.remoteMutations, []);
+});
+
 test("the first exact-queue creation failure leaves a journal-owned recoverable transaction", (t) => {
   const f = fixture(t);
   const planned = planFixture(f);
