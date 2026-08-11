@@ -2505,8 +2505,8 @@ async function currentManifestCalibrationFixture({
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
 /// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
 /// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
-/// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: SC-18353 now supplies
-/// their real production-deferred current captures.
+/// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: their physical source
+/// sessions bind the superseded closure and cannot truthfully be made current by a synthetic fixture.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
 const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({

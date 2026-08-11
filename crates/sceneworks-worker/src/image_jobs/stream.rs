@@ -193,7 +193,34 @@ where
 /// Windows/CUDA candle lane shares this loop but has no `mlx_rs` dependency.
 #[cfg(target_os = "macos")]
 fn release_gen_cache_between_items() {
+    #[cfg(test)]
+    if SUPPRESS_TEST_MLX_CACHE_RELEASE.with(std::cell::Cell::get) {
+        return;
+    }
     mlx_rs::memory::clear_cache();
+}
+
+#[cfg(all(test, target_os = "macos"))]
+std::thread_local! {
+    /// Headless unit-test escape hatch for drivers whose provider work is fully faked. The real
+    /// allocator call hard-exits when no Metal device exists, so those tests suppress only this
+    /// ancillary release while still exercising the exact production item loop. Hardware tests do
+    /// not enter this scope and continue to verify the real `clear_cache` behavior.
+    static SUPPRESS_TEST_MLX_CACHE_RELEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SUPPRESS_TEST_MLX_CACHE_RELEASE.with(|suppressed| suppressed.set(self.0));
+        }
+    }
+
+    let previous = SUPPRESS_TEST_MLX_CACHE_RELEASE.with(|suppressed| suppressed.replace(true));
+    let _restore = Restore(previous);
+    run()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -280,14 +307,100 @@ where
         adapter_count,
         spec,
         load_error_context,
-        move |generator, _cache_state, _load_policy, _external_committed_bytes, tx, cancel| {
+        move |generator,
+              _cache_state,
+              _loaded_policy,
+              _requested_policy,
+              _external_committed_bytes,
+              tx,
+              cancel| {
             drive(generator, tx, cancel)
         },
     )
 }
 
-/// Cached stream seam that exposes cold/warm state and the actual cold-load residency policy to the
-/// request callback. Geometry and request strategy remain absent from the generator cache key.
+/// The reclaimable-byte estimate and the gate that consumes resident-entry credit for one cold load.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+struct ColdLoadAdmission<A> {
+    incoming_reclaimable_weight_bytes: u64,
+    admit: A,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl<A> ColdLoadAdmission<A> {
+    fn new(incoming_reclaimable_weight_bytes: u64, admit: A) -> Self {
+        Self {
+            incoming_reclaimable_weight_bytes,
+            admit,
+        }
+    }
+}
+
+/// Cached stream whose pre-load admission belongs to the cache miss rather than the route preamble.
+/// The admission closure is invoked by the cache loader only for a cold/different-key load; an exact
+/// warm hit goes straight to `drive` without re-gating or evicting itself.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn start_cached_gen_stream_after_cold_admission<A, D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    cold_admission: ColdLoadAdmission<A>,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    A: FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    D: FnOnce(&dyn Generator, tokio::sync::mpsc::Sender<GenEvent>, CancelFlag) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    let ColdLoadAdmission {
+        incoming_reclaimable_weight_bytes,
+        admit: cold_admission,
+    } = cold_admission;
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+    let blocking_cancel = cancel.clone();
+    let blocking = tokio::spawn(async move {
+        emit_load_event(
+            "image_pipeline_load_start",
+            &job_id,
+            engine_id,
+            adapter_count,
+        );
+        crate::generator_cache::with_cached_generator_for_request_after_cold_admission(
+            engine_id,
+            spec,
+            load_error_context,
+            incoming_reclaimable_weight_bytes,
+            cold_admission,
+            move |generator,
+                  _cache_state,
+                  _loaded_policy,
+                  _requested_policy,
+                  _external_committed_bytes| {
+                emit_load_event(
+                    "image_pipeline_load_complete",
+                    &job_id,
+                    engine_id,
+                    adapter_count,
+                );
+                drive(generator, tx, blocking_cancel)
+            },
+        )
+        .await
+    });
+    (cancel, rx, blocking)
+}
+
+/// Cached stream seam that exposes cold/warm state, the actual cold-load execution policy, and the
+/// current request's policy intent to the callback. Geometry and request strategy remain absent from
+/// the generator load identity.
 fn start_cached_gen_stream_with_request_state<D>(
     job_id: String,
     engine_id: &'static str,
@@ -304,7 +417,8 @@ where
     D: FnOnce(
             &dyn Generator,
             gen_core::MemoryCacheState,
-            gen_core::OffloadPolicy,
+            crate::generator_cache::ExecutionPolicy,
+            crate::generator_cache::ExecutionPolicy,
             u64,
             tokio::sync::mpsc::Sender<GenEvent>,
             CancelFlag,
@@ -326,7 +440,11 @@ where
             engine_id,
             spec,
             load_error_context,
-            move |generator, cache_state, load_policy, external_committed_bytes| {
+            move |generator,
+                  cache_state,
+                  loaded_policy,
+                  requested_policy,
+                  external_committed_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
@@ -336,7 +454,8 @@ where
                 drive(
                     generator,
                     cache_state,
-                    load_policy,
+                    loaded_policy,
+                    requested_policy,
                     external_committed_bytes,
                     tx,
                     blocking_cancel,

@@ -188,6 +188,10 @@ pub enum LatentTemporalLawFact {
     None,
     #[serde(rename = "causal-4x")]
     Causal4x,
+    #[serde(rename = "causal-6x")]
+    Causal6x,
+    #[serde(rename = "causal-8x")]
+    Causal8x,
 }
 
 /// Stable normalization identity at the denoiser-to-decoder seam.
@@ -243,6 +247,8 @@ impl From<&gen_core::LatentSpace> for LatentSpaceFact {
         let temporal_law = match space.temporal_law {
             gen_core::LatentTemporalLaw::None => LatentTemporalLawFact::None,
             gen_core::LatentTemporalLaw::Causal4x => LatentTemporalLawFact::Causal4x,
+            gen_core::LatentTemporalLaw::Causal6x => LatentTemporalLawFact::Causal6x,
+            gen_core::LatentTemporalLaw::Causal8x => LatentTemporalLawFact::Causal8x,
         };
         let normalization = match space.normalization {
             gen_core::LatentNormalization::Identity => LatentNormalizationFact::Identity,
@@ -1006,10 +1012,14 @@ mod tests {
         wan.denoiser_output_latent_space = Some(&gen_core::WAN_Z16_VIDEO_LATENT_SPACE);
         let mut flux2 = descriptor("flux2", "mlx", true);
         flux2.denoiser_output_latent_space = Some(&gen_core::FLUX2_PACKED_LATENT_SPACE);
+        let mut mochi = descriptor("mochi", "mlx", false);
+        mochi.denoiser_output_latent_space = Some(&gen_core::MOCHI_VIDEO_LATENT_SPACE);
+        let mut ltx = descriptor("ltx", "mlx", false);
+        ltx.denoiser_output_latent_space = Some(&gen_core::LTX_VIDEO_LATENT_SPACE);
         let unknown = descriptor("unknown", "mlx", false);
 
         let facts = facts_from_descriptors(
-            &[qwen, wan, flux2, unknown],
+            &[qwen, wan, flux2, mochi, ltx, unknown],
             "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "cargo run …",
         )
@@ -1034,6 +1044,14 @@ mod tests {
         assert_eq!(qwen["patchLayout"]["kind"], "unpacked");
         assert_eq!(qwen["temporalLaw"], "none");
         assert_eq!(wan["temporalLaw"], "causal-4x");
+        assert_eq!(
+            engine("mochi")["denoiserOutputLatentSpace"]["temporalLaw"],
+            "causal-6x"
+        );
+        assert_eq!(
+            engine("ltx")["denoiserOutputLatentSpace"]["temporalLaw"],
+            "causal-8x"
+        );
         assert_eq!(qwen["normalization"], wan["normalization"]);
         assert!(qwen["normalization"]["contentHash"]
             .as_str()
