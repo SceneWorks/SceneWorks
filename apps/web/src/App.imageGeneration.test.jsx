@@ -1548,7 +1548,7 @@ describe("SceneWorks app shell", () => {
     );
   });
 
-  it("surfaces the FLUX.2-dev Enhance prompt toggle (ui.promptEnhance) and submits advanced.enhancePrompt", async () => {
+  it("surfaces the FLUX.2-dev Enhance prompt toggle on Candle base and submits advanced.enhancePrompt", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -1592,7 +1592,7 @@ describe("SceneWorks app shell", () => {
             },
           ],
           latestAssets: [],
-          launchRequest: { id: "launch-flux2dev", view: "Image", characterId: "char-1", referenceAssetId: "ref-1", mode: "character_image" },
+          launchRequest: { id: "launch-flux2dev", view: "Image", mode: "text_to_image" },
           loras: [],
           onPreview: () => {},
           purgeAsset: () => {},

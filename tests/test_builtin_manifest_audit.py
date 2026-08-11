@@ -742,8 +742,9 @@ def test_measured_memory_rows_declare_their_workload_geometry():
     """sc-16020: geometry is data, not a prose assumption.
 
     The counts were derived from the live catalog when the field landed. Update them when
-    adding/removing measured rows; the universal assertions are what prevent a new row from
-    silently escaping the normalization contract.
+    adding/removing rows; the universal assertions are what prevent a new row from silently
+    escaping the normalization contract or an unmeasured tier gate from presenting itself as a
+    calibrated measurement.
     """
     manifest = _load_builtin_models_manifest()
     mlx_rows = []
@@ -760,11 +761,36 @@ def test_measured_memory_rows_declare_their_workload_geometry():
     assert len(mlx_rows) == 16
     assert len(candle_rows) == 36
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
-    image_rows = [row for row in candle_rows if row[0] != "scail2_14b"]
-    assert all(row[1].get("vramMeasuredPixels") == 1024 * 1024 for row in image_rows), image_rows
-    scail = [row for row in candle_rows if row[0] == "scail2_14b"]
+    assert all(isinstance(row[1].get("measured"), bool) for row in candle_rows), candle_rows
+
+    measured_rows = [row for row in candle_rows if row[1]["measured"]]
+    unmeasured_rows = [row for row in candle_rows if not row[1]["measured"]]
+    assert len(measured_rows) == 24
+    assert len(unmeasured_rows) == 12
+
+    measured_image_rows = [row for row in measured_rows if row[0] != "scail2_14b"]
+    assert all(
+        row[1].get("vramMeasuredPixels") == 1024 * 1024
+        for row in measured_image_rows
+    ), measured_image_rows
+    scail = [row for row in measured_rows if row[0] == "scail2_14b"]
     assert len(scail) == 1
     assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
+
+    # Unmeasured rows still declare the geometry of their estimate or conservative gate, but they
+    # do not enter the calibrated 1024² set. FLUX.2-dev is deliberately the sole 256² gate: its
+    # durable runs establish a safe high-water, not a 1024² calibration.
+    non_calibration_geometry = [
+        (model_id, candle["vramMeasuredPixels"])
+        for model_id, candle in unmeasured_rows
+        if candle["vramMeasuredPixels"] != 1024 * 1024
+    ]
+    assert non_calibration_geometry == [("flux2_dev", 256 * 256)]
+    flux2_dev = next(
+        candle for model_id, candle in unmeasured_rows if model_id == "flux2_dev"
+    )
+    assert flux2_dev["measured"] is False
+    assert flux2_dev["vramGbByTier"] == {"q4": 42.7, "q8": 70.8}
 
 
 def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
@@ -835,6 +861,12 @@ def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
     assert any(
         error.validator == "required"
         and "vramMeasuredPixels" in error.validator_value
+        and list(error.absolute_path)[-1:] == ["candle"]
+        for error in candle_errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]
+    assert any(
+        error.validator == "required"
+        and "measured" in error.validator_value
         and list(error.absolute_path)[-1:] == ["candle"]
         for error in candle_errors
     ), [(error.validator, list(error.absolute_path), error.message) for error in candle_errors]

@@ -340,6 +340,7 @@ fn flux2_edit_generate_one(
     image_guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
     enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -366,7 +367,7 @@ fn flux2_edit_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    enhance.apply(&mut request);
+    enhance.apply(&mut request, prompt_enhancement);
     let memory_context = if use_provider_memory_safety {
         let contract = generator.memory_strategy_contract().ok_or_else(|| {
             WorkerError::Engine(
@@ -555,7 +556,7 @@ async fn generate_flux2_edit_stream(
     let adapter_count = adapters.len();
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
-    let enhance = PromptEnhance::from_advanced(&request.advanced);
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     let spec = load_spec(weights_dir, quant, adapters, None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
@@ -574,10 +575,10 @@ async fn generate_flux2_edit_stream(
                 }
                 _ => None,
             };
-            drive_gen_items_scored(
+            drive_gen_items_scored_reported(
                 tx,
                 seeds.into_iter().zip(prompts),
-                move |index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     // Pose tier: pair this pose's DWPose whole-body skeleton (body + hands
                     // 21x2 + face 68 when the pose carries them — sc-6702) with the reference
                     // as a `[skeleton, reference]` multi-image set; else the plain reference
@@ -623,6 +624,7 @@ async fn generate_flux2_edit_stream(
                         image_guidance,
                         conditioning,
                         &enhance,
+                        prompt_enhancement.for_prompt(&prompt),
                         preview,
                         &cancel,
                         on_progress,

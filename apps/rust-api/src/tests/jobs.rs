@@ -934,6 +934,389 @@ async fn create_image_job_rejects_oversized_advanced_object() {
 }
 
 #[tokio::test]
+async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let body = |model: &str, advanced: Value| {
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "model": model,
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": advanced,
+        })
+    };
+
+    let (status, initial) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        body(
+            "flux2_dev",
+            json!({
+                "enhancePrompt": true,
+                "enhanceTemperature": 0.2,
+                "enhanceMaxTokens": 2048,
+            }),
+        ),
+    )
+    .await;
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    assert_eq!(status, StatusCode::CREATED, "{initial}");
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{initial}");
+        assert!(initial["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("native MLX or Candle")));
+    }
+
+    for (advanced, detail) in [
+        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": true, "enhanceTemperature": 2.01 }),
+            "must be between 0 and 2",
+        ),
+        (
+            json!({ "enhancePrompt": true, "enhanceMaxTokens": 2049 }),
+            "must be between 1 and 2048",
+        ),
+        (
+            json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
+            "requires advanced.enhancePrompt=true",
+        ),
+        (
+            json!({
+                "enhancePrompt": true,
+                "promptEnhancement": { "outcome": "enhanced" },
+            }),
+            "worker-owned",
+        ),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body("flux2_dev", advanced),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains(detail)),
+            "{error}"
+        );
+    }
+
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        body("flux2_klein_9b", json!({ "enhancePrompt": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error["detail"]
+        .as_str()
+        .is_some_and(|value| value.contains("FLUX.2-Klein")));
+
+    for strict_control in [
+        json!({ "poses": [{ "id": "pose-1" }] }),
+        json!({ "controlWeights": { "overlayId": "flux2-depth" } }),
+        json!({ "controlImage": "asset-1" }),
+        json!({ "controlMode": "depth" }),
+    ] {
+        let mut advanced = strict_control.as_object().unwrap().clone();
+        advanced.insert("enhancePrompt".to_owned(), json!(true));
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body("flux2_dev", Value::Object(advanced)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("strict control")));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        // Retry and duplicate validate the exact shallow-merged payload they will enqueue. A valid
+        // dev job therefore cannot be replayed as Klein while retaining its enhancement request.
+        let job_id = initial["id"].as_str().expect("created job id");
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "model": "flux2_klein_9b" } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("FLUX.2-Klein")));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        // Candle owns exactly the native base + bespoke edit routes. Character/style modes and
+        // legacy reference aliases must never reach the generic base renderer and drop their input.
+        for mode in ["character_image", "style_variations"] {
+            let mut payload = body("flux2_dev", json!({ "enhancePrompt": true }));
+            payload["mode"] = json!(mode);
+            payload["referenceAssetId"] = json!("reference-1");
+            let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "mode={mode}: {error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("Candle supports only")));
+        }
+
+        for carrier in [
+            json!({ "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = body("flux2_dev", json!({ "enhancePrompt": true }));
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(carrier.as_object().unwrap().clone());
+            let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("cannot include source or reference")));
+        }
+
+        let mut missing_edit_input = body("flux2_dev", json!({ "enhancePrompt": true }));
+        missing_edit_input["mode"] = json!("edit_image");
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            missing_edit_input,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("requires a source or reference")));
+
+        let mut valid_edit = body("flux2_dev", json!({ "enhancePrompt": true }));
+        valid_edit["mode"] = json!("edit_image");
+        valid_edit["sourceAssetId"] = json!("source-1");
+        let (status, edit) = request(app.clone(), "POST", "/api/v1/image/jobs", valid_edit).await;
+        assert_eq!(status, StatusCode::CREATED, "{edit}");
+
+        let job_id = initial["id"].as_str().expect("created job id");
+        for operation in ["retry", "duplicate"] {
+            for mode in [
+                "character_image",
+                "style_variations",
+                "reference",
+                "image_to_image",
+            ] {
+                let (status, error) = request(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v1/jobs/{job_id}/{operation}"),
+                    json!({
+                        "payloadChanges": {
+                            "mode": mode,
+                            "referenceAssetId": "reference-1"
+                        }
+                    }),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{operation} mode={mode}: {error}"
+                );
+                assert!(error["detail"]
+                    .as_str()
+                    .is_some_and(|value| value.contains("Candle supports only")));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // MLX legitimately owns all four surfaced modes, provided every edit-like mode carries the
+        // reference that selects its native edit route.
+        for (mode, carrier) in [
+            ("edit_image", json!({ "sourceAssetId": "source-1" })),
+            (
+                "character_image",
+                json!({ "referenceAssetId": "reference-1" }),
+            ),
+            (
+                "style_variations",
+                json!({ "referenceAssetIds": ["reference-1"] }),
+            ),
+        ] {
+            let mut payload = body("flux2_dev", json!({ "enhancePrompt": true }));
+            payload["mode"] = json!(mode);
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(carrier.as_object().unwrap().clone());
+            let (status, created) =
+                request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+            assert_eq!(status, StatusCode::CREATED, "mode={mode}: {created}");
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        // A backendless API cannot enqueue enhancement directly or resurrect it through a replay.
+        let (status, plain) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body("flux2_dev", json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{plain}");
+        let job_id = plain["id"].as_str().expect("plain job id");
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": { "enhancePrompt": true } } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("native MLX or Candle")));
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[tokio::test]
+async fn post_preset_prompt_enhancement_uses_the_resolved_candle_route() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "z_image_turbo",
+              "name": "Z-Image",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "character_image", "style_variations"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {}, "ui": {}
+            },
+            {
+              "id": "flux2_dev",
+              "name": "FLUX.2 Dev",
+              "family": "flux2",
+              "type": "image",
+              "adapter": "flux2_diffusers",
+              "capabilities": ["text_to_image", "edit_image", "character_image", "style_variations"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {}, "ui": { "promptEnhance": true }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models write");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models write");
+    for name in ["builtin.loras.jsonc", "user.loras.jsonc"] {
+        std::fs::write(
+            manifest_dir.join(name),
+            r#"{ "schemaVersion": 1, "loras": [] }"#,
+        )
+        .expect("lora manifest writes");
+    }
+    std::fs::write(
+        manifest_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [{
+            "id": "resolved_flux2_dev",
+            "name": "Resolved FLUX.2 Dev",
+            "workflow": "text_to_image",
+            "model": "flux2_dev",
+            "loras": []
+          }]
+        }
+        "#,
+    )
+    .expect("builtin presets write");
+    std::fs::write(
+        manifest_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user presets write");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Prompt enhancement preset" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (status, error) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "z_image_turbo",
+            "mode": "character_image",
+            "prompt": "mist over hills",
+            "referenceAssetId": "reference-1",
+            "recipePresetId": "resolved_flux2_dev",
+            "advanced": { "enhancePrompt": true }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("Candle supports only")),
+        "the post-preset FLUX.2-dev model must be checked against Candle's actual route: {error}"
+    );
+}
+
+#[tokio::test]
 async fn create_image_job_enforces_the_pose_output_ceiling() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

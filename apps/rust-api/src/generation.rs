@@ -29,6 +29,10 @@ pub(crate) async fn create_image_job(
     // no-op for a web request (which sends the already-composed prompt + presetPromptResolvedClientSide
     // and no top-level styleId), so a web-composed prompt is never double-folded.
     crate::styles::apply_style_to_image_payload(&state, &payload, &mut job_payload).await?;
+    // Prompt enhancement is route-specific, so validate the canonical post-preset model rather
+    // than trusting the DTO's pre-expansion model. This is also where client attempts to forge the
+    // worker-owned report block are refused.
+    validate_prompt_enhancement_payload(&job_payload)?;
     // Ideogram 4 headless/API parity (sc-6519, fully async per sc-9120): a plain-text Ideogram 4 job
     // needs its prompt expanded into a rich JSON caption via the magic-prompt utility model — the same
     // separate prompt_refine job the web runs (sc-6501) — or it stochastically renders the safety-filter

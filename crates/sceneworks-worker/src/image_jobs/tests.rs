@@ -133,6 +133,13 @@ impl Generator for HiresProbeGenerator {
                 total: req.steps.unwrap_or(1),
             });
         }
+        if req.prompt_enhancement.is_active() {
+            req.prompt_enhancement
+                .emit(gen_core::PromptEnhancementReport::enhanced(
+                    req.prompt.clone(),
+                    format!("{} enhanced", req.prompt),
+                ));
+        }
         on_progress(Progress::Decoding);
         Ok(GenerationOutput::Images(vec![Image {
             width: req.width,
@@ -290,6 +297,7 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             provider_reference_strength: 0.3,
         }),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |event| progress.push(event),
     )
@@ -327,6 +335,69 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             .count(),
         1
     );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reports.clone();
+    let sink = gen_core::PromptEnhancementSink::new(move |report| {
+        captured.lock().unwrap().push(report);
+    });
+    generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        &PromptEnhance {
+            enabled: true,
+            temperature: Some(0.2),
+            max_tokens: Some(64),
+        },
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        sink,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("two-pass enhanced generation");
+
+    let requests = generator.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].enhance_prompt);
+    assert!(!requests[0].prompt_enhancement.is_active());
+    assert!(requests[1].enhance_prompt);
+    assert!(requests[1].prompt_enhancement.is_active());
+    assert_eq!(reports.lock().unwrap().len(), 1);
 }
 
 #[cfg(any(
@@ -405,6 +476,7 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         &PromptEnhance::default(),
         Some(hires_fix),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -491,6 +563,7 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
             provider_reference_strength: 0.3,
         }),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -3873,6 +3946,7 @@ fn smoke_generate_one(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -4058,6 +4132,7 @@ fn lens_turbo_real_weights_bucket_resolution() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_p| {},
@@ -4348,6 +4423,7 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4421,6 +4497,7 @@ fn boogu_q4_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4490,6 +4567,7 @@ fn klein_tier_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4551,6 +4629,7 @@ fn ideogram_4_bf16_real_weights_loads_and_generates() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -4710,6 +4789,7 @@ fn kolors_real_weights_img2img_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -4768,6 +4848,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -5142,6 +5223,7 @@ fn smoke_generate_one_true_cfg(
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -5502,6 +5584,7 @@ fn sc3031_ab_dump_txt2img() {
         None,
         None,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -6080,7 +6163,10 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
@@ -6089,7 +6175,8 @@ fn prompt_enhance_reads_advanced_settings() {
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
         .advanced,
-    );
+    )
+    .expect("absent enhancement settings validate");
     assert!(!off.enabled);
     assert_eq!(off.temperature, None);
     assert_eq!(off.max_tokens, None);
@@ -6100,10 +6187,389 @@ fn prompt_enhance_reads_advanced_settings() {
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
-    .advanced);
+    .advanced)
+    .expect("bounded enhancement settings validate");
     assert!(on.enabled);
     assert_eq!(on.temperature, Some(0.2));
     assert_eq!(on.max_tokens, Some(256));
+}
+
+#[test]
+fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
+    #[allow(unused_mut)]
+    let mut settings = Settings::from_env();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        settings.backend_candle_enabled = true;
+    }
+    for (advanced, expected) in [
+        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": true, "enhanceTemperature": 2.1 }),
+            "must be between 0 and 2",
+        ),
+        (
+            json!({ "enhancePrompt": true, "enhanceMaxTokens": 2049 }),
+            "must be between 1 and 2048",
+        ),
+        (
+            json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
+            "tuning requires",
+        ),
+        (
+            json!({ "promptEnhancement": { "outcome": "enhanced" } }),
+            "worker-owned",
+        ),
+    ] {
+        let error =
+            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
+                .expect_err("invalid settings reject")
+                .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let klein = request(json!({
+        "model": "flux2_klein_9b",
+        "advanced": { "enhancePrompt": true }
+    }));
+    assert!(validate_prompt_enhancement_request(&klein, &settings)
+        .unwrap_err()
+        .to_string()
+        .contains("FLUX.2-Klein"));
+    for strict_control in [
+        json!({ "poses": [{ "id": "pose-1" }] }),
+        json!({ "controlWeights": { "overlayId": "flux2-depth" } }),
+        json!({ "controlImage": "asset-1" }),
+        json!({ "controlMode": "depth" }),
+    ] {
+        let mut advanced = strict_control.as_object().unwrap().clone();
+        advanced.insert("enhancePrompt".to_owned(), json!(true));
+        let strict = request(json!({
+            "model": "flux2_dev",
+            "advanced": advanced,
+        }));
+        assert!(validate_prompt_enhancement_request(&strict, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("strict control"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "character_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "style_variations", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("MLX supports its native base/edit/character/style routes");
+        }
+        for mode in ["reference", "image_to_image"] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            assert!(validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support"));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "edit_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "edit_image", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("Candle supports only its native base and edit routes");
+        }
+
+        for mode in [
+            "character_image",
+            "style_variations",
+            "reference",
+            "image_to_image",
+        ] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            let error = validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Candle supports only"),
+                "mode={mode}: {error}"
+            );
+        }
+
+        for carrier in [
+            json!({ "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = carrier.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("mode".to_owned(), json!("text_to_image"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            let error =
+                validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains("cannot include source or reference"),
+                "{error}"
+            );
+        }
+
+        let missing_edit_input = request(json!({
+            "model": "flux2_dev",
+            "mode": "edit_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(
+            validate_prompt_enhancement_request(&missing_edit_input, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a source or reference")
+        );
+
+        settings.backend_candle_enabled = false;
+        let disabled = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&disabled, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let backendless = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&backendless, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly() {
+    let enhanced = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "a fox".to_owned(),
+            "a red fox in winter light".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("matching enhanced report validates");
+    assert_eq!(enhanced["outcome"], "enhanced");
+    assert_eq!(enhanced["originalPrompt"], "a fox");
+    assert_eq!(enhanced["effectivePrompt"], "a red fox in winter light");
+    assert!(enhanced["fallbackReason"].is_null());
+
+    let fallback = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "enhancer unavailable".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("safe fallback validates");
+    assert_eq!(fallback["outcome"], "fallback");
+    assert_eq!(fallback["effectivePrompt"], "a fox");
+    assert_eq!(fallback["fallbackReason"], "enhancer unavailable");
+
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "another prompt".to_owned(),
+            "a fox".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not match"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not rewrite"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced("a fox".to_owned(), "   ".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("must contain"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "unsafe\nreason".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("safe bounded reason"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::absent("a fox".to_owned()),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("absent outcome"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
+    fn enhanced(original: &str, effective: &str) -> gen_core::PromptEnhancementReport {
+        gen_core::PromptEnhancementReport::enhanced(original.to_owned(), effective.to_owned())
+    }
+
+    let mut reports = PromptEnhancementReports::new();
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        false,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("disabled request"));
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        1,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("unknown image"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .expect("first report is accepted");
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "another red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("duplicate"));
+    let fact = take_prompt_enhancement_fact(&mut reports, 0)
+        .expect("the report remains available for its image");
+    assert_eq!(fact["effectivePrompt"], "a red fox");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("no prompt-enhancement report"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("another prompt", "a red fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not match"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not rewrite"));
+
+    // Reports may arrive out of order for a batch, but each image must consume only the report
+    // bound to its own index and requested prompt.
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        1,
+        "an owl".to_owned(),
+        enhanced("an owl", "a moonlit owl"),
+    )
+    .expect("second image report is accepted first");
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        2,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a fox in snowfall"),
+    )
+    .expect("first image report is accepted second");
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 0).unwrap()["effectivePrompt"],
+        "a fox in snowfall"
+    );
+    assert_eq!(
+        take_prompt_enhancement_fact(&mut reports, 1).unwrap()["effectivePrompt"],
+        "a moonlit owl"
+    );
 }
 
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
@@ -6900,6 +7366,7 @@ fn flux2_edit_real_weights_generates_one_image() {
         None,
         build_edit_conditioning(std::slice::from_ref(&reference)),
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -9730,6 +10197,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
         None,
         conditioning,
         &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |p| {
@@ -9865,6 +10333,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
                 None,
                 conditioning,
                 &PromptEnhance::default(),
+                gen_core::PromptEnhancementSink::default(),
                 gen_core::PreviewSink::default(),
                 &cancel,
                 &mut |p| {
@@ -10535,6 +11004,7 @@ fn ideogram_4_real_weights_generates_caption_and_plain_images() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -10729,6 +11199,7 @@ fn ideogram_4_headless_auto_caption_renders_real_image() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
@@ -10855,6 +11326,7 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -11057,6 +11529,7 @@ fn boogu_real_weights_generates_base_turbo_edit() {
             None,
             None,
             &enhance,
+            gen_core::PromptEnhancementSink::default(),
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |p| {
@@ -15541,6 +16014,7 @@ fn sc_8253_8278_identity_angle_ab() {
                         strength: None,
                     }],
                     &PromptEnhance::default(),
+                    gen_core::PromptEnhancementSink::default(),
                     gen_core::PreviewSink::default(),
                     &cancel,
                     &mut |_| {},
@@ -16150,12 +16624,80 @@ mod preview_stream_tests {
         );
     }
 
+    #[test]
+    fn scored_reported_driver_keeps_prompt_and_likeness_facts_isolated_per_image() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
+        let items = [
+            ("a fox", "a red fox in snow", 11_i64, 0.91_f64),
+            ("an owl", "a moonlit owl in flight", 12_i64, 0.73_f64),
+        ];
+        drive_gen_items_scored_reported(
+            tx,
+            items,
+            |_index, (original, effective, seed, likeness), _preview, reports, _progress| {
+                reports
+                    .for_prompt(original)
+                    .emit(gen_core::PromptEnhancementReport::enhanced(
+                        original.to_owned(),
+                        effective.to_owned(),
+                    ));
+                let face_likeness = json!({ "score": likeness })
+                    .as_object()
+                    .expect("likeness fact object")
+                    .clone();
+                Ok(Some((seed, 1, 1, vec![0_u8; 3], Some(face_likeness))))
+            },
+        )
+        .expect("weights-free scored edit carrier completes");
+
+        for (expected_index, (original, effective, seed, likeness)) in items.into_iter().enumerate()
+        {
+            match rx.try_recv().expect("prompt report precedes its image") {
+                GenEvent::PromptEnhancement {
+                    index,
+                    expected_prompt,
+                    report,
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(expected_prompt, original);
+                    assert_eq!(
+                        prompt_enhancement_fact(report, &expected_prompt).unwrap()
+                            ["effectivePrompt"],
+                        effective
+                    );
+                }
+                other => panic!(
+                    "expected a prompt-enhancement event, got {}",
+                    gen_event_name(&other)
+                ),
+            }
+            match rx
+                .try_recv()
+                .expect("scored image follows its prompt report")
+            {
+                GenEvent::Image {
+                    index,
+                    seed: actual_seed,
+                    face_likeness,
+                    ..
+                } => {
+                    assert_eq!(index, expected_index);
+                    assert_eq!(actual_seed, seed);
+                    assert_eq!(face_likeness.unwrap()["score"], likeness);
+                }
+                other => panic!("expected a scored image, got {}", gen_event_name(&other)),
+            }
+        }
+        assert!(rx.try_recv().is_err(), "no cross-image facts remain queued");
+    }
+
     fn gen_event_name(event: &GenEvent) -> &'static str {
         match event {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
             GenEvent::Preview { .. } => "Preview",
+            GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::Image { .. } => "Image",
         }
     }

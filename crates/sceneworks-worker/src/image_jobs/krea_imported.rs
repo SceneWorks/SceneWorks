@@ -953,6 +953,7 @@ async fn generate_krea_imported_stream(
                         &enhance,
                         Some(hires_fix),
                         preview,
+                        gen_core::PromptEnhancementSink::default(),
                         &cancel,
                         on_progress,
                     )?;

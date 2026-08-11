@@ -256,6 +256,10 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         seed: 42,
         // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
         use_pid: false,
+        enhance_prompt: false,
+        enhance_max_tokens: None,
+        enhance_temperature: None,
+        prompt_enhancement: gen_core::PromptEnhancementSink::default(),
         preview: gen_core::PreviewSink::default(),
         cancel: gen_core::runtime::CancelFlag::new(),
     };

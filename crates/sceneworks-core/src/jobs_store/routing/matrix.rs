@@ -2606,15 +2606,10 @@ mod tests {
             .expect("FLUX.2 prompt enhancement is represented");
         assert_eq!(
             (enhancement.mlx, enhancement.candle),
-            (Some(true), Some(false))
+            (Some(true), Some(true))
         );
-        assert_eq!(
-            enhancement
-                .parity_obligation
-                .as_ref()
-                .map(|item| item.work_item.as_str()),
-            Some("sc-18474")
-        );
+        assert!(enhancement.parity_obligation.is_none());
+        assert!(!enhancement.preserved_candle_only);
 
         let mut video_mlx_only = 0;
         for video in matrix.models.iter().filter(|row| row.model_type == "video") {
@@ -2993,7 +2988,7 @@ mod tests {
             operation_cell(flux2, "prompt_enhancement", &original, &candle).unwrap();
         assert_eq!(
             (original_cell.mlx, original_cell.candle),
-            (Some(true), Some(false))
+            (Some(true), Some(true))
         );
 
         let mut no_enhancement: Value = serde_json::from_str(MLX_RUNTIME_FACTS).unwrap();
@@ -3008,7 +3003,12 @@ mod tests {
             runtime_facts(&serde_json::to_string(&no_enhancement).unwrap(), "mlx").unwrap();
         let mutated_cell =
             operation_cell(flux2, "prompt_enhancement", &no_enhancement, &candle).unwrap();
-        assert_eq!(mutated_cell.mlx, Some(false));
+        assert_eq!(
+            (mutated_cell.mlx, mutated_cell.candle),
+            (Some(false), Some(true))
+        );
+        assert!(mutated_cell.preserved_candle_only);
+        assert!(mutated_cell.parity_obligation.is_none());
 
         let sana = manifest
             .models

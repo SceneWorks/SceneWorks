@@ -7434,35 +7434,24 @@
           ]
         }
       },
-      // candle/CUDA VRAM gate — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at 1024²/8-step via the
-      // candle-gen-flux2 offload A/B harness (flux2_dev_probed_generate_for_offload_ab, device-level
-      // nvidia-smi PeakSampler on an idle GPU 0), the FLUX.1 (sc-10856) / Qwen-Image (sc-10969) methodology.
-      // Two peaks per tier: `vramGbByTier` = RESIDENT (packed TE + DiT + VAE co-resident, the default
-      // cross-request-cached path); `sequentialPeakGb` = SEQUENTIAL residency (sc-10868: the Mistral text
-      // encoder dropped before the DiT loads) — always lower, byte-identical pixels (md5-verified). The
-      // fit-gate compares the resident peak against free VRAM to pick sequential-offload vs reject, then
-      // (sc-10856) REJECTS if even the sequential peak won't fit rather than OOM.
-      // MEASURED (sc-10920): q4 res 44.0 / seq 35.6, q8 res 70.7 / seq 64.9. The reclaim is MODEST because
-      // the packed q4/q8 tiers ALSO pack the Mistral TE (q4 15 GB / q8 25 GB on disk), so dropping it frees
-      // far less than a dense TE would. This CORRECTS the earlier sc-10868 "95 GB resident / ~60 GB reclaim"
-      // figure, which was taken against a DENSE-bf16-TE staging that does NOT match the shipping packed tier
-      // (sc-10868's SEQUENTIAL 35.4 reproduces exactly here at 35.6; only its resident diverged) — and it
-      // agrees with the older sc-9094 VramProbe (q4 47.2). bf16 is CARRIED (measured:false): its 113 GB
-      // dense weights exceed a 96 GB card even sequentially (Mistral TE bf16 ~48 GB + f32 activation), so it
-      // is un-measurable on the dev box — the ~128 GB resident / ~97 GB sequential estimates both exceed
-      // 96 GB, so the gate rejects bf16 off-Mac before OOM (the intended outcome). minMemoryGb 56 stays the
-      // conservative STATIC admit floor (sc-9094 memory-eligibility); the dynamic fit-gate now drives the
-      // true resident/sequential/reject decision per card.
+      // Candle/CUDA prompt-enhancement high water re-measured for the v3 caption-upsample lifecycle on
+      // RTX PRO 6000 Blackwell (sm_120), with VramProbe on an otherwise idle GPU. Exact merged-source Q8
+      // edit evidence is under `.codex/evidence/sc-18474/inference-e1995384...`; Q4 T2I/edit and Q8 T2I
+      // evidence is under `.codex/evidence/sc-18474/inference-351a482f...`, whose inference commit is an
+      // ancestor of e1995384 and differs from the merge tree only in the MLX FLUX.2 model adapter.
+      // All captures use the native Candle route, 256x256, one diffusion step, one caption token, and an
+      // exactly-once typed Enhanced report: Q4 T2I 40.8 GB, Q4 edit 42.7 GB, Q8 T2I 70.8 GB, Q8 edit
+      // 70.8 GB. These are bounded route high-waters, NOT 1024 calibration records. `vramMeasuredPixels`
+      // therefore stays honest at 256², and the old v2 1024 ladder bindings below remain historical only:
+      // the live v3 provider fingerprint rejects them before selection. The static rows use the largest
+      // observed high-water per tier; the common gate adds its 2 GB reserve, yielding conservative host
+      // tiers of 48 GB for Q4 and 80 GB for Q8. No BF16 row is published without fresh evidence.
       "candle": {
-        // SC-15833: exact Q4 base-only CUDA memory-ladder evidence. Edit and strict ControlNet
-        // loadability are captured separately, but only the text-to-image/none coordinates below
-        // are admitted as runtime-complete memory evidence. The captures remain truthfully pinned
-        // to 5ffd; `docs/calibration/sc-15833/inference-compatibility-a4f4.json` proves the Candle
-        // FLUX.2 closure still describes the same compiled code at a4f409ae, so only that later pin
-        // is admitted as compatible. sc-17524: two closure paths DID move across that window
-        // (`Cargo.lock` and `candle-gen`) and the audited `candle-gen-flux2` lib test binary is
-        // byte-identical at both ends, so the proof is a measured digest rather than tree identity.
-        // The MLX FLUX.2 changes in between are outside this CUDA closure.
+        // Historical SC-15833 Q4 base-only CUDA ladder bindings. Keep their exact 5ffd revision,
+        // closure digest, v2 fingerprint, and 1024 geometry for auditability; do not restamp them.
+        // The live provider reports the v3 caption-upsample fingerprint, and the worker requires an
+        // exact calibration-identity match before a packaged record can enter selection. These rows
+        // therefore document prior behavior only and cannot authorize a v3 route or a small GPU.
         "calibrations": [
           {
             "abi": 3, "loadShape": "deferred_materialization",
@@ -7547,11 +7536,11 @@
             "overlays": ["none", "control"]
           }
         },
-        "minMemoryGb": 56,
-        "vramGbByTier": { "q4": 44.0, "q8": 70.7, "bf16": 128.0 },
-        "vramMeasuredPixels": 1048576,
-        "sequentialPeakGb": { "q4": 35.6, "q8": 64.9, "bf16": 97.0 },
-        "measured": true
+        "minMemoryGb": 48,
+        "vramGbByTier": { "q4": 42.7, "q8": 70.8 },
+        "vramMeasuredPixels": 65536,
+        "sequentialPeakGb": { "q4": 42.7, "q8": 70.8 },
+        "measured": false
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",

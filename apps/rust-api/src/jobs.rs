@@ -438,6 +438,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
             &mut merged,
         )
         .await?;
+        validate_prompt_enhancement_payload(&merged)?;
     }
     Ok(merged)
 }

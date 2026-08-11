@@ -221,6 +221,204 @@ use crate::engines::{mlx_model, ResolvedModel};
 /// Takes no `reqwest::Client`: its only use was forwarding one to the inline-upscale post-pass, and
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
+const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
+const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
+const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
+
+fn parse_prompt_enhancement_fields(
+    advanced: &JsonObject,
+) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
+    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned"
+        )));
+    }
+    let enabled = match advanced.get("enhancePrompt") {
+        None => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(WorkerError::InvalidPayload(
+                "advanced.enhancePrompt must be a boolean".to_owned(),
+            ));
+        }
+    };
+    let temperature = advanced
+        .get("enhanceTemperature")
+        .map(|value| {
+            let value = value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "advanced.enhanceTemperature must be a finite number".to_owned(),
+                    )
+                })?;
+            if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+                )));
+            }
+            Ok(value as f32)
+        })
+        .transpose()?;
+    let max_tokens = advanced
+        .get("enhanceMaxTokens")
+        .map(|value| {
+            let value = value.as_u64().ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "advanced.enhanceMaxTokens must be an integer".to_owned(),
+                )
+            })?;
+            if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                )));
+            }
+            Ok(value as u32)
+        })
+        .transpose()?;
+    if !enabled && (temperature.is_some() || max_tokens.is_some()) {
+        return Err(WorkerError::InvalidPayload(
+            "prompt-enhancement tuning requires advanced.enhancePrompt=true".to_owned(),
+        ));
+    }
+    Ok((enabled, temperature, max_tokens))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_has_edit_input(request: &ImageRequest) -> bool {
+    request
+        .source_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        || request
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        || !request.reference_asset_ids.is_empty()
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
+    request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        || !request.reference_asset_ids.is_empty()
+}
+
+fn validate_prompt_enhancement_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    let mode = request.mode.as_str();
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = settings;
+        if !matches!(
+            mode,
+            "text_to_image" | "edit_image" | "character_image" | "style_variations"
+        ) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement on MLX does not support image mode {mode}"
+            )));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if !settings.backend_candle_enabled {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement requires the enabled native Candle backend on this worker"
+                    .to_owned(),
+            ));
+        }
+        if !matches!(mode, "text_to_image" | "edit_image") {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
+            )));
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = (mode, settings);
+        Err(WorkerError::InvalidPayload(
+            "prompt enhancement requires a native MLX or Candle image backend".to_owned(),
+        ))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        if mode == "text_to_image" && prompt_enhancement_has_edit_input(request) {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement text_to_image cannot include source or reference image assets"
+                    .to_owned(),
+            ));
+        }
+        if mode == "edit_image" && !prompt_enhancement_has_edit_input(request) {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement edit_image requires a source or reference image asset"
+                    .to_owned(),
+            ));
+        }
+        if matches!(mode, "character_image" | "style_variations")
+            && !prompt_enhancement_has_reference_input(request)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement {mode} requires a reference image asset"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Re-check the backend and route at the worker trust boundary. Raw queue writes and legacy stored
+/// jobs need the same fail-closed behavior as typed API creates, including a build with no native
+/// image backend. The route shape is checked before any weight or project asset load.
+fn validate_prompt_enhancement_request(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.advanced)?;
+    if !enabled {
+        return Ok(());
+    }
+    if request.model != "flux2_dev" {
+        return Err(WorkerError::InvalidPayload(
+            "prompt enhancement is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it"
+                .to_owned(),
+        ));
+    }
+    let strict_control = request
+        .advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+        || request.advanced.contains_key("controlWeights")
+        || request.advanced.contains_key("controlImage")
+        || request.advanced.contains_key("controlMode");
+    if strict_control {
+        return Err(WorkerError::InvalidPayload(
+            "prompt enhancement cannot be combined with FLUX.2-dev strict control".to_owned(),
+        ));
+    }
+    validate_prompt_enhancement_route(request, settings)
+}
+
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
@@ -233,6 +431,7 @@ pub(crate) async fn run_image_generate_job(
         ));
     }
     validate_hires_fix_request(&request)?;
+    validate_prompt_enhancement_request(&request, settings)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -2906,7 +3105,7 @@ mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
     admit_candle_base, admit_candle_base_floor, admit_candle_load_spec_floor,
-    safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
+    has_candle_tier_peak_row, safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —

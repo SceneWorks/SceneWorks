@@ -1,11 +1,11 @@
 use super::{
     admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
-    model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
+    consume_gen_events, drive_gen_items_reported, fit_engine_image, load_reference_image,
+    mlx_model, model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
     resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
     Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, Settings, Value, WorkerError, WorkerResult,
+    Path, PathBuf, PromptEnhance, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
@@ -429,6 +429,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         .collect();
     let total = work.len();
     let negative = request.negative_prompt.clone();
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -465,15 +466,15 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             Ok((model, references, memory_context))
         },
         move |(model, references, memory_context), tx, cancel| {
-            drive_gen_items(
+            drive_gen_items_reported(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
                     let req = Flux2EditRequest {
-                        prompt,
+                        prompt: prompt.clone(),
                         negative: negative.clone(),
                         width,
                         height,
@@ -482,6 +483,14 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         seed: seed as u64,
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
+                        enhance_prompt: enhance.enabled,
+                        enhance_max_tokens: enhance.max_tokens,
+                        enhance_temperature: enhance.temperature,
+                        prompt_enhancement: if enhance.enabled {
+                            prompt_enhancement.for_prompt(&prompt)
+                        } else {
+                            gen_core::PromptEnhancementSink::default()
+                        },
                         preview: preview.clone(),
                         cancel: cancel.clone(),
                     };
