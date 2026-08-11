@@ -12240,8 +12240,8 @@
           // image_jobs/bernini.rs; overridable via SCENEWORKS_CANDLE_BERNINI_DIR), independent of
           // `paths.model`, and the video lane reuses the same resolver. Without this entry the off-Mac
           // candle Bernini lane dead-ended with no way to install the snapshot. Shared by bernini +
-          // bernini_image (one repo, HF cache dedupes). Loads dense today (the off-Mac packed-tier select
-          // is a follow-up). Size is the bf16 tier estimate (candle loads the converted tree dense).
+          // bernini_image (one repo, HF cache dedupes). The worker selects the published bf16/q8/q4
+          // subdirectory from this whole-repo snapshot. Size remains the bf16 tier estimate.
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
           "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
@@ -12320,7 +12320,7 @@
       },
       "ui": {
         "label": "Bernini",
-        "description": "ByteDance Bernini full pipeline: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B text-to-video renderer. Highest-quality, planner-guided generation — but very large (≈179 GB) and slow (the 7B planner runs many passes per clip). macOS native MLX only; needs ample unified memory.",
+        "description": "ByteDance Bernini full pipeline: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B text-to-video renderer. Highest-quality, planner-guided generation — but very large (≈179 GB) and slow (the 7B planner runs many passes per clip). Native MLX on macOS and Candle on Windows/Linux; needs ample accelerator memory.",
         "recommendedFor": ["text_to_video"],
         "durationHint": "Heavy planner + dual 14B experts — keep clips at 5s or less. Generates at 16fps.",
         "promptGuide": {
@@ -12397,7 +12397,7 @@
           // download (empty files list); the candle worker's `resolve_candle_bernini_model_dir` resolves it
           // by string from the HF cache (`CANDLE_BERNINI_REPO`, image_jobs/bernini.rs; overridable via
           // SCENEWORKS_CANDLE_BERNINI_DIR), independent of `paths.model`. One repo shared with the video id
-          // (HF cache dedupes). Loads dense today (off-Mac packed-tier select is a follow-up).
+          // (HF cache dedupes). The worker selects the published bf16/q8/q4 subdirectory.
           "provider": "huggingface",
           "repo": "SceneWorks/bernini",
           "revision": "f9f95e0ff3d7940664ab8163ebf71bf0c8018b27",
@@ -12448,7 +12448,7 @@
       },
       "ui": {
         "label": "Bernini (Image)",
-        "description": "ByteDance Bernini full pipeline as a still-image generator: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B renderer to produce a single image (text-to-image) or edit a source image (image-to-image). Highest-quality, planner-guided — but very large (≈179 GB) and slow (the 7B planner runs many passes per image). macOS native MLX only; needs ample unified memory. For everyday stills the fast native image models are recommended.",
+        "description": "ByteDance Bernini full pipeline as a still-image generator: a Qwen2.5-VL semantic planner driving a Wan2.2 A14B renderer to produce a single image (text-to-image) or edit a source image (image-to-image). Highest-quality, planner-guided — but very large (≈179 GB) and slow (the 7B planner runs many passes per image). Native MLX on macOS and Candle on Windows/Linux; needs ample accelerator memory. For everyday stills the fast native image models are recommended.",
         "recommendedFor": ["text_to_image", "edit_image"],
         "promptGuide": {
           "title": "Bernini Image Prompt Guide",
@@ -12466,8 +12466,9 @@
     // I2V (dense) + the stock Wan2.1 z16 VAE / umt5-xxl + an open-CLIP XLM-RoBERTa
     // ViT-H/14 image tower; packed-token conditioning with auto-generated color-coded
     // segmentation masks (the worker paints them from native SAM3 — no user masks).
-    // macOS-only native MLX (mlx-gen-scail2, engine id "scail2_14b"); no Torch path.
-    // Distributed the SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
+    // Native MLX on macOS and native Candle on NVIDIA Windows/Linux (engine id "scail2_14b").
+    // Both backends share the dense bf16 tier; q4/q8 remain MLX-only. Distributed the
+    // SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
     // published as `SceneWorks/scail2-mlx` (sc-5445), downloaded on first use. This entry
     // covers the standalone `animate_character` mode (sc-5447 /
     // sc-5448) AND cross-identity `replace_person` (sc-5452 — the SAME engine with
@@ -12485,7 +12486,7 @@
         "replace_person"
       ],
       "downloads": [
-        // macOS quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
+        // Quant matrix (sc-9944, epic 8506): each tier is a SEPARATE user-selectable artifact
         // tagged with a `variant`; `q4` (default) installs when no tier is chosen. Each tier subdir is
         // fully self-contained (the DiT `dit.safetensors` at the tier's precision + the shared dense
         // Wan2.1 z16 VAE + UMT5 T5 encoder + open-CLIP ViT-H/14 visual tower + tokenizer + config.json
@@ -12525,7 +12526,7 @@
           "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "bf16",
           "files": ["bf16/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           // Dense bf16 tier (sc-9944): the DiT as a true dense mirror of the zai-org fp32 checkpoint
           // (reconstructed for this story; the pre-sc-5445 dense snapshot had been pruned) + the shared
           // dense VAE/T5/CLIP/tokenizer. Exact on-disk size of the built bf16/ subdir.
@@ -12601,9 +12602,24 @@
           "schedulers": ["default"]
         }
       },
+      // Exact shared-package Candle/CUDA evidence (sc-18473): inference
+      // 3174984b20334bb029170e367be234de0b3f8753 loaded the Model Manager bf16 directory from
+      // SceneWorks/scail2-mlx@ce88cfdb1008f395e9c820e525e6db7b6695f7b3 through the production
+      // candle_gen_scail2 provider and rendered 832x480 / 81 frames / 1 step. GitHub Actions run
+      // 31455292141, job 93667700921, artifact 9089420126 (uploaded zip SHA-256
+      // de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9) emitted the validated
+      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. minMemoryGb is
+      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower Candle tier
+      // or sequential-offload path, so both worker modes fail closed below that live free-VRAM floor.
+      "candle": {
+        "minMemoryGb": 105,
+        "vramGbByTier": { "bf16": 102.115 },
+        "vramMeasuredPixels": 399360,
+        "measured": true
+      },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; macOS native MLX only. Needs ample unified memory and runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Candle needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve); lower-memory NVIDIA cards are rejected before load. Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {

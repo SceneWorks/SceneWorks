@@ -605,9 +605,9 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
 /// `ads2v`. Routed on the model id + mode, not weight availability — the worker's dedicated
 /// `CandleVideoRoute::Bernini` dispatch resolves-or-errors loudly if the `SceneWorks/bernini`
 /// snapshot is unprovisioned (sc-11003), and validates the per-mode source media when it assembles the
-/// conditioning. No LoRA (the engine reports `supports_lora=false`); an explicit `mlxQuantize` is
-/// recorded for lineage but does NOT push the job off candle (the loader reads the converted tree dense,
-/// exactly like the still lane, sc-10996) — there is no torch Bernini to fall back to. Factored out so
+/// conditioning. No LoRA (the engine reports `supports_lora=false`); an explicit `mlxQuantize` remains
+/// on Candle because the worker resolves the published bf16/q8/q4 tier subdirectories (sc-11003) —
+/// there is no torch Bernini to fall back to. Factored out so
 /// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
 pub(crate) fn bernini_video_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if model != "bernini" {

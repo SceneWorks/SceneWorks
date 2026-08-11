@@ -82,6 +82,7 @@ on:
       # both lanes. Path filters match DELETES and ADDS too, so a restamp, delete or re-add of this
       # file still triggers the lane.
       - "config/engine-capabilities/capabilities.mlx.json"
+      - "config/engine-capabilities/runtime/capabilities.mlx.json"
       # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
       # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
       # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
@@ -555,8 +556,9 @@ jobs:
       - name: Verify capabilities.mlx.json is a real dump, not a restamp
         run: |
           set -euo pipefail
-          scratch="$(mktemp -d)"
-          trap 'rm -rf "$scratch"' EXIT
+          scratch="$RUNNER_TEMP/engine-capability-facts-verify"
+          rm -rf "$scratch"
+          mkdir -p "$scratch"
           cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$scratch"
           if ! diff -u config/engine-capabilities/capabilities.mlx.json \
                      "$scratch/capabilities.mlx.json"; then
@@ -564,6 +566,13 @@ jobs:
                  "dump at this pin. Re-dump it on a Mac:"\
                  "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
                  "then (cd apps/web && npm run gen:preview-support)."
+            exit 1
+          fi
+          if ! diff -u config/engine-capabilities/runtime/capabilities.mlx.json \
+                     "$scratch/runtime/capabilities.mlx.json"; then
+            echo "::error::config/engine-capabilities/runtime/capabilities.mlx.json does not"\
+                 " match inference's fresh runtime capability snapshot. Download the"\
+                 " backend-capability-facts-mlx artifact from this run; never hand-author it."
             exit 1
           fi
           if ! diff -u config/engine-capabilities/audio/capabilities.candle.json \
@@ -575,6 +584,13 @@ jobs:
                  "then (cd apps/web && npm run gen:preview-support)."
             exit 1
           fi
+      - name: Upload fresh MLX capability facts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-capability-facts-mlx
+          path: ${{ runner.temp }}/engine-capability-facts-verify
+          if-no-files-found: error
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:

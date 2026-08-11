@@ -756,13 +756,18 @@ fn bernini_candle_txt2img_and_i2i_route_to_candle() {
     assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
         "model": "bernini_image", "mode": "edit_image"
     }))));
-    // NOT `candle_quant` (sc-10996): the off-Mac packed-tier select is deferred (sc-11003), so an
-    // explicit `mlxQuantize` request is refused rather than staying on candle — the descriptor
-    // advertises Q4/Q8 but no consumable off-Mac tier exists yet.
-    assert!(!image_request_candle_eligible(
-        "bernini_image",
-        &object(json!({ "prompt": "a marble bust", "advanced": { "mlxQuantize": 8 } }))
-    ));
+    // sc-11003 publishes bf16/q8/q4 subdirectories in the off-Mac snapshot, and the worker's shared
+    // Bernini resolver selects them for both the image and video lanes. Quant requests therefore stay
+    // on Candle instead of being bounced by a stale catalog flag.
+    for bits in [4, 8] {
+        assert!(image_request_candle_eligible(
+            "bernini_image",
+            &object(json!({
+                "prompt": "a marble bust",
+                "advanced": { "mlxQuantize": bits }
+            }))
+        ));
+    }
 }
 
 #[test]

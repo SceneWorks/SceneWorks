@@ -96,6 +96,7 @@ on:
       # ADDS as well as modifications, so a restamp, a delete or a re-add of this file still
       # triggers the lane, and a rename is a delete+add that still matches.
       - "config/engine-capabilities/capabilities.candle.json"
+      - "config/engine-capabilities/runtime/capabilities.candle.json"
       # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
       # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
       # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
@@ -561,6 +562,10 @@ jobs:
           git diff --no-index --exit-code -- config\engine-capabilities\audio\capabilities.candle.json "%scratch%\audio\capabilities.candle.json"
           if errorlevel 2 goto :audio_diff_failed
           if errorlevel 1 goto :audio_restamped
+          if not exist "%scratch%\runtime\capabilities.candle.json" goto :no_runtime_file
+          git diff --no-index --exit-code -- config\engine-capabilities\runtime\capabilities.candle.json "%scratch%\runtime\capabilities.candle.json"
+          if errorlevel 2 goto :runtime_diff_failed
+          if errorlevel 1 goto :runtime_restamped
           exit /b 0
           :no_runner_temp
           echo ::error::RUNNER_TEMP is not set, so there is nowhere safe to dump. Refusing to run rather than risk writing into the checked-out tree.
@@ -586,3 +591,19 @@ jobs:
           :audio_restamped
           echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump at this pin. Either box re-dumps it - the audio registry is candle-native everywhere - then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
           exit /b 1
+          :no_runtime_file
+          echo ::error::the dumper wrote legacy facts but no runtime/capabilities.candle.json. The rich inference descriptor snapshot required by the backend matrix was not captured.
+          exit /b 1
+          :runtime_diff_failed
+          echo ::error::git could not compare the checked-in rich Candle runtime descriptor facts against the fresh dump. This is a tooling or missing-file failure.
+          exit /b 1
+          :runtime_restamped
+          echo ::error::config/engine-capabilities/runtime/capabilities.candle.json does not match inference's fresh runtime capability snapshot. Download the backend-capability-facts-candle artifact from this run; never hand-author descriptor facts.
+          exit /b 1
+      - name: Upload fresh Candle capability facts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-capability-facts-candle
+          path: ${{ runner.temp }}/engine-capability-facts-verify
+          if-no-files-found: error

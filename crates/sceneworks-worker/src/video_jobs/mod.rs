@@ -1744,6 +1744,58 @@ use vace::{
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use vace::{wan_vace_extend_raw_settings, wan_vace_raw_settings};
 
+/// Resolve the inference generator descriptors the production dispatch can load for one routed
+/// video model/mode. This is the matching-platform mapping source consumed by the capability-facts
+/// dumper; it deliberately reuses the same family resolvers as [`resolve_video_route`] and
+/// [`resolve_candle_video_route`] instead of maintaining a second model table.
+#[cfg(target_os = "macos")]
+pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    if mode == "replace_person" {
+        return if let Some(engine_id) = scail2_engine_id(model) {
+            vec![engine_id]
+        } else if model == "wan_2_2_vace_fun_14b" {
+            vec!["wan2_2_vace_fun_14b"]
+        } else {
+            vec!["wan_vace"]
+        };
+    }
+    if matches!(mode, "extend_clip" | "video_bridge")
+        && wan_engine_id(model) == Some("wan2_2_ti2v_5b")
+    {
+        // Production prefers the ControlClip VACE engine and falls back to the TI2V keyframe path
+        // when that snapshot is not provisioned. Both descriptors therefore govern the route.
+        return vec!["wan_vace", "wan2_2_ti2v_5b"];
+    }
+    wan_engine_id(model)
+        .or_else(|| ltx_engine_id(model))
+        .or_else(|| svd_engine_id(model))
+        .or_else(|| bernini_engine_id(model))
+        .or_else(|| scail2_engine_id(model))
+        .or_else(|| krea_realtime_engine_id(model))
+        .or_else(|| mochi_engine_id(model))
+        .into_iter()
+        .collect()
+}
+
+/// Candle sibling of [`runtime_descriptor_engine_ids`], sourced from the actual Candle dispatch
+/// ladder and its `candle_video_engine_id` registry join.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
+    if mode == "replace_person" {
+        return vec![scail2_engine_id(model).unwrap_or("wan_vace")];
+    }
+    if mode == "animate_character" {
+        return scail2_engine_id(model).into_iter().collect();
+    }
+    if matches!(mode, "extend_clip" | "video_bridge") {
+        return vec!["wan_vace"];
+    }
+    bernini_engine_id(model)
+        .or_else(|| candle::candle_video_engine_id(model))
+        .into_iter()
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Backend-neutral video helpers shared by the MLX (macOS) and candle
 // (Windows/CUDA) lanes (sc-8830, F-028). These collapse the byte-identical

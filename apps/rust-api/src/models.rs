@@ -3253,6 +3253,69 @@ mod download_receipt_tests {
             }
         }
     }
+
+    /// The live SCAIL-2 manifest must give off-Mac users the dense shared package and the catalog's
+    /// install badge must enforce the exact provider-required six-file layout. This binds product
+    /// advertisement, Model Manager filtering, and worker loadability without duplicating weights.
+    #[test]
+    fn scail2_shared_bf16_package_is_installable_off_macos_and_fails_closed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let original = builtin_models_entry("scail2_14b");
+
+        for os in ["windows", "linux"] {
+            let mut model = original.clone();
+            retain_downloads_for_os(&mut model, os);
+            let downloads = model["downloads"].as_array().unwrap();
+            assert_eq!(downloads.len(), 1, "{os} must expose one installable tier");
+            assert_eq!(downloads[0]["variant"], "bf16");
+            assert_eq!(downloads[0]["files"], json!(["bf16/*"]));
+            assert_eq!(model_download(&model).unwrap()["variant"], "bf16");
+        }
+
+        let mut model = original;
+        retain_downloads_for_os(&mut model, "windows");
+        let download = model_download(&model).unwrap();
+        let repo = download["repo"].as_str().unwrap();
+        let revision = download["revision"].as_str().unwrap();
+        let tier = huggingface_repo_cache_path(data.path(), repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join("bf16");
+        std::fs::create_dir_all(&tier).unwrap();
+
+        std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+        let partial =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!partial.installed);
+        assert!(partial.cache_incomplete);
+        assert!(
+            partial
+                .missing_required_files
+                .iter()
+                .any(|file| file.contains("bf16") && file.contains("incomplete")),
+            "got {:?}",
+            partial.missing_required_files
+        );
+
+        for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
+            std::fs::write(tier.join(file), b"").unwrap();
+        }
+        let installed =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(installed.installed);
+        assert!(!installed.cache_incomplete);
+
+        std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+        let torn = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!torn.installed, "a provider-required file was removed");
+        assert!(torn.cache_incomplete);
+
+        let description = model["ui"]["description"].as_str().unwrap();
+        assert!(description.contains("Candle on NVIDIA Windows/Linux"));
+        assert!(!description.contains("macOS native MLX only"));
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A
@@ -3568,6 +3631,7 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         "anima" => Some(tc::anima_tier_complete),
         "boogu" => Some(tc::boogu_tier_complete),
         "sana" => Some(tc::sana_tier_complete),
+        "scail2" => Some(tc::scail2_tier_complete),
         // sc-14432: the SenseNova-U1 turnkeys ship a FLAT unified tier (backbone + config at the tier
         // root, no `model_index.json`), so without a predicate a torn tier read `installed` and then
         // failed at load — "complete but unloadable", with re-downloading the only (useless) repair.
@@ -4526,8 +4590,10 @@ mod model_size_concurrency_tests {
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
+        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
+        // each gain its exact pinned download context while macOS keeps the same one.
         for (os, expected_distinct_contexts) in
-            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 87_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]

@@ -5,7 +5,7 @@ use super::*;
 #[cfg(target_os = "macos")]
 use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, vace::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};
+use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
 
 #[test]
 fn video_jobs_remains_split_into_real_engine_modules() {
@@ -223,10 +223,11 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "Candle-shared VACE imports must not pull in macOS-only generation symbols"
     );
     assert!(
-        test_imports.contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, wan::*};")
+        test_imports
+            .contains("use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};")
             && !test_imports
                 .contains("use super::{bernini::*, ltx::*, mochi::*, svd::*, vace::*, wan::*};"),
-        "Candle tests must import the LTX helpers without the unused VACE family glob"
+        "Candle tests must import the shared LTX/SCAIL helpers without the unused VACE family glob"
     );
     for dispatch in [
         "generate_candle_video",
@@ -245,6 +246,95 @@ use serde_json::json;
 
 fn request(value: Value) -> VideoRequest {
     VideoRequest::from_payload(&value.as_object().cloned().unwrap())
+}
+
+/// Both SCAIL modes carry the model path and one-shot admission together into the shared generator.
+/// The generator cache, not these request arms, decides warm versus cold under its single-owner
+/// transaction; keeping the plan structural prevents either mode from regressing to a racy external
+/// peek/check or an unconditionally gated warm hit.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
+    const SOURCE: &str = include_str!("candle.rs");
+    assert_eq!(
+        SOURCE.matches("scail2_cold_load_plan(").count(),
+        3,
+        "one owner function and exactly two production callers must exist"
+    );
+    let animate = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2(")
+        .expect("animate arm")
+        .1
+        .split_once("/// Resolve a candle SCAIL-2 `replace_person`")
+        .expect("animate arm boundary")
+        .0;
+    let replace = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2_replace(")
+        .expect("replace arm")
+        .1
+        .split_once("/// Resolve the candle Wan-VACE diffusers snapshot dir")
+        .expect("replace arm boundary")
+        .0;
+    for (name, arm) in [("animate_character", animate), ("replace_person", replace)] {
+        assert!(
+            arm.contains("let Scail2ColdLoadPlan {")
+                && arm.contains("model_dir,")
+                && arm.contains("admission,"),
+            "{name} must keep the resolved model path and cold admission together"
+        );
+        let input = arm
+            .split_once("let input = VideoGenInput {")
+            .expect("engine input")
+            .1;
+        assert!(
+            input.contains("model_dir,"),
+            "{name} must use the planned model path"
+        );
+        assert!(
+            input.contains("cold_load_admission: Some(admission),"),
+            "{name} must hand admission to the cache cold-miss seam"
+        );
+        assert!(
+            !input.contains("model_dir: resolve_candle_scail2_model_dir"),
+            "{name} must not retain an ungated resolver bypass"
+        );
+    }
+
+    let wan = include_str!("wan.rs");
+    assert!(
+        wan.contains("Some(admission) => {")
+            && wan.contains("let cold_load_cancel = cancel.clone();")
+            && wan.contains(
+                "with_cached_generator_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
+            ),
+        "the shared video path must bind SCAIL admission and the same request cancel flag at the generator-cache seam"
+    );
+    let cache = include_str!("../generator_cache.rs");
+    assert!(
+        cache.contains("run_cached_with_access_after_cold_evict("),
+        "generator cache must use the serialized evict/admit/load transaction"
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn scail2_cold_admission_uses_a_fresh_bounded_probe_without_blocking_the_request_runtime() {
+    const CANDLE: &str = include_str!("candle.rs");
+    const GPU: &str = include_str!("../gpu.rs");
+    assert!(CANDLE.contains("nvidia_vram_budget_gb_fresh_blocking(&gpu_id)"));
+    let helper = GPU
+        .split_once("pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(")
+        .expect("fresh blocking NVIDIA helper")
+        .1
+        .split_once("/// Apple-Silicon unified-memory")
+        .expect("helper boundary")
+        .0;
+    assert!(helper.contains("tokio::runtime::Builder::new_current_thread()"));
+    assert!(helper.contains("query_gpu_utilization(gpu_id)"));
+    assert!(
+        !helper.contains("tokio::runtime::Handle::current()"),
+        "the cache OS thread must not block the request's Tokio runtime"
+    );
 }
 
 #[test]
@@ -6042,6 +6132,88 @@ fn scail2_engine_id_maps_only_the_scail2_family() {
     assert_eq!(scail2_engine_id(""), None);
 }
 
+/// The off-Mac resolver must consume the exact pinned bf16 tier that Model Manager installs, and it
+/// must use the provider-owned completeness predicate rather than a weaker worker-side sentinel.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    assert_eq!(
+        sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES,
+        runtime_cuda::providers::scail2::SHARED_TIER_FILES,
+        "API/MLX completeness and the pinned candle provider must require identical package files"
+    );
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_shared_")
+        .tempdir()
+        .expect("temp dir");
+    let tier = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
+        .expect("repo cache path")
+        .join("snapshots")
+        .join(SCAIL2_REVISION)
+        .join("bf16");
+    std::fs::create_dir_all(&tier).unwrap();
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+
+    // A directory or one plausible tensor is not an install. Missing any provider-required file
+    // must keep routing closed and name Model Manager as the repair path.
+    std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+    let error = resolve_managed_candle_scail2_model_dir(&settings)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Model Manager"), "got: {error}");
+    assert!(error.contains("bf16"), "got: {error}");
+
+    for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+        std::fs::write(tier.join(file), b"").unwrap();
+    }
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        tier
+    );
+
+    std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+}
+
+/// Existing manually assembled candle snapshots remain a compatibility fallback, but only when the
+/// provider accepts their complete legacy component shape.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_preserves_complete_legacy_layout_only() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let data = tempfile::Builder::new()
+        .prefix("sw_candle_scail2_legacy_")
+        .tempdir()
+        .expect("temp dir");
+    let legacy = data.path().join("models").join("candle").join("scail2");
+    for component in ["transformer", "text_encoder", "vae", "clip", "tokenizer"] {
+        std::fs::create_dir_all(legacy.join(component)).unwrap();
+    }
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+
+    std::fs::write(legacy.join("tokenizer/tokenizer.json"), b"").unwrap();
+    assert_eq!(
+        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        legacy
+    );
+}
+
 /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),
 /// `mlxQuantize` opts up to Q8 or down to bf16 (`<= 0`), parsing a JSON number or string. The
 /// bf16 snapshot is ~47 GB so a missing control NEVER means bf16. Mirrors the Bernini quant test.
@@ -6779,7 +6951,7 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
     std::fs::create_dir_all(&dir).unwrap();
-    for file in SCAIL2_TIER_FILES {
+    for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
 }

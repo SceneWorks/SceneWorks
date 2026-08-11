@@ -800,11 +800,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // tasks route to candle: t2i via the generic `image_request_candle_eligible` gate, i2i via the
     // `bernini_image` `edit_image` branch in `image_job_is_candle_eligible` (a `sourceAssetId` edit, the
     // bespoke `generate_candle_bernini_image_stream` lane — like the MLX `bernini_image_mlx_eligible`).
-    // NOT `candle_quant`: the descriptor advertises Q4/Q8, but the off-Mac packed-tier select is deferred
-    // until the `SceneWorks/bernini` tier layout lands (sc-11003) — the candle lane loads the
-    // converted snapshot dense today. The video `bernini` id lives in the video table below (still
-    // MLX-only — no candle video route wired yet).
-    ModelCaps::new("bernini_image", true, true, false, false, false),
+    // `candle_quant = true`: the descriptor advertises Q4/Q8 and the off-Mac worker resolves the
+    // published `SceneWorks/bernini` bf16/q8/q4 tier subdirectories (sc-11003) in both its still and
+    // video lanes. No inference LoRA slot, so this is quant-only rather than quant+LoRA.
+    ModelCaps::new("bernini_image", true, true, true, false, false),
     // Ideogram 4 + Turbo (epic 4725 MLX; sc-6597 candle): 9.3B flow DiT + Qwen3-VL-8B TE. T2I + edit on
     // MLX (sc-6303); candle serves txt2img + the in-lane edit path (sc-6598) via the generic stream.
     // Candle advertises Q4/Q8 (sc-9607 flipped `supported_quants: [Q4, Q8]`, dropping the loader's
@@ -890,6 +889,11 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // Both are VACE-capable on candle.
     VideoModelCaps::new("wan_2_2_t2v_14b", true, true, false, true),
     VideoModelCaps::new("wan_2_2_i2v_14b", true, true, true, true),
+    // Wan2.2 VACE-Fun A14B (sc-3459 / sc-6604): the shipped dual-expert model is a dedicated
+    // MLX replace-person engine. The worker resolves it before the generic Wan-VACE fallback and
+    // fails loudly off-Mac, so only the MLX column is true; its sole admitted mode is pinned by
+    // `video_mode_is_mlx_eligible`.
+    VideoModelCaps::new("wan_2_2_vace_fun_14b", true, false, false, false),
     // SVD (`svd` → `svd_xt`, sc-3523 MLX; sc-5493 candle): image→video ONLY. Not a VACE model.
     VideoModelCaps::new("svd", true, true, true, false),
     // Bernini (epic 4699 / sc-4707 MLX; sc-10997 candle): Qwen2.5-VL planner + Wan2.2-T2V-A14B
@@ -1623,6 +1627,7 @@ mod tests {
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
+        "bernini_image",
         "ideogram_4",
         "ideogram_4_turbo",
         "boogu_image",
@@ -1680,6 +1685,7 @@ mod tests {
         "wan_2_2",
         "wan_2_2_t2v_14b",
         "wan_2_2_i2v_14b",
+        "wan_2_2_vace_fun_14b",
         "svd",
         "bernini",
         "scail2_14b",

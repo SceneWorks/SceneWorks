@@ -1,0 +1,7267 @@
+{
+  "schemaVersion": 2,
+  "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
+  "summary": {
+    "modelCount": 91,
+    "cellCount": 868,
+    "mlxOnlyCellCount": 216,
+    "candleOnlyCellCount": 37,
+    "exceptionCount": 0
+  },
+  "sources": {
+    "apiContractEntry": "12c73682cf9c4810e38e172953ae92787fa39b79ef06420bcedeb16b6e549fa0",
+    "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
+    "apiGeneration": "6d91fe0874135dbda3b40192bd0dee53f869e493c58d3627a2beec4cdfeaa1be",
+    "apiValidation": "84f992aa4aa573b363a8428d320738c53b6e4b36078af5110c6852a15b2254eb",
+    "descriptorAudioFacts": "634d90068826cd9cc06fe1bf1b5b08c682b88638cb2afa46752cce29d097222f",
+    "descriptorCandleFacts": "17eaf8a60bd9b90b789b8f6fe022c01494ddd1d701a8c6ebfa1600781d9fa728",
+    "descriptorCandleRuntime": "5a62e095bbb6db33594096d2d45d047c2d3931891be65a13a6a2c2328be9957d",
+    "descriptorMlxFacts": "68858788dbcb6bc3c3e0f2b2dd11a42843eaa5f0a82b9debc63ae0a95ae19900",
+    "descriptorMlxRuntime": "a4df129934b390858af02374cf7c12114003c46c2236c1c47634eb1c1fecba7b",
+    "descriptorPreviewFacts": "c6596f1ae68c59a9eac383a1e643c6dd89b206faa42f7232da0a8bc92dde8fca",
+    "exceptionRegister": "22f2bcbc551e6bde83175df16c40707dc001e0bacdbeafb136e57932ab7af7d7",
+    "manifest": "693b42b5464c235ada92d5d06ac92a982216d2dbeda2a2a4cdf6ff984e0c9eed",
+    "routerCandle": "4073e3cc947ad4e53c27320d56ae265a294c4f58256bf95c50bc8a53ac31f8ba",
+    "routerCatalog": "135bff1a323dd59e7318864f454e711e9a56253aeba9b148a36fdc816991e19a",
+    "routerGaps": "f495497899b6b73b1884e7f703c9b356ac4690ee4d4ed1e8655890673d9db340",
+    "routerMlx": "485f72eb161bdcad7dcd5891cb73e42db91b7af4da7f567db3a53c2c75296697",
+    "scheduler": "1b05c5c9c33fe036276bffeb400637575dbcab309a2977e8b1702bfce669d52f",
+    "trainingCatalog": "783b049b02a0e4085ddc0a4c59ace7b1093a6cc919fe26625109abf884b60a49",
+    "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
+    "webImageAdvanced": "98c945022fe4b9ba9d976fff4efbe69b522aa6e91a9903b7f3169a45aa749dcf",
+    "webImageRequest": "a46fe3824501f0ded99ab2cb0163b7fd661c58da4a325908c6dadc8c9bdc385c",
+    "webMacGating": "733e4e27429d88a6ba285c74815ca0f8f83152ccbe09e4001dd3d46912824689",
+    "webPreviewGating": "febc16c07bef46a6004d24a2556d37cdb0513c208e60416e170875ff80ea78fe",
+    "webSimpleAudio": "e23261b5f19326c7aae617600c2379e81dfcc75b1ecaaab9e23da6855aa31054",
+    "webSimpleAudioStudio": "2270aa3462252b667a0f1985b819c84749aae44f4fc01ba163a8a5f670227519",
+    "webSimpleJobs": "bba715b793b6fbe6a644d4db31172e3a8a3fc9c8d93fede22767a2989b09dd27",
+    "webSimpleVideo": "b75c0a2b754e8f3288d569548e33df6e9889d7a4813b64a83557a0baeb329637",
+    "webUpscaleEngines": "31f3e26fbd009954126a324ea37dc9e2e1a9fa89955620c50794fb2df1ec40d4",
+    "webVideoStudio": "2e7f20c353bcab79e299a3dbc39a0aae064869822e324220250eec875fcf21c1",
+    "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
+    "webVideoValidation": "1650a576cbe0a080e70e466f71a26e9d7b599379987e891385b2d33bab86cea9",
+    "workerAudioDispatch": "1679977fd1fbd9427572df035fd32e2644f79363eadceef90305ea54083043b1",
+    "workerDispatch": "74251a96f9ae0ea50d166a2678609287c4eaaa946b35c931db6bb55e9443036e",
+    "workerEngineTable": "527455e759e96d1e636532a2032e1532cef6e28debd0a7cd4d2eef6f84544bfc",
+    "workerGpuCapabilities": "5d07619ff976b7a6f2843eb264373d9069f83676bd9686a36cc737478496ffa0",
+    "workerImageDispatch": "cc62f0ec8aaf91270e45229239f9f2ad6a2aabef6453cd63524b7cdfae2a5605",
+    "workerTrainingDispatch": "48259a3c67d6f0a6d43945ee6f13fdabe150da8fe291bb7d582fad2ea9598aff",
+    "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
+    "workerVideoBernini": "0884a375e5006409d6f892212e1a4cb2bb250c18a8ef11f948d3d3098f63a651",
+    "workerVideoCandle": "1a43ed7815a47d7db846f3313ed6fdfcc9eb85f3a5d377857fbbf6559ea00374",
+    "workerVideoDispatch": "d1329d8212c2661cefbaff91d4989bbdb4f8733a8a740509124f2d6786ead2f4",
+    "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
+    "workerVideoLtx": "73d76df14aadd41c4c4324bd82deb2112550d0f06cd1fa3a2037f8fa96104eba",
+    "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
+    "workerVideoScail2": "52f560272ff42dca5568b41e3d732d63215616cb03aa102243ed7dc67d25ace0",
+    "workerVideoSeedvr2": "632d4afe9649858e8f73d226c46276a3222a2c129f2a3afabd24b0640727e0cf",
+    "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
+    "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
+    "workerVideoWan": "0dcef4a504e0d1b92ee47bd2556d8a5a135947175022f9dcc1a65b89c76f2657"
+  },
+  "models": [
+    {
+      "id": "acestep_v15_turbo",
+      "family": "acestep",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "audioEdit",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "anima_aesthetic",
+      "family": "anima",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "anima_base",
+      "family": "anima",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "anima_turbo",
+      "family": "anima",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "aura_sr_v2",
+      "family": "aura-sr",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "engine:aura-sr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "bernini",
+      "family": "bernini",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "replace_person",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "videoClip",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "bernini_image",
+      "family": "bernini",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "videoClip",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "boogu_image",
+      "family": "boogu",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "boogu_image_edit",
+      "family": "boogu",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "boogu_image_turbo",
+      "family": "boogu",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "chatterbox_tts",
+      "family": "chatterbox",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "referenceAudio",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "voiceEmbedding",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "chatterbox_ve",
+      "family": "voice",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_voice_embedder",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "chroma1_base",
+      "family": "chroma",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "chroma1_flash",
+      "family": "chroma",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "chroma1_hd",
+      "family": "chroma",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "clap_htsat_unfused",
+      "family": "clap",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_embedder",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "clip_vit_l14",
+      "family": "clip",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "dataset_analysis",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "controlnet_tile_sdxl",
+      "family": "controlnet-tile",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "image_detail",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "dwpose_pose_detector",
+      "family": "dwpose",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "pose_detect",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "flux2_dev",
+      "family": "flux2-dev",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "prompt_enhancement",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "prompt_enhancement",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18474",
+            "url": "https://app.shortcut.com/trefry/story/18474"
+          }
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "multiReference",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "flux2_klein_9b",
+      "family": "flux2-klein",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "flux2_klein_9b_kv",
+      "family": "flux2-klein",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "flux2_klein_9b_true_v2",
+      "family": "flux2-klein",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "flux_dev",
+      "family": "flux",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "flux_schnell",
+      "family": "flux",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "ideogram_4",
+      "family": "ideogram",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "image_inpaint",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_inpaint",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "mask",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "ideogram_4_turbo",
+      "family": "ideogram",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "image_inpaint",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_inpaint",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "mask",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "illustrious_xl_v1",
+      "family": "sdxl",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_detail",
+        "image_inpaint",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_detail",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "image_inpaint",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "mask",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "illustrious_xl_v2",
+      "family": "sdxl",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_detail",
+        "image_inpaint",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_detail",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "image_inpaint",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "mask",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "instantid_realvisxl",
+      "family": "sdxl",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "joycaption_beta_one",
+      "family": "joycaption",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "training_caption",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "kokoro_82m",
+      "family": "kokoro",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "kolors",
+      "family": "kolors",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "krea_2_raw",
+      "family": "krea_2",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "krea_2_turbo",
+      "family": "krea_2",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "int8-convrot",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "krea_realtime_14b",
+      "family": "krea-realtime",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8433"
+          }
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8433"
+          }
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8433"
+          }
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "videoClip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8433"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8433"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": null
+      }
+    },
+    {
+      "id": "lens",
+      "family": "lens",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "lens_turbo",
+      "family": "lens",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "ltx_2_3",
+      "family": "ltx-video",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "controlClip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "keyframe",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "videoClip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "ltx_2_3_eros",
+      "family": "ltx-video",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "controlClip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "keyframe",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "videoClip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "mage_flow",
+      "family": "mage-flow",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "mage_flow_base",
+      "family": "mage-flow",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "mage_flow_edit",
+      "family": "mage-flow",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "mage_flow_edit_base",
+      "family": "mage-flow",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "mage_flow_edit_turbo",
+      "family": "mage-flow",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "mage_flow_turbo",
+      "family": "mage-flow",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "mmaudio_large_44k",
+      "family": "mmaudio",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "videoSync",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "mmaudio_small_16k",
+      "family": "mmaudio",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "videoSync",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "moss_sfx_v2",
+      "family": "moss_soundeffect",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "moss_tts_realtime",
+      "family": "moss_tts_realtime",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "conversationHistory",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "referenceAudio",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "moss_ttsd_v05",
+      "family": "moss_ttsd",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_generator",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": false
+      }
+    },
+    {
+      "id": "openvoice_v2",
+      "family": "openvoice",
+      "modelType": "audio",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_transform",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "person_detector",
+      "family": "yolo11m-person-detect",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "person_detect",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "pid_flux",
+      "family": "pid",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "person_detect",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "pid_flux2",
+      "family": "pid",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "person_detect",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "pid_qwenimage",
+      "family": "pid",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "person_detect",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "pid_sdxl",
+      "family": "pid",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "person_detect",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "prompt_refine_anubis_8b",
+      "family": "prompt-refine",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "prompt_refine",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "pulid_flux_dev",
+      "family": "flux",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "qwen_image",
+      "family": "qwen-image",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511",
+      "family": "qwen-image",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": null,
+        "parityObligation": {
+          "workItem": "sc-18476",
+          "url": "https://app.shortcut.com/trefry/story/18476",
+          "authority": "epic-16948"
+        }
+      }
+    },
+    {
+      "id": "qwen_image_edit_2511_lightning",
+      "family": "qwen-image",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": null,
+        "parityObligation": {
+          "workItem": "sc-18476",
+          "url": "https://app.shortcut.com/trefry/story/18476",
+          "authority": "epic-16948"
+        }
+      }
+    },
+    {
+      "id": "real_esrgan",
+      "family": "real-esrgan",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "engine:real-esrgan",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "realvisxl",
+      "family": "sdxl",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_detail",
+        "image_inpaint",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_detail",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "image_inpaint",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "mask",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "realvisxl_lightning",
+      "family": "sdxl",
+      "modelType": "image",
+      "manifestOperations": [
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "style_variations",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "mask",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "sam2_person_segment",
+      "family": "sam2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "person_segment",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "sam3_person_segment",
+      "family": "sam3",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "smart_segment",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "sana_1600m",
+      "family": "sana",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18475",
+            "url": "https://app.shortcut.com/trefry/story/18475",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18475",
+            "url": "https://app.shortcut.com/trefry/story/18475",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "sana_sprint_1600m",
+      "family": "sana",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18475",
+            "url": "https://app.shortcut.com/trefry/story/18475",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18475",
+            "url": "https://app.shortcut.com/trefry/story/18475",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "scail2_14b",
+      "family": "scail2",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "controlClip",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "mask",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "sd3_5_large",
+      "family": "sd3",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "sd3_5_large_turbo",
+      "family": "sd3",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "sd3_5_medium",
+      "family": "sd3",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "sdxl",
+      "family": "sdxl",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_detail",
+        "image_inpaint",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_detail",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "image_inpaint",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "mask",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "seedvr2_upscaler",
+      "family": "seedvr2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "engine:seedvr2",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "sensenova_u1_8b",
+      "family": "sensenova-u1",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "interleave",
+        "text_to_image",
+        "vqa"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "interleave",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "vqa",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": true,
+        "preservedCandleOnly": true
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_fast",
+      "family": "sensenova-u1",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": true,
+        "preservedCandleOnly": true
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2",
+      "family": "sensenova-u1",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "interleave",
+        "text_to_image",
+        "vqa"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "interleave",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "vqa",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": true,
+        "preservedCandleOnly": true
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast",
+      "family": "sensenova-u1",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": true,
+        "preservedCandleOnly": true
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3",
+      "family": "sensenova-u1",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "interleave",
+        "text_to_image",
+        "vqa"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "interleave",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "vqa",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": true,
+        "preservedCandleOnly": true
+      }
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast",
+      "family": "sensenova-u1",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": true,
+        "preservedCandleOnly": true
+      }
+    },
+    {
+      "id": "svd",
+      "family": "svd",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "vision_caption_qwen3vl_8b",
+      "family": "vision-caption",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "training_caption",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "wan_2_2",
+      "family": "wan-video",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "controlClip",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "keyframe",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "wan_2_2_i2v_14b",
+      "family": "wan-video",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "controlClip",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "wan_2_2_t2v_14b",
+      "family": "wan-video",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "controlClip",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "reference",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "wan_2_2_vace_fun_14b",
+      "family": "wan-video",
+      "modelType": "video",
+      "manifestOperations": [
+        "ads2v",
+        "animate_character",
+        "extend_clip",
+        "first_last_frame",
+        "image_to_video",
+        "multi_video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "replace_person",
+        "text_to_video",
+        "video_bridge",
+        "video_to_video"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "ads2v",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "animate_character",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "extend_clip",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "first_last_frame",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "image_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "multi_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference_video_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "replace_person",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "text_to_video",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_bridge",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "video_to_video",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "controlClip",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-8588"
+          }
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18478",
+            "url": "https://app.shortcut.com/trefry/story/18478",
+            "authority": "epic-9083"
+          }
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": null
+      }
+    },
+    {
+      "id": "whisper_base",
+      "family": "whisper",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "provider:audio_transcriber",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "z_image",
+      "family": "z-image",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "z_image_edit",
+      "family": "z-image",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "image_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18476",
+            "url": "https://app.shortcut.com/trefry/story/18476"
+          }
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "z_image_turbo",
+      "family": "z-image",
+      "modelType": "image",
+      "manifestOperations": [
+        "image_to_image",
+        "style_variations",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "style_variations",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "control",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18477",
+            "url": "https://app.shortcut.com/trefry/story/18477"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    }
+  ],
+  "gpuJobTypes": [
+    {
+      "jobType": "audio_generate",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "catalog_analysis",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "control_training",
+      "category": "per-kernel",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ]
+    },
+    {
+      "jobType": "dataset_analysis",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "dataset_face_analysis",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "dataset_upscale",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "face_likeness_compare",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "frame_extract",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": false,
+          "candle": false
+        }
+      ]
+    },
+    {
+      "jobType": "image_detail",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
+        }
+      ]
+    },
+    {
+      "jobType": "image_edit",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "image_generate",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "image_interleave",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "image_segment",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
+        }
+      ]
+    },
+    {
+      "jobType": "image_upscale",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "engine:real-esrgan",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "engine:seedvr2",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "engine:aura-sr",
+          "mlx": false,
+          "candle": false
+        }
+      ]
+    },
+    {
+      "jobType": "image_vqa",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "kps_extract",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "lora_train",
+      "category": "per-kernel",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "person_detect",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "person_replace",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
+        }
+      ]
+    },
+    {
+      "jobType": "person_track",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "placeholder",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": false,
+          "candle": false
+        }
+      ]
+    },
+    {
+      "jobType": "pose_detect",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "prompt_refine",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "timeline_export",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": false,
+          "candle": false
+        }
+      ]
+    },
+    {
+      "jobType": "training_caption",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "video_bridge",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
+        }
+      ]
+    },
+    {
+      "jobType": "video_extend",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18480",
+            "url": "https://app.shortcut.com/trefry/story/18480"
+          }
+        }
+      ]
+    },
+    {
+      "jobType": "video_generate",
+      "category": "per-model",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
+      "jobType": "video_upscale",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    }
+  ],
+  "trainingKernels": [
+    {
+      "target": "anima_base_lora",
+      "baseModel": "anima_base",
+      "kernel": "anima_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "anima_base_lora",
+      "baseModel": "anima_base",
+      "kernel": "anima_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "illustrious_xl_v1_lora",
+      "baseModel": "illustrious_xl_v1",
+      "kernel": "sdxl_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "illustrious_xl_v1_lora",
+      "baseModel": "illustrious_xl_v1",
+      "kernel": "sdxl_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "illustrious_xl_v2_lora",
+      "baseModel": "illustrious_xl_v2",
+      "kernel": "sdxl_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "illustrious_xl_v2_lora",
+      "baseModel": "illustrious_xl_v2",
+      "kernel": "sdxl_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "kolors_lora",
+      "baseModel": "kolors",
+      "kernel": "kolors_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "kolors_lora",
+      "baseModel": "kolors",
+      "kernel": "kolors_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "krea_2_control",
+      "baseModel": "krea_2_raw",
+      "kernel": "krea_control",
+      "networkType": "control",
+      "support": {
+        "capability": "train",
+        "mlx": false,
+        "candle": true,
+        "preservedCandleOnly": true
+      }
+    },
+    {
+      "target": "krea_2_raw_lora",
+      "baseModel": "krea_2_raw",
+      "kernel": "krea_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "krea_2_raw_lora",
+      "baseModel": "krea_2_raw",
+      "kernel": "krea_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "lens_turbo_lora",
+      "baseModel": "lens",
+      "kernel": "lens_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "lens_turbo_lora",
+      "baseModel": "lens",
+      "kernel": "lens_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "ltx_video_lora",
+      "baseModel": "ltx_2_3",
+      "kernel": "ltx_mlx_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "mage_flow_base_lora",
+      "baseModel": "mage_flow_base",
+      "kernel": "mage_flow_lora",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "mage_flow_base_lora",
+      "baseModel": "mage_flow_base",
+      "kernel": "mage_flow_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "mage_flow_base_lora",
+      "baseModel": "mage_flow_base",
+      "kernel": "mage_flow_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "sd3_5_large_lora",
+      "baseModel": "sd3_5_large",
+      "kernel": "sd3_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "sd3_5_large_lora",
+      "baseModel": "sd3_5_large",
+      "kernel": "sd3_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "sd3_5_medium_lora",
+      "baseModel": "sd3_5_medium",
+      "kernel": "sd3_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "sd3_5_medium_lora",
+      "baseModel": "sd3_5_medium",
+      "kernel": "sd3_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "sdxl_lora",
+      "baseModel": "sdxl",
+      "kernel": "sdxl_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "sdxl_lora",
+      "baseModel": "sdxl",
+      "kernel": "sdxl_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "wan_i2v_14b_lora",
+      "baseModel": "wan_2_2_i2v_14b",
+      "kernel": "wan_moe_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "wan_lora",
+      "baseModel": "wan_2_2",
+      "kernel": "wan_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "target": "wan_lora",
+      "baseModel": "wan_2_2",
+      "kernel": "wan_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": false,
+        "parityObligation": {
+          "workItem": "sc-18479",
+          "url": "https://app.shortcut.com/trefry/story/18479"
+        }
+      }
+    },
+    {
+      "target": "wan_t2v_14b_lora",
+      "baseModel": "wan_2_2_t2v_14b",
+      "kernel": "wan_moe_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "z_image_turbo_lora",
+      "baseModel": "z_image_turbo",
+      "kernel": "z_image_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "z_image_turbo_lora",
+      "baseModel": "z_image_turbo",
+      "kernel": "z_image_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    }
+  ],
+  "exceptions": []
+}

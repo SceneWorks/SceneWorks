@@ -139,6 +139,22 @@ pub(crate) fn with_candle_capabilities(
                 return gpu;
             }
             extend_capabilities_unique(&mut gpu.capabilities, derived);
+            // Advanced video generation is routed through production video-engine predicates,
+            // not the generic descriptor modality: Candle's Wan-VACE/SCAIL providers serve
+            // replace_person, extend_clip, and video_bridge, but `registry_capabilities` can only
+            // derive the coarse `video_generate` capability. Advertise the three concrete job
+            // types so scheduler eligibility, worker claiming, and the rich descriptor mappings
+            // describe the same executable surface. Per-model/mode routing remains fail-closed in
+            // `jobs_store::video_job_is_candle_eligible`; advertising these capabilities does not
+            // admit unsupported video models.
+            extend_capabilities_unique(
+                &mut gpu.capabilities,
+                [
+                    WorkerCapability::VideoExtend,
+                    WorkerCapability::VideoBridge,
+                    WorkerCapability::PersonReplace,
+                ],
+            );
             // Plain Image Edit (sc-5487, epic 5480): the distinct `image_edit` job type
             // (`mode == "edit_image"` + `sourceAssetId`, epic 2427) runs the bespoke candle edit lanes
             // (SdxlEdit / Flux2Edit / QwenEdit) via `run_image_generate_job`, which dispatches by payload
@@ -681,6 +697,32 @@ pub(crate) async fn nvidia_vram_budget_gb(gpu_id: &str) -> Option<crate::vram_ga
     Some(crate::vram_gate::VramBudget {
         free_gb: free_mb as f64 / 1024.0,
         total_gb: total_mb as f64 / 1024.0,
+    })
+}
+
+/// Fresh, bounded NVIDIA budget probe for the serialized generator-cache cold-load transaction.
+///
+/// The cache worker is a dedicated OS thread, not a Tokio executor thread. Building a private
+/// current-thread runtime here therefore cannot block the worker runtime that owns the request, and
+/// lets [`run_bounded_command`] retain its three-second timeout/kill-on-drop contract. This bypasses
+/// [`gpu_utilization`]'s one-second heartbeat cache deliberately: SCAIL calls it only after evicting
+/// a different resident generator, so a pre-eviction sample could reject a load whose reclaimed VRAM
+/// now fits (or, worse, credit memory that was not actually returned).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn nvidia_vram_budget_gb_fresh_blocking(
+    gpu_id: &str,
+) -> Option<crate::vram_gate::VramBudget> {
+    if gpu_id == "cpu" {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let snapshot = runtime.block_on(query_gpu_utilization(gpu_id))?;
+    Some(crate::vram_gate::VramBudget {
+        free_gb: snapshot.memory_free_mb? as f64 / 1024.0,
+        total_gb: snapshot.memory_total_mb? as f64 / 1024.0,
     })
 }
 
