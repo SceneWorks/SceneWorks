@@ -1820,6 +1820,8 @@ pub(super) async fn generate_video_using(
             )
         });
         tokio::spawn(async move {
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let cold_load_cancel = cancel.clone();
             let run = move |generator: &dyn Generator| {
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
@@ -1860,6 +1862,7 @@ pub(super) async fn generate_video_using(
                             engine_id,
                             spec,
                             "video load failed",
+                            cold_load_cancel,
                             admission,
                             load_generator,
                             run,

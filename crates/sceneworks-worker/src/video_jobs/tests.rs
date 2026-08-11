@@ -303,8 +303,11 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
     let wan = include_str!("wan.rs");
     assert!(
         wan.contains("Some(admission) => {")
-            && wan.contains("with_cached_generator_using_cold_admission("),
-        "the shared video path must consume SCAIL admission only at the generator-cache seam"
+            && wan.contains("let cold_load_cancel = cancel.clone();")
+            && wan.contains(
+                "with_cached_generator_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
+            ),
+        "the shared video path must bind SCAIL admission and the same request cancel flag at the generator-cache seam"
     );
     let cache = include_str!("../generator_cache.rs");
     assert!(

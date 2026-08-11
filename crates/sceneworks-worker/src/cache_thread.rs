@@ -186,22 +186,30 @@ where
     pub(crate) fn with_model_access_after_cold_evict<R>(
         &mut self,
         key: K,
+        cancel_check: impl Fn() -> WorkerResult<()>,
         cold_admission: impl FnOnce() -> WorkerResult<()>,
         load: impl FnOnce() -> WorkerResult<M>,
         run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R>,
         entry_missing_msg: &str,
     ) -> WorkerResult<R> {
+        // The async waiter may have been aborted while this closure was queued on the unbounded
+        // std::mpsc channel. Check the request-owned flag on the cache thread before even comparing
+        // keys so an abandoned job cannot touch a still-useful resident entry.
+        cancel_check()?;
         let access = if self.entry.as_ref().is_some_and(|entry| entry.key == key) {
             CacheAccess::Warm
         } else {
             // A full Candle generator/device drop returns the resident cudarc allocation to the
             // driver. Admission therefore samples the real post-evict budget, without guessing at
             // reclaimable bytes. A rejection deliberately leaves the single slot cold.
+            cancel_check()?;
             self.entry = None;
             if self.evict_before_load {
                 release_backend_cache_after_evict();
             }
+            cancel_check()?;
             cold_admission()?;
+            cancel_check()?;
             let model = load()?;
             self.entry = Some(Entry {
                 key: key.clone(),
@@ -385,6 +393,7 @@ where
 pub(crate) async fn run_cached_with_access_after_cold_evict<K, M, R>(
     worker: mpsc::Sender<CacheJob<K, M>>,
     key: K,
+    cancel_check: impl Fn() -> WorkerResult<()> + Send + 'static,
     cold_admission: impl FnOnce() -> WorkerResult<()> + Send + 'static,
     load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
     run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,
@@ -398,8 +407,21 @@ where
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let request_active = || {
+                // A Tokio task can be aborted/dropped without first tripping its engine cancel
+                // flag. The std::mpsc job outlives that waiter, so the reply channel is the
+                // authoritative abandonment signal for that path.
+                if reply_tx.is_closed() {
+                    Err(WorkerError::Canceled(
+                        "Model cache request was abandoned before load.".to_owned(),
+                    ))
+                } else {
+                    cancel_check()
+                }
+            };
             cache.with_model_access_after_cold_evict(
                 key,
+                request_active,
                 cold_admission,
                 load,
                 run,
@@ -557,6 +579,7 @@ mod tests {
         let warm = cache
             .with_model_access_after_cold_evict(
                 7,
+                || Ok(()),
                 || {
                     warm_gate_called.set(true);
                     Err(WorkerError::InvalidPayload(
@@ -575,6 +598,7 @@ mod tests {
         let load_called = Cell::new(false);
         let rejected = cache.with_model_access_after_cold_evict(
             8,
+            || Ok(()),
             || {
                 assert!(
                     dropped.get(),
