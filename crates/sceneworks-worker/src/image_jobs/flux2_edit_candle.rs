@@ -429,6 +429,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
         .collect();
     let total = work.len();
     let negative = request.negative_prompt.clone();
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
 
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
@@ -465,15 +466,15 @@ pub(super) async fn generate_candle_flux2_edit_stream(
             Ok((model, references, memory_context))
         },
         move |(model, references, memory_context), tx, cancel| {
-            drive_gen_items(
+            drive_gen_items_reported(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
                     let req = Flux2EditRequest {
-                        prompt,
+                        prompt: prompt.clone(),
                         negative: negative.clone(),
                         width,
                         height,
@@ -482,6 +483,14 @@ pub(super) async fn generate_candle_flux2_edit_stream(
                         seed: seed as u64,
                         // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
                         use_pid,
+                        enhance_prompt: enhance.enabled,
+                        enhance_max_tokens: enhance.max_tokens,
+                        enhance_temperature: enhance.temperature,
+                        prompt_enhancement: if enhance.enabled {
+                            prompt_enhancement.for_prompt(&prompt)
+                        } else {
+                            gen_core::PromptEnhancementSink::default()
+                        },
                         preview: preview.clone(),
                         cancel: cancel.clone(),
                     };

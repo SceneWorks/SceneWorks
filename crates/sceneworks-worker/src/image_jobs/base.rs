@@ -4770,6 +4770,9 @@ mod sampling_knob_tests {
 /// reference image(s) for edit; every other engine ignores the fields, and the dev Image-Studio
 /// toggle (manifest `ui.promptEnhance`) is the only surface that sets `enhancePrompt`, so this is a
 /// no-op for all other models.
+const PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS: usize = 16_000;
+const PROMPT_ENHANCE_MAX_REASON_CHARS: usize = 512;
+
 #[derive(Clone, Default)]
 pub(crate) struct PromptEnhance {
     enabled: bool,
@@ -4778,27 +4781,142 @@ pub(crate) struct PromptEnhance {
 }
 
 impl PromptEnhance {
-    /// Resolve from a job request's `advanced` settings (same keys as the LTX-2.3 video path).
-    pub(crate) fn from_advanced(advanced: &JsonObject) -> Self {
-        PromptEnhance {
-            enabled: advanced::bool(advanced, "enhancePrompt"),
-            temperature: advanced
-                .get("enhanceTemperature")
-                .and_then(Value::as_f64)
-                .map(|value| value as f32),
-            max_tokens: advanced
-                .get("enhanceMaxTokens")
-                .and_then(Value::as_u64)
-                .map(|value| value as u32),
-        }
+    /// Resolve from a job request's `advanced` settings without truthy/string coercions. These
+    /// values drive a native LLM sampler and therefore have one typed, bounded contract shared with
+    /// the API and inference providers.
+    pub(crate) fn from_advanced(advanced: &JsonObject) -> WorkerResult<Self> {
+        let (enabled, temperature, max_tokens) = parse_prompt_enhancement_fields(advanced)?;
+        Ok(Self {
+            enabled,
+            temperature,
+            max_tokens,
+        })
     }
 
     /// Write the resolved enhancement settings onto a `GenerationRequest`.
-    fn apply(&self, request: &mut GenerationRequest) {
+    fn apply(
+        &self,
+        request: &mut GenerationRequest,
+        prompt_enhancement: gen_core::PromptEnhancementSink,
+    ) {
         request.enhance_prompt = self.enabled;
         request.enhance_temperature = self.temperature;
         request.enhance_max_tokens = self.max_tokens;
+        request.prompt_enhancement = if self.enabled {
+            prompt_enhancement
+        } else {
+            gen_core::PromptEnhancementSink::default()
+        };
     }
+}
+
+fn prompt_enhancement_fact(
+    report: gen_core::PromptEnhancementReport,
+    requested_prompt: &str,
+) -> WorkerResult<Value> {
+    if report.original_prompt != requested_prompt {
+        return Err(WorkerError::Engine(
+            "prompt-enhancement report original_prompt did not match the per-image request".to_owned(),
+        ));
+    }
+    if report.effective_prompt.trim().is_empty()
+        || report.effective_prompt.chars().count() > PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS
+    {
+        return Err(WorkerError::Engine(format!(
+            "prompt-enhancement report effective_prompt must contain 1..={PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS} characters"
+        )));
+    }
+    let (outcome, fallback_reason) = match report.outcome {
+        gen_core::PromptEnhancementOutcome::Enhanced => {
+            if report.fallback_reason.is_some() {
+                return Err(WorkerError::Engine(
+                    "enhanced prompt report unexpectedly carried a fallback reason".to_owned(),
+                ));
+            }
+            ("enhanced", None)
+        }
+        gen_core::PromptEnhancementOutcome::Fallback => {
+            if report.effective_prompt != report.original_prompt {
+                return Err(WorkerError::Engine(
+                    "fallback prompt report did not preserve the original prompt".to_owned(),
+                ));
+            }
+            let reason = report
+                .fallback_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| {
+                    !reason.is_empty()
+                        && reason.chars().count() <= PROMPT_ENHANCE_MAX_REASON_CHARS
+                        && !reason.chars().any(char::is_control)
+                })
+                .ok_or_else(|| {
+                    WorkerError::Engine(
+                        "fallback prompt report did not carry a safe bounded reason".to_owned(),
+                    )
+                })?;
+            ("fallback", Some(reason.to_owned()))
+        }
+        gen_core::PromptEnhancementOutcome::Absent => {
+            return Err(WorkerError::Engine(
+                "enabled prompt enhancement reported an absent outcome".to_owned(),
+            ));
+        }
+    };
+    Ok(json!({
+        "outcome": outcome,
+        "originalPrompt": report.original_prompt,
+        "effectivePrompt": report.effective_prompt,
+        "fallbackReason": fallback_reason,
+    }))
+}
+
+type PromptEnhancementReports = std::collections::HashMap<
+    usize,
+    (String, gen_core::PromptEnhancementReport),
+>;
+
+fn record_prompt_enhancement_report(
+    reports: &mut PromptEnhancementReports,
+    enhancement_expected: bool,
+    image_count: usize,
+    index: usize,
+    expected_prompt: String,
+    report: gen_core::PromptEnhancementReport,
+) -> WorkerResult<()> {
+    if !enhancement_expected {
+        return Err(WorkerError::Engine(
+            "provider emitted a prompt-enhancement report for a disabled request".to_owned(),
+        ));
+    }
+    if index >= image_count {
+        return Err(WorkerError::Engine(
+            "provider emitted a prompt-enhancement report for an unknown image".to_owned(),
+        ));
+    }
+    match reports.entry(index) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert((expected_prompt, report));
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {
+            return Err(WorkerError::Engine(format!(
+                "provider emitted duplicate prompt-enhancement reports for image {index}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn take_prompt_enhancement_fact(
+    reports: &mut PromptEnhancementReports,
+    index: usize,
+) -> WorkerResult<Value> {
+    let (expected_prompt, report) = reports.remove(&index).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "provider emitted no prompt-enhancement report for image {index}"
+        ))
+    })?;
+    prompt_enhancement_fact(report, &expected_prompt)
 }
 
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
@@ -4842,6 +4960,7 @@ fn generate_one(
     memory: Option<gen_core::GenerationMemory>,
     memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
     // Live denoise preview (epic 16624, sc-16904): forwarded frames reach the job's progress
     // stream. Inert for engines that don't emit; the default sink costs one branch per step.
     preview: gen_core::PreviewSink,
@@ -4871,7 +4990,7 @@ fn generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    enhance.apply(&mut request);
+    enhance.apply(&mut request, prompt_enhancement);
     let output = crate::memory_strategy::generate_with_scope(
         generator,
         &mut request,
@@ -5055,6 +5174,7 @@ fn generate_one_with_hires(
     enhance: &PromptEnhance,
     hires_fix: Option<HiresFixPlan>,
     preview: gen_core::PreviewSink,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -5082,6 +5202,7 @@ fn generate_one_with_hires(
             memory_strategy_context,
             enhance,
             preview,
+            prompt_enhancement,
             cancel,
             on_progress,
         );
@@ -5105,6 +5226,8 @@ fn generate_one_with_hires(
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
     };
+    // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
+    // would produce two reports for one image and could feed two different prompts into one recipe.
     let (base_width, base_height, base_pixels) = generate_one(
         generator,
         prompt,
@@ -5126,8 +5249,9 @@ fn generate_one_with_hires(
         text_style_gain,
         memory,
         first_pass_context.as_ref(),
-        enhance,
+        &PromptEnhance::default(),
         preview.clone(),
+        gen_core::PromptEnhancementSink::default(),
         cancel,
         &mut first_progress,
     )?;
@@ -5176,6 +5300,7 @@ fn generate_one_with_hires(
         memory_strategy_context,
         enhance,
         preview,
+        prompt_enhancement,
         cancel,
         &mut second_progress,
     )
@@ -6476,7 +6601,7 @@ async fn generate_stream(
     let adapter_count = adapters.len();
     // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
     // the request's advanced `enhancePrompt` toggle, gated to dev by the manifest `ui.promptEnhance`.
-    let enhance = PromptEnhance::from_advanced(&request.advanced);
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
     // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
@@ -6644,7 +6769,10 @@ async fn generate_stream(
                 external_committed_bytes
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
+            drive_gen_items_scored_reported(
+                tx,
+                seeds,
+                move |_index, seed, preview, prompt_enhancement, on_progress| {
                 let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
                     generator,
                     &mlx_request_plan,
@@ -6684,6 +6812,7 @@ async fn generate_stream(
                         &enhance,
                         hires_fix,
                         preview.clone(),
+                        prompt_enhancement.for_prompt(&prompt),
                         &cancel,
                         on_progress,
                     )
@@ -6717,7 +6846,8 @@ async fn generate_stream(
                     )
                 });
                 Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
-            })
+                },
+            )
         },
     );
 
@@ -8054,14 +8184,10 @@ async fn generate_candle_stream(
         &job.id,
         backend,
     );
-    // sc-6135 / sc-7458: caption upsampling is FLUX.2-dev-only. On candle (off-Mac) dev now runs here,
-    // but the Mistral3/Pixtral caption-upsampler vision tower is NOT ported (deferred to epic 6564
-    // story 4), so `enhance` degrades to **passthrough**: it is carried onto the `GenerationRequest`
-    // for uniformity, but the candle `Flux2Generator` ignores `enhance_prompt`, so the raw prompt is
-    // used verbatim. Critically this is a no-op, NOT a fall-back to the Python torch worker — the dev
-    // T2I job stays on candle (a future candle enhancer lights up here with no router change). Every
-    // other candle family ignores the fields too.
-    let enhance = PromptEnhance::from_advanced(&request.advanced);
+    // sc-18474: FLUX.2-dev prompt enhancement is native on Candle too. The request-local report
+    // sink below is the proof seam: an enabled request cannot silently run the raw prompt without a
+    // typed, honestly persisted fallback. The stale passthrough-only behavior is no longer allowed.
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path). The
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
@@ -8958,7 +9084,10 @@ async fn generate_candle_stream(
         spec,
         format!("candle {engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, preview, on_progress| {
+            drive_gen_items_reported(
+                tx,
+                seeds,
+                move |_index, seed, preview, prompt_enhancement, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires(
                         generator,
@@ -8998,6 +9127,7 @@ async fn generate_candle_stream(
                         &enhance,
                         hires_fix,
                         preview.clone(),
+                        prompt_enhancement.for_prompt(&prompt),
                         &cancel,
                         on_progress,
                     )
@@ -9018,7 +9148,8 @@ async fn generate_candle_stream(
                     |retry_seed| render(retry_seed, on_progress),
                 )?;
                 Ok(Some((final_seed, out_w, out_h, pixels)))
-            })
+                },
+            )
         },
     );
 
@@ -9416,6 +9547,11 @@ async fn consume_gen_events_with_disclosure(
     let mut effective_steps: Option<u32> = None;
     // Live denoise preview (sc-16904): the latest frame rides the next progress POST.
     let mut latest_preview: Option<PreviewSlot> = None;
+    let prompt_enhancement_expected = raw_settings
+        .get("enhancePrompt")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut prompt_enhancement_reports = PromptEnhancementReports::new();
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -9537,6 +9673,20 @@ async fn consume_gen_events_with_disclosure(
                     latest_preview = Some(slot);
                 }
             }
+            GenEvent::PromptEnhancement {
+                index,
+                expected_prompt,
+                report,
+            } => {
+                record_prompt_enhancement_report(
+                    &mut prompt_enhancement_reports,
+                    prompt_enhancement_expected,
+                    total,
+                    index,
+                    expected_prompt,
+                    report,
+                )?;
+            }
             GenEvent::Image {
                 index,
                 seed,
@@ -9562,6 +9712,15 @@ async fn consume_gen_events_with_disclosure(
                 // down views), while every non-scoring path leaves `face_likeness` `None` ⇒ the field
                 // is omitted entirely (the sc-4408 omit-when-absent contract).
                 let mut image_raw_settings = raw_settings.clone();
+                // This key is worker-owned even for legacy/raw jobs. Only the typed provider report
+                // can add it back, after matching it to this image's exact requested prompt.
+                image_raw_settings.remove(PROMPT_ENHANCEMENT_FACT_KEY);
+                if prompt_enhancement_expected {
+                    image_raw_settings.insert(
+                        PROMPT_ENHANCEMENT_FACT_KEY.to_owned(),
+                        take_prompt_enhancement_fact(&mut prompt_enhancement_reports, index)?,
+                    );
+                }
                 if let Some(block) = face_likeness {
                     image_raw_settings.insert(
                         crate::face_likeness::FACE_LIKENESS_FACT_KEY.to_owned(),
@@ -9669,6 +9828,11 @@ async fn consume_gen_events_with_disclosure(
         )
         .await?;
         return Err(WorkerError::Canceled(message.to_owned()));
+    }
+    if !prompt_enhancement_reports.is_empty() {
+        return Err(WorkerError::Engine(
+            "provider emitted a prompt-enhancement report without a completed image".to_owned(),
+        ));
     }
     // Post the effective-settings + per-phase timing block (epic 10402,
     // sc-10405/sc-10406). Best-effort; coalesce-merges with the S2 hardware block

@@ -934,6 +934,118 @@ async fn create_image_job_rejects_oversized_advanced_object() {
 }
 
 #[tokio::test]
+async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let body = |model: &str, advanced: Value| {
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "model": model,
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": advanced,
+        })
+    };
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        body(
+            "flux2_dev",
+            json!({
+                "enhancePrompt": true,
+                "enhanceTemperature": 0.2,
+                "enhanceMaxTokens": 2048,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    for (advanced, detail) in [
+        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": true, "enhanceTemperature": 2.01 }),
+            "must be between 0 and 2",
+        ),
+        (
+            json!({ "enhancePrompt": true, "enhanceMaxTokens": 2049 }),
+            "must be between 1 and 2048",
+        ),
+        (
+            json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
+            "requires advanced.enhancePrompt=true",
+        ),
+        (
+            json!({
+                "enhancePrompt": true,
+                "promptEnhancement": { "outcome": "enhanced" },
+            }),
+            "worker-owned",
+        ),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body("flux2_dev", advanced),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains(detail)),
+            "{error}"
+        );
+    }
+
+    for (model, advanced, detail) in [
+        (
+            "flux2_klein_9b",
+            json!({ "enhancePrompt": true }),
+            "FLUX.2-Klein",
+        ),
+        (
+            "flux2_dev",
+            json!({ "enhancePrompt": true, "poses": [{ "id": "pose-1" }] }),
+            "strict control",
+        ),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body(model, advanced),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains(detail)));
+    }
+
+    // Retry and duplicate validate the exact shallow-merged payload they will enqueue. A valid dev
+    // job therefore cannot be replayed as Klein while retaining its enhancement request.
+    let job_id = created["id"].as_str().expect("created job id");
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "model": "flux2_klein_9b" } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("FLUX.2-Klein")));
+    }
+}
+
+#[tokio::test]
 async fn create_image_job_enforces_the_pose_output_ceiling() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

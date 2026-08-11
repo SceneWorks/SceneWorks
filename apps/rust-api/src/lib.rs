@@ -3963,6 +3963,101 @@ fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Resul
     Ok(())
 }
 
+const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
+const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
+const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
+
+/// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
+/// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
+/// LLM sampler and must never inherit the old truthy/coercing behavior.
+fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, ApiError> {
+    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
+        return Err(ApiError::bad_request(format!(
+            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
+        )));
+    }
+    let enabled = match advanced.get("enhancePrompt") {
+        None => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt must be a boolean",
+            ));
+        }
+    };
+    if let Some(value) = advanced.get("enhanceTemperature") {
+        let temperature = value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                ApiError::bad_request("advanced.enhanceTemperature must be a finite number")
+            })?;
+        if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&temperature) {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+            )));
+        }
+        if !enabled {
+            return Err(ApiError::bad_request(
+                "advanced.enhanceTemperature requires advanced.enhancePrompt=true",
+            ));
+        }
+    }
+    if let Some(value) = advanced.get("enhanceMaxTokens") {
+        let tokens = value
+            .as_u64()
+            .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
+        if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&tokens) {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+            )));
+        }
+        if !enabled {
+            return Err(ApiError::bad_request(
+                "advanced.enhanceMaxTokens requires advanced.enhancePrompt=true",
+            ));
+        }
+    }
+    Ok(enabled)
+}
+
+/// Validate the canonical, post-preset image payload. Enhancement is a FLUX.2-dev base/edit
+/// capability on both native backends; it is deliberately not inherited by Klein or by the
+/// separate strict-control route. Keeping this check on the final payload also covers presets and
+/// retry/duplicate's shallow-merged canonical payload.
+fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if !validate_prompt_enhancement_fields(advanced)? {
+        return Ok(());
+    }
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if model != "flux2_dev" {
+        return Err(ApiError::bad_request(
+            "advanced.enhancePrompt is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it",
+        ));
+    }
+    let strict_control = advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+        || advanced.contains_key("controlWeights")
+        || advanced.contains_key("controlImage")
+        || advanced.contains_key("controlMode");
+    if strict_control {
+        return Err(ApiError::bad_request(
+            "advanced.enhancePrompt cannot be combined with FLUX.2-dev strict control",
+        ));
+    }
+    Ok(())
+}
+
 /// Reject a `model` id that is not a safe single path component (F-003 / sc-11159).
 ///
 /// The id flows verbatim from the untrusted job payload into the worker's asset
@@ -4009,6 +4104,7 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    validate_prompt_enhancement_fields(&payload.advanced)?;
     validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(

@@ -133,6 +133,13 @@ impl Generator for HiresProbeGenerator {
                 total: req.steps.unwrap_or(1),
             });
         }
+        if req.prompt_enhancement.is_active() {
+            req.prompt_enhancement
+                .emit(gen_core::PromptEnhancementReport::enhanced(
+                    req.prompt.clone(),
+                    format!("{} enhanced", req.prompt),
+                ));
+        }
         on_progress(Progress::Decoding);
         Ok(GenerationOutput::Images(vec![Image {
             width: req.width,
@@ -290,6 +297,7 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             provider_reference_strength: 0.3,
         }),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |event| progress.push(event),
     )
@@ -327,6 +335,69 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
             .count(),
         1
     );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() {
+    let generator = HiresProbeGenerator::new();
+    let cancel = CancelFlag::new();
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = reports.clone();
+    let sink = gen_core::PromptEnhancementSink::new(move |report| {
+        captured.lock().unwrap().push(report);
+    });
+    generate_one_with_hires(
+        &generator,
+        "test",
+        4,
+        4,
+        42,
+        2,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        &PromptEnhance {
+            enabled: true,
+            temperature: Some(0.2),
+            max_tokens: Some(64),
+        },
+        Some(HiresFixPlan {
+            width: 8,
+            height: 8,
+            steps: 3,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        }),
+        gen_core::PreviewSink::default(),
+        sink,
+        &cancel,
+        &mut |_| {},
+    )
+    .expect("two-pass enhanced generation");
+
+    let requests = generator.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].enhance_prompt);
+    assert!(!requests[0].prompt_enhancement.is_active());
+    assert!(requests[1].enhance_prompt);
+    assert!(requests[1].prompt_enhancement.is_active());
+    assert_eq!(reports.lock().unwrap().len(), 1);
 }
 
 #[cfg(any(
@@ -405,6 +476,7 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         &PromptEnhance::default(),
         Some(hires_fix),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -491,6 +563,7 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
             provider_reference_strength: 0.3,
         }),
         gen_core::PreviewSink::default(),
+        gen_core::PromptEnhancementSink::default(),
         &cancel,
         &mut |_| {},
     )
@@ -6080,7 +6153,10 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
@@ -6089,7 +6165,8 @@ fn prompt_enhance_reads_advanced_settings() {
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
         .advanced,
-    );
+    )
+    .expect("absent enhancement settings validate");
     assert!(!off.enabled);
     assert_eq!(off.temperature, None);
     assert_eq!(off.max_tokens, None);
@@ -6100,10 +6177,188 @@ fn prompt_enhance_reads_advanced_settings() {
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
-    .advanced);
+    .advanced)
+    .expect("bounded enhancement settings validate");
     assert!(on.enabled);
     assert_eq!(on.temperature, Some(0.2));
     assert_eq!(on.max_tokens, Some(256));
+}
+
+#[test]
+fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
+    for (advanced, expected) in [
+        (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
+        (
+            json!({ "enhancePrompt": true, "enhanceTemperature": 2.1 }),
+            "must be between 0 and 2",
+        ),
+        (
+            json!({ "enhancePrompt": true, "enhanceMaxTokens": 2049 }),
+            "must be between 1 and 2048",
+        ),
+        (
+            json!({ "enhancePrompt": false, "enhanceMaxTokens": 64 }),
+            "tuning requires",
+        ),
+        (
+            json!({ "promptEnhancement": { "outcome": "enhanced" } }),
+            "worker-owned",
+        ),
+    ] {
+        let error =
+            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
+                .err()
+                .expect("invalid settings reject")
+                .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let klein = request(json!({
+        "model": "flux2_klein_9b",
+        "advanced": { "enhancePrompt": true }
+    }));
+    assert!(validate_prompt_enhancement_request(&klein)
+        .unwrap_err()
+        .to_string()
+        .contains("FLUX.2-Klein"));
+    let strict = request(json!({
+        "model": "flux2_dev",
+        "advanced": { "enhancePrompt": true, "poses": [{ "id": "pose-1" }] }
+    }));
+    assert!(validate_prompt_enhancement_request(&strict)
+        .unwrap_err()
+        .to_string()
+        .contains("strict control"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly() {
+    let enhanced = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "a fox".to_owned(),
+            "a red fox in winter light".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("matching enhanced report validates");
+    assert_eq!(enhanced["outcome"], "enhanced");
+    assert_eq!(enhanced["originalPrompt"], "a fox");
+    assert_eq!(enhanced["effectivePrompt"], "a red fox in winter light");
+    assert!(enhanced["fallbackReason"].is_null());
+
+    let fallback = prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "enhancer unavailable".to_owned(),
+        ),
+        "a fox",
+    )
+    .expect("safe fallback validates");
+    assert_eq!(fallback["outcome"], "fallback");
+    assert_eq!(fallback["effectivePrompt"], "a fox");
+    assert_eq!(fallback["fallbackReason"], "enhancer unavailable");
+
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::enhanced(
+            "another prompt".to_owned(),
+            "a fox".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("did not match"));
+    assert!(prompt_enhancement_fact(
+        gen_core::PromptEnhancementReport::fallback(
+            "a fox".to_owned(),
+            "unsafe\nreason".to_owned(),
+        ),
+        "a fox",
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("safe bounded reason"));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
+    fn enhanced(original: &str, effective: &str) -> gen_core::PromptEnhancementReport {
+        gen_core::PromptEnhancementReport::enhanced(original.to_owned(), effective.to_owned())
+    }
+
+    let mut reports = PromptEnhancementReports::new();
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        false,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("disabled request"));
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        1,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("unknown image"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "a red fox"),
+    )
+    .expect("first report is accepted");
+    assert!(record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("a fox", "another red fox"),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("duplicate"));
+    let fact = take_prompt_enhancement_fact(&mut reports, 0)
+        .expect("the report remains available for its image");
+    assert_eq!(fact["effectivePrompt"], "a red fox");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("no prompt-enhancement report"));
+
+    record_prompt_enhancement_report(
+        &mut reports,
+        true,
+        1,
+        0,
+        "a fox".to_owned(),
+        enhanced("another prompt", "a red fox"),
+    )
+    .expect("the carrier accepts the typed provider report");
+    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("did not match"));
 }
 
 // ---- sc-6055: FLUX.2-dev strict-pose (flux2_dev_control) -------------------------------------
@@ -16156,6 +16411,7 @@ mod preview_stream_tests {
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
             GenEvent::Preview { .. } => "Preview",
+            GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::Image { .. } => "Image",
         }
     }

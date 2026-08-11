@@ -221,6 +221,99 @@ use crate::engines::{mlx_model, ResolvedModel};
 /// Takes no `reqwest::Client`: its only use was forwarding one to the inline-upscale post-pass, and
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
+const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
+const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
+const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
+
+fn parse_prompt_enhancement_fields(
+    advanced: &JsonObject,
+) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
+    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned"
+        )));
+    }
+    let enabled = match advanced.get("enhancePrompt") {
+        None => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(WorkerError::InvalidPayload(
+                "advanced.enhancePrompt must be a boolean".to_owned(),
+            ));
+        }
+    };
+    let temperature = advanced
+        .get("enhanceTemperature")
+        .map(|value| {
+            let value = value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "advanced.enhanceTemperature must be a finite number".to_owned(),
+                    )
+                })?;
+            if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+                )));
+            }
+            Ok(value as f32)
+        })
+        .transpose()?;
+    let max_tokens = advanced
+        .get("enhanceMaxTokens")
+        .map(|value| {
+            let value = value.as_u64().ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "advanced.enhanceMaxTokens must be an integer".to_owned(),
+                )
+            })?;
+            if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                )));
+            }
+            Ok(value as u32)
+        })
+        .transpose()?;
+    if !enabled && (temperature.is_some() || max_tokens.is_some()) {
+        return Err(WorkerError::InvalidPayload(
+            "prompt-enhancement tuning requires advanced.enhancePrompt=true".to_owned(),
+        ));
+    }
+    Ok((enabled, temperature, max_tokens))
+}
+
+/// Re-check the route at the worker trust boundary. Raw queue writes and legacy stored jobs need the
+/// same fail-closed behavior as typed API creates, including a build with no native image backend.
+fn validate_prompt_enhancement_request(request: &ImageRequest) -> WorkerResult<()> {
+    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.advanced)?;
+    if !enabled {
+        return Ok(());
+    }
+    if request.model != "flux2_dev" {
+        return Err(WorkerError::InvalidPayload(
+            "prompt enhancement is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it"
+                .to_owned(),
+        ));
+    }
+    let strict_control = request
+        .advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+        || request.advanced.contains_key("controlWeights")
+        || request.advanced.contains_key("controlImage")
+        || request.advanced.contains_key("controlMode");
+    if strict_control {
+        return Err(WorkerError::InvalidPayload(
+            "prompt enhancement cannot be combined with FLUX.2-dev strict control".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
@@ -233,6 +326,7 @@ pub(crate) async fn run_image_generate_job(
         ));
     }
     validate_hires_fix_request(&request)?;
+    validate_prompt_enhancement_request(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
