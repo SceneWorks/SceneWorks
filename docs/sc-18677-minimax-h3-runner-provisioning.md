@@ -450,7 +450,7 @@ So the correct consequences are:
 | --- | --- | --- | --- |
 | [31509409586](https://github.com/SceneWorks/SceneWorks/actions/runs/31509409586) | `ad072c06` | `cuda-windows-2` | **provisioned, resolve failed** — found the §8.1 bug |
 | [31511147004](https://github.com/SceneWorks/SceneWorks/actions/runs/31511147004) | `62410075` | `cuda-windows` | **success, every step** — the `.` sentinel fix |
-| [31512848344](https://github.com/SceneWorks/SceneWorks/actions/runs/31512848344) | `06ebcf53` | — | re-run at the merge head, after the containment rework |
+| [31512848344](https://github.com/SceneWorks/SceneWorks/actions/runs/31512848344) | `06ebcf53` | `cuda-windows` | **success, every step** — re-run after the containment rework |
 
 Run **31511147004 is the AC4 evidence**: every step green, including `Clippy (candle worker)` and
 `Verify capabilities.candle.json is a real dump, not a restamp`. What it printed:
@@ -468,8 +468,9 @@ whole point of §8.1 — and the resolve step's component-presence assertion pas
 thirteen declared patterns. It also landed on `cuda-windows`, the *other* org-level `real-weights`
 runner, so both halves of that pool are now demonstrated.
 
-Run 31512848344 re-runs the same dispatch at the merge head, because the containment logic in the
-validate and resolve steps was reworked after 31511147004 (§8.2).
+Run 31512848344 re-ran the same dispatch after the validate and resolve steps' containment logic was
+reworked (§8.2), and is green on every step too. Only docs changed after its SHA, so it exercises
+all shipped code.
 
 Run 31509409586 confirmed the substance and found a real defect, which is the outcome worth having.
 What it established:
