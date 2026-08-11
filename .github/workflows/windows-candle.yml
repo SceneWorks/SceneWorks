@@ -315,6 +315,8 @@ jobs:
           $report = Join-Path $env:RUNNER_TEMP 'sc-18315-idle-gpu-diagnostics.txt'
           "capturedAt=$([DateTime]::UtcNow.ToString('O'))" | Out-File -LiteralPath $report -Encoding utf8
           "runner=$env:RUNNER_NAME" | Out-File -LiteralPath $report -Encoding utf8 -Append
+          "CUDA_VISIBLE_DEVICES=$env:CUDA_VISIBLE_DEVICES" | Out-File -LiteralPath $report -Encoding utf8 -Append
+          "CUDA_DEVICE_ORDER=$env:CUDA_DEVICE_ORDER" | Out-File -LiteralPath $report -Encoding utf8 -Append
           "`n=== nvidia-smi ===" | Out-File -LiteralPath $report -Encoding utf8 -Append
           nvidia-smi 2>&1 | Out-File -LiteralPath $report -Encoding utf8 -Append
           "`n=== gpu summary ===" | Out-File -LiteralPath $report -Encoding utf8 -Append
