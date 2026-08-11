@@ -6196,6 +6196,12 @@ fn prompt_enhance_reads_advanced_settings() {
 
 #[test]
 fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
+    #[allow(unused_mut)]
+    let mut settings = Settings::from_env();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        settings.backend_candle_enabled = true;
+    }
     for (advanced, expected) in [
         (json!({ "enhancePrompt": "yes" }), "must be a boolean"),
         (
@@ -6226,7 +6232,7 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
         "model": "flux2_klein_9b",
         "advanced": { "enhancePrompt": true }
     }));
-    assert!(validate_prompt_enhancement_request(&klein)
+    assert!(validate_prompt_enhancement_request(&klein, &settings)
         .unwrap_err()
         .to_string()
         .contains("FLUX.2-Klein"));
@@ -6242,10 +6248,133 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             "model": "flux2_dev",
             "advanced": advanced,
         }));
-        assert!(validate_prompt_enhancement_request(&strict)
+        assert!(validate_prompt_enhancement_request(&strict, &settings)
             .unwrap_err()
             .to_string()
             .contains("strict control"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "character_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "style_variations", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("MLX supports its native base/edit/character/style routes");
+        }
+        for mode in ["reference", "image_to_image"] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            assert!(validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support"));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        for payload in [
+            json!({ "mode": "text_to_image" }),
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+            json!({ "mode": "edit_image", "referenceAssetId": "reference-1" }),
+            json!({ "mode": "edit_image", "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = payload.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                .expect("Candle supports only its native base and edit routes");
+        }
+
+        for mode in [
+            "character_image",
+            "style_variations",
+            "reference",
+            "image_to_image",
+        ] {
+            let invalid = request(json!({
+                "model": "flux2_dev",
+                "mode": mode,
+                "referenceAssetId": "reference-1",
+                "advanced": { "enhancePrompt": true }
+            }));
+            let error = validate_prompt_enhancement_request(&invalid, &settings)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Candle supports only"),
+                "mode={mode}: {error}"
+            );
+        }
+
+        for carrier in [
+            json!({ "sourceAssetId": "source-1" }),
+            json!({ "referenceAssetId": "reference-1" }),
+            json!({ "referenceAssetIds": ["reference-1"] }),
+        ] {
+            let mut payload = carrier.as_object().unwrap().clone();
+            payload.insert("model".to_owned(), json!("flux2_dev"));
+            payload.insert("mode".to_owned(), json!("text_to_image"));
+            payload.insert("advanced".to_owned(), json!({ "enhancePrompt": true }));
+            let error =
+                validate_prompt_enhancement_request(&request(Value::Object(payload)), &settings)
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains("cannot include source or reference"),
+                "{error}"
+            );
+        }
+
+        let missing_edit_input = request(json!({
+            "model": "flux2_dev",
+            "mode": "edit_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(
+            validate_prompt_enhancement_request(&missing_edit_input, &settings)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a source or reference")
+        );
+
+        settings.backend_candle_enabled = false;
+        let disabled = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&disabled, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let backendless = request(json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "advanced": { "enhancePrompt": true }
+        }));
+        assert!(validate_prompt_enhancement_request(&backendless, &settings)
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
     }
 }
 

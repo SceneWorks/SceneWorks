@@ -4021,10 +4021,103 @@ fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, Api
     Ok(enabled)
 }
 
-/// Validate the canonical, post-preset image payload. Enhancement is a FLUX.2-dev base/edit
-/// capability on both native backends; it is deliberately not inherited by Klein or by the
-/// separate strict-control route. Keeping this check on the final payload also covers presets and
-/// retry/duplicate's shallow-merged canonical payload.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
+    prompt_enhancement_payload_string(payload, "referenceAssetId")
+        || payload
+            .get("referenceAssetIds")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
+            })
+}
+
+fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiError> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("text_to_image");
+
+    #[cfg(target_os = "macos")]
+    if !matches!(
+        mode,
+        "text_to_image" | "edit_image" | "character_image" | "style_variations"
+    ) {
+        return Err(ApiError::bad_request(format!(
+            "advanced.enhancePrompt on MLX does not support image mode {mode}"
+        )));
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if !matches!(mode, "text_to_image" | "edit_image") {
+        return Err(ApiError::bad_request(format!(
+            "advanced.enhancePrompt on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
+        )));
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = payload;
+        Err(ApiError::bad_request(
+            "advanced.enhancePrompt requires a native MLX or Candle image backend",
+        ))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        let has_references = prompt_enhancement_payload_references(payload);
+        let has_edit_input =
+            has_references || prompt_enhancement_payload_string(payload, "sourceAssetId");
+        if mode == "text_to_image" && has_edit_input {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt text_to_image cannot include source or reference image assets",
+            ));
+        }
+        if mode == "edit_image" && !has_edit_input {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt edit_image requires a source or reference image asset",
+            ));
+        }
+        if matches!(mode, "character_image" | "style_variations") && !has_references {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhancePrompt {mode} requires a reference image asset"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
+/// actual native backend route: MLX owns base/edit/character/style while Candle owns only base and
+/// its bespoke `edit_image` lane. It is not inherited by Klein, strict control, backendless builds,
+/// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
+/// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.
 fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
     let empty = JsonObject::new();
     let advanced = payload
@@ -4055,7 +4148,7 @@ fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiEr
             "advanced.enhancePrompt cannot be combined with FLUX.2-dev strict control",
         ));
     }
-    Ok(())
+    validate_prompt_enhancement_route(payload)
 }
 
 /// Reject a `model` id that is not a safe single path component (F-003 / sc-11159).

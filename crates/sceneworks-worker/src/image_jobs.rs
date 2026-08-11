@@ -285,9 +285,114 @@ fn parse_prompt_enhancement_fields(
     Ok((enabled, temperature, max_tokens))
 }
 
-/// Re-check the route at the worker trust boundary. Raw queue writes and legacy stored jobs need the
-/// same fail-closed behavior as typed API creates, including a build with no native image backend.
-fn validate_prompt_enhancement_request(request: &ImageRequest) -> WorkerResult<()> {
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_has_edit_input(request: &ImageRequest) -> bool {
+    request
+        .source_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        || request
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        || !request.reference_asset_ids.is_empty()
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
+    request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        || !request.reference_asset_ids.is_empty()
+}
+
+fn validate_prompt_enhancement_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    let mode = request.mode.as_str();
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = settings;
+        if !matches!(
+            mode,
+            "text_to_image" | "edit_image" | "character_image" | "style_variations"
+        ) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement on MLX does not support image mode {mode}"
+            )));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if !settings.backend_candle_enabled {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement requires the enabled native Candle backend on this worker"
+                    .to_owned(),
+            ));
+        }
+        if !matches!(mode, "text_to_image" | "edit_image") {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
+            )));
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = (mode, settings);
+        Err(WorkerError::InvalidPayload(
+            "prompt enhancement requires a native MLX or Candle image backend".to_owned(),
+        ))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        if mode == "text_to_image" && prompt_enhancement_has_edit_input(request) {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement text_to_image cannot include source or reference image assets"
+                    .to_owned(),
+            ));
+        }
+        if mode == "edit_image" && !prompt_enhancement_has_edit_input(request) {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement edit_image requires a source or reference image asset"
+                    .to_owned(),
+            ));
+        }
+        if matches!(mode, "character_image" | "style_variations")
+            && !prompt_enhancement_has_reference_input(request)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement {mode} requires a reference image asset"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Re-check the backend and route at the worker trust boundary. Raw queue writes and legacy stored
+/// jobs need the same fail-closed behavior as typed API creates, including a build with no native
+/// image backend. The route shape is checked before any weight or project asset load.
+fn validate_prompt_enhancement_request(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
     let (enabled, _, _) = parse_prompt_enhancement_fields(&request.advanced)?;
     if !enabled {
         return Ok(());
@@ -311,7 +416,7 @@ fn validate_prompt_enhancement_request(request: &ImageRequest) -> WorkerResult<(
             "prompt enhancement cannot be combined with FLUX.2-dev strict control".to_owned(),
         ));
     }
-    Ok(())
+    validate_prompt_enhancement_route(request, settings)
 }
 
 pub(crate) async fn run_image_generate_job(
@@ -326,7 +431,7 @@ pub(crate) async fn run_image_generate_job(
         ));
     }
     validate_hires_fix_request(&request)?;
-    validate_prompt_enhancement_request(&request)?;
+    validate_prompt_enhancement_request(&request, settings)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
