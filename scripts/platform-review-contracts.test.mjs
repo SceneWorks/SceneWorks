@@ -153,6 +153,17 @@ test("Windows Krea provisioning accepts supported newer Python 3 runtimes", asyn
 //   %USERPROFILE%\.cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\<rev>\q4
 // Every fragment below is a factor of that string. Change any one and a Krea five-rung capture
 // silently reads another directory -- or, if it is lucky, throws.
+// Assertions about a step must be scoped TO that step. A bare `assert.match(workflow, ...)` is
+// satisfied by an identical string anywhere in the file, which is not hypothetical: dropping
+// `inputs.provision_snapshot` from the Provision step's `if:` left the suite green because the
+// neighbouring "Validate runner Python" step carries the byte-identical condition. Slice first.
+function stepBody(workflow, name) {
+  const at = workflow.indexOf(`      - name: ${name}\n`);
+  assert.ok(at >= 0, `windows-candle.yml must keep a step named ${name}`);
+  const next = workflow.indexOf("\n      - ", at + 1);
+  return workflow.slice(at, next === -1 ? undefined : next);
+}
+
 function dispatchInputs(workflow) {
   const start = workflow.indexOf("  workflow_dispatch:\n    inputs:\n");
   assert.ok(start >= 0, "windows-candle.yml must keep a workflow_dispatch inputs block");
@@ -281,8 +292,11 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
   // Provisioning is now a first-class outcome: sc-17153/sc-17156 need H3 weights resident and
   // there is no H3 five-rung fixture. The old coupling throw must be gone...
   assert.doesNotMatch(workflow, /requires run_five_rung_reference=true/);
+  // Scoped to the Provision step itself: the identical `if:` string also appears on the
+  // "Validate runner Python" step, so a file-wide match would stay green if this step's gate were
+  // dropped -- and an ungated Provision step re-downloads the snapshot on every five-rung run.
   assert.match(
-    workflow,
+    stepBody(workflow, "Provision exact snapshot"),
     /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot \}\}/,
   );
   // ...but every five-rung guard it used to sit beside must survive, keyed on the new names.
@@ -356,11 +370,60 @@ test("windows-candle provisioning can never degrade into a whole-repo fetch", as
   // Pin the LOOP BODY, not just the throw string: replacing the `if (-not $head) { continue }`
   // guard with an unconditional `continue` makes the assertion vacuous while leaving the error
   // message -- and every other assertion in this file -- untouched.
-  assert.match(workflow, /provisioned snapshot is missing declared components under/);
-  assert.match(workflow, /\$head = \(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]/);
-  assert.match(workflow, /if \(-not \$head\) \{ continue \}/);
-  assert.match(workflow, /\$component = Join-Path \$snapshotRoot \$head\.Replace\('\/', '\\'\)/);
-  assert.match(workflow, /if \(-not \(Test-Path -LiteralPath \$component\)\) \{ \$missing \+= \$head \}/);
+  const resolve = stepBody(workflow, "Resolve exact snapshot");
+  // Pin the THROW, not the message. Every other assertion here survives `throw` ->
+  // `Write-Warning`: the head computation, the guard, the Join-Path, the Test-Path and the string
+  // all still match, while "fails loudly if absent" quietly becomes a log line.
+  assert.match(resolve, /throw "provisioned snapshot is missing declared components under/);
+  assert.match(resolve, /\$head = \(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]/);
+  assert.match(resolve, /if \(-not \$head\) \{ continue \}/);
+  assert.match(resolve, /foreach \(\$pattern in \(\$env:PROVISION_PATTERNS -split/);
+  assert.match(resolve, /\$component = Join-Path \$snapshotRoot \$head\.Replace\('\/', '\\'\)/);
+  assert.match(resolve, /if \(-not \(Test-Path -LiteralPath \$component\)\) \{ \$missing \+= \$head \}/);
+  // Without Resolve-Path the EndsWith below compares the raw Join-Path output against the suffix
+  // it was just built from -- a tautology -- and nothing normalizes a traversal before it.
+  assert.match(resolve, /\$root = \(Resolve-Path -LiteralPath \$root\)\.Path/);
+});
+
+// sc-18677: provisioning must stay anonymous. This box sets HF_HOME=E:\huggingface, which can hold
+// a credential; with an implicit token a gated repo turns a "not entitled" failure into a silent
+// success on whoever's token the runner happens to carry. macos-mlx.yml pins both of these for its
+// own provisioning block and this lane pinned neither.
+test("windows-candle provisioning stays anonymous", async () => {
+  const provision = stepBody(await source(".github/workflows/windows-candle.yml"), "Provision exact snapshot");
+  assert.match(provision, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
+  assert.match(provision, /^\s+token=False,$/m);
+});
+
+// sc-18677 section 8.1, generalized. GitHub substitutes an input's `default` for any empty dispatch
+// value, so a non-empty default makes "the absence of this thing" INEXPRESSIBLE unless the step
+// body understands a sentinel. That cost run 31509409586. Any future provision_* input with a
+// non-empty default has to make the same decision consciously.
+test("every OPTIONAL provision_* input with a non-empty default has a sentinel", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  const params = stepBody(workflow, "Resolve snapshot provisioning parameters");
+
+  let checked = 0;
+  for (const name of names.filter((n) => n.startsWith("provision_"))) {
+    const def = defaults[name];
+    if (def === undefined || def === "" || def === "false") continue;
+    // "Optional" is derived, not listed: the validation step wraps an optional input's checks in
+    // `if ($env:NAME)`. A required input (provision_repository, provision_patterns) is checked
+    // unconditionally, and "unset" is not a state it can meaningfully have.
+    const env = name.toUpperCase();
+    const optional = new RegExp(`if \\(\\$env:${env}(_INPUT)?\\) \\{`).test(validate);
+    if (!optional) continue;
+    checked += 1;
+    assert.match(
+      params,
+      new RegExp(`\\$env:${env}(_INPUT)? -ne '\\.'`),
+      `${name} is optional and defaults to ${JSON.stringify(def)}, so an empty dispatch value ` +
+        "cannot unset it; the params step must honor a '.' sentinel or the default must be empty",
+    );
+  }
+  assert.ok(checked > 0, "this guard must actually examine an input, or it is vacuous");
 });
 
 // sc-18677: the containment checks around the two operator inputs that reach the filesystem.
@@ -398,9 +461,44 @@ test("windows-candle validates every provisioning input that reaches a path", as
     workflow,
     /throw "provision_patterns entries must be relative to the snapshot root: \$pattern"/,
   );
+  // Containment is decided by CANONICALIZING, not by matching path segments against '..'.
+  // Segment-equality was bypassable two ways: `..*` yields head `..` while the pattern contains
+  // no `..` segment, and `.. ` survives -contains yet Win32 strips the trailing space. The
+  // GetFullPath probe kills the first class; the TrimEnd(' ', '.') segment check kills the
+  // second, which GetFullPath does NOT normalize.
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  assert.match(validate, /\$head = \(\(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]\)\.TrimEnd\('\/'\)/);
+  assert.match(validate, /if \(-not \$segment\.TrimEnd\(' ', '\.'\)\) \{/);
+  // The validate step has its own loop and its own head guard, distinct from the resolve step's.
+  // Pin BOTH, scoped: `foreach ($pattern in @($patterns[0]))` checks only the first of thirteen
+  // H3 patterns, and `if ($true) { continue }` skips every one, while every other assertion in
+  // this file keeps matching because the resolve step still spells them correctly.
+  assert.match(validate, /foreach \(\$pattern in \$patterns\) \{/);
+  assert.match(validate, /if \(-not \$head\) \{ continue \}/);
+  // Both containment guards must stay FATAL. There are two throws with this message -- the
+  // segment check and the canonical probe -- and turning either into a Write-Host leaves the
+  // string present, so presence alone is not the property worth asserting.
+  assert.equal(
+    (validate.match(/throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/g) || []).length,
+    2,
+    "both the segment check and the canonical-containment probe must throw",
+  );
+  assert.match(
+    validate,
+    /\$full\.StartsWith\(\$probe \+ '\\', \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+  // ...and the resolve step canonicalizes independently, so the proof does not rest on
+  // validation having run.
+  assert.match(
+    stepBody(workflow, "Resolve exact snapshot"),
+    /throw "declared component escapes the snapshot root: \$pattern"/,
+  );
   // provision_cache_dir is written verbatim into $GITHUB_ENV.
   assert.match(workflow, /throw 'provision_cache_dir must be a single line'/);
-  assert.match(workflow, /throw 'provision_cache_dir must be an absolute path'/);
+  assert.match(workflow, /throw 'provision_cache_dir must be an absolute path with a drive letter'/);
+  // IsPathRooted accepts `\foo` and `C:foo` -- rooted, but not absolute -- so the check would not
+  // mean what its message says. PowerShell 5.1's .NET has no IsPathFullyQualified.
+  assert.match(workflow, /\$env:PROVISION_CACHE_DIR_INPUT -notmatch '\^\[A-Za-z\]:\\\\'/);
 });
 
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {

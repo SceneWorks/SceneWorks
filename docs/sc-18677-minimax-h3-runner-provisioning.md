@@ -244,6 +244,13 @@ so a Krea dispatch resolves the same snapshot either way. It matters the day a `
 on a second machine: without the label the job lands somewhere with no snapshot and dies at the
 resolve step; with it the job queues for a box that has the weights.
 
+One further delta, smaller: provisioning-input validation now runs on
+`run_five_rung_reference || provision_snapshot` rather than on `provision_snapshot` alone, because
+both steps that *consume* those values run on the wider condition. A five-rung dispatch that
+explicitly clears `provision_patterns` or `provision_subdir` therefore now throws where it
+previously did not. Every historical Krea shape leaves those defaults in place, so no real dispatch
+changes.
+
 ### 4.2 How "identical" was proven
 
 **Executed, not asserted.** The PowerShell step bodies were extracted from the YAML and run locally
@@ -457,6 +464,20 @@ What it established:
   q4/q8 measurement on this box can be trusted.
 - `Resolve exact snapshot` **failed**, correctly and loudly, for the reason in §8.1.
 
+### 8.0 Operational caveat: provisioning is gated behind a green candle build
+
+Worth knowing before anyone relies on this to land weights. The heavy chain — `Fetch the pinned
+inference release`, `Test the candle GPU worker`, the rust-api sidecar check, the memory-adapter
+check — runs **before** the provisioning steps, and a failure in any of it aborts the job. There is
+no `continue-on-error` and no `if: always()` escape. So an unrelated compile break on the branch
+makes it *impossible* to land weights on the box at all, not merely slow.
+
+The ~24 minutes that chain costs on the scarce `cuda` pool is the lesser point. Reordering was
+considered and deliberately not done here: the capability-dump verify is last by design (a contract
+test enforces that placement, so a missing dump cannot suppress unrelated coverage), and rearranging
+a lane whose ordering carries documented rationale belongs in its own change. Read a partially-red
+dispatch at the step level, as §8 does, rather than by the run's overall conclusion.
+
 ### 8.1 The bug it found: an empty input cannot override a non-empty default
 
 The dispatch passed `-f provision_subdir=`, intending "this model's components are at the snapshot
@@ -475,3 +496,9 @@ Two things are worth recording about how this was missed, because both are reusa
   reproducing this exact failure is now in the set.
 - The contract tests could not have caught it either: they assert the default **is** `q4`, which was
   true and correct. The gap was between two things that were each individually right.
+
+The lesson is now generalized rather than patched: a test walks every **optional** `provision_*`
+input — optionality derived from the validation step wrapping its checks in `if ($env:NAME)`, not
+from a hand-maintained list — and requires that any such input with a non-empty default be handled
+by a sentinel in the params step. The next input to hit this cannot ship without making the same
+decision consciously.

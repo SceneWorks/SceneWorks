@@ -467,14 +467,42 @@ jobs:
               throw 'provision_patterns must name at least one allow-pattern; an empty list would fetch the whole repository'
             }
             # Each pattern's leading literal segment is joined onto the snapshot root by the
-            # resolve step's component-presence assertion. Without this, `../../foo/*` would let
+            # resolve step's component-presence assertion. Without containment, `../../foo/*` lets
             # that assertion be satisfied by a directory outside the snapshot entirely -- which
             # is the one assertion that makes a root-resolved model's proof real.
+            #
+            # Validate the HEAD, computed with the identical expression the resolve step uses, and
+            # decide containment by CANONICALIZING rather than by matching path segments. Textual
+            # segment-equality is the wrong tool on Windows and was demonstrably bypassable two
+            # ways: `..*` yields head `..` while the pattern itself contains no `..` segment
+            # (moving the wildcard one character left defeats a check on `$pattern`), and `.. `
+            # survives `-contains '..'` yet Win32 strips trailing spaces and dots from path
+            # components, so it resolves to the parent anyway. GetFullPath collapses every such
+            # spelling, including the ones nobody has thought of yet.
+            $probe = Join-Path 'C:\__sw_containment_probe__' 'snapshot'
             foreach ($pattern in $patterns) {
               if ($pattern -match '^[\\/]' -or $pattern -match '^[A-Za-z]:') {
                 throw "provision_patterns entries must be relative to the snapshot root: $pattern"
               }
-              if (($pattern -split '[\\/]') -contains '..') {
+              $head = (($pattern -split '[\*\?\[]')[0]).TrimEnd('/')
+              if (-not $head) { continue }
+              # TWO checks, because neither alone is sufficient.
+              #
+              # (a) Segment shape. Win32 strips trailing spaces and dots from every path
+              # component, so `.. ` names the parent while comparing equal to nothing -- and
+              # [System.IO.Path]::GetFullPath does NOT strip it, so (b) alone accepts it. Any
+              # segment that is empty once trailing dots and spaces are removed is a disguised
+              # `.`/`..` and has no legitimate use in a component name.
+              foreach ($segment in ($head -split '[\\/]')) {
+                if (-not $segment.TrimEnd(' ', '.')) {
+                  throw "provision_patterns entries must not traverse out of the snapshot: $pattern"
+                }
+              }
+              # (b) Canonical containment, which catches every ordinary spelling including the
+              # wildcard-adjacent ones a check on `$pattern` misses (`..*` has head `..` while the
+              # pattern itself contains no `..` segment).
+              $full = [System.IO.Path]::GetFullPath((Join-Path $probe $head.Replace('/', '\')))
+              if (-not $full.StartsWith($probe + '\', [StringComparison]::OrdinalIgnoreCase)) {
                 throw "provision_patterns entries must not traverse out of the snapshot: $pattern"
               }
             }
@@ -494,8 +522,11 @@ jobs:
               if ($env:PROVISION_CACHE_DIR_INPUT -match '[\r\n]') {
                 throw 'provision_cache_dir must be a single line'
               }
-              if (-not [System.IO.Path]::IsPathRooted($env:PROVISION_CACHE_DIR_INPUT)) {
-                throw 'provision_cache_dir must be an absolute path'
+              # NOT IsPathRooted: it accepts `\foo` and `C:foo`, which are rooted but not
+              # absolute, so the check would not mean what its message says. .NET Framework 4.x
+              # (PowerShell 5.1) has no IsPathFullyQualified, hence the explicit drive pattern.
+              if ($env:PROVISION_CACHE_DIR_INPUT -notmatch '^[A-Za-z]:\\') {
+                throw 'provision_cache_dir must be an absolute path with a drive letter'
               }
             }
           }
@@ -654,6 +685,13 @@ jobs:
             $head = $head.TrimEnd('/')
             if (-not $head) { continue }
             $component = Join-Path $snapshotRoot $head.Replace('/', '\')
+            # Canonical containment, independently of the validation step. -LiteralPath suppresses
+            # globbing, NOT Win32 path normalization, so a probe must be proven to land inside the
+            # snapshot before its existence means anything.
+            $full = [System.IO.Path]::GetFullPath($component)
+            if (-not $full.StartsWith($snapshotRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+              throw "declared component escapes the snapshot root: $pattern"
+            }
             if (-not (Test-Path -LiteralPath $component)) { $missing += $head }
           }
           if ($missing.Count -gt 0) {
@@ -662,7 +700,7 @@ jobs:
           Write-Host "resolved snapshot root: $root"
           # The model-neutral handle. Nothing in the repo reads it YET -- it is the seam
           # sc-17153/sc-17156 need, since SCENEWORKS_KREA_ROOT is a Krea-shaped name their
-          # MiniMax measurement steps cannot reuse. Exported unconditionally so a provision-only
+          # MiniMax measurement steps cannot reuse. Exported without an $isKrea guard so a provision-only
           # dispatch still names its snapshot to any step added after it.
           "SCENEWORKS_PROVISIONED_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if ($isKrea) {
