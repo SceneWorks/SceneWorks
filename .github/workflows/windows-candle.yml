@@ -586,3 +586,12 @@ jobs:
           :audio_restamped
           echo ::error::config/engine-capabilities/audio/capabilities.candle.json does not match a fresh dump at this pin. Either box re-dumps it - the audio registry is candle-native everywhere - then run npm run gen:preview-support from apps/web. If the macOS lane passes this same check while this one fails, the two lanes have stopped producing identical audio bytes, which is what the shared file assumes. Do NOT just rewrite the inferenceRevision line.
           exit /b 1
+      - name: Upload SC-18306 Candle capability facts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-18306-candle-capabilities-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}\engine-capability-facts-verify\capabilities.candle.json
+            ${{ runner.temp }}\engine-capability-facts-verify\audio\capabilities.candle.json
+          if-no-files-found: error
