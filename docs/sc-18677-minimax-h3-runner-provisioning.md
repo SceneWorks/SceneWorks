@@ -52,9 +52,9 @@ path, so the two cards do not sum into a 205 GB budget for one job.
 
 | Volume | Used | Free |
 | --- | ---: | ---: |
-| C: | 3,061.4 GB | **663.6 GB** |
-| D: | 2,390.8 GB | **1,335.2 GB** |
-| E: | 7,192 GB | **3,983 GB** |
+| C: | 3,289.1 GB | **710.6 GB** |
+| D: | 2,494.5 GB | **1,506.2 GB** |
+| E: | 7,722.4 GB | **4,276.7 GB** |
 
 The story flags that ~200 GB of provisioning competes with CI disk on this box. **It cost nothing.**
 The full 498 GB upstream repo was already resident in `E:\huggingface\hub` before this story, and the
@@ -67,11 +67,13 @@ Confirmed present and in lockstep. The root `Cargo.toml` carries
 
 ```toml
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "b965641e388f4db646e4c60ab3f75219737e2cc8" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "014134e3035ad7e4eca5c2ed7bded2375dc3c071" }
 ```
 
 and that rev equals the worker's `sceneworks-gen-core` / `runtime-cuda` pins
-(`crates/sceneworks-worker/Cargo.toml:40,99`). This matters more here than anywhere else in the
+(`crates/sceneworks-worker/Cargo.toml:40,99`). This is the pin **on this epic's feature branch**,
+which is the rev the story asks about; `main` has since moved to `b965641e…`, so read the branch
+you are on rather than assuming. This matters more here than anywhere else in the
 repo: without the vendored multi-arch kernels, `libmoe.a` is an Ampere-only cubin with no PTX and
 **every quantized matmul silently returns zeros on sm_120** — which would turn a q4/q8 VRAM
 measurement into a confident wrong number rather than an error. Two guards keep it honest, and both
@@ -263,17 +265,19 @@ snapshots path segment, deleting either loud-failure guard, and pushing the inpu
 
 ## 5. Per-tier reachability (AC2)
 
-Component bytes are sc-17139's; the tier factors are its validated MLX-affine model
-(`group_size: 64` → q8 = 8.5/16 = 53.125% of bf16, q4 = 4.5/16 = 28.125%), which held to +0.03% /
-+0.48% against six shipped artifacts. The VAEs stay dense in every tier, so
-**11.044 GB is a fixed floor**.
+Component figures are taken **directly from sc-17139 §5.2**, not recomputed. That matters: a flat
+`(bits + 0.5)/16` factor applied to a whole component's bf16 bytes understates each quantized tier
+by ~0.2 GB, because ~0.02% of the DiT (the AdaLN biases and `proj_in.weight`, whose in-features 96
+is not a multiple of 64) cannot be packed and stays dense. sc-17139's per-component numbers already
+carry that dense remainder, so using them keeps the two epic documents on one set of totals. The
+VAEs stay dense in every tier, so **11.044 GB is a fixed floor**.
 
 Against **one card = 102.642 GB**, using the *trimmed* text encoder (what sc-17150 will host):
 
 | Tier | DiT | TE | VAEs | **Resident total** | % of card | Headroom | Verdict |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| q4 | 18.641 | 14.486 | 11.044 | **44.171** | 43.0% | +58.471 | **fits** |
-| q8 | 35.211 | 27.363 | 11.044 | **73.618** | 71.7% | +29.024 | **fits** |
+| q4 | 18.651 | 14.683 | 11.044 | **44.378** | 43.2% | +58.264 | **fits** |
+| q8 | 35.218 | 27.491 | 11.044 | **73.753** | 71.9% | +28.889 | **fits** |
 | bf16 | 66.280 | 51.506 | 11.044 | **128.830** | 125.5% | **−26.188** | **exceeds** |
 
 Under **sequential** residency — the phase order the schema describes, text encoder dropped before
@@ -281,12 +285,16 @@ the DiT — the peak is `max(TE, DiT + VAEs)`:
 
 | Tier | TE stage | DiT+VAEs stage | **Sequential peak** | % of card | Headroom |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| q4 | 14.486 | 29.685 | **29.685** | 28.9% | +72.957 |
-| q8 | 27.363 | 46.255 | **46.255** | 45.1% | +56.387 |
+| q4 | 14.683 | 29.695 | **29.695** | 28.9% | +72.947 |
+| q8 | 27.491 | 46.262 | **46.262** | 45.1% | +56.380 |
 | bf16 | 51.506 | 77.324 | **77.324** | 75.3% | +25.318 |
 
+The resident column matches sc-17139 §5.3's install totals to the 0.001 GB its rounding allows
+(44.378 / 73.752 / 128.830 there — that table adds the 0.023 GB of configs, which the 11.044 GB
+floor here already includes).
+
 With the **untrimmed** TE currently on the box, resident bf16 is 144.039 GB (140.3%) and resident q8
-is 81.697 GB (79.6%); the sequential peaks are unchanged, because the DiT stage dominates at every
+is 81.832 GB (79.7%); the sequential peaks are unchanged, because the DiT stage dominates at every
 tier.
 
 ### Verdicts
@@ -335,7 +343,12 @@ The story asks that an unreachable tier be recorded as "must not be advertised o
 **Both premises behind that instruction are wrong, and the correct consequence is different.**
 
 **Premise 1 — "the largest `candle.vramGbByTier` in the manifest today is `bf16: 40.7`".** It is
-**128.0** (`flux2_dev`). Eleven entries already exceed 40.7:
+**128.0** (`flux2_dev`). Of the 35 entries carrying a `candle.vramGbByTier`, **fifteen** have a
+ladder whose maximum exceeds 40.7 — `flux2_dev` 128, `qwen_image_edit_2511_lightning` 87.4,
+`qwen_image` 82.5, `qwen_image_edit_2511` 81.7, `flux2_klein_9b` 75.5, `ideogram_4` 74.1, `kolors`
+63.7, `ideogram_4_turbo` 56.3, `boogu_image_turbo` 54.5, `boogu_image` 54.4, `lens_turbo` 52,
+`krea_2_turbo` 47.2, `krea_2_raw` 46.4, `sd3_5_large` 41.3, `sd3_5_large_turbo` 41.3. The five
+heaviest, with their gates:
 
 | id | q4 | q8 | bf16 | `minMemoryGb` | seq-capable |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -357,6 +370,22 @@ runtime decides:
 - `sequentialPeakGb` is the **second-stage** check: when the resident peak forces sequential offload
   but the measured sequential peak still exceeds free VRAM, reject before load instead of running
   into a reactive OOM (`:1054`, sc-10856).
+
+**`flux2_dev` is the structural template, and it is almost exactly H3's situation:**
+
+```jsonc
+"candle": {
+  "minMemoryGb": 56,                                        // gates the DEFAULT (q4) tier
+  "vramGbByTier":      { "q4": 44,   "q8": 70.7, "bf16": 128 },  // bf16 EXCEEDS this box's card
+  "sequentialPeakGb":  { "q4": 35.6, "q8": 64.9, "bf16": 97 },   // ...and fits sequentially
+  "supportsSequentialOffload": true
+}
+```
+
+A shipped entry already advertises a bf16 resident peak 25 GB above this card's capacity, and
+carries the measured sequential number that makes it runnable anyway. H3 bf16 is *less* extreme:
+128.830 GB resident versus flux2_dev's 128, and a sequential peak of 77.324 GB (66.280 GB
+post-AdaLN-evict) versus flux2_dev's 97.
 
 So the correct consequences are:
 

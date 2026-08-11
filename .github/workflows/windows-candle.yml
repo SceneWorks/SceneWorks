@@ -327,7 +327,8 @@ jobs:
     #
     # Provisioning now keys the 240m budget on its OWN input rather than on the five-rung
     # conjunction (sc-18677): a provision-only dispatch is a supported mode, and H3's
-    # component set is ~210 GB against Krea q4's ~14 GB, so it is the branch that most
+    # component set is 144.051 GB (210.332 GB once transformer_ref joins in sc-17149) against
+    # Krea q4's ~14 GB, so it is the branch that most
     # needs the long budget. Krea's two dispatch shapes keep their exact previous values --
     # five-rung + provision 240, five-rung alone 120, everything else 45.
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
@@ -446,8 +447,15 @@ jobs:
           PROVISION_REVISION: ${{ inputs.provision_revision }}
           PROVISION_PATTERNS: ${{ inputs.provision_patterns }}
           PROVISION_SUBDIR: ${{ inputs.provision_subdir }}
+          PROVISION_CACHE_DIR_INPUT: ${{ inputs.provision_cache_dir }}
         run: |
-          if ($env:PROVISION_SNAPSHOT -eq 'true') {
+          # Gate on the SAME condition as the steps that consume these values (the params and
+          # resolve steps run on `run_five_rung_reference || provision_snapshot`), not on
+          # provision_snapshot alone. Scoping the containment checks to the provisioning branch
+          # left them unreachable for a five-rung-only dispatch, which consumes provision_subdir
+          # and provision_patterns just the same -- it failed closed downstream on the EndsWith
+          # assertion, but reported a confusing path mismatch instead of the real reason.
+          if ($env:PROVISION_SNAPSHOT -eq 'true' -or $env:RUN_FIVE_RUNG_REFERENCE -eq 'true') {
             if ($env:PROVISION_REPOSITORY -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$') {
               throw 'provision_repository must be a Hugging Face owner/name repo id'
             }
@@ -458,7 +466,21 @@ jobs:
             if ($patterns.Count -eq 0) {
               throw 'provision_patterns must name at least one allow-pattern; an empty list would fetch the whole repository'
             }
+            # Each pattern's leading literal segment is joined onto the snapshot root by the
+            # resolve step's component-presence assertion. Without this, `../../foo/*` would let
+            # that assertion be satisfied by a directory outside the snapshot entirely -- which
+            # is the one assertion that makes a root-resolved model's proof real.
+            foreach ($pattern in $patterns) {
+              if ($pattern -match '^[\\/]' -or $pattern -match '^[A-Za-z]:') {
+                throw "provision_patterns entries must be relative to the snapshot root: $pattern"
+              }
+              if (($pattern -split '[\\/]') -contains '..') {
+                throw "provision_patterns entries must not traverse out of the snapshot: $pattern"
+              }
+            }
             if ($env:PROVISION_SUBDIR) {
+              # The shape regex alone is NOT containment: '.' is inside the character class, so
+              # '..' matches it. The -contains check below is load-bearing.
               if ($env:PROVISION_SUBDIR -notmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$') {
                 throw 'provision_subdir must be a relative path of [A-Za-z0-9._-] segments'
               }
@@ -466,13 +488,20 @@ jobs:
                 throw 'provision_subdir must not traverse out of the snapshot'
               }
             }
+            if ($env:PROVISION_CACHE_DIR_INPUT) {
+              # This value is written verbatim into $GITHUB_ENV, where a newline would inject
+              # arbitrary job-scoped variables into every later step.
+              if ($env:PROVISION_CACHE_DIR_INPUT -match '[\r\n]') {
+                throw 'provision_cache_dir must be a single line'
+              }
+              if (-not [System.IO.Path]::IsPathRooted($env:PROVISION_CACHE_DIR_INPUT)) {
+                throw 'provision_cache_dir must be an absolute path'
+              }
+            }
           }
           if ($env:RUN_FIVE_RUNG_REFERENCE -ne 'true') { exit 0 }
           if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
             throw 'inference_revision must be an exact lowercase 40-hex commit'
-          }
-          if ($env:PROVISION_REVISION -notmatch '^[0-9a-f]{40}$') {
-            throw 'provision_revision must be an exact lowercase 40-hex artifact revision'
           }
           if ($env:PROVISION_REPOSITORY -ne 'SceneWorks/krea-2-turbo-mlx') {
             throw 'provision_repository must be the fixed SceneWorks/krea-2-turbo-mlx reference artifact for a five-rung capture'
@@ -527,10 +556,11 @@ jobs:
             throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
           }
       # ONE allow-pattern per component, never a bare repo fetch. MiniMaxAI/MiniMax-H3 is
-      # ~498 GB because it ships the root (modular) layout plus FL2VA/ and Ref2VA/ partition
+      # 498.475 GB because it ships the root (modular) layout plus FL2VA/ and Ref2VA/ partition
       # re-packagings of the same components; only the root layout is referenced by
       # `modular_model_index.json` and only it is the conversion source (sc-17139 section 2).
-      # Fetching by component takes that to ~210 GB. Note this is the OPPOSITE of the rule for
+      # Fetching by component takes that to 210.332 GB, and to 144.051 GB for the set sc-18677
+      # actually provisions (transformer_ref is sc-17149's, deferred). Note this is the OPPOSITE of the rule for
       # `config/manifests` download rows, where an empty `files` list (whole repo) is correct --
       # those name SceneWorks-built artifacts that contain only what a user needs, whereas this
       # provisions a third-party repo with three overlapping copies of every component.
@@ -547,6 +577,7 @@ jobs:
           HF_HUB_VERBOSITY: "error"
         run: |
           python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          if ($LASTEXITCODE -ne 0) { throw "installing huggingface_hub failed with exit code $LASTEXITCODE" }
           @'
           import os
           from huggingface_hub import snapshot_download
@@ -620,6 +651,10 @@ jobs:
             throw "provisioned snapshot is missing declared components under ${snapshotRoot}: $($missing -join ', ')"
           }
           Write-Host "resolved snapshot root: $root"
+          # The model-neutral handle. Nothing in the repo reads it YET -- it is the seam
+          # sc-17153/sc-17156 need, since SCENEWORKS_KREA_ROOT is a Krea-shaped name their
+          # MiniMax measurement steps cannot reuse. Exported unconditionally so a provision-only
+          # dispatch still names its snapshot to any step added after it.
           "SCENEWORKS_PROVISIONED_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if ($isKrea) {
             "SCENEWORKS_KREA_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

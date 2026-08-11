@@ -162,7 +162,10 @@ function dispatchInputs(workflow) {
   const defaults = {};
   let current = null;
   for (const line of workflow.slice(start, end).split("\n")) {
-    const header = line.match(/^ {6}([a-z_]+):$/);
+    // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
+    // helper backs the "at most 10 inputs" cap check. A narrower pattern would silently skip an
+    // input and let a workflow GitHub rejects sail through as 10-or-fewer.
+    const header = line.match(/^ {6}([A-Za-z0-9_-]+):$/);
     if (header) {
       current = header[1];
       names.push(current);
@@ -235,6 +238,17 @@ test("windows-candle rebuilds the exact Krea snapshot path from the generalized 
     /\$root\.EndsWith\(\$env:PROVISION_SNAPSHOT_SUFFIX, \[StringComparison\]::OrdinalIgnoreCase\)/,
   );
 
+  // The PYTHON half of the cache binding, not just the PowerShell half. Centralizing the cache
+  // path exists because it was previously spelled twice in two languages with nothing tying
+  // them; pinning only the PowerShell side leaves a re-hardcoded `os.path.join(USERPROFILE...)`
+  // green, which downloads the whole component set to C: before the resolve step throws.
+  assert.match(workflow, /cache_dir=os\.environ\["PROVISION_CACHE_DIR"\],/);
+  assert.doesNotMatch(
+    workflow,
+    /cache_dir=os\.path\.join\(os\.environ\["USERPROFILE"\]/,
+    "the provisioning cache dir must come from the shared resolved value, not a second hardcoding",
+  );
+
   // The memory-adapter binaries read these env names via required_env; renaming the dispatch
   // inputs must not rename the runtime contract (bin/candle.rs, bin/mlx.rs).
   assert.match(workflow, /"SCENEWORKS_KREA_ROOT=\$root" \| Out-File/);
@@ -244,6 +258,21 @@ test("windows-candle rebuilds the exact Krea snapshot path from the generalized 
   // five-rung adapter a MiniMax root under a Krea-shaped name.
   assert.match(workflow, /\$isKrea = \$env:PROVISION_REPOSITORY -eq 'SceneWorks\/krea-2-turbo-mlx'/);
   assert.match(workflow, /if \(\$isKrea\) \{\n\s*"SCENEWORKS_KREA_ROOT=\$root"/);
+  // The CONSUMPTION side too, not just the export side. `secrets.SCENEWORKS_KREA_ROOT` is a
+  // Krea-specific override; dropping the `$isKrea -and` would let it redirect an H3 resolve.
+  assert.match(workflow, /if \(\$isKrea -and \$env:KREA_ROOT_OVERRIDE\) \{/);
+});
+
+// sc-18677: the provisioning branch's timeout is the whole point of the change (a 144 GB fetch
+// under the ordinary 45m cap dies mid-download), and the doc claims Krea's two dispatch shapes
+// keep their exact previous budgets. Pin the whole expression the way the macOS twin above pins
+// its lane's -- otherwise a revert to a flat `timeout-minutes: 45` passes every other test here.
+test("windows-candle keeps the provisioning and five-rung timeout budgets", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(
+    workflow,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+  );
 });
 
 test("windows-candle keeps the five-rung guards while decoupling provisioning", async () => {
@@ -302,8 +331,9 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
 test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   // MiniMaxAI/MiniMax-H3 is ~498 GB because FL2VA/ and Ref2VA/ re-package the same components;
-  // the component set is ~210 GB. snapshot_download treats allow_patterns=[] as "everything",
-  // so an empty list is a 288 GB accident on a box that shares its disk with CI. Both the
+  // the set sc-18677 provisions is 144.051 GB. snapshot_download treats allow_patterns=[] as
+  // "everything", so an empty list is a 354.424 GB accident on a box that shares its disk with
+  // CI -- FL2VA/ and Ref2VA/ alone are 288.102 GB of it. Both the
   // validation step and the Python body must refuse it.
   assert.match(
     workflow,
@@ -315,9 +345,48 @@ test("windows-candle provisioning can never degrade into a whole-repo fetch", as
   // A non-zero pip/python exit must fail the step: `@'...'@ | python -` does not propagate.
   assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw "snapshot provisioning failed with exit code \$LASTEXITCODE" \}/);
 
+  assert.match(
+    workflow,
+    /if \(\$LASTEXITCODE -ne 0\) \{ throw "installing huggingface_hub failed with exit code \$LASTEXITCODE" \}/,
+  );
+
   // With provision_subdir empty the snapshot directory exists as soon as ANY file lands, so
   // existence alone is not proof. Every declared component's literal prefix must be present.
+  //
+  // Pin the LOOP BODY, not just the throw string: replacing the `if (-not $head) { continue }`
+  // guard with an unconditional `continue` makes the assertion vacuous while leaving the error
+  // message -- and every other assertion in this file -- untouched.
   assert.match(workflow, /provisioned snapshot is missing declared components under/);
+  assert.match(workflow, /\$head = \(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]/);
+  assert.match(workflow, /if \(-not \$head\) \{ continue \}/);
+  assert.match(workflow, /\$component = Join-Path \$snapshotRoot \$head\.Replace\('\/', '\\'\)/);
+  assert.match(workflow, /if \(-not \(Test-Path -LiteralPath \$component\)\) \{ \$missing \+= \$head \}/);
+});
+
+// sc-18677: the containment checks around the two operator inputs that reach the filesystem.
+// `provision_subdir` is joined onto the cache path; each `provision_patterns` entry's literal
+// head is joined onto the snapshot root by the component-presence assertion above. Both are
+// validated on the SAME condition as the steps that consume them, not on provision_snapshot
+// alone -- a five-rung-only dispatch consumes both just the same.
+test("windows-candle validates every provisioning input that reaches a path", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(
+    workflow,
+    /if \(\$env:PROVISION_SNAPSHOT -eq 'true' -or \$env:RUN_FIVE_RUNG_REFERENCE -eq 'true'\) \{/,
+    "provisioning-input validation must cover the five-rung-only path that also consumes them",
+  );
+  assert.match(workflow, /throw 'provision_subdir must not traverse out of the snapshot'/);
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/,
+  );
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must be relative to the snapshot root: \$pattern"/,
+  );
+  // provision_cache_dir is written verbatim into $GITHUB_ENV.
+  assert.match(workflow, /throw 'provision_cache_dir must be a single line'/);
+  assert.match(workflow, /throw 'provision_cache_dir must be an absolute path'/);
 });
 
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
