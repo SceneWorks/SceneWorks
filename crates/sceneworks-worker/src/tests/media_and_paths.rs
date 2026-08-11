@@ -483,7 +483,10 @@ fn pinned_model_files_detect_persistent_final_and_intermediate_symlink_aba() {
         .ensure_unchanged()
         .expect_err("persistent final A-to-B retarget is rejected");
     std::fs::remove_file(&final_link).expect("final B link removes");
-    symlink(&a, &final_link).expect("recreated final A link creates");
+    // Recreate the same resolved target through a different lexical spelling. A filesystem may
+    // immediately reuse the deleted link's inode and ctime, so repeating the identical link text
+    // would make the fixture depend on allocator timing rather than the entry fingerprint contract.
+    symlink(Path::new("./a"), &final_link).expect("recreated final A link creates");
     final_pin
         .ensure_unchanged()
         .expect_err("recreated final A entry is not the pinned entry");
@@ -508,7 +511,7 @@ fn pinned_model_files_detect_persistent_final_and_intermediate_symlink_aba() {
         .ensure_unchanged()
         .expect_err("persistent intermediate A-to-B retarget is rejected");
     std::fs::remove_file(&active).expect("active B link removes");
-    symlink(&tree_a, &active).expect("recreated active A link creates");
+    symlink(Path::new("./tree-a"), &active).expect("recreated active A link creates");
     intermediate_pin
         .ensure_unchanged()
         .expect_err("recreated intermediate A entry is not the pinned component");
