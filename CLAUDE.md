@@ -12,10 +12,12 @@ here.
   the current ruleset/CI state.
 
   Read its *Current state* section before acting on any branch protection
-  assumption. As of 2026-08-11 the two repositories deliberately differ:
-  **SceneWorks has no merge queue anywhere**, while **inference still queues
-  `main` and every feature branch**. Procedures that mention staging, activating,
-  or recovering a per-branch queue ruleset apply to inference only.
+  assumption. As of 2026-08-11 **neither SceneWorks nor inference has a merge
+  queue** — both were removed the same day after the queue was measured catching
+  zero integration failures in 103 groups while adding ~21m per merge. `main` is
+  `strict: false` in both; `feature/*` is `strict: true` in both. Any procedure
+  or memory that mentions staging, activating, or recovering a per-branch queue
+  ruleset is obsolete.
 
 - **[RELEASING.md](RELEASING.md)** — release, hotfix, inference-pin, publication,
   and failed-candidate recovery.
