@@ -50,7 +50,7 @@ const USAGE = `Usage:
 
 Safety properties:
   * plan reads the complete live Shortcut epic and is otherwise read-only except for atomically creating the explicit state file.
-  * refresh-stories adopts additive live scope only before any final-integration PR intent.
+  * refresh-stories adopts additive live scope only before any live or recorded final-integration PR intent.
   * state/report commands hold an exclusive owner-recorded lock; stale recovery is explicit unless a same-host PID is dead.
   * create-mode bootstrap stages both state-owned queues, then creates, activates, and verifies each repository.
   * adopt-existing validates immutable heads, checks, pins, and active/effective policies without remote mutation.
