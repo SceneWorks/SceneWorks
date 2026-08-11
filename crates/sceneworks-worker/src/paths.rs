@@ -247,6 +247,10 @@ pub(crate) fn normalize_app_managed_model_file_entry_path(
 /// target captured by that same pin. This is the file trust-boundary primitive for prepared
 /// [`gen_core::LoadSpec`]s: there is no authorize-then-re-resolve gap, and the extension-bearing
 /// loader path is preserved for format dispatch.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 pub(crate) fn pin_app_managed_model_file(
     settings: &Settings,
     raw_path: &Path,
@@ -289,6 +293,10 @@ pub(crate) fn pin_operator_model_file(
 /// Atomically finalize a complete prepared token set, deduplicating repeated lexical File slots
 /// (for example the same adapter selected twice at different scales) before calling the strict
 /// gen-core preparation API.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
 pub(crate) fn prepare_load_spec_with_file_pins(
     spec: &mut gen_core::LoadSpec,
     pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
