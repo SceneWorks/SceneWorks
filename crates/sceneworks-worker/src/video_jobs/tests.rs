@@ -248,6 +248,99 @@ fn request(value: Value) -> VideoRequest {
     VideoRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn scail2_preflight_returns_the_only_model_dir_an_admitted_arm_can_use() {
+    let manifest = json!({
+        "candle": {
+            "minMemoryGb": 105,
+            "vramGbByTier": { "bf16": 102.115 },
+            "vramMeasuredPixels": 399360,
+            "measured": true
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let model_dir = PathBuf::from("model-manager/scail2/bf16");
+    let rejected = scail2_vram_preflight(
+        &manifest,
+        model_dir.clone(),
+        "0",
+        crate::vram_gate::apply_vram_cap(None, Some(104.0)),
+    );
+    assert!(matches!(rejected, Err(WorkerError::InvalidPayload(_))));
+
+    let admitted = scail2_vram_preflight(
+        &manifest,
+        model_dir.clone(),
+        "0",
+        crate::vram_gate::apply_vram_cap(None, Some(105.0)),
+    )
+    .expect("102.115 GB measured peak plus reserve fits");
+    assert_eq!(admitted.model_dir, model_dir);
+}
+
+/// Both SCAIL modes perform expensive conditioning (SAM3 and source-video decode) before entering
+/// the shared generator. Pin admission ahead of that work, and pin the returned path into the input,
+/// so deleting either call is a compile failure rather than a silently ungated route.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn both_candle_scail2_arms_gate_before_conditioning_and_consume_the_gated_path() {
+    const SOURCE: &str = include_str!("candle.rs");
+    assert_eq!(
+        SOURCE.matches("scail2_vram_preflight(").count(),
+        3,
+        "one owner function and exactly two production callers must exist"
+    );
+    let animate = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2(")
+        .expect("animate arm")
+        .1
+        .split_once("/// Resolve a candle SCAIL-2 `replace_person`")
+        .expect("animate arm boundary")
+        .0;
+    let replace = SOURCE
+        .split_once("pub(super) async fn generate_candle_scail2_replace(")
+        .expect("replace arm")
+        .1
+        .split_once("/// Resolve the candle Wan-VACE diffusers snapshot dir")
+        .expect("replace arm boundary")
+        .0;
+    for (name, arm, conditioning) in [
+        (
+            "animate_character",
+            animate,
+            "resolve_candle_scail2_conditioning(",
+        ),
+        (
+            "replace_person",
+            replace,
+            "resolve_candle_scail2_replace_conditioning(",
+        ),
+    ] {
+        let gate = arm.find("scail2_vram_preflight(").expect("VRAM gate call");
+        let expensive = arm.find(conditioning).expect("conditioning call");
+        assert!(gate < expensive, "{name} must gate before {conditioning}");
+        assert!(
+            arm.contains("let Scail2VramPreflight { model_dir } ="),
+            "{name} must obtain the model path from admission"
+        );
+        let input = arm
+            .split_once("let input = VideoGenInput {")
+            .expect("engine input")
+            .1;
+        assert!(
+            input.contains("model_dir,"),
+            "{name} must use the gated path"
+        );
+        assert!(
+            !input.contains("model_dir: resolve_candle_scail2_model_dir"),
+            "{name} must not retain an ungated resolver bypass"
+        );
+    }
+}
+
 #[test]
 fn seedvr2_probe_and_scratch_plan_cover_both_sequences_before_decode() {
     let stderr = r#"

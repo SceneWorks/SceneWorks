@@ -12602,9 +12602,24 @@
           "schedulers": ["default"]
         }
       },
+      // Exact shared-package Candle/CUDA evidence (sc-18473): inference
+      // 3174984b20334bb029170e367be234de0b3f8753 loaded the Model Manager bf16 directory from
+      // SceneWorks/scail2-mlx@ce88cfdb1008f395e9c820e525e6db7b6695f7b3 through the production
+      // candle_gen_scail2 provider and rendered 832x480 / 81 frames / 1 step. GitHub Actions run
+      // 31455292141, job 93667700921, artifact 9089420126 (uploaded zip SHA-256
+      // de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9) emitted the validated
+      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. minMemoryGb is
+      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower Candle tier
+      // or sequential-offload path, so both worker modes fail closed below that live free-VRAM floor.
+      "candle": {
+        "minMemoryGb": 105,
+        "vramGbByTier": { "bf16": 102.115 },
+        "vramMeasuredPixels": 399360,
+        "measured": true
+      },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Needs ample memory and runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Candle needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve); lower-memory NVIDIA cards are rejected before load. Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {

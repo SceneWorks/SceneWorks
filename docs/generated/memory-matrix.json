@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:743c75c002928d594223767b1780f2c744171e991560f3f7d4b572f2ef74b1cc",
+    "sceneWorksRevision": "source-tree:3cfe23739acf92960315a24165e3dee94272bc4a7aed7aea81d26de0c1a1ff7f",
     "inferenceRevision": "3174984b20334bb029170e367be234de0b3f8753",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "6546ea4bdd663bc0ab06ed84ae778727d604c75ea33c78c37313e689e250df39"
+        "sha256": "7835d35c6ed64c436c7eca6e069a4190afb40b70525585613c42363775b6ccc8"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -38,7 +38,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "d37861ae1e6078e5cdcb4939f1e937d913cc72c6e834fada333afee9033c01fb"
+        "sha256": "f7a5bca4cfa80e8db7b624f6156c1b18f5448238d7ec55157bf278334d3147df"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",

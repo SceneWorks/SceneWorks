@@ -728,6 +728,28 @@ async fn candle_video_vram_budget(settings: &Settings) -> Option<crate::vram_gat
     })
 }
 
+/// The SCAIL model directory is obtainable only through its fail-closed measured VRAM gate. Carrying
+/// the path in the return value makes admission structural: deleting the gate leaves both production
+/// arms without the value required to construct their [`VideoGenInput`].
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Scail2VramPreflight {
+    pub(super) model_dir: PathBuf,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn scail2_vram_preflight(
+    manifest_entry: &JsonObject,
+    model_dir: PathBuf,
+    gpu_id: &str,
+    budget: Option<crate::vram_gate::VramBudget>,
+) -> WorkerResult<Scail2VramPreflight> {
+    match crate::vram_gate::scail2_video_fit_error(manifest_entry, gpu_id, budget) {
+        Some(error) => Err(error),
+        None => Ok(Scail2VramPreflight { model_dir }),
+    }
+}
+
 /// Windows/CUDA candle video path (sc-5097 txt2video; sc-5175 adds the Wan2.2 14B MoE T2V + I2V).
 /// Resolves the engine + weights, provisions the LTX Gemma encoder, resolves any i2v source-image
 /// conditioning, builds a `VideoGenInput`, and runs it through the shared [`generate_video`] streaming
@@ -1538,6 +1560,12 @@ pub(super) async fn generate_candle_scail2(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, &'static str, Value)> {
+    let Scail2VramPreflight { model_dir } = scail2_vram_preflight(
+        &request.model_manifest_entry,
+        resolve_candle_scail2_model_dir(settings)?,
+        &settings.gpu_id,
+        candle_video_vram_budget(settings).await,
+    )?;
     let negative_prompt = non_empty_negative_prompt(request);
     let conditioning =
         resolve_candle_scail2_conditioning(api, settings, job, request, project_path).await?;
@@ -1549,7 +1577,7 @@ pub(super) async fn generate_candle_scail2(
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_candle_scail2_model_dir(settings)?,
+        model_dir,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),
@@ -1699,6 +1727,12 @@ pub(super) async fn generate_candle_scail2_replace(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    let Scail2VramPreflight { model_dir } = scail2_vram_preflight(
+        &request.model_manifest_entry,
+        resolve_candle_scail2_model_dir(settings)?,
+        &settings.gpu_id,
+        candle_video_vram_budget(settings).await,
+    )?;
     let negative_prompt = non_empty_negative_prompt(request);
     let (conditioning, status) =
         resolve_candle_scail2_replace_conditioning(api, settings, job, request, project_path)
@@ -1707,7 +1741,7 @@ pub(super) async fn generate_candle_scail2_replace(
         sampler: None,
         scheduler: None,
         engine_id,
-        model_dir: resolve_candle_scail2_model_dir(settings)?,
+        model_dir,
         conditioning,
         prompt: request.prompt.clone(),
         negative_prompt,

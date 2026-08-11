@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -737,7 +738,7 @@ def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
     assert set(static_overlays) == set(contract_overlays) == expected
 
 
-def test_measured_memory_rows_declare_their_1024_square_geometry():
+def test_measured_memory_rows_declare_their_workload_geometry():
     """sc-16020: geometry is data, not a prose assumption.
 
     The counts were derived from the live catalog when the field landed. Update them when
@@ -757,9 +758,45 @@ def test_measured_memory_rows_declare_their_1024_square_geometry():
             candle_rows.append((model["id"], candle))
 
     assert len(mlx_rows) == 16
-    assert len(candle_rows) == 35
+    assert len(candle_rows) == 36
     assert all(row[2].get("measuredPixels") == 1024 * 1024 for row in mlx_rows), mlx_rows
-    assert all(row[1].get("vramMeasuredPixels") == 1024 * 1024 for row in candle_rows), candle_rows
+    image_rows = [row for row in candle_rows if row[0] != "scail2_14b"]
+    assert all(row[1].get("vramMeasuredPixels") == 1024 * 1024 for row in image_rows), image_rows
+    scail = [row for row in candle_rows if row[0] == "scail2_14b"]
+    assert len(scail) == 1
+    assert scail[0][1].get("vramMeasuredPixels") == 832 * 480
+
+
+def test_scail2_candle_admission_matches_the_validated_shared_package_evidence():
+    """sc-18473: the installable shared package and its fail-closed gate share one exact row."""
+    manifest = _load_builtin_models_manifest()
+    scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
+    candle = scail["candle"]
+    assert candle == {
+        "minMemoryGb": 105,
+        "vramGbByTier": {"bf16": 102.115},
+        "vramMeasuredPixels": 832 * 480,
+        "measured": True,
+    }
+    assert candle["minMemoryGb"] == math.ceil(
+        candle["vramGbByTier"]["bf16"] + 2
+    )
+    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+
+    raw = MANIFEST_PATH.read_text(encoding="utf-8")
+    scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(
+        "// Krea Realtime 14B", 1
+    )[0]
+    for exact_evidence in [
+        "3174984b20334bb029170e367be234de0b3f8753",
+        "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+        "31455292141",
+        "93667700921",
+        "9089420126",
+        "de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9",
+        "overallPeakGb=102.115",
+    ]:
+        assert exact_evidence in scail_section
 
 
 def test_schema_requires_geometry_for_every_peak_memory_evidence_shape():
