@@ -75,19 +75,41 @@ Do not create an epic branch as a substitute for incomplete requirements.
 
 ## 2. Create the integration branches
 
-Use current remote state and a clean checkout. GitHub rejects a merge-queue rule
-whose condition is the wildcard `feature/*`, while an active exact queue rule
-rejects creation of its not-yet-existing ref. The bootstrap command must
-therefore treat the applicable exact queue ruleset and ref as one durable,
-recoverable transaction; when inference is in scope, that transaction covers
-both repositories' queue rulesets and refs.
+Use current remote state and a clean checkout.
 
 Run the complete read-only preflight for every applicable repository before the
 first mutation: capture the current `origin/main` SHA; verify both wildcard
 ruleset layers; and verify every configured required context on that exact
 commit is terminal `success`, `skipped`, or `neutral` from the expected GitHub
 Actions app. Pending, missing, wrong-app, or failed contexts are a stop
-condition. Persist the plan, then for each repository:
+condition. Persist the plan before mutating anything.
+
+The two repositories then diverge, because only inference still has merge
+queues. See *Current state* under **CI and repository configuration**.
+
+### SceneWorks: create the ref
+
+There is no queue rule and therefore no ordering constraint. Create the branch
+at the captured immutable SHA under the active wildcard base and deletion
+guards:
+
+```bash
+git fetch origin
+git switch -c feature/sc-<epic-id>-<epic-slug> origin/main
+git push -u origin feature/sc-<epic-id>-<epic-slug>
+```
+
+Then verify that **two** layers aggregate: the wildcard base policy and the
+wildcard deletion guard. Do not create a per-branch queue ruleset; SceneWorks
+has none by decision, and adding one back reintroduces a cost measured to buy
+nothing.
+
+### inference: stage the queue, create the ref, activate
+
+GitHub rejects a merge-queue rule whose condition is the wildcard `feature/*`,
+while an active exact queue rule rejects creation of its not-yet-existing ref.
+When inference is in scope, its exact queue ruleset and ref must therefore be
+treated as one durable, recoverable transaction:
 
 1. create or verify the exact queue ruleset in disabled mode and record its ID
    and payload digest;
@@ -96,9 +118,10 @@ condition. Persist the plan, then for each repository:
 3. immediately activate only the recorded exact queue ruleset; and
 4. query the effective rules and require the five-rule aggregate.
 
-Only after every repository reaches that state may bootstrap create a workspace
-or declare success. Do not loosen `do_not_enforce_on_create=false` or silently
-choose an older commit to make branch creation succeed.
+Step 2 uses the same commands shown for SceneWorks above, run against the
+inference remote — but only between the staged-disabled and activate steps, never
+before or after. Create the inference branch only when inference changes are part
+of the approved scope, and use the identical branch name as SceneWorks.
 
 Recovery resumes recognized durable states instead of blindly rolling back:
 
@@ -111,27 +134,20 @@ Recovery resumes recognized durable states instead of blindly rolling back:
 - missing queue/ref at the recorded SHA: create the recorded policy disabled,
   then activate it.
 
-An unexpected ref SHA, duplicate matching ref or ruleset, payload drift, or an
-unrecognized partial state fails closed. A partial success in one repository is
-resumed after revalidation; it is not force-deleted or rewritten. A ref whose
-queue rule is missing or disabled remains protected by the wildcard layers but
-is unsafe: expose no workspace and admit no story PR until recovery completes.
+An inference ref whose queue rule is missing or disabled remains protected by
+the wildcard layers but is unsafe: expose no workspace and admit no story PR
+until recovery completes.
 
-The equivalent manual ref creation is:
+### Both repositories
 
-```bash
-git fetch origin
-git switch -c feature/sc-<epic-id>-<epic-slug> origin/main
-git push -u origin feature/sc-<epic-id>-<epic-slug>
-```
-
-Create the inference branch only when inference changes are part of the approved
-scope. Use the identical command and branch name in that repository.
-
-Immediately verify that all three applicable active layers aggregate: the wildcard
-base policy, the wildcard deletion guard, and the exact-branch queue policy. Do
-not begin story merges while the branch allows unreviewed direct pushes, lacks
-required checks, can be deleted, or has no merge queue.
+Only after every applicable repository reaches its verified state may bootstrap
+create a workspace or declare success. Do not loosen
+`do_not_enforce_on_create=false` or silently choose an older commit to make
+branch creation succeed. An unexpected ref SHA, duplicate matching ref or
+ruleset, payload drift, or an unrecognized partial state fails closed. A partial
+success in one repository is resumed after revalidation; it is not force-deleted
+or rewritten. Do not begin story merges while a branch allows unreviewed direct
+pushes, lacks required checks, or can be deleted.
 
 Add the following to the Shortcut epic:
 
@@ -163,8 +179,12 @@ Treat each story as a small PR even though its base is an epic branch.
      --head story/sc-<story-id>-<story-slug>
    ```
 
-9. Merge through the feature branch's required checks and merge queue. Verify
-   the remote merge rather than treating queue entry as completion.
+9. Merge through the feature branch's required checks — and, in inference only,
+   its merge queue. SceneWorks feature branches have no queue; they require the
+   branch to be up to date with its base (`strict: true`), so merge `main` or the
+   feature head in and let the checks re-run rather than waiting for a queue to
+   do it for you. Verify the remote merge rather than treating queue entry or a
+   green check as completion.
 10. Validate the acceptance criteria against the new combined feature head.
 11. Add a Shortcut closeout comment containing the PR, merge commit, tests,
     runtime evidence, limitations, and tracked follow-ups.
@@ -267,7 +287,7 @@ Open one PR from the SceneWorks feature branch to `main`. Its body must contain:
 - independent-review verdicts; and
 - explicit limitations and separately tracked follow-ups.
 
-Before enqueueing, verify:
+Before merging, verify:
 
 - every required story is Done and no epic blocker remains;
 - both feature branches include current respective `main`;
@@ -276,9 +296,13 @@ Before enqueueing, verify:
 - required CI reports on the actual feature-to-main PR head; and
 - no unrelated changes entered through synchronization.
 
-Merge through the protected `main` merge queue. Afterward, re-fetch and verify
-the exact remote merge commit, post-merge state, and any required runtime or
-deployment evidence. Only then:
+Merge through the protected `main` ruleset. SceneWorks `main` has **no merge
+queue** and does **not** require the branch to be up to date (`strict: false`),
+so nothing re-verifies this PR against a `main` that moved after its checks went
+green — if `main` advanced while the final PR sat open, merge it in and let the
+required checks re-run before merging. Afterward, re-fetch and verify the exact
+remote merge commit, post-merge state, and any required runtime or deployment
+evidence. Only then:
 
 1. add the epic closeout comment;
 2. move the epic to Done;
@@ -305,50 +329,96 @@ publish a release.
 
 ## CI and repository configuration
 
-### Current state observed on 2026-08-08
+### Current state verified on 2026-08-11
 
-The process above is not yet fully enforced:
+**The two repositories no longer behave the same way. SceneWorks has no merge
+queue anywhere; inference still queues everything.** Read the repository-specific
+column before following any procedure below.
 
-- SceneWorks ruleset `Require MR` targets only the default branch.
-- Inference ruleset `Require MR` targets only the default branch.
-- Therefore `feature/*` branches in both repositories currently lack the PR,
-  required-check, merge-queue, non-fast-forward, and deletion rules applied to
-  `main`.
-- SceneWorks `check.yml`, `desktop-macos-check.yml`,
-  `desktop-linux-check.yml`, and `desktop-windows.yml` already trigger for
-  arbitrary pull-request bases and `merge_group` events.
-- SceneWorks `macos-mlx.yml` supports `merge_group` but restricts ordinary PRs
-  to `main`; its required macOS/MLX status would not report on a story PR whose
-  base is `feature/*`.
-- SceneWorks `windows-candle.yml` restricts ordinary PRs to `main` and does not
-  currently support `merge_group`; it cannot be made a feature-branch required
-  check without restructuring its triggers and path selection.
-- Inference `ci.yml` already supports arbitrary pull requests and
-  `merge_group`; its workflow trigger is suitable for feature branches, but no
-  feature-branch ruleset currently requires its `CI gate`.
+| | SceneWorks | inference |
+| --- | --- | --- |
+| `main` ruleset | `Require MR` (17708030) | `Require MR` (20481541) |
+| queue on `main` | **none** | `merge_queue` |
+| up-to-date required on `main` | no (`strict: false`) | — |
+| `feature/*` base policy | 20638194 | 20638200 |
+| queue on `feature/*` | **none** | per-branch exact rulesets, active |
+| `feature/*` up-to-date | yes (`strict: true`) | yes (`strict: true`) |
+| deletion guard | 20638197 | 20638201 |
+
+Both repositories' `feature/*` base policies carry `pull_request` (0 approvals;
+SceneWorks additionally requires code-owner review), `non_fast_forward`, and
+required status checks — the same seven contexts as SceneWorks `main`
+(`web`, `parity`, `candle`, `build-windows`, `check-linux`, `check-macos`,
+`macOS build, lint and workspace tests (hosted)`), and `CI gate` for inference.
+
+#### Why SceneWorks has no queue
+
+Removed 2026-08-11 after measurement, not preference. Over 5.4 days the queue
+produced **103 merge groups and caught zero integration failures**, while adding
+a median 21m (mean 35m, p90 43m) to every merge. Every group contained exactly
+one PR — `min_entries_to_merge: 1` forms a group the instant one entry arrives,
+so nothing was ever amortized and the entire cost was additive. Its only
+observable effects were two evictions, on PRs that then took 1h32m and 5h33m.
+
+Do not re-add it without new evidence. A merge queue earns its cost through
+batching under concurrency; at SceneWorks' merge rate it batched nothing. The
+`merge_group:` triggers remain in the workflows deliberately so re-enabling is a
+one-line ruleset change.
+
+#### Consequences for this document
+
+- Every SceneWorks bootstrap step that stages, activates, or recovers an exact
+  per-branch queue ruleset is obsolete. SceneWorks feature branches have **two**
+  layers, not three, and ref creation needs no transaction.
+- The inference procedures are unchanged and still correct.
+- `release/next` is covered by **no ruleset in either repository** — no required
+  checks, no PR requirement, no force-push or deletion guard. It is the least
+  protected branch in the hotfix path.
+
+Workflow triggers, verified the same day:
+
+- SceneWorks `check.yml`, `desktop-macos-check.yml`, `desktop-linux-check.yml`,
+  and `desktop-windows.yml` trigger for arbitrary pull-request bases and
+  `merge_group`.
+- SceneWorks `macos-mlx.yml` now targets `pull_request: branches: [main,
+  "feature/*"]` with no PR path filter, so its required status reports on
+  feature-target PRs. `platform-review-contracts.test.mjs` enforces this.
+- SceneWorks `windows-candle.yml` still restricts ordinary PRs to `main`, keeps
+  a PR path filter, and has no `merge_group` trigger. It is deliberately not a
+  required check; a contract test asserts it stays out of the required set.
+- Inference `ci.yml` supports arbitrary pull requests and `merge_group`, and its
+  `CI gate` is required on `feature/*`.
 
 Re-query live rules and workflow files before implementation; this section is a
-dated baseline, not a substitute for current inspection.
+dated snapshot, not a substitute for current inspection.
 
-### Required before the first feature branch
+### Ruleset and workflow requirements
 
-#### 1. Add feature-branch rulesets
+These layers already exist in both repositories (see *Current state* above); this
+section is the contract they must keep satisfying, and the recipe for any future
+repository or feature branch.
 
-Create three layers of `Feature integration` rulesets in each repository.
-GitHub rulesets use `fnmatch`, so the two durable wildcard layers target
-`feature/*`, which intentionally matches the one-slash branch format defined
-above. The third layer targets one exact feature branch.
+#### 1. Feature-branch rulesets
 
-GitHub's ruleset API rejects `merge_queue` when the condition contains a
-wildcard (`Invalid rule 'merge_queue': Wildcard ref names are not supported
-when merge queue is enabled`). An active exact queue rule also rejects initial
-creation of its matching ref with `Changes must be made through the merge
-queue`. Consequently the wildcard base policy must not contain the queue rule.
-Every bootstrap must create or verify a separate disabled exact queue ruleset
-for `feature/sc-<epic-id>-<epic-slug>`, create the checked ref under the active
-wildcard guards, immediately activate the exact rule, and verify the aggregate.
-A wildcard queue payload or a feature ref with a missing/disabled exact queue
-rule is a configuration error, not a degraded mode.
+GitHub rulesets use `fnmatch`, so the durable wildcard layers target `feature/*`,
+which intentionally matches the one-slash branch format defined above.
+
+**SceneWorks: two layers** — the wildcard base policy and the wildcard deletion
+guard. There is no queue layer, so there is no exact-branch ruleset, no staging
+transaction, and no per-epic ruleset lifecycle to manage.
+
+**inference: three layers** — the same two wildcard layers plus one exact-branch
+queue ruleset per feature branch. GitHub's ruleset API rejects `merge_queue`
+when the condition contains a wildcard (`Invalid rule 'merge_queue': Wildcard ref
+names are not supported when merge queue is enabled`). An active exact queue rule
+also rejects initial creation of its matching ref with `Changes must be made
+through the merge queue`. Consequently the wildcard base policy must not contain
+the queue rule. Every inference bootstrap must create or verify a separate
+disabled exact queue ruleset for `feature/sc-<epic-id>-<epic-slug>`, create the
+checked ref under the active wildcard guards, immediately activate the exact
+rule, and verify the aggregate. A wildcard queue payload, or an inference feature
+ref with a missing/disabled exact queue rule, is a configuration error rather
+than a degraded mode.
 
 SceneWorks must require at least the same integration contexts currently
 required on `main`:
@@ -372,23 +442,32 @@ must:
 - require current-head status checks;
 - use merge commits so story and synchronization provenance is retained.
 
-The exact-branch queue ruleset must also have no bypass actors. It contains the
-`merge_queue` rule for that one feature ref, uses merge commits, and uses merge
-groups of one entry unless deliberate batch validation is accepted. Persist its
-ID and payload digest while it is disabled, then activate only that exact
-recorded policy after ref creation. If the disposable proof shows that GitHub
-does not aggregate a queue-only exact ruleset with the wildcard pull-request
-and status rules, repeat those rules in the exact ruleset; never remove them
-from the wildcard layer. Record the final active state with the epic bootstrap
-evidence.
+The exact-branch queue ruleset — **inference only** — must also have no bypass
+actors. It contains the `merge_queue` rule for that one feature ref and uses
+merge commits. Persist its ID and payload digest while it is disabled, then
+activate only that exact recorded policy after ref creation. If the disposable
+proof shows that GitHub does not aggregate a queue-only exact ruleset with the
+wildcard pull-request and status rules, repeat those rules in the exact ruleset;
+never remove them from the wildcard layer. Record the final active state with the
+epic bootstrap evidence.
+
+Note the batch-size trap that removed SceneWorks' queues: `min_entries_to_merge:
+1` forms a group the instant a single entry arrives, so `max_entries_to_build`
+never engages, `min_entries_to_merge_wait_minutes` is inert, and the queue
+amortizes nothing while charging a full verification pass per PR. If an inference
+queue is ever measured behaving that way, fix the batching parameters or remove
+the queue — do not keep paying for a group of one.
 
 The wildcard deletion-guard ruleset must contain only the deletion rule and
 normally have no bypass actors. After every non-cleanup assertion passes on a
 disposable proof branch, or after the post-merge checklist succeeds, freeze the
-target branch and require no open PR or queue entry. First attempt the proof
-deletion with the exact queue still active. If GitHub's queue rule rejects
-deletion, disable only the recorded exact queue policy and re-verify that the
-wildcard base and deletion layers remain active before continuing.
+target branch and require no open PR or queue entry.
+
+In SceneWorks, deletion is then gated only by the deletion guard itself. In
+inference, first attempt the deletion with the exact queue still active; if
+GitHub's queue rule rejects it, disable only the recorded exact queue policy and
+re-verify that the wildcard base and deletion layers remain active before
+continuing.
 
 An administrator may then temporarily add one closed maintainer team or cleanup
 automation as the deletion guard's exact cleanup actor. If neither exists, one
@@ -396,18 +475,18 @@ explicitly named repository administrator may be the temporary actor; record
 its immutable actor ID, the approved proof-or-completed branch names, and the
 start/end of the cleanup window. Delete only those branches and restore
 `bypass_actors: []` immediately in a finally-style cleanup step, whether the
-deletion succeeds or fails. If deletion failed after the exact queue was
-disabled, reactivate that recorded queue policy and verify all five effective
-rules before releasing the freeze. If reactivation also fails, keep the branch
-explicitly unsafe, expose no workspace, admit no PR, and record an incident for
-recovery. Never leave deletion authority active during an epic. Bypass is
-ruleset-wide: never put the deletion rule and its cleanup bypass in the base
-policy or exact queue ruleset, because that would also let the cleanup actor
-bypass pull-request, status-check, non-fast-forward, or queue protections. If
-the ref is absent, audit the restored guard and then delete the obsolete exact
-queue ruleset. If activation failed during bootstrap, keep the disabled-queue
-ref as a fail-closed resumable state; use this same bounded cleanup only after
-an explicit abandonment decision.
+deletion succeeds or fails. In inference, if deletion failed after the exact
+queue was disabled, reactivate that recorded queue policy and verify all five
+effective rules before releasing the freeze; if reactivation also fails, keep the
+branch explicitly unsafe, expose no workspace, admit no PR, and record an
+incident for recovery. Never leave deletion authority active during an epic.
+Bypass is ruleset-wide: never put the deletion rule and its cleanup bypass in the
+base policy or an exact queue ruleset, because that would also let the cleanup
+actor bypass pull-request, status-check, non-fast-forward, or queue protections.
+For inference, if the ref is absent, audit the restored guard and then delete the
+obsolete exact queue ruleset; if activation failed during bootstrap, keep the
+disabled-queue ref as a fail-closed resumable state. Use this same bounded
+cleanup only after an explicit abandonment decision.
 
 Evaluate mode, when available, is an optional preview of matched refs and rule
 evaluations; it cannot prove enforced denials or merge-queue admission. Activate
@@ -429,15 +508,20 @@ At minimum:
 3. Ensure path-irrelevant required jobs report success through an always-created
    change-selection job. Do not use a workflow-level `paths` filter for a
    required check, because an absent workflow leaves the requirement pending.
-4. Ensure every required workflow includes `merge_group`. GitHub explicitly
-   requires that trigger for checks used by a merge queue; see
+4. Keep `merge_group` on every required workflow even though SceneWorks no
+   longer has a queue. The trigger costs nothing while no such event fires, and
+   it keeps re-enabling a queue a one-line ruleset change; a required lane
+   without it strands a queued group until `check_response_timeout_minutes`
+   evicts its entries, which re-orders the queue silently rather than failing.
+   GitHub requires that trigger for checks used by a merge queue; see
    [Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#merge_group).
 5. Keep concurrency keyed so one PR or merge-group run cannot cancel another
    required verdict.
 
 Do not add duplicate `push: feature/*` builds merely because the branches are
-new. If the merge queue tests the exact speculative commit that lands, that run
-is the integration verdict. Add post-merge feature pushes only when they prove a
+new. With no SceneWorks queue, the integration verdict is the required-check run
+on the PR head itself, and `strict: true` on `feature/*` guarantees that head
+contains the current base. Add post-merge feature pushes only when they prove a
 separate property.
 
 #### 3. Decide the privileged runtime policy
@@ -449,11 +533,12 @@ policy:
 
 - feature-target story and synchronization PRs run the required hosted checks,
   including `macOS build, lint and workspace tests (hosted)`;
-- `nax-worker` does not auto-run for PRs targeting `feature/*` or for merge
-  groups; it continues to run for the final same-repo integration PR targeting
-  `main`;
-- `windows-candle.yml` remains limited to ordinary PRs targeting `main` and
-  stays out of the merge queue; and
+- `nax-worker` does not auto-run for PRs targeting `feature/*`, nor for merge
+  groups should a queue ever be re-enabled; it continues to run for the final
+  same-repo integration PR targeting `main`;
+- `windows-candle.yml` remains limited to ordinary PRs targeting `main`, keeps
+  its PR path filter, and carries no `merge_group` trigger, so it stays out of
+  the required set; and
 - at the frozen final feature head, explicitly dispatch both privileged
   workflows and record their exact head SHA and successful run URLs in the epic
   before opening the final PR to `main`.
@@ -479,9 +564,9 @@ After adding the inference ruleset:
 Implement small fail-closed automation rather than relying only on memory:
 
 - a feature bootstrap command or agent skill that creates and records mirrored
-  branches from exact main SHAs, verifies both wildcard layers, and safely
-  stages, activates, or recovers each exact-branch queue ruleset around creation
-  of its ref;
+  branches from exact main SHAs, verifies both wildcard layers in each
+  repository, and — for inference only — safely stages, activates, or recovers
+  its exact-branch queue ruleset around creation of the ref;
 - a PR policy check that rejects a feature story targeting `main` or the wrong
   epic branch;
 - a check that rejects a final SceneWorks feature PR while its inference pin is
@@ -504,14 +589,18 @@ feature branches and exercise all of the following:
    runtime evidence.
 5. An inference story PR produces `CI gate`, merges through its queue, and can be
    pinned by the SceneWorks feature branch.
-6. SceneWorks and inference merge queues validate their speculative commits and
-   do not cancel one another.
-7. The API refuses a wildcard queue payload and an active queue rejects initial
-   ref creation; disabled staging followed by ref creation and immediate queue
-   activation produces all five effective rules.
+6. A SceneWorks story PR whose base has moved is blocked as out-of-date
+   (`strict: true` on `feature/*`), and merges once the base is merged in and the
+   required checks re-run. There is no SceneWorks queue to validate a speculative
+   commit, so this is the only integration verdict.
+7. In inference, the API refuses a wildcard queue payload and an active queue
+   rejects initial ref creation; disabled staging followed by ref creation and
+   immediate queue activation produces all five effective rules. In SceneWorks,
+   creating a feature ref succeeds directly under the two wildcard layers.
 8. Direct and force pushes to feature branches fail.
 9. An unauthorized deletion fails, while the authorized post-epic cleanup path
-   succeeds without bypassing the base or exact queue policies.
+   succeeds without bypassing the base policy, or — in inference — the exact
+   queue policy.
 10. The final inference-first merge and SceneWorks pin transition succeed without
    leaving `main` dependent on a feature-only inference commit.
 
