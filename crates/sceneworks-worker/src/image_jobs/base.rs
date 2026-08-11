@@ -5206,8 +5206,8 @@ fn generate_one_with_hires(
             memory,
             memory_strategy_context,
             enhance,
-            preview,
             prompt_enhancement,
+            preview,
             cancel,
             on_progress,
         );
@@ -5255,8 +5255,8 @@ fn generate_one_with_hires(
         memory,
         first_pass_context.as_ref(),
         &PromptEnhance::default(),
-        preview.clone(),
         gen_core::PromptEnhancementSink::default(),
+        preview.clone(),
         cancel,
         &mut first_progress,
     )?;
@@ -5304,8 +5304,8 @@ fn generate_one_with_hires(
         memory,
         memory_strategy_context,
         enhance,
-        preview,
         prompt_enhancement,
+        preview,
         cancel,
         &mut second_progress,
     )

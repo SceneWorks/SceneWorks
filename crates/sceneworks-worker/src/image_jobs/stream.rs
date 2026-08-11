@@ -264,8 +264,10 @@ where
     Ok(())
 }
 
-/// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by FLUX.2-dev edit and
-/// the shared MLX lane. Face likeness and prompt provenance remain independent per-image facts.
+/// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by the shared MLX lane.
+/// Face likeness and prompt provenance remain independent per-image facts. The Candle FLUX.2-dev
+/// edit route does not admit the character-image mode, so it has no scored/reporting combination.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn drive_gen_items_scored_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,

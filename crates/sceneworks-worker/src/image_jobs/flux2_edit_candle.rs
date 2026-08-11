@@ -1,11 +1,11 @@
 use super::{
     admit_candle_base, apply_candle_image_load_shape, candle_certified_artifact_path,
-    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, mlx_model,
-    model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
+    consume_gen_events, drive_gen_items_reported, fit_engine_image, load_reference_image,
+    mlx_model, model_repo, pid_effective_dims, pid_output_tier, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, resolve_pid_weights, resolve_quant, resolve_seed,
     resolve_weights_dir, start_gen_stream, ApiClient, CandleBaseEvidence, Flux2Edit,
     Flux2EditPaths, Flux2EditRequest, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, Settings, Value, WorkerError, WorkerResult,
+    Path, PathBuf, PromptEnhance, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
