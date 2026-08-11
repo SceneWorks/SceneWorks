@@ -142,6 +142,382 @@ test("Windows Krea provisioning accepts supported newer Python 3 runtimes", asyn
   );
 });
 
+// sc-18677 generalized windows-candle.yml's provisioning from "the Krea q4 snapshot" to "the
+// snapshot named by the provision_* inputs", so epic 17137 can land MiniMax-H3 weights on the
+// CUDA box for sc-17153/sc-17156's per-tier VRAM measurement. The story's acceptance criterion
+// is that a Krea dispatch "still behaves identically -- proven, not assumed". These tests are
+// that proof, and they are structural rather than prose-matching: they pin the input DEFAULTS
+// and the path-construction EXPRESSIONS, which together determine the resolved snapshot path.
+//
+// The path the old hardcoded step produced, verbatim:
+//   %USERPROFILE%\.cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\<rev>\q4
+// Every fragment below is a factor of that string. Change any one and a Krea five-rung capture
+// silently reads another directory -- or, if it is lucky, throws.
+// Assertions about a step must be scoped TO that step. A bare `assert.match(workflow, ...)` is
+// satisfied by an identical string anywhere in the file, which is not hypothetical: dropping
+// `inputs.provision_snapshot` from the Provision step's `if:` left the suite green because the
+// neighbouring "Validate runner Python" step carries the byte-identical condition. Slice first.
+function stepBody(workflow, name) {
+  const at = workflow.indexOf(`      - name: ${name}\n`);
+  assert.ok(at >= 0, `windows-candle.yml must keep a step named ${name}`);
+  const next = workflow.indexOf("\n      - ", at + 1);
+  return workflow.slice(at, next === -1 ? undefined : next);
+}
+
+function dispatchInputs(workflow) {
+  const start = workflow.indexOf("  workflow_dispatch:\n    inputs:\n");
+  assert.ok(start >= 0, "windows-candle.yml must keep a workflow_dispatch inputs block");
+  const end = workflow.indexOf("\nconcurrency:", start);
+  assert.ok(end > start, "could not find the end of the workflow_dispatch block");
+  const names = [];
+  const defaults = {};
+  let current = null;
+  for (const line of workflow.slice(start, end).split("\n")) {
+    // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
+    // helper backs the "at most 10 inputs" cap check. A narrower pattern would silently skip an
+    // input and let a workflow GitHub rejects sail through as 10-or-fewer.
+    const header = line.match(/^ {6}([A-Za-z0-9_-]+):$/);
+    if (header) {
+      current = header[1];
+      names.push(current);
+      defaults[current] = undefined;
+      continue;
+    }
+    const def = current && line.match(/^ {8}default: (.*)$/);
+    if (def) defaults[current] = def[1].trim().replace(/^"|"$/g, "");
+  }
+  return { names, defaults };
+}
+
+test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+
+  // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
+  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
+  // a future story that adds an input needs the headroom this preserves.
+  assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
+
+  for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
+    assert.ok(!names.includes(gone), `${gone} was renamed; two provisioning paths must not coexist`);
+  }
+  for (const required of [
+    "provision_snapshot",
+    "provision_repository",
+    "provision_revision",
+    "provision_patterns",
+    "provision_subdir",
+    "provision_cache_dir",
+  ]) {
+    assert.ok(names.includes(required), `missing generalized input ${required}`);
+  }
+
+  // The defaults ARE the Krea dispatch. With these values and no other input set, the
+  // generalized steps must reconstruct the old hardcoded path exactly.
+  assert.equal(defaults.provision_repository, "SceneWorks/krea-2-turbo-mlx");
+  assert.equal(defaults.provision_patterns, "q4/**");
+  assert.equal(defaults.provision_subdir, "q4");
+  assert.equal(defaults.provision_cache_dir, undefined, "an empty cache dir must mean the historical location");
+});
+
+test("windows-candle rebuilds the exact Krea snapshot path from the generalized inputs", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // cache dir: %USERPROFILE%\.cache\huggingface\hub when provision_cache_dir is empty. This box
+  // sets HF_HOME=E:\huggingface, and honoring it here would relocate Krea's cache -- so the
+  // default deliberately ignores HF_HOME. A caller that wants another cache passes it in.
+  assert.match(workflow, /\$cache = Join-Path \$env:USERPROFILE '\.cache\\huggingface\\hub'/);
+  assert.doesNotMatch(
+    workflow,
+    /^\s*\$cache = .*HF_HOME/m,
+    "the default cache dir must not be derived from HF_HOME",
+  );
+
+  // models--<owner>--<name>\snapshots\<revision>[\<subdir>]
+  assert.match(workflow, /\$folder = 'models--' \+ \$env:PROVISION_REPOSITORY\.Replace\('\/', '--'\)/);
+  assert.match(workflow, /\$subdirTail = '\\' \+ \$env:PROVISION_SUBDIR\.Replace\('\/', '\\'\)/);
+  assert.match(
+    workflow,
+    /\$suffix = '\\' \+ \$folder \+ '\\snapshots\\' \+ \$env:PROVISION_REVISION \+ \$subdirTail/,
+  );
+
+  // The resolve step still asserts existence AND that the canonical path ends with that exact
+  // suffix, so a stale cache entry or a lookalike repo cannot satisfy it.
+  assert.match(workflow, /Test-Path -LiteralPath \$root -PathType Container/);
+  assert.match(
+    workflow,
+    /\$root\.EndsWith\(\$env:PROVISION_SNAPSHOT_SUFFIX, \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+
+  // The PYTHON half of the cache binding, not just the PowerShell half. Centralizing the cache
+  // path exists because it was previously spelled twice in two languages with nothing tying
+  // them; pinning only the PowerShell side leaves a re-hardcoded `os.path.join(USERPROFILE...)`
+  // green, which downloads the whole component set to C: before the resolve step throws.
+  assert.match(workflow, /cache_dir=os\.environ\["PROVISION_CACHE_DIR"\],/);
+  assert.doesNotMatch(
+    workflow,
+    /cache_dir=os\.path\.join\(os\.environ\["USERPROFILE"\]/,
+    "the provisioning cache dir must come from the shared resolved value, not a second hardcoding",
+  );
+
+  // The memory-adapter binaries read these env names via required_env; renaming the dispatch
+  // inputs must not rename the runtime contract (bin/candle.rs, bin/mlx.rs).
+  assert.match(workflow, /"SCENEWORKS_KREA_ROOT=\$root" \| Out-File/);
+  assert.match(workflow, /SCENEWORKS_KREA_REPOSITORY: \$\{\{ inputs\.provision_repository \}\}/);
+  assert.match(workflow, /SCENEWORKS_KREA_REVISION: \$\{\{ inputs\.provision_revision \}\}/);
+  // ...and SCENEWORKS_KREA_ROOT stays scoped to Krea, so an H3 dispatch cannot hand the
+  // five-rung adapter a MiniMax root under a Krea-shaped name.
+  assert.match(workflow, /\$isKrea = \$env:PROVISION_REPOSITORY -eq 'SceneWorks\/krea-2-turbo-mlx'/);
+  assert.match(workflow, /if \(\$isKrea\) \{\n\s*"SCENEWORKS_KREA_ROOT=\$root"/);
+  // The CONSUMPTION side too, not just the export side. `secrets.SCENEWORKS_KREA_ROOT` is a
+  // Krea-specific override; dropping the `$isKrea -and` would let it redirect an H3 resolve.
+  assert.match(workflow, /if \(\$isKrea -and \$env:KREA_ROOT_OVERRIDE\) \{/);
+});
+
+// sc-18677: the provisioning branch's timeout is the whole point of the change (a 144 GB fetch
+// under the ordinary 45m cap dies mid-download), and the doc claims Krea's two dispatch shapes
+// keep their exact previous budgets. Pin the whole expression the way the macOS twin above pins
+// its lane's -- otherwise a revert to a flat `timeout-minutes: 45` passes every other test here.
+test("windows-candle keeps the provisioning and five-rung timeout budgets", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(
+    workflow,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+  );
+});
+
+test("windows-candle keeps the five-rung guards while decoupling provisioning", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // Provisioning is now a first-class outcome: sc-17153/sc-17156 need H3 weights resident and
+  // there is no H3 five-rung fixture. The old coupling throw must be gone...
+  assert.doesNotMatch(workflow, /requires run_five_rung_reference=true/);
+  // Scoped to the Provision step itself: the identical `if:` string also appears on the
+  // "Validate runner Python" step, so a file-wide match would stay green if this step's gate were
+  // dropped -- and an ungated Provision step re-downloads the snapshot on every five-rung run.
+  assert.match(
+    stepBody(workflow, "Provision exact snapshot"),
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot \}\}/,
+  );
+  // ...but every five-rung guard it used to sit beside must survive, keyed on the new names.
+  assert.match(workflow, /throw 'inference_revision must be an exact lowercase 40-hex commit'/);
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REVISION -notmatch '\^\[0-9a-f\]\{40\}\$'/,
+  );
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REPOSITORY -ne 'SceneWorks\/krea-2-turbo-mlx'/,
+    "a five-rung capture is still only valid against the fixed Krea reference artifact",
+  );
+  assert.match(workflow, /does not match the adapter's compiled INFERENCE_PIN/);
+
+  // The resolve step must still run for a five-rung dispatch that does NOT provision, and the
+  // params step that FEEDS it (PROVISION_CACHE_DIR / _SNAPSHOT_SUFFIX / _SUBDIR_TAIL) must run on
+  // the same wider condition. Scoped per step for the reason at the top of this block: the two
+  // `if:` strings are byte-identical, so one file-wide match is satisfied by EITHER step and three
+  // mutations stayed green -- narrowing the resolve step to five-rung-only (a provision-only
+  // dispatch then exports no snapshot root at all, skipping AC1's whole proof step), narrowing it
+  // to provision-only (a five-rung-without-provisioning dispatch loses it), and narrowing the
+  // params step (the resolve step then joins two empty env vars and throws, or worse, matches).
+  const resolveGate =
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_five_rung_reference \|\| inputs\.provision_snapshot\) \}\}/;
+  assert.match(stepBody(workflow, "Resolve exact snapshot"), resolveGate);
+  assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
+});
+
+test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
+  const candle = await source(".github/workflows/windows-candle.yml");
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+
+  // The MLX lane is the template: base labels for ordinary runs, plus a weights label for a
+  // dispatch that needs real weights on disk. Assert the template still looks like that, so this
+  // guard cannot outlive the convention it mirrors.
+  assert.match(mlx, /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.run_memory_calibration \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","macOS","ARM64","nax","weights"\]'\)/);
+
+  // The `cuda` pool spans two registration levels and only the org-level half carries
+  // `real-weights`; a provisioning job on the other half finds no snapshot.
+  assert.match(
+    candle,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
+  );
+  // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
+  // available pool for this ~24m lane in half for no coverage.
+  assert.doesNotMatch(
+    candle,
+    /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
+  );
+});
+
+test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  // MiniMaxAI/MiniMax-H3 is ~498 GB because FL2VA/ and Ref2VA/ re-package the same components;
+  // the set sc-18677 provisions is 144.051 GB. snapshot_download treats allow_patterns=[] as
+  // "everything", so an empty list is a 354.424 GB accident on a box that shares its disk with
+  // CI -- FL2VA/ and Ref2VA/ alone are 288.102 GB of it. Both the
+  // validation step and the Python body must refuse it.
+  assert.match(
+    workflow,
+    /throw 'provision_patterns must name at least one allow-pattern; an empty list would fetch the whole repository'/,
+  );
+  assert.match(workflow, /raise SystemExit\("provision_patterns resolved to an empty allow-list"\)/);
+  assert.match(workflow, /allow_patterns=patterns,/);
+
+  // A non-zero pip/python exit must fail the step: `@'...'@ | python -` does not propagate.
+  assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw "snapshot provisioning failed with exit code \$LASTEXITCODE" \}/);
+
+  assert.match(
+    workflow,
+    /if \(\$LASTEXITCODE -ne 0\) \{ throw "installing huggingface_hub failed with exit code \$LASTEXITCODE" \}/,
+  );
+
+  // With provision_subdir empty the snapshot directory exists as soon as ANY file lands, so
+  // existence alone is not proof. Every declared component's literal prefix must be present.
+  //
+  // Pin the LOOP BODY, not just the throw string: replacing the `if (-not $head) { continue }`
+  // guard with an unconditional `continue` makes the assertion vacuous while leaving the error
+  // message -- and every other assertion in this file -- untouched.
+  const resolve = stepBody(workflow, "Resolve exact snapshot");
+  // Pin the THROW, not the message. Every other assertion here survives `throw` ->
+  // `Write-Warning`: the head computation, the guard, the Join-Path, the Test-Path and the string
+  // all still match, while "fails loudly if absent" quietly becomes a log line.
+  //
+  // All THREE of the resolve step's assertions need that treatment, not just the component one.
+  // The existence check and the canonical-suffix check are pinned elsewhere in this file as
+  // EXPRESSIONS (`Test-Path -LiteralPath $root -PathType Container`, `$root.EndsWith(...)`), which
+  // a `throw` -> `Write-Warning` downgrade leaves untouched. The suffix one is the dangerous case:
+  // downgraded, a snapshot whose canonical path does not match the requested repo+revision is
+  // accepted and exported as SCENEWORKS_PROVISIONED_ROOT / SCENEWORKS_KREA_ROOT, so a five-rung
+  // capture or a per-tier VRAM measurement silently runs against the WRONG weights.
+  assert.match(resolve, /throw "the exact snapshot is not available on this runner/);
+  assert.match(resolve, /throw "the resolved root does not match the requested repository/);
+  assert.match(resolve, /throw "provisioned snapshot is missing declared components under/);
+  assert.match(resolve, /\$head = \(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]/);
+  assert.match(resolve, /if \(-not \$head\) \{ continue \}/);
+  assert.match(resolve, /foreach \(\$pattern in \(\$env:PROVISION_PATTERNS -split/);
+  assert.match(resolve, /\$component = Join-Path \$snapshotRoot \$head\.Replace\('\/', '\\'\)/);
+  assert.match(resolve, /if \(-not \(Test-Path -LiteralPath \$component\)\) \{ \$missing \+= \$head \}/);
+  // Without Resolve-Path the EndsWith below compares the raw Join-Path output against the suffix
+  // it was just built from -- a tautology -- and nothing normalizes a traversal before it.
+  assert.match(resolve, /\$root = \(Resolve-Path -LiteralPath \$root\)\.Path/);
+});
+
+// sc-18677: provisioning must stay anonymous. This box sets HF_HOME=E:\huggingface, which can hold
+// a credential; with an implicit token a gated repo turns a "not entitled" failure into a silent
+// success on whoever's token the runner happens to carry. macos-mlx.yml pins both of these for its
+// own provisioning block and this lane pinned neither.
+test("windows-candle provisioning stays anonymous", async () => {
+  const provision = stepBody(await source(".github/workflows/windows-candle.yml"), "Provision exact snapshot");
+  assert.match(provision, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
+  assert.match(provision, /^\s+token=False,$/m);
+});
+
+// sc-18677 section 8.1, generalized. GitHub substitutes an input's `default` for any empty dispatch
+// value, so a non-empty default makes "the absence of this thing" INEXPRESSIBLE unless the step
+// body understands a sentinel. That cost run 31509409586. Any future provision_* input with a
+// non-empty default has to make the same decision consciously.
+test("every OPTIONAL provision_* input with a non-empty default has a sentinel", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  const params = stepBody(workflow, "Resolve snapshot provisioning parameters");
+
+  let checked = 0;
+  for (const name of names.filter((n) => n.startsWith("provision_"))) {
+    const def = defaults[name];
+    if (def === undefined || def === "" || def === "false") continue;
+    // "Optional" is derived, not listed: the validation step wraps an optional input's checks in
+    // `if ($env:NAME)`. A required input (provision_repository, provision_patterns) is checked
+    // unconditionally, and "unset" is not a state it can meaningfully have.
+    const env = name.toUpperCase();
+    const optional = new RegExp(`if \\(\\$env:${env}(_INPUT)?\\) \\{`).test(validate);
+    if (!optional) continue;
+    checked += 1;
+    assert.match(
+      params,
+      new RegExp(`\\$env:${env}(_INPUT)? -ne '\\.'`),
+      `${name} is optional and defaults to ${JSON.stringify(def)}, so an empty dispatch value ` +
+        "cannot unset it; the params step must honor a '.' sentinel or the default must be empty",
+    );
+  }
+  assert.ok(checked > 0, "this guard must actually examine an input, or it is vacuous");
+});
+
+// sc-18677: the containment checks around the two operator inputs that reach the filesystem.
+// `provision_subdir` is joined onto the cache path; each `provision_patterns` entry's literal
+// head is joined onto the snapshot root by the component-presence assertion above. Both are
+// validated on the SAME condition as the steps that consume them, not on provision_snapshot
+// alone -- a five-rung-only dispatch consumes both just the same.
+test("windows-candle validates every provisioning input that reaches a path", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(
+    workflow,
+    /if \(\$env:PROVISION_SNAPSHOT -eq 'true' -or \$env:RUN_FIVE_RUNG_REFERENCE -eq 'true'\) \{/,
+    "provisioning-input validation must cover the five-rung-only path that also consumes them",
+  );
+  assert.match(workflow, /throw 'provision_subdir must not traverse out of the snapshot'/);
+  // The root sentinel. GitHub substitutes an input's `default` for any empty dispatch value, so
+  // `-f provision_subdir=` resolves to `q4`, not to "no subdir" (proved by run 31509409586).
+  // The default must stay `q4` to keep a Krea dispatch identical, so without '.' a
+  // root-resolved model like MiniMax-H3 cannot be expressed at all.
+  assert.match(
+    workflow,
+    /if \(\$env:PROVISION_SUBDIR -and \$env:PROVISION_SUBDIR -ne '\.'\) \{/,
+    "'.' must mean the snapshot root; an empty input cannot override a non-empty default",
+  );
+  assert.match(
+    workflow,
+    /description: "Tier\/subdirectory under the snapshot the resolve step must prove\. Use '\.' for a model whose components sit at the snapshot ROOT/,
+    "the sentinel must be documented on the input the operator actually reads",
+  );
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/,
+  );
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must be relative to the snapshot root: \$pattern"/,
+  );
+  // Containment is decided by CANONICALIZING, not by matching path segments against '..'.
+  // Segment-equality was bypassable two ways: `..*` yields head `..` while the pattern contains
+  // no `..` segment, and `.. ` survives -contains yet Win32 strips the trailing space. The
+  // GetFullPath probe kills the first class; the TrimEnd(' ', '.') segment check kills the
+  // second, which GetFullPath does NOT normalize.
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  assert.match(validate, /\$head = \(\(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]\)\.TrimEnd\('\/'\)/);
+  assert.match(validate, /if \(-not \$segment\.TrimEnd\(' ', '\.'\)\) \{/);
+  // The validate step has its own loop and its own head guard, distinct from the resolve step's.
+  // Pin BOTH, scoped: `foreach ($pattern in @($patterns[0]))` checks only the first of thirteen
+  // H3 patterns, and `if ($true) { continue }` skips every one, while every other assertion in
+  // this file keeps matching because the resolve step still spells them correctly.
+  assert.match(validate, /foreach \(\$pattern in \$patterns\) \{/);
+  assert.match(validate, /if \(-not \$head\) \{ continue \}/);
+  // Both containment guards must stay FATAL. There are two throws with this message -- the
+  // segment check and the canonical probe -- and turning either into a Write-Host leaves the
+  // string present, so presence alone is not the property worth asserting.
+  assert.equal(
+    (validate.match(/throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/g) || []).length,
+    2,
+    "both the segment check and the canonical-containment probe must throw",
+  );
+  assert.match(
+    validate,
+    /\$full\.StartsWith\(\$probe \+ '\\', \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+  // ...and the resolve step canonicalizes independently, so the proof does not rest on
+  // validation having run.
+  assert.match(
+    stepBody(workflow, "Resolve exact snapshot"),
+    /throw "declared component escapes the snapshot root: \$pattern"/,
+  );
+  // provision_cache_dir is written verbatim into $GITHUB_ENV.
+  assert.match(workflow, /throw 'provision_cache_dir must be a single line'/);
+  assert.match(workflow, /throw 'provision_cache_dir must be an absolute path with a drive letter'/);
+  // IsPathRooted accepts `\foo` and `C:foo` -- rooted, but not absolute -- so the check would not
+  // mean what its message says. PowerShell 5.1's .NET has no IsPathFullyQualified.
+  assert.match(workflow, /\$env:PROVISION_CACHE_DIR_INPUT -notmatch '\^\[A-Za-z\]:\\\\'/);
+});
+
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(
