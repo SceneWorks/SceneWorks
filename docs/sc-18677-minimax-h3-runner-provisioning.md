@@ -263,18 +263,43 @@ A Krea dispatch leaving every `provision_*` input at its default resolves to
 C:\Users\Michael\.cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\d009674080cc1bccf2b629d834c34bf5eccdb723\q4
 ```
 
-— character-for-character the path the hardcoded step produced. Eight cases pass: the historical
-five-rung + provision dispatch, five-rung without provisioning, H3 provision-only, and five negative
-cases (non-40-hex revision, `provision_subdir` traversal, empty allow-list, absent snapshot,
-declared-but-missing component) each failing at the intended step.
+— character-for-character the path the hardcoded step produced. Twenty-five cases pass: the
+historical five-rung + provision dispatch, five-rung without provisioning, H3 provision-only at the
+pinned revision, the eight containment bypasses of §8.2, and the other negative cases (non-40-hex
+revision, `provision_subdir` traversal, empty allow-list, absent snapshot, declared-but-missing
+component among them) each failing at the intended step.
 
-**Pinned so it cannot rot.** Four tests in `scripts/platform-review-contracts.test.mjs` (inside
-`npm run check`) assert the input defaults, the path-construction expressions, the surviving
-five-rung guards, and the never-a-whole-repo-fetch guards. They are structural rather than
-prose-matching: the defaults and the suffix expression together *determine* the resolved path. All
-ten mutations tried against them go red — including flipping `provision_subdir` to `q8`, switching
-the cache default to `HF_HOME`, exporting `SCENEWORKS_KREA_ROOT` unconditionally, dropping the
-snapshots path segment, deleting either loud-failure guard, and pushing the input count over 10.
+**Pinned so it cannot rot.** Nine tests in `scripts/platform-review-contracts.test.mjs` (inside
+`npm run check`; the file runs 54 tests in total) assert the input defaults and the 10-input cap,
+the path-construction expressions, the timeout budgets, the surviving five-rung guards, the
+`real-weights` routing, the never-a-whole-repo-fetch guards, the anonymous fetch, the sentinel rule,
+and the containment validation. They are structural rather than prose-matching: the defaults and the
+suffix expression together *determine* the resolved path.
+
+**Thirty mutations, all red — but five of them only after a third review round.** Twenty-five went
+red as written, including flipping `provision_subdir` to `q8`, switching the cache default to
+`HF_HOME`, exporting `SCENEWORKS_KREA_ROOT` unconditionally, dropping the snapshots path segment,
+deleting a loud-failure guard, and pushing the input count over 10. A third round then found **five
+that stayed green at 54/54**, which supersedes this PR's earlier "25/25 mutations red" claim:
+
+| Mutation that stayed green | Why the suite missed it | What catches it now |
+| --- | --- | --- |
+| `throw` → `Write-Warning` on `the exact snapshot is not available on this runner` | only the *condition* was pinned (`Test-Path -LiteralPath $root -PathType Container`), never the fatality | `assert.match(resolve, /throw "the exact snapshot is not available on this runner/)` |
+| `throw` → `Write-Warning` on `the resolved root does not match the requested repository` | same shape — the `EndsWith` expression was pinned, not the fatality | `assert.match(resolve, /throw "the resolved root does not match the requested repository/)` |
+| `Resolve exact snapshot` `if:` narrowed to five-rung-only | the `if:` assertion was file-wide, and the byte-identical string on the params step satisfied it | the assertion is now sliced with `stepBody(workflow, "Resolve exact snapshot")` |
+| `Resolve exact snapshot` `if:` narrowed to provision-only | same file-wide match | same slice |
+| `Resolve snapshot provisioning parameters` `if:` narrowed to provision-only | same file-wide match, satisfied by the resolve step instead | a second assertion sliced with `stepBody(workflow, "Resolve snapshot provisioning parameters")` |
+
+The second row is the dangerous one. Downgraded, a snapshot whose canonical path does *not* match
+the requested repo and revision is accepted and exported as `SCENEWORKS_PROVISIONED_ROOT` /
+`SCENEWORKS_KREA_ROOT`, so a five-rung capture or a per-tier VRAM measurement runs silently against
+the **wrong weights** — the failure mode AC1's "fails loudly" exists to prevent. The third row is the
+same class one level up: narrowed to five-rung-only, a provision-only dispatch — exactly the shape
+this story adds — skips AC1's entire proof step, with the suite green.
+
+Both are one lesson, already recorded as comments in the test file: **pin the `throw`, not the
+message, and slice every step assertion to its own step.** A file-wide `assert.match` is a claim
+about the file, not about the step you meant.
 
 ---
 
@@ -314,11 +339,14 @@ tier.
 
 ### Verdicts
 
-- **q4 — reachable.** 43.0% of the card resident. Ample activation headroom.
-- **q8 — reachable.** 71.7% resident, 29.02 GB spare. Comfortable resident, trivially fine sequential.
-- **bf16 — reachable ONLY sequentially.** Co-resident is not a measurement question: the weights
-  alone overrun the card by 26.19 GB before a single activation is allocated, so sc-17153 should not
-  spend a lane on it. Sequential fits at 77.32 GB with 25.32 GB for activations.
+- **q4 — reachable.** 44.378 GB resident, 43.2% of the card, +58.264 GB spare. Ample activation
+  headroom.
+- **q8 — reachable.** 73.753 GB resident, 71.9% of the card, +28.889 GB spare. Comfortable resident,
+  trivially fine sequential (46.262 GB, 45.1%).
+- **bf16 — reachable ONLY sequentially.** Co-resident is not a measurement question: at 128.830 GB
+  the weights alone overrun the card by 26.188 GB before a single activation is allocated, so
+  sc-17153 should not spend a lane on it. Sequential fits at 77.324 GB with 25.318 GB for
+  activations.
 
 ### 5.1 The AdaLN evict makes the bf16 sequential verdict comfortable, not marginal
 
@@ -435,7 +463,7 @@ So the correct consequences are:
 | Two revisions differ only in `README.md` | `HfApi.model_info(files_metadata=True)` LFS-OID diff over all 280 files |
 | Pattern set selects 64 files / 144.051 GB, no leakage | `filter_repo_objects` against the live file list |
 | Krea path is character-identical | step bodies executed locally with a simulated `GITHUB_ENV` |
-| Contract tests cannot rot | 10/10 mutations go red |
+| Contract tests cannot rot | 30/30 mutations go red — the five a third review round found still-green are now caught (§4.2) |
 | Snapshot written at the pinned revision, then verified on disk | run 31509409586's `Provision exact snapshot` step; directory listing after it |
 | Patched quant kernels really work on sm_120 | `cuda_quant_smoke` (un-`#[ignore]`d) passing in run 31509409586 |
 | Dispatch resolves the snapshot | §8 — **see §8.1; the first run failed and why** |

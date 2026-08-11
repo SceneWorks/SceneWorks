@@ -575,9 +575,12 @@ jobs:
             $subdirTail = '\' + $env:PROVISION_SUBDIR.Replace('/', '\')
           }
           $suffix = '\' + $folder + '\snapshots\' + $env:PROVISION_REVISION + $subdirTail
-          Add-Content -Path $env:GITHUB_ENV -Value "PROVISION_CACHE_DIR=$cache"
-          Add-Content -Path $env:GITHUB_ENV -Value "PROVISION_SNAPSHOT_SUFFIX=$suffix"
-          Add-Content -Path $env:GITHUB_ENV -Value "PROVISION_SUBDIR_TAIL=$subdirTail"
+          # -Encoding utf8 is not cosmetic: Windows PowerShell 5.1's Add-Content defaults to the
+          # ANSI code page, and these three values carry operator-supplied paths. The resolve step
+          # writes the same file with `Out-File -Encoding utf8 -Append`; both halves must agree.
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_CACHE_DIR=$cache"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_SNAPSHOT_SUFFIX=$suffix"
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_SUBDIR_TAIL=$subdirTail"
           Write-Host "cache dir       : $cache"
           Write-Host "snapshot suffix : $suffix"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

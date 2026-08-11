@@ -312,11 +312,18 @@ test("windows-candle keeps the five-rung guards while decoupling provisioning", 
   );
   assert.match(workflow, /does not match the adapter's compiled INFERENCE_PIN/);
 
-  // The resolve step must still run for a five-rung dispatch that does NOT provision.
-  assert.match(
-    workflow,
-    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_five_rung_reference \|\| inputs\.provision_snapshot\) \}\}/,
-  );
+  // The resolve step must still run for a five-rung dispatch that does NOT provision, and the
+  // params step that FEEDS it (PROVISION_CACHE_DIR / _SNAPSHOT_SUFFIX / _SUBDIR_TAIL) must run on
+  // the same wider condition. Scoped per step for the reason at the top of this block: the two
+  // `if:` strings are byte-identical, so one file-wide match is satisfied by EITHER step and three
+  // mutations stayed green -- narrowing the resolve step to five-rung-only (a provision-only
+  // dispatch then exports no snapshot root at all, skipping AC1's whole proof step), narrowing it
+  // to provision-only (a five-rung-without-provisioning dispatch loses it), and narrowing the
+  // params step (the resolve step then joins two empty env vars and throws, or worse, matches).
+  const resolveGate =
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_five_rung_reference \|\| inputs\.provision_snapshot\) \}\}/;
+  assert.match(stepBody(workflow, "Resolve exact snapshot"), resolveGate);
+  assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
 });
 
 test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
@@ -374,6 +381,16 @@ test("windows-candle provisioning can never degrade into a whole-repo fetch", as
   // Pin the THROW, not the message. Every other assertion here survives `throw` ->
   // `Write-Warning`: the head computation, the guard, the Join-Path, the Test-Path and the string
   // all still match, while "fails loudly if absent" quietly becomes a log line.
+  //
+  // All THREE of the resolve step's assertions need that treatment, not just the component one.
+  // The existence check and the canonical-suffix check are pinned elsewhere in this file as
+  // EXPRESSIONS (`Test-Path -LiteralPath $root -PathType Container`, `$root.EndsWith(...)`), which
+  // a `throw` -> `Write-Warning` downgrade leaves untouched. The suffix one is the dangerous case:
+  // downgraded, a snapshot whose canonical path does not match the requested repo+revision is
+  // accepted and exported as SCENEWORKS_PROVISIONED_ROOT / SCENEWORKS_KREA_ROOT, so a five-rung
+  // capture or a per-tier VRAM measurement silently runs against the WRONG weights.
+  assert.match(resolve, /throw "the exact snapshot is not available on this runner/);
+  assert.match(resolve, /throw "the resolved root does not match the requested repository/);
   assert.match(resolve, /throw "provisioned snapshot is missing declared components under/);
   assert.match(resolve, /\$head = \(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]/);
   assert.match(resolve, /if \(-not \$head\) \{ continue \}/);
