@@ -246,6 +246,14 @@ function reconcileCargoLock(
   return "verified";
 }
 
+function cargoManifestsAlreadyPinned(entries) {
+  const cargoManifests = entries.filter(({ updatesCargoLock }) => updatesCargoLock);
+  if (cargoManifests.length === 0) {
+    throw new Error("no Cargo manifest inputs were provided for lockfile reconciliation");
+  }
+  return cargoManifests.every(({ current, bumped }) => current === bumped);
+}
+
 function distinctResolutions(crate) {
   // One `cargo tree` over both platform bundles (--target all), so macOS + CUDA resolutions are
   // visible even off-macOS -- the same data source check-gen-core-skew.sh uses.
@@ -646,6 +654,32 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     "a stale lock is repaired even when manifests already carry the target pin",
     staleLockRepairs === 1,
   );
+  const provenanceOnlyRepair = [
+    { current: "cargo-at-target", bumped: "cargo-at-target", updatesCargoLock: true },
+    { current: "old-provenance", bumped: "new-provenance", updatesCargoLock: false },
+  ];
+  let provenanceOnlyUpdates = 0;
+  let provenanceOnlyVerifications = 0;
+  reconcileCargoLock(SHA, cargoManifestsAlreadyPinned(provenanceOnlyRepair), {
+    readLock: () =>
+      duplicateLock.replaceAll(OLD_SHA, SHA).replaceAll(OLD_COMMIT, CURRENT_COMMIT),
+    update: () => {
+      provenanceOnlyUpdates += 1;
+    },
+    verify: () => {
+      provenanceOnlyVerifications += 1;
+    },
+  });
+  check(
+    "a provenance-only repair verifies the current lock without updating it",
+    provenanceOnlyUpdates === 0 && provenanceOnlyVerifications === 1,
+  );
+  check(
+    "a Cargo manifest transition still requires an update",
+    !cargoManifestsAlreadyPinned([
+      { current: "old-pin", bumped: "new-pin", updatesCargoLock: true },
+    ]),
+  );
   let metadataInvocation = null;
   verifyCargoLockCurrent("/self-test/repo", (command, args, options) => {
     metadataInvocation = { command, args, options };
@@ -880,15 +914,16 @@ function main() {
     ...inferenceManifests().map((path) => ({
       path,
       rewrite: (text) => repin(text, sha, path),
+      updatesCargoLock: true,
     })),
     { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
     {
       path: MEMORY_PROVENANCE,
       rewrite: (text) => repinMemoryProvenance(text, sha),
     },
-  ].map(({ path, rewrite }) => {
+  ].map(({ path, rewrite, updatesCargoLock = false }) => {
     const current = readFileSync(path, "utf8");
-    return { path, current, bumped: rewrite(current) };
+    return { path, current, bumped: rewrite(current), updatesCargoLock };
   });
   // NOTE: "manifests already say `sha`" is NOT the same as "the lockfile agrees". This used to
   // early-return on the manifests alone, so a tree whose manifests were correct but whose
@@ -903,8 +938,8 @@ function main() {
   // from the tree, and `verifyFlux2AuditWindow` needs it to tell a bump that MOVES the pin out of
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
   const previousPin = pinnedRevision(manifests.find((m) => m.path === MANIFEST)?.current ?? "");
-  const manifestsAlreadyPinned = manifests.every((m) => m.bumped === m.current);
-  if (manifestsAlreadyPinned) {
+  const cargoPinsAlreadyInManifests = cargoManifestsAlreadyPinned(manifests);
+  if (cargoPinsAlreadyInManifests) {
     console.log(
       lockHasStaleInferenceRevision(sha)
         ? `bump-inference: manifests already pinned at ${sha}, but the lockfile is STALE; repairing`
@@ -943,7 +978,7 @@ function main() {
     writeFileSync(m.path, m.bumped);
     console.log(`  wrote ${m.path}`);
   }
-  reconcileCargoLock(sha, manifestsAlreadyPinned);
+  reconcileCargoLock(sha, cargoPinsAlreadyInManifests);
   verifyNoSkew();
   regenerateMemoryMatrix();
   verifyLicenseAudit();
