@@ -48,6 +48,18 @@
       }
     },
     {
+      // sc-18917: upstream renamed BOTH the repo (LTX-2.3-22b-IC-LoRA-LipDub -> …-DubIt) and the
+      // weight file (…-lipdub-0.9 -> …-dubit-0.9). The old repo name still answers 200 through HF's
+      // 307 rename redirect, so the listing looked healthy while the declared FILE matched nothing
+      // — the worker's sc-12288 zero-file check turned that into a failed download for anyone who
+      // selected it. `revision` is pinned here (and was not before) because an unrevisioned entry
+      // reads a moving default branch, which is exactly how the rename went unnoticed; the
+      // remaining 12 unrevisioned keys are sc-18924's scope, not this entry's.
+      //
+      // `id` and `name` deliberately keep the LipDub spelling: `id` is the stable catalog key the
+      // picker, job payloads, compatibility checks and the on-disk install probe all key on, so
+      // renaming it would orphan saved selections and installed weights for no functional gain,
+      // and "LipDub" names what the adapter DOES. DubIt is upstream's product branding.
       "id": "ltx_2_3_ic_lipdub",
       "name": "LTX-2.3 IC-LoRA LipDub",
       "family": "ltx-video",
@@ -58,8 +70,9 @@
       "defaultWeight": 0.8,
       "source": {
         "provider": "huggingface",
-        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
-        "file": "ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"
+        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-DubIt",
+        "file": "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+        "revision": "1456334c3d69924de5083e553733b108ed1147f2"
       }
     },
     {
