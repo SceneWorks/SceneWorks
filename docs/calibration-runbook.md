@@ -927,8 +927,12 @@ now **throws** rather than shipping — which is the guard that would have caugh
 shipped structure already does this (`KreaTurboPhasePeaks::peak_gb`), and it is load-bearing rather
 than incidental. Fitting the *overall* peak with any single form leaves a held-out error of
 **≥10.26 GiB** (94× the text-phase noise floor) for all five candidate forms, because a max of linear
-pieces is not linear. Fitting each phase separately lands at **0.019–0.30 GiB** — denoise and decode
-at 0.019–0.13, text at 0.30. Add the temporal term *per phase*; never to the aggregate.
+pieces is not linear. Fitting each phase separately, and taking each phase's OWN best form, lands at
+**0.019–0.30 GiB** — decode 0.019 (`cross`), denoise 0.13 (`latent_tokens`), text 0.30 (`area_only`).
+⚠️ That band is a per-phase *best-of*, and it is **not** the band any single shipped form achieves:
+the `cross` form sc-18812 actually adopts spans **0.019–0.44 GiB** (0.0185 / 0.1741 / 0.4438). Citing
+0.019–0.30 as `cross`'s own accuracy is the mis-read that shipped once already, in the
+`perMpxFrameGb` schema description. Add the temporal term *per phase*; never to the aggregate.
 
 **2. The phase coefficients are the right order of magnitude for the staged components, and the
 per-voxel one matches the engine's own fit to 0.3%.** 🔴 Every coefficient below is fitted on **four
@@ -962,8 +966,17 @@ both terms apply), and those two are documented as fitted at **~36 + ~287 = 323 
 rounded *up* to 40 + 300 = 340 for headroom (`mlx-gen-ltx/src/pipeline.rs:218-228`). Measured 322
 against the engine's fitted **323** is **0.3%** — an independent reproduction of that fit, not of the
 rounded constant. `perLatentTokenGb` 0.000986 is **1.009 MiB/token**, which reproduces the withdrawn
-`0.997–1.032 MiB/token` above — as a **denoise-phase** relation, not an overall-peak one. The additive
-`perFrameGb` form is 15–350× worse on held-out points and should not be adopted.
+`0.997–1.032 MiB/token` above — as a **denoise-phase** relation, not an overall-peak one.
+
+🔴 **The additive `perFrameGb` form should not be adopted, but "15–350× worse" over-sells it and is
+withdrawn.** Held-out max residuals, additive against the `cross` form actually adopted by sc-18812:
+decode **6.5722 vs 0.0185** (355×), denoise **2.6848 vs 0.1741** (15.4×) — and text **0.3445 vs
+0.4438**, where additive is **1.29× BETTER**. The range holds on the two phases that carry the
+temporal response, not on all three. The adoption still stands: text is nearly flat in frames (all
+five candidates land within 0.164 GiB of each other there, 0.3015–0.4650, against a 22.6 GiB spread
+on decode), `cross` strictly contains `area_only` and `output_voxels` so neither can be refitted to
+beat it, and the 0.0993 GiB `cross` concedes on text is *below* that phase's own 0.1095 GiB
+replicate floor — the largest of the three floors by orders of magnitude (denoise 2.7e-4, decode 0).
 
 **3. 🔴 fps is a real but negligible memory axis — not an unmeasurable one.** Measured at identical
 `{768x512, 241 frames}`, fps 30 vs 24 (a 25% difference in audio-latent length): conditioning

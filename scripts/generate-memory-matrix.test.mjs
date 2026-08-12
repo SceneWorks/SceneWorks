@@ -8,6 +8,7 @@ import {
   MODEL_STORIES,
   SOURCE_PATHS,
   assertCellOwnershipIsBackendScoped,
+  assertCharacterizationIsConsistent,
   assertCalibrationPlanTargetsResolvedCoordinates,
   assertCellInventoryMatchesCatalog,
   assertPublishedDocumentIsClosed,
@@ -36,6 +37,8 @@ import {
   UNION_ONLY_MLX_ROUTES,
   UNROUTED_CATALOG_ENTRIES,
   VIDEO_FAMILY_STORIES,
+  measuredGeometryKey,
+  memoryCharacterization,
   mlxRequiredHostBytes,
   observedPeakBytes,
   modelStory,
@@ -4056,4 +4059,263 @@ test("a video cell's geometry envelope carries its temporal axis (sc-18815)", as
       assert.ok(!(key in cell.geometryEnvelope), `${cell.id}: image envelope gained ${key}`);
     }
   }
+});
+
+// ── sc-18812: the temporal axis reaches the characterization ───────────────────────────────────
+
+test("the measured-geometry key carries frames, and only above one (sc-18812)", () => {
+  // The `WxH` form has to survive verbatim: it is what all 208 published cells already carry, and
+  // the migration claim is that admitting a temporal axis moves none of them.
+  assert.equal(measuredGeometryKey({ width: 1024, height: 1024, frames: 1 }), "1024x1024");
+  assert.equal(measuredGeometryKey({ width: 768, height: 768, frames: 0 }), "768x768");
+  assert.equal(measuredGeometryKey({ width: 768, height: 512, frames: 241 }), "768x512xf241");
+});
+
+test("frames DISTINGUISH two measured geometries rather than collapsing (sc-18812)", () => {
+  // The seam this story was written against: two records that differ only temporally used to key
+  // to one `768x512` string, so a cell with real temporal coverage reported `point`.
+  const characterization = memoryCharacterization(["768x512xf121", "768x512xf241"]);
+  assert.deepEqual(characterization.measuredGeometries, ["768x512xf121", "768x512xf241"]);
+});
+
+test("temporal geometries at ONE area cannot determine the curve (sc-18812)", () => {
+  // Three points, three frame counts, and still singular: with one area the `mpx` and `mpx*frames`
+  // columns are proportional. sc-18810 established this the expensive way — crossing two areas is
+  // what makes the candidate forms identifiable at all — so counting geometries is the wrong test.
+  const characterization = memoryCharacterization([
+    "768x512xf121",
+    "768x512xf241",
+    "768x512xf361",
+  ]);
+  assert.equal(characterization.status, "point");
+  assert.equal(characterization.coveredPixelBound, null);
+  assert.equal(characterization.coveredFrameBound, null);
+});
+
+test("two areas crossed with two frame counts ARE determinable (sc-18812)", () => {
+  const characterization = memoryCharacterization([
+    "768x512xf121",
+    "768x512xf241",
+    "1280x704xf121",
+  ]);
+  assert.equal(characterization.status, "fitted");
+  assert.equal(characterization.coveredPixelBound, 1280 * 704);
+  assert.equal(characterization.coveredFrameBound, 241);
+});
+
+test("`coveredFrameBound` appears only where a temporal geometry does (sc-18812)", () => {
+  // Mirrors `geometryEnvelope`'s durations/fps convention. An image cell that gained a null
+  // temporal bound would be the generator inventing an axis its records never carried.
+  assert.ok(!("coveredFrameBound" in memoryCharacterization(["768x768", "1024x1024"])));
+  assert.ok(!("coveredFrameBound" in memoryCharacterization([])));
+  assert.ok("coveredFrameBound" in memoryCharacterization(["768x512xf121", "1280x704xf241"]));
+});
+
+test("two resolutions of ONE area do not determine the image curve either (sc-18812)", () => {
+  // A latent defect the rank rule fixes on the way past: `768x512` and `512x768` are two distinct
+  // geometry strings carrying one area, and counting called that `fitted`. It publishes no cell
+  // today — verified by the regenerated artifact being byte-identical — but it would have been the
+  // first thing a portrait/landscape video sweep hit.
+  assert.equal(memoryCharacterization(["768x512", "512x768"]).status, "point");
+  assert.equal(memoryCharacterization(["768x512", "512x768"]).coveredPixelBound, null);
+  assert.equal(memoryCharacterization(["768x512", "1280x704"]).status, "fitted");
+});
+
+test("admitting the temporal axis moves no published image cell (sc-18812)", async () => {
+  // The migration guard, over the REAL published population rather than a fixture. Every shipped
+  // cell must still key its geometries in the two-number form and carry no temporal bound.
+  const matrix = await buildMatrix({ publish: false });
+  let measured = 0;
+  for (const cell of matrix.cells) {
+    assert.ok(
+      !("coveredFrameBound" in cell.memoryCharacterization),
+      `${cell.id}: an image cell gained a temporal bound`,
+    );
+    for (const geometry of cell.memoryCharacterization.measuredGeometries) {
+      assert.match(geometry, /^[1-9][0-9]*x[1-9][0-9]*$/, `${cell.id}: ${geometry}`);
+      measured += 1;
+    }
+  }
+  assert.ok(measured > 0, "the guard must have graded real measured geometries");
+});
+
+// ── sc-18812 review pass: the DECLARED form, and evidence that can state its frames ────────────
+
+/** The builtin manifest, parsed, ready to be mutated and fed back through `sourceOverrides`. */
+async function parsedBuiltinManifest() {
+  return JSON.parse(
+    stripJsoncComments(
+      await readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+    ),
+  );
+}
+
+const KREA_Q8_THREE_STAGE = "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:staged_residency";
+// `resident` is the control: it is the one rung with NO entry in `phaseCurvesByTier`, so it shares
+// every evidence record with the cell above and differs only in the declared curve form.
+const KREA_Q8_RESIDENT = "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:resident";
+
+const cellById = (matrix, id) => {
+  const cell = matrix.cells.find((candidate) => candidate.id === id);
+  assert.ok(cell, `${id} must exist for this test to mean anything`);
+  return cell;
+};
+
+test("the coefficient count comes from the DECLARED curve, not from what was measured (sc-18812)", () => {
+  // Two areas, one frame each. Against the two-coefficient image form that is a determinable
+  // curve; against a declared three-coefficient form it is two points short of one, and calling it
+  // `fitted` would publish a temporal coefficient nobody measured.
+  const geometries = ["768x768", "1024x1024"];
+  const image = memoryCharacterization(geometries);
+  assert.equal(image.status, "fitted");
+  assert.equal(image.coveredPixelBound, 1024 * 1024);
+  assert.ok(!("coveredFrameBound" in image));
+
+  const declaredTemporal = memoryCharacterization(geometries, { declaresTemporalCurve: true });
+  assert.equal(declaredTemporal.status, "point");
+  assert.equal(declaredTemporal.coveredPixelBound, null);
+  assert.equal(declaredTemporal.coveredFrameBound, null);
+
+  // ...and the flag can only ever ADD the axis. Multi-frame measurements are temporal whatever the
+  // flag says, so an unset flag cannot smuggle a video cell back onto the two-coefficient rule.
+  assert.equal(
+    memoryCharacterization(["768x512xf121", "768x512xf241", "1280x704xf121"], {
+      declaresTemporalCurve: false,
+    }).status,
+    "fitted",
+  );
+  assert.equal(memoryCharacterization(["768x768"], { declaresTemporalCurve: true }).status, "point");
+  assert.equal(
+    memoryCharacterization([], { declaresTemporalCurve: true }).status,
+    "unmeasured",
+    "a declared temporal curve with no measurements is still unmeasured, not point",
+  );
+});
+
+test("a declared temporal curve regrades its own cell against three coefficients (sc-18812)", async () => {
+  const baseline = await buildMatrix({ publish: false });
+  assert.equal(cellById(baseline, KREA_Q8_THREE_STAGE).memoryCharacterization.status, "fitted");
+
+  const manifest = await parsedBuiltinManifest();
+  const krea = manifest.models.find((model) => model.id === "krea_2_turbo");
+  krea.candle.turboFit.phaseCurvesByTier.q8.threeStage.decode.perMpxFrameGb = 0.2998482076533136;
+  const changed = await buildMatrix({
+    publish: false,
+    sourceOverrides: { manifest: JSON.stringify(manifest) },
+  });
+
+  // The cell whose curve gained the term: same two measured geometries, now one short of the rank
+  // its own form needs.
+  const declared = cellById(changed, KREA_Q8_THREE_STAGE).memoryCharacterization;
+  assert.deepEqual(declared.measuredGeometries, ["1024x1024", "768x768"]);
+  assert.equal(declared.status, "point");
+  assert.equal(declared.coveredPixelBound, null);
+  assert.equal(declared.coveredFrameBound, null);
+
+  // The control, on the SAME evidence: no declared temporal term, so nothing about it moves.
+  assert.deepEqual(
+    cellById(changed, KREA_Q8_RESIDENT).memoryCharacterization,
+    cellById(baseline, KREA_Q8_RESIDENT).memoryCharacterization,
+  );
+  assert.equal(cellById(changed, KREA_Q8_RESIDENT).memoryCharacterization.status, "fitted");
+});
+
+test("an evidence record can state its frame count, and it reaches characterization (sc-18812)", async () => {
+  const baseline = await buildMatrix({ publish: false });
+  assert.deepEqual(cellById(baseline, KREA_Q8_THREE_STAGE).memoryCharacterization.measuredGeometries, [
+    "1024x1024",
+    "768x768",
+  ]);
+
+  const manifest = await parsedBuiltinManifest();
+  const krea = manifest.models.find((model) => model.id === "krea_2_turbo");
+  const record = krea.candle.turboFit.evidenceRecords.find(
+    (candidate) => candidate.tier === "q8" && candidate.width === 768,
+  );
+  assert.ok(record, "fixture needs a q8 768x768 evidence record");
+  record.frames = 241;
+  const changed = await buildMatrix({
+    publish: false,
+    sourceOverrides: { manifest: JSON.stringify(manifest) },
+  });
+
+  // The point of the fix: `historicalVerification` no longer hand-builds `WxH`, so a record that
+  // declares frames is characterized at the geometry it was actually captured at rather than as a
+  // one-frame design point that was never measured.
+  const characterization = cellById(changed, KREA_Q8_THREE_STAGE).memoryCharacterization;
+  assert.deepEqual(characterization.measuredGeometries, ["1024x1024", "768x768xf241"]);
+  assert.equal(characterization.status, "point");
+  assert.equal(characterization.coveredFrameBound, null);
+  // The evidence row itself carries the frames too — a consumer reading the row must see the same
+  // geometry the characterization was computed from.
+  const row = cellById(changed, KREA_Q8_THREE_STAGE).evidence.historicalVerification.find(
+    (candidate) => candidate.geometry.startsWith("768x768"),
+  );
+  assert.equal(row.geometry, "768x768xf241");
+
+  // Untouched tiers are untouched: q4 shares the code path and moves only if its own records do.
+  assert.deepEqual(
+    cellById(changed, "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:staged_residency")
+      .memoryCharacterization.measuredGeometries,
+    ["1024x1024", "768x768"],
+  );
+});
+
+test("`fitted` may not be published on fewer geometries than the form has coefficients (sc-18812)", () => {
+  // The validator's guard, exercised on a forged cell rather than by trusting that
+  // `memoryCharacterization` never emits one. The two are deliberately independent: this is what
+  // would catch a rank bug that answered `fitted` on too few points.
+  const forged = (characterization) => ({
+    id: "forged:cell",
+    state: "Implemented/unverified",
+    memoryCharacterization: characterization,
+  });
+  assert.throws(
+    () =>
+      assertCharacterizationIsConsistent(
+        forged({
+          status: "fitted",
+          measuredGeometries: ["1024x1024", "768x768"],
+          coveredPixelBound: 1024 * 1024,
+          coveredFrameBound: 241,
+        }),
+      ),
+    /fitted on 2 measured geometries, but its curve has 3 coefficients/,
+  );
+  // The SAME cell without the temporal marker is a legitimate two-coefficient fit and passes, so
+  // the rejection above is attributable to the coefficient count and not to the forging.
+  assert.doesNotThrow(() =>
+    assertCharacterizationIsConsistent(
+      forged({
+        status: "fitted",
+        measuredGeometries: ["1024x1024", "768x768"],
+        coveredPixelBound: 1024 * 1024,
+      }),
+    ),
+  );
+  // Three geometries satisfy the three-coefficient floor, so the guard is a floor and not a blanket
+  // refusal of temporal cells.
+  assert.doesNotThrow(() =>
+    assertCharacterizationIsConsistent(
+      forged({
+        status: "fitted",
+        measuredGeometries: ["1024x1024", "768x512xf121", "768x512xf241"],
+        coveredPixelBound: 1024 * 1024,
+        coveredFrameBound: 241,
+      }),
+    ),
+  );
+  // And the temporal bound obeys the same "null unless fitted" rule the pixel bound does.
+  assert.throws(
+    () =>
+      assertCharacterizationIsConsistent(
+        forged({
+          status: "point",
+          measuredGeometries: ["768x512xf121", "768x512xf241"],
+          coveredPixelBound: null,
+          coveredFrameBound: 241,
+        }),
+      ),
+    /coveredFrameBound is only meaningful on a fitted curve/,
+  );
 });
