@@ -1188,15 +1188,19 @@ function rung4Implementation(verdict, modelId, tier, mode, overlay) {
  * never appears anywhere — it would sit in the file being maintained, reviewed and trusted while
  * having no effect at all.
  *
- * `catalogFamilyBackends` (sc-18813) is the third state that direction needs, and the survey is
- * ORDERED to produce it. The universe this generator builds is still `type === "image"` only until
- * sc-18815 lands, while admitting a modality to that universe requires its survey verdicts to
- * already exist — `rung4SurveyCell` destructures `survey.get(key)` for every rung-4 cell, and the
- * catalog -> survey direction above throws first. Landing either story alone therefore fails, so a
- * verdict may run AHEAD of admission. It may not run ahead of the ROUTING CATALOG: the tolerated
- * set is the family/backend pairs the routing catalog actually routes (`routedLanes` over
- * `MODEL_CAPS`/`VIDEO_MODEL_CAPS`), not an unchecked exemption. A typo'd group, a backend the
- * catalog does not route, or a verdict for a family nothing in the manifest maps to still throws.
+ * `catalogFamilyBackends` (sc-18813) is the third state that direction needs. The universe this
+ * generator builds is still `type === "image"` only until sc-18815 admits video, while admitting a
+ * modality requires its survey verdicts to already exist — `rung4SurveyCell` destructures
+ * `survey.get(key)` for every rung-4 cell, and the catalog -> survey direction above throws first.
+ * A verdict written ahead of that admission therefore hits the arm above. That is an artifact of the
+ * SLICING, not a structural necessity: one change carrying the admission and the verdict together
+ * satisfies both arms and needs no third state, and once the family is in `advertised` the strict
+ * arm covers it with no exemption at all. What the third state buys is landing the survey on its own,
+ * so it can be reviewed on its own. So a verdict may run AHEAD of admission. It may not run ahead of
+ * the ROUTING CATALOG: the tolerated set is the family/backend pairs the routing catalog actually
+ * routes (`routedLanes` over `MODEL_CAPS`/`VIDEO_MODEL_CAPS`), not an unchecked exemption. A typo'd
+ * group, a backend the catalog does not route, or a verdict for a family nothing in the manifest
+ * maps to still throws.
  *
  * It also self-clears: once a modality is admitted, its pairs appear in `advertised` and the strict
  * arm covers them again. Callers that pass nothing keep the original two-state behaviour.
