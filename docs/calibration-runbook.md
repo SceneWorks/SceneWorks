@@ -284,6 +284,32 @@ fetch `q4` (33.6 GB, and it is the `default: true` tier) and `bf16` (113 GB)
 (`config/manifests/builtin.models.jsonc`, the `flux2_dev` `downloads` array). Neither absence is
 visible from the repo directory or from the marker discussed next.
 
+🔴 **`ls` the snapshot is not enough — the tier may not exist at the revision the manifest pins.**
+Second worked example, `SceneWorks/ltx-2.3-mlx`, provisioned for sc-18809. The snapshot on this Mac
+held `gemma/` + `q8/` only; the manifest declares four rows. `hf download … --include 'bf16/*'`
+**exited 0 having fetched nothing**, because the pinned revision `254989c3…` (2026-06-14) predates
+the upstream `bf16/` upload `01df27d3…` (2026-07-05) by three weeks. The glob was correct and the
+tier was published — just not at the pin. So the download reported success, no directory appeared,
+and the failure would have surfaced later as the engine's `missing transformer.safetensors`.
+
+Two things follow, and both are now enforced rather than remembered:
+
+- **Verify the pin, not the repo.** `node scripts/check-download-patterns.mjs` used to resolve every
+  glob against the repo's *default branch*, so it passed this entry for weeks. As of sc-18809 it
+  fetches `/api/models/<repo>/revision/<rev>` per entry and prints the revision it checked
+  (`ltx_2_3/bf16  SceneWorks/ltx-2.3-mlx@254989c3ca7e  bf16/*`). Run it before quoting a tier as
+  fetchable. It is still a manual pre-flight, not CI — it talks to the HF API (see its header).
+- **A tier that lands at a different revision is a resolution problem too.** The cache then holds two
+  `snapshots/<rev>/` dirs with the tiers split across them, and `huggingface_snapshot_dir` selects
+  exactly one. `ltx_bundle_subdir_across_revisions` (sc-18809) scans siblings with tier preference
+  dominating revision, mirroring `bundled_ltx_gemma_dir`'s sc-14377 fix for the co-requisite TE.
+  Without that a bf16 request silently renders at whatever tier sits in the selected snapshot.
+
+Inventory after provisioning, following symlinks (`du -shL`), all four rows now pinned to
+`01df27d3…`: `gemma/` 26.4 GB, `q4/` 20.5 GB, `q8/` 29.7 GB, `bf16/` 47.1 GB. Blob-level dedup means
+the bump itself re-downloads nothing — the cache is keyed by LFS digest and `01df27d3…` only *added*
+`bf16/`.
+
 ⚠ **This step answers "which tiers exist", NOT "which tiers are usable" — do not let it become the
 latter.** In that same worked example, `find … -name .sceneworks-model-revision` over the entire
 `models--SceneWorks--flux2-dev-mlx` tree returns **nothing**, so by the very rule stated immediately
@@ -653,6 +679,68 @@ from a real capture rather than trusted forward.
   lane cannot be measured at the production geometry at all; three-tier coverage there needs a
   ≥192 GB Mac, or bf16 rows captured at a reduced geometry and labelled as such. Establish this
   before you accept a three-tier scope, not after two tiers have already been swept.
+- 🔴 **…but establish it by MEASURING, because the obvious arithmetic over-counts a staged pipeline.**
+  Counter-example, `mlx:ltx_2_3` bf16, settled in sc-18809. The arithmetic said no: 47.1 GB of dense
+  bf16 tier plus the 26.4 GB Gemma co-requisite is **73.5 GB of weights** before a single video
+  activation, on a 128 GiB box, across an envelope reaching 449 frames. That is the same shape as the
+  `flux2_dev` finding above, and the epic carried it as a live risk. **It was wrong**, because the two
+  giants never co-reside: sc-10976 stages the text phase (build TE → `encode_av` → `eval` → drop →
+  `clear_cache()`) *before* the AvDiT materializes, so the weights floor is `max(TE, DiT)`, not their
+  sum. Measured with the committed real-weights test (below), the bf16 co-residence estimate is
+  69.20 GiB while the actual staged peak at the same geometry is **36.89 GiB** — 47% lower. Whenever a
+  provider stages components, an additive weights sum is an upper bound that can be off by nearly 2×;
+  read the provider's load path before quoting it, and prefer one cheap measured load over the sum.
+
+### bf16 feasibility, measured — the shape of an answer this section wants
+
+Host: Apple M5 Max, **128 GiB** unified (`sysctl hw.memsize` → `137438953472`). The ceiling that
+actually binds is Metal's `recommendedMaxWorkingSetSize` = `115448725504` B = **107.52 GiB**
+(`MTLCreateSystemDefaultDevice().recommendedMaxWorkingSetSize`); `maxBufferLength` is 80.64 GiB, which
+bounds any *single* allocation and is nowhere near binding here. Quote both — `hw.memsize` alone
+overstates what Metal will wire.
+
+Instrument, on real weights at inference pin `b965641e`:
+
+```bash
+cargo test -p mlx-gen-ltx --release --test sequential_residency_real_weights -- --ignored --nocapture
+# with LTX_MODEL_DIR=<snapshot>/<tier> and LTX_GEMMA_DIR=<snapshot>/gemma
+```
+
+It brackets a real staged `generate` in `reset_peak_memory()` / `get_peak_memory()`. Its geometry is
+hardcoded at 256×256×9; the larger rows below were taken with the same instrumentation and the
+geometry lifted onto env vars. Confirm the run was not skipped — an `#[ignore]`d test that returns
+early still reports `ok`, so require the printed line and a non-trivial wall time.
+
+| tier | geometry | frames | stage-2 latent tokens | DiT weights | **staged peak** | wall |
+| --- | --- | --- | --- | --- | --- | --- |
+| q4 | 256×256 | 9 | 128 | 10.57 GiB | 33.10 GiB | 15.6 s |
+| bf16 | 256×256 | 9 | 128 | 35.37 GiB | 36.89 GiB | 13.6 s |
+| bf16 | 768×512 | 145 | 7 296 | 35.37 GiB | 43.87 GiB | 90.6 s |
+| bf16 | **1280×704** | **449** | **50 160** | 35.37 GiB | **87.07 GiB** | 847.8 s |
+
+**Verdict: bf16 is measurable across the WHOLE declared envelope on this host.** The last row is the
+manifest maximum — the largest `limits.resolutions` entry at `hardMaxDuration` 15 s × the fastest
+declared 30 fps, so 450 raw frames snapped to 449 by LTX's `8k + 1` stride. It completed, returned all
+449 frames, and peaked **20.45 GiB (19%) under** the 107.52 GiB ceiling. Nothing in the envelope is
+out of reach, so no reduced-geometry caveat and no ≥192 GB Mac is needed for this lane.
+
+Two things fell out that the sweep should use rather than re-derive:
+
+- **Peak is near-perfectly linear in stage-2 latent token count**, `T_lat · (H/32) · (W/32)` with
+  `T_lat = 1 + (frames − 1)/8`. Across the three bf16 rows the marginal cost is 0.997 then
+  1.032 MiB/token, and `36.89 GiB + 1.0 MiB × tokens` predicts the max-envelope peak as 85.87 GiB
+  against 87.07 GiB measured — 1.4% error over a **392×** token range. Neither raw frame count nor
+  area alone can do that; the product is the regressor.
+- **Which phase is the floor flips with tier.** For q4 the text phase dominates (peak 33.10 GiB with a
+  10.57 GiB DiT); for bf16 the DiT does (35.37 GiB). A model that assumes one or the other is wrong
+  for half the tiers of the same lane.
+
+**(tier, geometry) pairs a sweep may assume on this host**, stated explicitly so the next story does
+not re-litigate it: **q4, q8 and bf16 are each measurable at every `limits` combination** — the five
+declared resolutions (0.41–0.90 MP) crossed with durations 4–15 s and fps 24/25/30, i.e. 96–449
+frames. bf16 is the worst case and it clears with 19% to spare; q8 (20.6 GiB DiT) and q4 (10.6 GiB)
+sit strictly below it in the DiT phase. Budget wall clock, not memory: the max-envelope bf16 row took
+**14.1 minutes**, and `nax-worker` caps at 240 minutes per dispatch.
 
 ## 7. Ingest, stamping, and a new lane
 

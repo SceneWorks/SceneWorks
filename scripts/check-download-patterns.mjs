@@ -82,19 +82,33 @@ function patternToRegExp(pattern) {
 
 const fileCache = new Map();
 
-async function repoFiles(repo) {
-  if (fileCache.has(repo)) return fileCache.get(repo);
+// The file list of `repo` AT `revision` — the entry's own pin, not the default branch (sc-18809).
+//
+// This used to fetch `/api/models/<repo>` unqualified, which lists whatever `main` holds today. A
+// download entry pinned to a revision that PREDATES its own files therefore passed: the glob matched
+// on `main`, while the pinned snapshot had no such path, so the fetch resolved zero files and the
+// worker's hard-fail fired at the user instead. That is not hypothetical — `ltx_2_3`'s bf16 row
+// declared `bf16/*` at `254989c3…`, three weeks before `bf16/` was uploaded, and this gate passed it.
+// The pin is the thing the worker actually downloads, so it is the thing to verify.
+async function repoFiles(repo, revision) {
+  const key = `${repo}@${revision ?? "main"}`;
+  if (fileCache.has(key)) return fileCache.get(key);
   const token = process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN;
   const headers = token ? { Authorization: `Bearer ${token}` } : {};
-  const response = await fetch(`https://huggingface.co/api/models/${repo}?blobs=false`, { headers });
+  // `/api/models/<repo>/revision/<rev>` is the revision-qualified twin of `/api/models/<repo>`; an
+  // entry with no `revision` keeps the unqualified (default-branch) reading, which is what it fetches.
+  const url = revision
+    ? `https://huggingface.co/api/models/${repo}/revision/${encodeURIComponent(revision)}?blobs=false`
+    : `https://huggingface.co/api/models/${repo}?blobs=false`;
+  const response = await fetch(url, { headers });
   if (!response.ok) {
     const result = { error: `HTTP ${response.status}` };
-    fileCache.set(repo, result);
+    fileCache.set(key, result);
     return result;
   }
   const body = await response.json();
   const result = { files: (body.siblings ?? []).map((sibling) => sibling.rfilename) };
-  fileCache.set(repo, result);
+  fileCache.set(key, result);
   return result;
 }
 
@@ -121,6 +135,7 @@ async function main() {
         id: model.id,
         label: `${model.id}/${download.variant ?? "-"}`,
         repo: download.repo,
+        revision: download.revision ?? null,
         declared: download.files ?? [],
       });
     }
@@ -138,6 +153,7 @@ async function main() {
       id: lora.id,
       label: `lora:${lora.id}`,
       repo,
+      revision: source.revision ?? lora.revision ?? null,
       declared: single ? [single] : (source.files ?? lora.files ?? []),
     });
   }
@@ -148,9 +164,10 @@ async function main() {
     // per-pattern claim to verify. (The worker's aggregate zero-file check still covers an
     // empty repo at download time.)
     if (claim.declared.length === 0) continue;
-    const { files, error } = await repoFiles(claim.repo);
+    const at = claim.revision ? `@${claim.revision.slice(0, 12)}` : "";
+    const { files, error } = await repoFiles(claim.repo, claim.revision);
     if (error) {
-      unreachable.push(`${claim.label}  ${claim.repo}  (${error})`);
+      unreachable.push(`${claim.label}  ${claim.repo}${at}  (${error})`);
       continue;
     }
     repos += 1;
@@ -158,7 +175,7 @@ async function main() {
       patterns += 1;
       const regexp = patternToRegExp(pattern);
       if (!files.some((file) => regexp.test(file))) {
-        failures.push(`${claim.label}  ${claim.repo}  ${pattern}`);
+        failures.push(`${claim.label}  ${claim.repo}${at}  ${pattern}`);
       }
     }
   }
@@ -171,7 +188,10 @@ async function main() {
   if (failures.length > 0) {
     console.error(`\nZERO-MATCH PATTERNS (${failures.length}) — the worker will hard-fail these downloads:`);
     for (const line of failures) console.error(`  ${line}`);
-    console.error(`\nEither the glob is wrong, or the tier is not published yet.`);
+    console.error(
+      `\nEither the glob is wrong, the tier is not published yet, or the entry's pinned revision` +
+        ` predates the files it declares (sc-18809 — the trailing @<rev> above is what was checked).`,
+    );
     process.exitCode = 1;
     return;
   }

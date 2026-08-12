@@ -8383,6 +8383,87 @@ fn ltx_bundle_subdir_picks_quant_and_finds_gemma() {
     assert!(bundled_ltx_gemma_dir(&bare.join("q4")).is_none());
 }
 
+/// sc-18809: the bf16 tier only exists at the bumped `01df27d3…` revision, so a machine installed
+/// before the bump keeps its tiers SPLIT across two `snapshots/<rev>/` dirs. Tier selection must look
+/// across revisions, and — the part that actually matters — tier preference must dominate revision, or
+/// a bf16 request silently renders at whatever tier happens to sit in the selected snapshot.
+#[cfg(target_os = "macos")]
+#[test]
+fn ltx_bundle_subdir_across_revisions_prefers_tier_over_revision() {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+    let cache_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_revs_")
+        .tempdir()
+        .expect("temp dir");
+    // The real shape: `<repo>/snapshots/<rev>/<tier>`. `old` sorts before `new`, so a plain
+    // sorted-first scan would pick `old` — the assertions below pin that it does not.
+    let snapshots = cache_guard.path().join("snapshots");
+    let old = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
+    let new = snapshots.join("01df27d308466533aa09d251e3aebdcc627d07eb");
+    write_complete_ltx_dir(&old.join("q4"));
+    write_complete_ltx_dir(&old.join("q8"));
+    write_complete_ltx_dir(&new.join("bf16"));
+
+    // Selected = the pre-bump snapshot, which has no bf16 at all. The single-snapshot lookup would
+    // silently downgrade to q8 here; the cross-revision one finds the requested tier.
+    assert_eq!(
+        ltx_bundle_subdir(&old, &["bf16", "q8", "q4"]).as_deref(),
+        Some(old.join("q8").as_path()),
+        "precondition: the single-snapshot lookup downgrades bf16 → q8"
+    );
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&old, &["bf16", "q8", "q4"]).as_deref(),
+        Some(new.join("bf16").as_path()),
+        "bf16 in a sibling revision must beat q8 in the selected one"
+    );
+    // Symmetric: selected = the bf16-only snapshot, request the q4 default.
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&new, &["q4", "q8"]).as_deref(),
+        Some(old.join("q4").as_path())
+    );
+    // The selected snapshot still wins for a tier both hold.
+    write_complete_ltx_dir(&new.join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&new, &["q4", "q8"]).as_deref(),
+        Some(new.join("q4").as_path())
+    );
+    // An incomplete tier is skipped across revisions too, exactly as within one.
+    std::fs::remove_file(new.join("bf16").join("vocoder.safetensors")).unwrap();
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(&old, &["bf16", "q8", "q4"]).as_deref(),
+        Some(old.join("q8").as_path())
+    );
+    // A root that is NOT under a `snapshots/` dir keeps the old single-dir behaviour (legacy local
+    // conversions must not start scanning whatever sits beside them).
+    let flat_guard = tempfile::Builder::new()
+        .prefix("sw_ltx_flat_")
+        .tempdir()
+        .expect("temp dir");
+    write_complete_ltx_dir(&flat_guard.path().join("sibling").join("bf16"));
+    write_complete_ltx_dir(&flat_guard.path().join("selected").join("q4"));
+    assert_eq!(
+        ltx_bundle_subdir_across_revisions(
+            &flat_guard.path().join("selected"),
+            &["bf16", "q8", "q4"]
+        )
+        .as_deref(),
+        Some(flat_guard.path().join("selected").join("q4").as_path())
+    );
+}
+
 /// Lay down a complete Gemma-3 text-encoder snapshot at `dir`: config, tokenizer, a two-shard
 /// index, and the shards it maps. Mirrors the real bundle `gemma/` so the completeness +
 /// eros-resolution tests are hermetic.

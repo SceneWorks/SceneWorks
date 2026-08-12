@@ -45,8 +45,16 @@ pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// Pin the exact commit for defense-in-depth (mirrors the SeedVR2/Real-ESRGAN pins, sc-8879/sc-9682).
 /// The native downloader still verifies each file's own hash on download. Bumped in sc-13870 to the
 /// packed-q4 + Gemma revision validated by the candle training and inference round-trip.
+///
+/// Bumped again in sc-18809 from `254989c3…` to `01df27d3…`. `254989c3…` (2026-06-14) predates the
+/// upstream "Add dense bf16 tier (sc-8513)" upload (2026-07-05) and therefore contains **no `bf16/`
+/// path at all**, so [`ensure_ltx_bf16_present`] fetched an empty file set and reported success — the
+/// bf16 tier was unreachable through the product. `01df27d3…` is a strict superset (it only added
+/// `bf16/`; `gemma/`, `q4/`, `q8/` keep byte-identical LFS digests), and the cache is keyed by those
+/// digests, so the bump re-materializes symlinks and re-downloads nothing. Must stay equal to the
+/// `revision` on every `ltx_2_3` `downloads` row in `builtin.models.jsonc`.
 #[cfg(target_os = "macos")]
-pub(super) const LTX_BUNDLE_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
+pub(super) const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
 /// carry the audio `vocoder` + I2V `vae_encoder` + single `upsampler`/`vae_decoder` the
@@ -142,6 +150,46 @@ pub(super) fn ltx_bundle_subdir(root: &Path, order: &[&str]) -> Option<PathBuf> 
         .find(|dir| ltx_dir_is_complete(dir))
 }
 
+/// [`ltx_bundle_subdir`] widened to every snapshot revision of the same repo cache (sc-18809).
+///
+/// `huggingface_snapshot_dir` resolves ONE snapshot dir, but the cache legitimately holds several: the
+/// sc-18809 revision bump means a machine installed before it keeps `snapshots/254989c3…` (gemma + q4 +
+/// q8) and gains `snapshots/01df27d3…` when the bf16 tier is fetched. Looking in the selected snapshot
+/// only would then find no `bf16/` and silently fall through to `q8/` — rendering at a tier the user did
+/// not pick. This mirrors [`bundled_ltx_gemma_dir`]'s sibling-revision scan (sc-14377), which solved the
+/// same split for the co-requisite TE.
+///
+/// **Tier preference dominates revision**: the whole `order` is tried against each revision-set pass, so
+/// `bf16/` in a sibling snapshot beats `q8/` in the selected one. Sibling revisions are visited in sorted
+/// order so resolution is deterministic. `selected` itself is always tried first for a given tier.
+#[cfg(target_os = "macos")]
+pub(super) fn ltx_bundle_subdir_across_revisions(
+    selected: &Path,
+    order: &[&str],
+) -> Option<PathBuf> {
+    let mut roots = vec![selected.to_path_buf()];
+    if let Some(snapshots) = selected.parent() {
+        if snapshots.file_name().and_then(|name| name.to_str()) == Some("snapshots") {
+            if let Ok(entries) = std::fs::read_dir(snapshots) {
+                let mut siblings: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir() && path != selected)
+                    .collect();
+                siblings.sort();
+                roots.extend(siblings);
+            }
+        }
+    }
+    // Tier-outer, revision-inner — the loop nesting IS the precedence rule. Each (tier, root) pair
+    // goes through [`ltx_bundle_subdir`] so the completeness predicate has exactly one caller shape.
+    order.iter().find_map(|sub| {
+        roots
+            .iter()
+            .find_map(|root| ltx_bundle_subdir(root, &[sub]))
+    })
+}
+
 /// Resolve the converted LTX MLX snapshot dir. Env override (`SCENEWORKS_MLX_LTX_DIR` /
 /// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey SceneWorks bundle
 /// [`LTX_BUNDLE_REPO`], descending into its `q4/`/`q8/` subdir. Only a dir **complete for the
@@ -191,7 +239,11 @@ pub(super) fn resolve_ltx_model_dir(
     // load.
     if !eros {
         if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
-            if let Some(dir) = ltx_bundle_subdir(&root, ltx_bundle_tier_order(request)) {
+            // Across revisions (sc-18809): the cache can hold the pre-bump `254989c3…` snapshot beside
+            // the bf16-bearing `01df27d3…` one, and the selected root is only one of them.
+            if let Some(dir) =
+                ltx_bundle_subdir_across_revisions(&root, ltx_bundle_tier_order(request))
+            {
                 return Ok(dir);
             }
         }
