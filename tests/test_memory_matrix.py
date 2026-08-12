@@ -44,13 +44,63 @@ def test_generated_memory_matrix_is_current_and_schema_valid():
 
 def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     matrix = load_matrix()
-    assert matrix["summary"]["imageModels"] == 53
+    # sc-18815: the universe is modality-aware, so the census is too. `imageModels` was REMOVED
+    # rather than left holding the whole-universe total under a one-modality name — a field called
+    # `imageModels` reading 63 is worse than the image-only universe it replaced.
+    assert "imageModels" not in matrix["summary"]
+    assert matrix["summary"]["catalogEntries"] == 63
+    assert matrix["summary"]["catalogEntriesByModality"] == {"image": 53, "video": 10}
+    image_ids = {model["id"] for model in matrix["models"] if model["modality"] == "image"}
+    video_ids = {model["id"] for model in matrix["models"] if model["modality"] == "video"}
+    assert len(image_ids) == 53
+    assert len(video_ids) == 10
     # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, so its former
     # generic staged-route claim is intentionally absent from this census.
+    # sc-18815 keeps this as exactly the IMAGE-lane claim its denominator says it is: the video
+    # `bernini` entry rides the same `bernini` engine as the already-counted `bernini_image`, so a
+    # modality-blind count reads 39/53 for a lane that gained nothing.
     assert matrix["summary"]["mlxStagedStaticCoverage"] == 38
     assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == 53
-    assert len(matrix["models"]) == len(matrix["modelSlices"]) == 53
+    assert matrix["summary"]["videoMlxStagedStaticCoverage"] == 1
+    assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == 10
+    assert len(matrix["models"]) == len(matrix["modelSlices"]) == 63
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
+
+    # sc-18815: `wan_2_2_vace_fun_14b` has a manifest entry and a real MLX engine but ZERO rows in
+    # `VIDEO_MODEL_CAPS`, so the routing catalog — this epic's backend authority — routes it nowhere
+    # and it resolves to no coordinates. It must still be NAMED: an entry that emits nothing and an
+    # entry that is not in the catalog look identical here otherwise, which is the silent absence
+    # this story exists to end.
+    assert [entry["id"] for entry in matrix["summary"]["unroutedEntries"]] == [
+        "wan_2_2_vace_fun_14b"
+    ]
+    vace = next(model for model in matrix["models"] if model["id"] == "wan_2_2_vace_fun_14b")
+    assert vace["backends"] == []
+    assert vace["axes"] == {}
+    assert matrix["modelSlices"]["wan_2_2_vace_fun_14b"] == []
+    assert all(
+        model["backends"] for model in matrix["models"] if model["id"] != "wan_2_2_vace_fun_14b"
+    )
+
+    # Video providers are genuinely per-backend, and a scalar route cannot express that: getting it
+    # wrong binds a cell's calibration evidence, plan row and closure digest to a provider that never
+    # ran it. `mlx:ltx_2_3` is the exact key sc-18808 already committed to the closure table.
+    ltx = next(model for model in matrix["models"] if model["id"] == "ltx_2_3")
+    assert ltx["resolvedRoutes"] == {"mlx": "ltx_2_3", "candle": "ltx_2_3_distilled"}
+    assert {
+        (cell["backend"], cell["provider"])
+        for cell in matrix["cells"]
+        if cell["modelId"] == "ltx_2_3"
+    } <= {("mlx", "ltx_2_3"), ("candle", "ltx_2_3_distilled")}
+
+    # Video entries name NO per-entry ownership story, because epic 18803 filed none. An integer
+    # there would name a story that cannot close the cell — SC-15812's defect from the other side.
+    for model in matrix["models"]:
+        for backend in model["backends"]:
+            assert isinstance(model["owningFamilyStories"][backend], int), model["id"]
+            assert isinstance(model["owningModelStories"][backend], int) == (
+                model["modality"] == "image"
+            ), model["id"]
 
     # sc-18099: `cells` is a SUBSET, and the artifact has to say so in its own numbers. `summary`
     # keeps the RESOLVED coordinate total, which is no longer `len(cells)`, and partitions it —
@@ -69,8 +119,9 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     assert sum(row["coordinates"] for row in matrix["coverage"]) == matrix["summary"]["cells"]
     assert sum(row["published"] for row in matrix["coverage"]) == len(matrix["cells"])
     assert sum(row["elided"] for row in matrix["coverage"]) == matrix["summary"]["elidedCells"]
-    # `mlxStagedStaticCoverage` is a claim about all 53 entries. Recomputed from the census rather
-    # than from `cells`, which would silently shrink it to whatever the slim happened to publish.
+    # `mlxStagedStaticCoverage` is a claim about all 53 image entries. Recomputed from the census
+    # rather than from `cells`, which would silently shrink it to whatever the slim happened to
+    # publish — and scoped to the image lane, which is what its denominator claims to cover.
     assert (
         len(
             {
@@ -79,9 +130,23 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
                 if row["backend"] == "mlx"
                 and row["rung"] == "staged_residency"
                 and row["implemented"]
+                and row["modelId"] in image_ids
             }
         )
         == matrix["summary"]["mlxStagedStaticCoverage"]
+    )
+    assert (
+        len(
+            {
+                row["modelId"]
+                for row in matrix["coverage"]
+                if row["backend"] == "mlx"
+                and row["rung"] == "staged_residency"
+                and row["implemented"]
+                and row["modelId"] in video_ids
+            }
+        )
+        == matrix["summary"]["videoMlxStagedStaticCoverage"]
     )
     # Every entry keeps a slice key even when it publishes nothing, and no slice may name a cell the
     # slim dropped.
@@ -926,13 +991,62 @@ def test_rung4_survey_covers_every_family_and_rides_only_its_own_cells():
 
     rows = matrix["rung4SurveyRows"]
     assert len(rows) == matrix["summary"]["rung4Survey"]["surveyedFamilyBackends"]
-    # `familyStory` is the family GROUP key, which is the family's MLX story id — the same key on
-    # both backends, unlike `cells[].owningFamilyStory`, which is the backend-scoped owner.
-    assert {(row["familyStory"], row["backend"]) for row in rows} == {
-        (model["owningFamilyStories"]["mlx"], backend)
+    # `familyStory` is the family GROUP key — the family's MLX story id for the epic-15448 image
+    # families, and the family's own NAME for the video families sc-18815 admits (sc-18828 owns three
+    # unrelated families at once, so no assignment of story ids to them is both distinct and true).
+    # It is the same key on both backends, unlike `cells[].owningFamilyStory`, which is the
+    # backend-scoped owner. Joined through the published `models[].familyGroup` rather than through
+    # `owningFamilyStories["mlx"]`: that identity holds for image families only.
+    advertised = {
+        (model["familyGroup"], backend)
         for model in matrix["models"]
         for backend in model["backends"]
     }
+    surveyed = {(row["familyStory"], row["backend"]) for row in rows}
+    # sc-18815: surveyed and pending PARTITION what the catalog advertises. A family that is in the
+    # universe, carries no verdict and is not declared pending is a hole the generator throws on;
+    # asserting the partition is stronger than asserting either half, and unlike the old equality it
+    # does not freeze this epic's story ordering into the test.
+    pending = {
+        (row["family"], row["backend"])
+        for row in matrix["summary"]["rung4Survey"]["pendingFamilyBackends"]
+    }
+    assert not (surveyed & pending)
+    assert surveyed | pending == advertised
+    assert pending == {
+        ("krea-realtime", "mlx"),
+        ("scail2", "mlx"),
+        ("svd", "candle"),
+        ("svd", "mlx"),
+        ("wan-video", "candle"),
+        ("wan-video", "mlx"),
+    }
+    assert all(
+        isinstance(row["pendingSurveyStory"], int)
+        for row in matrix["summary"]["rung4Survey"]["pendingFamilyBackends"]
+    )
+
+    # The discriminator is on every rung-4 cell and agrees with the rows, so "not surveyed yet" can
+    # never be read as "surveyed and found to have no implementation". Both directions, or the flag
+    # could be published as a constant and still satisfy the partition above.
+    family_of = {model["id"]: model["familyGroup"] for model in matrix["models"]}
+    for cell in rung4:
+        key = (family_of[cell["modelId"]], cell["backend"])
+        assert cell["rung4Survey"]["surveyed"] is (key in surveyed), cell["id"]
+        if not cell["rung4Survey"]["surveyed"]:
+            assert cell["state"] == "Missing", cell["id"]
+            assert cell["rung4Survey"]["requestPeak"] == "unsurveyed"
+            assert cell["rung4Survey"]["structuralApplicability"] is None
+            assert cell["rung4Survey"]["implementation"] is None
+            assert isinstance(cell["rung4Survey"]["pendingSurveyStory"], int)
+    assert any(cell["rung4Survey"]["surveyed"] for cell in rung4)
+    # Stated rather than assumed: today EVERY published rung-4 cell is surveyed, because the four
+    # pending families are also entirely unplanned and unmeasured, so sc-18099's predicate elides all
+    # of their coordinates. The pending set is therefore only visible through `summary` here — which
+    # is exactly why it is published there and not left to be inferred from the cells. The generator
+    # suite asserts the unsurveyed cells against the PRE-publication cross-product, where they exist.
+    assert all(cell["rung4Survey"]["surveyed"] for cell in rung4)
+    assert pending, "the pending set must be non-empty, or the assertion above is vacuous"
 
     # The two findings stay separate: an architecture that CAN be windowed is never, by itself,
     # evidence that windowing it moves the request peak.
