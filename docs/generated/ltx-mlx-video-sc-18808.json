@@ -9,7 +9,7 @@
       },
       "backend": "mlx",
       "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
-      "capturedAt": "2026-08-12T00:34:06Z",
+      "capturedAt": "2026-08-12T00:47:57Z",
       "diagnostics": {
         "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
         "blockers": [
@@ -30,12 +30,12 @@
           {
             "name": "conditioningActivePeak",
             "unit": "bytes",
-            "value": 35678641896
+            "value": 35561029352
           },
           {
             "name": "denoiseActivePeak",
             "unit": "bytes",
-            "value": 27411282472
+            "value": 27444099160
           },
           {
             "name": "decodeActivePeak",
@@ -45,17 +45,17 @@
           {
             "name": "overallAllocatorEnvelope",
             "unit": "bytes",
-            "value": 100801583668
+            "value": 99741021600
           },
           {
             "name": "predictedOverallCeiling",
             "unit": "bytes",
-            "value": 105897787392
+            "value": 104756936704
           },
           {
             "name": "denoiseEntryActive",
             "unit": "bytes",
-            "value": 20707250250
+            "value": 20686341314
           },
           {
             "name": "decodeEntryActive",
@@ -95,12 +95,12 @@
           {
             "name": "warmRepeatPeak",
             "unit": "bytes",
-            "value": 39594202362
+            "value": 39594200462
           },
           {
             "name": "warmRepeatPostCleanupActive",
             "unit": "bytes",
-            "value": 3268140556
+            "value": 3268138656
           },
           {
             "name": "warmRepeatPostCleanupCache",
@@ -157,7 +157,7 @@
         "wiredLimitBytes": 87044670532
       },
       "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-f303dac33c8cc9ec60f3",
+      "id": "imc-a15336c6db1de55051cf",
       "loadShape": "eager_materialization",
       "loadability": {
         "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@254989c3ca7ee691187647f350b112c0c448789d:q8+gemma",
@@ -167,32 +167,32 @@
       "negativeMutation": null,
       "observedMemory": {
         "conditioning": {
-          "activeBytes": 35678641896,
-          "allocatorBytes": 37479563236,
-          "deviceBytes": 37479563236,
-          "reclaimableBytes": 1800921340,
-          "wiredBytes": 37479563236
+          "activeBytes": 35561029352,
+          "allocatorBytes": 37349335840,
+          "deviceBytes": 37349335840,
+          "reclaimableBytes": 1788306488,
+          "wiredBytes": 37349335840
         },
         "decode": {
           "activeBytes": 15032119664,
-          "allocatorBytes": 80155061436,
-          "deviceBytes": 80155061436,
-          "reclaimableBytes": 65122941772,
-          "wiredBytes": 80155061436
+          "allocatorBytes": 79212111912,
+          "deviceBytes": 79212111912,
+          "reclaimableBytes": 64179992248,
+          "wiredBytes": 79212111912
         },
         "denoise": {
-          "activeBytes": 27411282472,
-          "allocatorBytes": 27411282472,
-          "deviceBytes": 27411282472,
+          "activeBytes": 27444099160,
+          "allocatorBytes": 27444099160,
+          "deviceBytes": 27444099160,
           "reclaimableBytes": 0,
-          "wiredBytes": 27411282472
+          "wiredBytes": 27444099160
         },
         "overall": {
-          "activeBytes": 35678641896,
-          "allocatorBytes": 100801583668,
-          "deviceBytes": 100801583668,
-          "reclaimableBytes": 65122941772,
-          "wiredBytes": 100801583668
+          "activeBytes": 35561029352,
+          "allocatorBytes": 99741021600,
+          "deviceBytes": 99741021600,
+          "reclaimableBytes": 64179992248,
+          "wiredBytes": 99741021600
         }
       },
       "predictedPeakBytes": null,
@@ -216,7 +216,7 @@
         "sceneWorks": {
           "dirty": false,
           "matrixSourceRevision": "source-tree:f7a7d714f5e6b484c92727472f8475542609520fa87c488251f907b05e5f475a",
-          "revision": "39109290e2592ab1d2122ac0a3b039c270e548d9"
+          "revision": "3be0ee2a49e56db8cc5f95c86f943b93d5176cfd"
         }
       },
       "scenarios": [
@@ -252,8 +252,7 @@
         },
         {
           "name": "loadability",
-          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
-          "result": "not_run"
+          "result": "passed"
         },
         {
           "name": "overlay",
