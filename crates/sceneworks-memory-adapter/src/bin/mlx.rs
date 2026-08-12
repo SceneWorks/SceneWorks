@@ -91,7 +91,83 @@ const FLUX2_RMS_THRESHOLD: f64 = 1.5 / 255.0;
 /// One fixed seed for every q4/q8 `mlx:flux2_dev` fixture
 /// (`flux2-dev-mlx-<tier>-<edge>-seed18218-step2`).
 const FLUX2_SEED: u64 = 18218;
+/// The `mlx:ltx_2_3` lane (sc-18808) — the FIRST video arm in this adapter. Every arm above it is an
+/// image arm and keeps its `geometry.frames == 1` refusal (`protocol::validate_still_geometry`);
+/// this one is the single arm allowed to accept a multi-frame geometry, and it pays for that by
+/// validating against LTX's OWN declared envelope instead of accepting any frame count at all.
+const LTX_PROVIDER: &str = "ltx_2_3";
+const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video path";
+/// ADAPTER-OWNED, and deliberately so. Every other arm reads its fingerprint back from the pinned
+/// provider's `MemoryStrategyContract::calibration`; `mlx-gen-ltx` registers **no** memory-strategy
+/// contract at all at the pin (zero `memory_strategy` symbols in the crate), so there is no provider
+/// identity to read. This constant versions the capture contract THIS arm implements — geometry
+/// envelope, staged-residency attestation, and phase boundaries — and the plan must match it, so a
+/// change here forces the plan and the records to move together.
+const LTX_CALIBRATION_FINGERPRINT: &str = "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1";
+/// One fixed seed for every `mlx:ltx_2_3` fixture
+/// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18808`).
+const LTX_SEED: u64 = 18808;
+/// LTX's video VAE is x32 spatial and **x8 causal temporal**, so `out_f = 1 + (t_lat - 1) * 8` and
+/// the engine's `validate_request` hard-rejects any `num_frames` that is not `1 + 8k`. Latent
+/// temporal depth — not raw frame count — is the physically motivated regressor for a frames-aware
+/// phase curve (sc-18810), so the arm reports it alongside the raw count.
+const LTX_TEMPORAL_SCALE: u32 = 8;
+/// `limits.requiresDimensionsMultipleOf` for `ltx_2_3` in `config/manifests/builtin.models.jsonc`,
+/// which mirrors the engine's `SIZE_MULTIPLE = 2 * SPATIAL_SCALE` (stage 1 renders at half
+/// resolution, so a dimension must divide by twice the 32x VAE compression).
+const LTX_DIMENSION_MULTIPLE: u32 = 64;
+/// `limits.resolutions`, verbatim.
+const LTX_RESOLUTIONS: [(u32, u32); 5] =
+    [(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)];
+/// `limits.durations` and `limits.fps`, verbatim. Together they span the frame envelope below.
+const LTX_DURATIONS_SECONDS: [u32; 6] = [4, 6, 8, 10, 12, 15];
+const LTX_FPS: [u32; 3] = [24, 25, 30];
 const MIB: u64 = 1024 * 1024;
+
+/// Port of `sceneworks_core::video_request::ltx_frame_count` — frames snap to the NEAREST `8k + 1`,
+/// minimum 9, ties to the lower. Duplicated rather than depended on: `sceneworks-core` pulls a
+/// bundled SQLite, an image codec stack and a trash binding into what is otherwise a calibration-only
+/// binary with two dependencies. The duplication is bounded by
+/// `ltx_frame_ladder_matches_the_shipped_video_request_ladder`, which pins the value this port
+/// produces at all 18 shipped (duration, fps) pairs.
+const fn ltx_snapped_frame_count(raw_frames: u32) -> u32 {
+    let frame_count = if raw_frames < 9 { 9 } else { raw_frames };
+    let lower = frame_count - ((frame_count - 1) % 8);
+    let upper = lower + 8;
+    if lower < 9 {
+        return upper;
+    }
+    if frame_count - lower <= upper - frame_count {
+        lower
+    } else {
+        upper
+    }
+}
+
+/// The closed frame envelope the declared `limits` can actually produce, derived over the FULL
+/// 18-cell `durations x fps` cross product through the ladder the product itself uses. Derived
+/// rather than written down so the bounds cannot drift away from the arrays above.
+const fn ltx_frame_envelope() -> (u32, u32) {
+    let (mut minimum, mut maximum) = (u32::MAX, 0);
+    let mut duration = 0;
+    while duration < LTX_DURATIONS_SECONDS.len() {
+        let mut fps = 0;
+        while fps < LTX_FPS.len() {
+            let frames = ltx_snapped_frame_count(LTX_DURATIONS_SECONDS[duration] * LTX_FPS[fps]);
+            if frames < minimum {
+                minimum = frames;
+            }
+            if frames > maximum {
+                maximum = frames;
+            }
+            fps += 1;
+        }
+        duration += 1;
+    }
+    (minimum, maximum)
+}
+
+const LTX_FRAME_ENVELOPE: (u32, u32) = ltx_frame_envelope();
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
@@ -1774,6 +1850,9 @@ fn run_z_image_reference_loaded(
 }
 
 fn run_z_image_reference(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside `..._loaded`: a non-still target must be refused without paying
+    // for weights, the same ordering every other image arm now has.
+    protocol::validate_still_geometry(request, "MLX Z-Image base calibration")?;
     let load_shape = planned_load_shape(request)?;
     let (repository, revision, generator) = load_z_image_generator(request, load_shape)?;
     run_z_image_reference_loaded(
@@ -1820,7 +1899,7 @@ fn validate_flux2_target(request: &Value) -> Result<(), String> {
             "MLX FLUX.2-dev calibration does not implement provider {provider:?}"
         ));
     }
-    Ok(())
+    protocol::validate_still_geometry(request, "MLX FLUX.2-dev calibration")
 }
 
 /// Bind the fixture to the planned tier AND geometry edge, deriving the seed — the same
@@ -2455,21 +2534,7 @@ fn validate_krea_base_target(request: &Value) -> Result<(), String> {
             "MLX Krea base calibration requires reference-free text_to_image mode, got {mode:?}"
         ));
     }
-    let geometry = target
-        .get("geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
-        let actual = geometry
-            .get(axis)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
-        if actual != expected {
-            return Err(format!(
-                "MLX Krea base calibration requires geometry.{axis} == {expected}, got {actual}"
-            ));
-        }
-    }
+    protocol::validate_still_geometry(request, "MLX Krea base calibration")?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(0) {
@@ -3109,21 +3174,7 @@ fn validate_sdxl_target(request: &Value) -> Result<(), String> {
             "MLX SDXL base calibration requires reference-free text_to_image mode, got {mode:?}"
         ));
     }
-    let geometry = target
-        .get("geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
-        let actual = geometry
-            .get(axis)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
-        if actual != expected {
-            return Err(format!(
-                "MLX SDXL base calibration requires geometry.{axis} == {expected}, got {actual}"
-            ));
-        }
-    }
+    protocol::validate_still_geometry(request, "MLX SDXL base calibration")?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(0) {
@@ -3571,6 +3622,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
 
 fn run_krea_control(request: &Value) -> Result<Value, String> {
     protocol::validate_exact_overlay_target(request, "control:1", KREA_CONTROL_EXECUTION_PATH)?;
+    protocol::validate_still_geometry(request, "MLX Krea pose-control calibration")?;
     let parameters = protocol::strategy_parameters(request)?;
     let strategy = json!({
         "rung": "bounded_decode",
@@ -4015,6 +4067,7 @@ fn run_qwen_vae_probe(request: &Value) -> Result<Value, String> {
         );
     }
     protocol::validate_plain_overlay_target(request, QWEN_PLAIN_EXECUTION_PATH)?;
+    protocol::validate_still_geometry(request, "MLX Qwen VAE-probe calibration")?;
     let parameters = protocol::strategy_parameters(request)?;
     let strategy = json!({
         "rung": "bounded_decode",
@@ -4271,6 +4324,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         return run_qwen_vae_probe(request);
     }
     protocol::validate_plain_overlay_target(request, QWEN_PROVIDER_EXECUTION_PATH)?;
+    protocol::validate_still_geometry(request, "MLX Qwen base calibration")?;
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
     let seed = planned_qwen_seed(request, tier)?;
@@ -4609,6 +4663,668 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+/// The exact target geometry an `mlx:ltx_2_3` calibration case renders. `fps` is NOT part of it:
+/// `GeometryEnvelope` has no temporal-cadence axis, so the arm binds fps through the fixture name
+/// instead (see [`planned_ltx_capture`]). That gap is real and is reported rather than papered over —
+/// the audio stream's latent length is a function of fps, so two records with identical
+/// `{width, height, batch, frames}` can legitimately differ in peak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LtxGeometry {
+    width: u32,
+    height: u32,
+    frames: u32,
+    /// `1 + (frames - 1) / 8` — the LTX video VAE's causal temporal depth.
+    latent_frames: u32,
+}
+
+fn ltx_declared_resolutions() -> String {
+    LTX_RESOLUTIONS
+        .iter()
+        .map(|(width, height)| format!("{width}x{height}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// LTX's own geometry envelope, which REPLACES the image arms' `frames == 1` refusal for this arm
+/// alone. Three independent constraints, each from a stated source:
+///
+/// * `limits.resolutions` — the five declared pairs (the catalog contract a real request can name).
+/// * `limits.requiresDimensionsMultipleOf` — 64, mirroring the engine's `SIZE_MULTIPLE`. Redundant
+///   with the pair list today; kept because it is the engine's hard rule and the pair list is not.
+/// * the temporal lattice and envelope — `frames = 1 + 8k` (the engine's `validate_request` hard
+///   reject) inside `[97, 449]`, the closed span the declared `durations x fps` cross product
+///   produces through the shipped LTX frame ladder.
+///
+/// A still geometry (`frames == 1`) is on the lattice but below the envelope floor, so it is refused
+/// here too: this arm may not silently capture a single-frame record for a video model.
+fn validate_ltx_geometry(width: u32, height: u32, frames: u32) -> Result<LtxGeometry, String> {
+    if !LTX_RESOLUTIONS.contains(&(width, height)) {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires one of the declared limits.resolutions ({}), got {width}x{height}",
+            ltx_declared_resolutions()
+        ));
+    }
+    if width % LTX_DIMENSION_MULTIPLE != 0 || height % LTX_DIMENSION_MULTIPLE != 0 {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry divisible by {LTX_DIMENSION_MULTIPLE}, got {width}x{height}"
+        ));
+    }
+    if frames % LTX_TEMPORAL_SCALE != 1 {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry.frames == 1 + {LTX_TEMPORAL_SCALE}k (the LTX \
+             video VAE is {LTX_TEMPORAL_SCALE}x causal in time), got {frames}"
+        ));
+    }
+    let (minimum, maximum) = LTX_FRAME_ENVELOPE;
+    if frames < minimum || frames > maximum {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
+             envelope [{minimum}, {maximum}], got {frames}"
+        ));
+    }
+    Ok(LtxGeometry {
+        width,
+        height,
+        frames,
+        latent_frames: 1 + (frames - 1) / LTX_TEMPORAL_SCALE,
+    })
+}
+
+/// Read the four declared geometry axes. Unlike the image arms this reads `frames` as a real value
+/// rather than asserting it away; `batch` is still pinned to 1 because LTX's descriptor advertises
+/// `max_count: 1` and the arm renders exactly one clip.
+fn ltx_target_geometry(request: &Value) -> Result<LtxGeometry, String> {
+    let geometry = protocol::planned(request)?
+        .pointer("/target/geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry.batch == 1 (the provider advertises \
+             max_count 1), got {batch}"
+        ));
+    }
+    validate_ltx_geometry(axis("width")?, axis("height")?, axis("frames")?)
+}
+
+/// Defense-in-depth mirror of `validate_flux2_target`, plus the T2V-specific target shape. The
+/// `run` dispatcher routes by provider id today, but this arm hardcodes the LTX contract, so a
+/// foreign caller must be refused BY NAME here rather than misrouted into it.
+fn validate_ltx_target(request: &Value) -> Result<LtxGeometry, String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != LTX_PROVIDER {
+        return Err(format!(
+            "MLX LTX-2.3 calibration does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != LTX_PROVIDER {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires modelId {LTX_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_video" {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires reference-free text_to_video mode, got {mode:?}"
+        ));
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "MLX LTX-2.3 calibration requires {field} == 0 when declared"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "MLX LTX-2.3 calibration requires {field} == false when declared"
+                ));
+            }
+        }
+    }
+    ltx_target_geometry(request)
+}
+
+/// Bind the fixture to the planned tier AND the full rendered geometry, and recover the two request
+/// parameters the geometry envelope cannot carry: the output cadence `fps` and the seed. fps rides
+/// here because `GeometryEnvelope` has no temporal-cadence axis and the audio latent length — which
+/// is denoised jointly with the video on every step — is `compute_audio_frames(frames, fps)`.
+fn planned_ltx_capture(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+) -> Result<(u32, u64), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!(
+        "ltx-2-3-mlx-{tier}-{}x{}-f{}-fps",
+        geometry.width, geometry.height, geometry.frames
+    );
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse LTX fixture fps {fps:?}: {error}"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse LTX fixture seed {seed:?}: {error}"))?;
+    if !LTX_FPS.contains(&fps) {
+        return Err(format!(
+            "planned.fixture declares fps {fps}, which is not one of the declared limits.fps {LTX_FPS:?}"
+        ));
+    }
+    if seed != LTX_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the LTX-2.3 calibration seed {LTX_SEED}"
+        ));
+    }
+    Ok((fps, seed))
+}
+
+/// The production A/V request. `video_mode` is deliberately left unset so the arm measures the same
+/// path a real job takes (`crates/sceneworks-worker/src/video_jobs/ltx.rs` only sets `"no_audio"`
+/// when the caller asks for it): the audio latents are denoised jointly with the video regardless,
+/// and skipping the audio DECODE would understate the decode phase. `steps` is likewise unset —
+/// LTX's distilled schedule is baked (8 + 3 folded to an 11-step bar), so a step count is not a knob.
+fn ltx_request(geometry: LtxGeometry, fps: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a slow dolly through a sunlit pine forest, drifting motes of pollen, cinematic"
+            .to_owned(),
+        width: geometry.width,
+        height: geometry.height,
+        count: 1,
+        seed: Some(seed),
+        frames: Some(geometry.frames),
+        fps: Some(fps),
+        ..Default::default()
+    }
+}
+
+/// Resolve and validate the `SCENEWORKS_LTX_*` environment family into a tier-exact load spec.
+///
+/// Two roots under ONE repository: the numeric tier and the `gemma/` co-requisite. The Gemma-3-12B
+/// text encoder is a hard load-time requirement of the pinned provider (`resolve_gemma_dir`,
+/// sc-13664 removed the env/HF-cache fallbacks), so it is threaded through `LoadSpec::text_encoder`
+/// and is snapshot-validated with the same `validate_huggingface_snapshot_root` identity check as
+/// the tier root — a mismatched TE would silently change the measured conditioning peak.
+fn ltx_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, PathBuf, PathBuf, LoadSpec), String> {
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    let repository = protocol::required_env("SCENEWORKS_LTX_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_LTX_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::LTX_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_LTX_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_LTX_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::LTX_REPOSITORY,
+    )?;
+    let text_encoder = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_LTX_TEXT_ENCODER_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_LTX_TEXT_ENCODER_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &text_encoder,
+        &repository,
+        &revision,
+        "gemma",
+        protocol::LTX_REPOSITORY,
+    )?;
+    // `LoadShape` is inert for this provider — `mlx-gen-ltx` never reads `spec.load_shape`, because
+    // the two giants are rebuilt inside every `generate` rather than materialized through a block
+    // schedule. Refuse a plan that claims otherwise instead of emitting a receipt whose declared
+    // materialization shape the run did not use (sc-16482: a receipt may only testify to its own run).
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization);
+    spec.text_encoder = Some(WeightsSource::Dir(text_encoder.clone()));
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok((repository, revision, root, text_encoder, spec))
+}
+
+/// The rung this arm can honestly attest, verified against the plan rather than copied from it.
+///
+/// MLX LTX has no selectable residency seam: `supports_sequential_offload: false` is honest about the
+/// SHARED seam and hides the behaviour. sc-10976 makes `Ltx` hold `root`/`gemma_dir` and build the
+/// ~26 GB Gemma text encoder and the AvDiT INSIDE `generate` — TE built, used, dropped and
+/// `clear_cache()`d before the DiT materializes, DiT dropped and cleared before the VAE decode. That
+/// is staged residency, unconditionally and undeclared. `resident` is therefore not a reachable state
+/// for this provider, and `bounded_decode` is not engaged at small geometry
+/// (`auto_tiling_budgeted_ltx` returns `None` and the decode runs single-pass), so the arm accepts
+/// exactly one rung and refuses the rest by name.
+fn ltx_attested_strategy(request: &Value) -> Result<Value, String> {
+    let rung = protocol::planned_rung(request)?;
+    if rung != "staged_residency" {
+        return Err(format!(
+            "the pinned MLX LTX-2.3 provider stages its text encoder and transformer unconditionally \
+             and exposes no residency seam, so staged_residency is the only capturable rung; rung \
+             {rung:?} is not capturable"
+        ));
+    }
+    let parameters = protocol::strategy_parameters(request)?;
+    if !parameters.is_empty() {
+        return Err(format!(
+            "staged_residency takes no strategy parameters, got {parameters:?}"
+        ));
+    }
+    let strategy = json!({
+        "rung": "staged_residency",
+        "engagedRungs": ["resident", "staged_residency"],
+        "parameters": parameters,
+    });
+    let planned_strategy = protocol::planned(request)?
+        .get("strategy")
+        .ok_or_else(|| "planned.strategy must be present".to_owned())?;
+    if planned_strategy != &strategy {
+        return Err(format!(
+            "plan/provider strategy mismatch: plan={planned_strategy}, MLX adapter measured={strategy}"
+        ));
+    }
+    Ok(strategy)
+}
+
+fn ltx_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact staged tuple per plan row; the row has no parameter axes, so the singleton case is
+    // the whole exercised domain.
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// Unwrap the video output, refusing an image-shaped or audio-shaped return.
+fn video_frames(output: GenerationOutput) -> Result<(Vec<Image>, u32, bool), String> {
+    match output {
+        GenerationOutput::Video { frames, fps, audio } => {
+            if frames.is_empty() {
+                return Err("MLX LTX-2.3 render returned no frames".to_owned());
+            }
+            Ok((frames, fps, audio.is_some()))
+        }
+        GenerationOutput::Images(_) => {
+            Err("MLX LTX-2.3 render returned images, not a video clip".to_owned())
+        }
+        GenerationOutput::Audio(_) => {
+            Err("MLX LTX-2.3 render returned an audio track, not a video clip".to_owned())
+        }
+    }
+}
+
+/// Maximum, mean, and root-mean-square absolute error over EVERY frame of two clips, in [0,1]
+/// units. Per-frame aggregation rather than a first-frame spot check: a temporal divergence that
+/// leaves frame 0 identical is exactly the failure a video determinism contract has to catch.
+fn video_max_mean_rms_abs(left: &[Image], right: &[Image]) -> Result<(f64, f64, f64), String> {
+    if left.len() != right.len() {
+        return Err(format!(
+            "video frame-count mismatch: measured={} repeat={}",
+            left.len(),
+            right.len()
+        ));
+    }
+    let mut maximum = 0.0_f64;
+    let mut sum = 0.0_f64;
+    let mut sum_squares = 0.0_f64;
+    let mut samples = 0_usize;
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if left.width != right.width || left.height != right.height {
+            return Err(format!(
+                "video frame {index} changed dimensions between renders"
+            ));
+        }
+        if left.pixels.len() != right.pixels.len() {
+            return Err(format!(
+                "video frame {index} changed pixel length between renders"
+            ));
+        }
+        for (&left, &right) in left.pixels.iter().zip(&right.pixels) {
+            let difference = (f64::from(left) - f64::from(right)).abs() / 255.0;
+            maximum = maximum.max(difference);
+            sum += difference;
+            sum_squares += difference * difference;
+            samples += 1;
+        }
+    }
+    if samples == 0 {
+        return Err("video comparison had no samples".to_owned());
+    }
+    Ok((
+        maximum,
+        sum / samples as f64,
+        (sum_squares / samples as f64).sqrt(),
+    ))
+}
+
+/// Total bytes of the `.safetensors` shards directly under `directory`, following the HF cache's
+/// blob symlinks. Used to bound the staged-residency claim against the real component footprints
+/// rather than against a comment.
+fn safetensors_bytes(directory: &Path) -> Result<u64, String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("read {}: {error}", directory.display()))?;
+    let mut total = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read {}: {error}", directory.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("safetensors") {
+            continue;
+        }
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| format!("stat {}: {error}", path.display()))?;
+        total = total.saturating_add(metadata.len());
+    }
+    if total == 0 {
+        return Err(format!(
+            "no .safetensors weights under {}",
+            directory.display()
+        ));
+    }
+    Ok(total)
+}
+
+/// The `mlx:ltx_2_3` arm (sc-18808) — the first arm in this adapter that drives a VIDEO job.
+///
+/// It is deliberately `gated`, not `runtime_complete`. `runtime_complete` requires `exact_fit`,
+/// `unknown_budget` and `stale_evidence` to PASS, and each of those is an assertion about a
+/// registered admission check. `mlx-gen-ltx` registers no `MemoryStrategyContract` at the pin, so
+/// there is no admission check to interrogate and no provider calibration identity to compare
+/// against — emitting a runtime-complete receipt would be claiming three scenarios that no code
+/// executed. What the arm DOES prove, on real weights: the render runs at a multi-frame geometry,
+/// the measured peak is bounded by the staged-residency claim rather than by the sum of the two
+/// giants, the output is deterministic across a warm repeat, and that determinism envelope is
+/// breachable.
+fn run_ltx(request: &Value) -> Result<Value, String> {
+    let geometry = validate_ltx_target(request)?;
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    let strategy = ltx_attested_strategy(request)?;
+    let load_shape = planned_load_shape(request)?;
+    if load_shape != LoadShape::EagerMaterialization {
+        return Err(
+            "the pinned mlx-gen-ltx crate never reads LoadSpec::load_shape — it rebuilds the text \
+             encoder and transformer inside every generate rather than materializing them through a \
+             deferred block schedule — so only eager_materialization can be truthfully attested"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+    if !matches!(tier, "q4" | "q8" | "bf16") {
+        return Err(format!(
+            "the MLX LTX-2.3 plan supports only the manifest's q4, q8 and bf16 tiers; tier {tier:?} \
+             is not capturable"
+        ));
+    }
+    let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX LTX-2.3 arm \
+             implements {LTX_CALIBRATION_FINGERPRINT}"
+        ));
+    }
+    let (repository, revision, root, text_encoder_root, spec) =
+        ltx_load_spec(request, tier, &selection)?;
+    // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
+    // than in an allocator reading that a broken staging would itself corrupt.
+    let text_encoder_bytes = safetensors_bytes(&text_encoder_root)?;
+    let transformer_bytes = std::fs::metadata(root.join("transformer.safetensors"))
+        .map_err(|error| format!("stat the {tier} transformer.safetensors: {error}"))?
+        .len();
+    let tier_bytes = safetensors_bytes(&root)?;
+
+    let registry =
+        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    if registry
+        .memory_strategy_contract(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
+        .is_some()
+    {
+        return Err(
+            "the pinned MLX LTX-2.3 provider now registers a memory-strategy contract; this arm's \
+             gated receipt asserts that it does not, so it must be upgraded to read the contract \
+             before it can keep emitting records"
+                .to_owned(),
+        );
+    }
+    let generator = registry
+        .load(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("load real LTX-2.3 {tier} provider: {error}"))?;
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    // Live allocator readings at the two staging handoffs, distinct from the per-phase PEAKS above.
+    let denoise_entry = Cell::new(AllocatorState::default());
+    let decode_entry = Cell::new(AllocatorState::default());
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let (measured, output_fps, has_audio) = video_frames(
+        generator
+            .generate(&ltx_request(geometry, fps, seed), &mut |progress| {
+                match progress {
+                    // LTX emits no boundary between the staged text phase and the DiT build, so this
+                    // phase legitimately spans BOTH giants' materializations; the staging bound below
+                    // is what proves they did not co-reside.
+                    Progress::Step { current: 1, .. } => {
+                        conditioning.set(PhaseMemory::capture());
+                        denoise_entry.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        decode_entry.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                }
+            })
+            .map_err(|error| format!("generate measured LTX-2.3 render: {error}"))?,
+    )?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    let denoise_entry = denoise_entry.get();
+    let decode_entry = decode_entry.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized LTX-2.3 lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    if measured.len() as u32 != geometry.frames {
+        return Err(format!(
+            "LTX-2.3 rendered {} frames for a {}-frame request",
+            measured.len(),
+            geometry.frames
+        ));
+    }
+    if output_fps != fps {
+        return Err(format!(
+            "LTX-2.3 returned fps {output_fps} for a {fps} fps request"
+        ));
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+
+    // THE STAGED-RESIDENCY PROOF, and the reason the record may claim rung 1 at all. If sc-10976's
+    // load->use->drop regressed and the Gemma text encoder stayed resident into the DiT phase, the
+    // peak would have to cover both giants at once. It does not have to be smaller by a hair: on this
+    // artifact the two sum to tens of GB more than the observed peak.
+    let costaged_bytes = text_encoder_bytes.saturating_add(transformer_bytes);
+    if overall.active >= costaged_bytes {
+        return Err(format!(
+            "LTX-2.3 peaked at {} active bytes, at or above the {costaged_bytes} bytes the staged \
+             text encoder ({text_encoder_bytes}) and transformer ({transformer_bytes}) occupy \
+             together — the staged-residency claim this record makes is not supported by the run",
+            overall.active
+        ));
+    }
+    // The second handoff: the DiT is dropped and the cache cleared before the VAE decode, so the
+    // allocator at the decode boundary must hold less than it did entering the denoise.
+    if decode_entry.active >= denoise_entry.active {
+        return Err(format!(
+            "LTX-2.3 held {} active bytes entering decode against {} entering denoise; the \
+             transformer was not released before the VAE decode",
+            decode_entry.active, denoise_entry.active
+        ));
+    }
+
+    // Warm repeat determinism on this exact loaded provider. LTX rebuilds both giants per generate,
+    // so "warm" here means a warm PROCESS, not a warm working set — the repeat pays the full staged
+    // load again, which is why exactly one repeat is executed.
+    clear_cache();
+    reset_peak_memory();
+    let (repeat, _, _) = video_frames(
+        generator
+            .generate(&ltx_request(geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm LTX-2.3 repeat: {error}"))?,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &repeat)?;
+    if !flux2_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "LTX-2.3 warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    // Falsifiability: the envelope the clip just passed must be breachable. A gated receipt keeps
+    // `negativeMutation` null, so the measured breach lands in diagnostics, not in the field.
+    let mutated = measured
+        .iter()
+        .map(qwen_negative_mutation)
+        .collect::<Vec<_>>();
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &repeat)?;
+    if flux2_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err("LTX-2.3 output mutation did not breach the determinism envelope".to_owned());
+    }
+
+    let blocker = concat!(
+        "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no ",
+        "admission check, no calibration identity and no request scope: the exact_fit, ",
+        "unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run ",
+        "against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm ",
+        "repeat determinism and its negative mutation are attested in observedMemory, quality and ",
+        "diagnostics instead"
+    );
+    let mut fragment = json!({
+        "status": "gated",
+        "strategy": strategy,
+        "loadShape": load_shape_key(LoadShape::EagerMaterialization),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": ltx_complete_sweep(request)?,
+        "scenarios": protocol::not_run_scenarios(blocker),
+        "predictedPeakBytes": null,
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": FLUX2_MAX_THRESHOLD,
+            "meanErrorThreshold": FLUX2_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": FLUX2_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}+gemma"),
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:ltx-2-3-staged-video",
+            "executed",
+            [blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("predictedOverallCeiling", "bytes", predicted_ceiling(overall.allocator_bytes())),
+                ("denoiseEntryActive", "bytes", denoise_entry.active),
+                ("decodeEntryActive", "bytes", decode_entry.active),
+                ("stagedTextEncoderBytes", "bytes", text_encoder_bytes),
+                ("stagedTransformerBytes", "bytes", transformer_bytes),
+                ("costagedGiantsBytes", "bytes", costaged_bytes),
+                ("tierArtifactBytes", "bytes", tier_bytes),
+                ("warmRepeatPeak", "bytes", warm_peak),
+                ("warmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("warmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("renderedFrames", "count", u64::from(geometry.frames)),
+                ("latentTemporalDepth", "count", u64::from(geometry.latent_frames)),
+                ("outputFps", "count", u64::from(fps)),
+                ("audioTrackDecoded", "count", u64::from(has_audio)),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, LTX_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
@@ -4628,6 +5344,9 @@ fn run(request: &Value) -> Result<Value, String> {
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
         FLUX2_PROVIDER => run_flux2_dev(request),
+        // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
+        // validates against LTX's own resolution/temporal envelope instead.
+        LTX_PROVIDER => run_ltx(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -4752,10 +5471,17 @@ mod flux2_tests {
     use super::*;
     use mlx_gen::gen_core::MemoryStrategySupport;
 
+    /// sc-18808 added the still geometry: `validate_flux2_target` now refuses a non-still target
+    /// alongside a foreign provider, so a request that omits the axis entirely can no longer reach
+    /// the rung gate this module's tests are aiming at.
     fn minimal_request(provider: &str, rung: &str) -> Value {
         json!({
             "planned": {
-                "target": { "provider": provider, "overlay": "none" },
+                "target": {
+                    "provider": provider,
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
                 "strategy": { "rung": rung, "parameters": {} }
             }
         })
@@ -5656,6 +6382,413 @@ mod qwen_evidence_tests {
         .expect_err("exclusive receipt creation must not repair or overwrite tampering");
         assert!(error.contains("already exists with different bytes"));
 
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+/// sc-18808 — the first VIDEO arm, and the regression suite that keeps the six IMAGE arms strict
+/// while it exists.
+#[cfg(test)]
+mod ltx_tests {
+    use super::*;
+
+    /// A minimal, otherwise-valid LTX target. Every field the arm reads before it touches the
+    /// environment or the weights is present, so a test that mutates exactly one axis is testing
+    /// that axis.
+    fn ltx_request_json(width: u32, height: u32, frames: u32) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "provider": LTX_PROVIDER,
+                    "modelId": LTX_PROVIDER,
+                    "tier": "q8",
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "geometry": { "width": width, "height": height, "batch": 1, "frames": frames }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": {
+                    "rung": "staged_residency",
+                    "engagedRungs": ["resident", "staged_residency"],
+                    "parameters": {}
+                },
+                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "fixture": format!("ltx-2-3-mlx-q8-{width}x{height}-f{frames}-fps24-seed{LTX_SEED}")
+            }
+        })
+    }
+
+    /// The port of the shipped LTX frame ladder must agree with
+    /// `sceneworks_core::video_request::ltx_frame_count` at every point the declared limits can
+    /// reach. These 18 values ARE the envelope, so an unnoticed drift here would silently widen or
+    /// narrow what this arm accepts.
+    #[test]
+    fn ltx_frame_ladder_matches_the_shipped_video_request_ladder() {
+        for (duration, fps, expected) in [
+            (4, 24, 97),
+            (4, 25, 97),
+            (4, 30, 121),
+            (6, 24, 145),
+            (6, 25, 153),
+            (6, 30, 177),
+            (8, 24, 193),
+            (8, 25, 201),
+            (8, 30, 241),
+            (10, 24, 241),
+            (10, 25, 249),
+            (10, 30, 297),
+            (12, 24, 289),
+            (12, 25, 297),
+            (12, 30, 361),
+            (15, 24, 361),
+            (15, 25, 377),
+            (15, 30, 449),
+        ] {
+            let frames = ltx_snapped_frame_count(duration * fps);
+            assert_eq!(frames, expected, "{duration}s at {fps}fps");
+            assert_eq!(
+                frames % LTX_TEMPORAL_SCALE,
+                1,
+                "every reachable frame count is on the 1 + 8k lattice"
+            );
+        }
+        // The ladder's own floor, independent of the declared durations.
+        assert_eq!(ltx_snapped_frame_count(0), 9);
+        assert_eq!(ltx_snapped_frame_count(1), 9);
+    }
+
+    /// The envelope is DERIVED from the declared arrays through the ladder above, not written down.
+    #[test]
+    fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps() {
+        assert_eq!(LTX_FRAME_ENVELOPE, (97, 449));
+        let (minimum, maximum) = LTX_FRAME_ENVELOPE;
+        assert_eq!(minimum, ltx_snapped_frame_count(4 * 24));
+        assert_eq!(maximum, ltx_snapped_frame_count(15 * 30));
+    }
+
+    #[test]
+    fn the_ltx_arm_accepts_the_declared_video_envelope() {
+        for (width, height) in LTX_RESOLUTIONS {
+            for frames in [LTX_FRAME_ENVELOPE.0, 241, LTX_FRAME_ENVELOPE.1] {
+                let geometry = validate_ltx_geometry(width, height, frames)
+                    .unwrap_or_else(|error| panic!("{width}x{height} f{frames}: {error}"));
+                assert_eq!(geometry.frames, frames);
+                assert_eq!(
+                    geometry.latent_frames,
+                    1 + (frames - 1) / LTX_TEMPORAL_SCALE
+                );
+                assert!(
+                    geometry.latent_frames > 1,
+                    "a video record is multi-latent-frame"
+                );
+            }
+        }
+    }
+
+    /// The negative half of the envelope, mirroring the shape of the pinned image-arm negative test.
+    #[test]
+    fn the_ltx_arm_rejects_out_of_envelope_geometry_with_a_named_reason() {
+        for (width, height, frames, expected) in [
+            // An undeclared resolution, including one that is 64-aligned and would otherwise render.
+            (1024, 1024, 97, "declared limits.resolutions"),
+            (800, 512, 97, "declared limits.resolutions"),
+            // Off the temporal lattice the LTX VAE's 8x causal compression requires.
+            (768, 512, 96, "1 + 8k"),
+            (768, 512, 100, "1 + 8k"),
+            // On the lattice but outside what a declared duration/fps pair can produce.
+            (768, 512, 1, "duration/fps envelope"),
+            (768, 512, 9, "duration/fps envelope"),
+            (768, 512, 457, "duration/fps envelope"),
+        ] {
+            let error = validate_ltx_geometry(width, height, frames)
+                .expect_err("an out-of-envelope LTX geometry must be refused");
+            assert!(
+                error.contains(expected),
+                "{width}x{height} f{frames}: {error}"
+            );
+        }
+    }
+
+    /// A still geometry is on the temporal lattice (`1 % 8 == 1`), so it can only be caught by the
+    /// envelope floor. The video arm must not be able to capture a single-frame record.
+    #[test]
+    fn the_ltx_arm_refuses_a_single_frame_capture() {
+        let error = run_ltx(&ltx_request_json(768, 512, 1))
+            .expect_err("a video arm must not capture a still");
+        assert!(error.contains("duration/fps envelope"), "{error}");
+    }
+
+    #[test]
+    fn the_ltx_arm_refuses_a_foreign_provider_before_environment_or_weight_work() {
+        for provider in ["ltx_2_3_distilled", "ltx_2_3_eros", "wan_2_2", "flux2_dev"] {
+            let mut request = ltx_request_json(768, 512, 97);
+            request["planned"]["target"]["provider"] = json!(provider);
+            let error =
+                run_ltx(&request).expect_err("a foreign provider must not reach the LTX arm");
+            assert_eq!(
+                error,
+                format!("MLX LTX-2.3 calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn the_ltx_arm_fails_closed_on_a_non_t2v_target_before_weight_work() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/target/modelId",
+                json!("ltx_2_3_eros"),
+                "requires modelId",
+            ),
+            (
+                "/planned/target/mode",
+                json!("image_to_video"),
+                "requires reference-free text_to_video mode",
+            ),
+            (
+                "/planned/target/geometry/batch",
+                json!(2),
+                "requires geometry.batch == 1",
+            ),
+            (
+                "/planned/target/overlay",
+                json!("lora"),
+                "refusing rather than recording false overlay coverage",
+            ),
+            (
+                "/planned/strategy/rung",
+                json!("resident"),
+                "staged_residency is the only capturable rung",
+            ),
+            (
+                "/planned/loadShape",
+                json!("deferred_materialization"),
+                "never reads LoadSpec::load_shape",
+            ),
+            (
+                "/planned/calibrationFingerprint",
+                json!("sc-18808-ltx-2-3-mlx-t2v-staged-capture-v0"),
+                "plan/adapter calibration mismatch",
+            ),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f97-fps60-seed18808"),
+                "not one of the declared limits.fps",
+            ),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f193-fps24-seed18808"),
+                "must start with",
+            ),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f97-fps24-seed42"),
+                "does not match the LTX-2.3 calibration seed",
+            ),
+            (
+                "/planned/target/tier",
+                json!("q2"),
+                "unsupported MLX numeric tier",
+            ),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            *request.pointer_mut(pointer).unwrap() = value.clone();
+            let error = run_ltx(&request)
+                .expect_err("a non-T2V LTX target must fail before environment or weights");
+            assert!(error.contains(expected), "{pointer}={value}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_ltx_arm_refuses_a_parameterized_staged_residency_row() {
+        let mut request = ltx_request_json(768, 512, 97);
+        request["planned"]["strategy"]["parameters"] = json!({ "decodeTileEdge": 512 });
+        let error = ltx_attested_strategy(&request)
+            .expect_err("staged residency has no strategy parameters at the pin");
+        assert!(error.contains("takes no strategy parameters"), "{error}");
+    }
+
+    /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would
+    /// have to be an explicit edit here.
+    #[test]
+    fn the_ltx_arm_attests_exactly_resident_plus_staged_residency() {
+        let strategy = ltx_attested_strategy(&ltx_request_json(768, 512, 97)).unwrap();
+        assert_eq!(strategy["rung"], "staged_residency");
+        assert_eq!(
+            strategy["engagedRungs"],
+            json!(["resident", "staged_residency"])
+        );
+        assert_eq!(strategy["parameters"], json!({}));
+    }
+
+    /// AC3, and the reason the video arm is safe to add: EVERY image arm still refuses a
+    /// multi-frame geometry, before it does environment or weight work. Four of the six never
+    /// validated the axis at all before sc-18808 — they read only width/height and hardcoded
+    /// `frames: 1` into the admission context, so a `frames: 2` plan row would have rendered one
+    /// frame and recorded a geometry it was never asked for.
+    #[test]
+    fn every_image_arm_still_refuses_a_multi_frame_geometry() {
+        type Arm = fn(&Value) -> Result<Value, String>;
+        let arms: [(&str, &str, Arm); 6] = [
+            (
+                KREA_BASE_PROVIDER,
+                "MLX Krea base calibration",
+                run_krea_base,
+            ),
+            (SDXL_PROVIDER, "MLX SDXL base calibration", run_sdxl),
+            (
+                Z_IMAGE_PROVIDER,
+                "MLX Z-Image base calibration",
+                run_z_image_reference,
+            ),
+            (
+                KREA_PROVIDER,
+                "MLX Krea pose-control calibration",
+                run_krea_control,
+            ),
+            (
+                QWEN_PROVIDER,
+                "MLX Qwen base calibration",
+                run_qwen_provider,
+            ),
+            (FLUX2_PROVIDER, "MLX FLUX.2-dev calibration", run_flux2_dev),
+        ];
+        for (provider, label, arm) in arms {
+            for frames in [0_u64, 2, 97] {
+                let request = json!({
+                    "planned": {
+                        "target": {
+                            "provider": provider,
+                            "modelId": provider,
+                            "tier": "q4",
+                            "mode": "text_to_image",
+                            "overlay": if provider == KREA_PROVIDER { "control:1" } else { "none" },
+                            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": frames }
+                        },
+                        "backend": "mlx",
+                        "loadShape": "deferred_materialization",
+                        "strategy": {
+                            "rung": "bounded_decode",
+                            "engagedRungs": ["resident", "bounded_decode"],
+                            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+                        },
+                        "calibrationFingerprint": "unused",
+                        "fixture": "unused"
+                    }
+                });
+                let error =
+                    arm(&request).expect_err("an image arm must refuse a multi-frame geometry");
+                assert_eq!(
+                    error,
+                    format!("{label} requires geometry.frames == 1, got {frames}"),
+                    "{provider} at frames={frames}"
+                );
+            }
+        }
+    }
+
+    /// And the still geometry itself must still get PAST the guard on every image arm, so the
+    /// refusals above are the frames axis rather than a blanket rejection.
+    #[test]
+    fn the_still_geometry_guard_is_not_a_blanket_refusal() {
+        for label in [
+            "MLX Krea base calibration",
+            "MLX SDXL base calibration",
+            "MLX Z-Image base calibration",
+            "MLX Krea pose-control calibration",
+            "MLX Qwen base calibration",
+            "MLX FLUX.2-dev calibration",
+        ] {
+            let request = json!({
+                "planned": { "target": { "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } } }
+            });
+            assert!(
+                protocol::validate_still_geometry(&request, label).is_ok(),
+                "{label}"
+            );
+        }
+    }
+
+    /// The video output unwrapper refuses the two shapes an image provider would return, so a
+    /// misrouted still could never be recorded as a clip.
+    #[test]
+    fn the_video_unwrapper_refuses_image_and_audio_shaped_output() {
+        let frame = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 0, 0, 255, 255, 255],
+        };
+        assert!(video_frames(GenerationOutput::Images(vec![frame.clone()]))
+            .unwrap_err()
+            .contains("returned images, not a video clip"));
+        assert!(video_frames(GenerationOutput::Video {
+            frames: Vec::new(),
+            fps: 24,
+            audio: None,
+        })
+        .unwrap_err()
+        .contains("returned no frames"));
+        let (frames, fps, audio) = video_frames(GenerationOutput::Video {
+            frames: vec![frame],
+            fps: 25,
+            audio: None,
+        })
+        .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(fps, 25);
+        assert!(!audio);
+    }
+
+    /// The clip comparator is per-frame and mutation-sensitive: a divergence confined to a LATE
+    /// frame must be seen, which a first-frame spot check would miss.
+    #[test]
+    fn the_clip_comparator_sees_a_late_frame_divergence() {
+        let frame = |value: u8| Image {
+            width: 2,
+            height: 2,
+            pixels: vec![value; 12],
+        };
+        let left = vec![frame(10), frame(10), frame(10)];
+        let identical = left.clone();
+        let (maximum, mean, rms) = video_max_mean_rms_abs(&left, &identical).unwrap();
+        assert_eq!((maximum, mean, rms), (0.0, 0.0, 0.0));
+        assert!(flux2_quality_passes(maximum, mean, rms));
+
+        let mut late = left.clone();
+        late[2] = frame(200);
+        let (maximum, mean, rms) = video_max_mean_rms_abs(&left, &late).unwrap();
+        assert!(maximum > FLUX2_MAX_THRESHOLD, "max={maximum}");
+        assert!(!flux2_quality_passes(maximum, mean, rms));
+
+        assert!(video_max_mean_rms_abs(&left, &left[..2])
+            .unwrap_err()
+            .contains("frame-count mismatch"));
+    }
+
+    /// The staged-residency bound is a real inequality over real byte counts, not a comment.
+    #[test]
+    fn safetensors_bytes_sums_only_weight_shards_and_fails_closed_when_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "sc-18808-ltx-shards-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(safetensors_bytes(&root)
+            .unwrap_err()
+            .contains("no .safetensors weights"));
+        std::fs::write(root.join("config.json"), b"{}").unwrap();
+        assert!(
+            safetensors_bytes(&root).is_err(),
+            "a config is not a weight shard"
+        );
+        std::fs::write(root.join("model-00001-of-00002.safetensors"), vec![0_u8; 7]).unwrap();
+        std::fs::write(root.join("model-00002-of-00002.safetensors"), vec![0_u8; 5]).unwrap();
+        assert_eq!(safetensors_bytes(&root).unwrap(), 12);
         std::fs::remove_dir_all(root).ok();
     }
 }

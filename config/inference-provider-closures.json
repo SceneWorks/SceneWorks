@@ -139,6 +139,18 @@
       "sourceFileCount": 248,
       "lockedPackageCount": 175
     },
+    "mlx:ltx_2_3": {
+      "crate": "crates/media/mlx-gen/mlx-gen-ltx",
+      "digest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-ltx"
+      ],
+      "sourceFileCount": 121,
+      "lockedPackageCount": 163
+    },
     "mlx:qwen_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
       "digest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",

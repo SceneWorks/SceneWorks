@@ -15,6 +15,10 @@ pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
 pub const SDXL_REPOSITORY: &str = "SceneWorks/sdxl-base-mlx";
 pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
+/// The `mlx:ltx_2_3` calibration artifact (sc-18808). Its `gemma/` co-requisite text encoder is a
+/// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
+/// roots under this one repository: the numeric tier and `gemma`.
+pub const LTX_REPOSITORY: &str = "SceneWorks/ltx-2.3-mlx";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and
@@ -274,6 +278,41 @@ pub fn target_geometry(request: &Value) -> Result<(u32, u32), String> {
 /// still have produced a `not_applicable` record that reads as considered coverage. Reading the target
 /// makes the verdict true by construction, and lets an adapter refuse a target it cannot execute
 /// instead of quietly excusing it.
+/// Refuse a non-still geometry before an IMAGE provider arm does environment or weight work.
+///
+/// The frames axis is a **per-arm** contract, not a global one (sc-18808). Every arm in this crate
+/// used to be an image arm, so `frames == 1` read like an apparatus-wide invariant; it never was
+/// one, and the first video arm (`mlx:ltx_2_3`) legitimately renders `1 + 8k` frames. Hoisting the
+/// refusal here rather than deleting it keeps the image arms strict while letting exactly one arm
+/// declare a different envelope, in one place a reader can see both halves of.
+///
+/// It is hoisted for a second, sharper reason. Only two of the six image arms — Krea base and SDXL —
+/// actually validated the axis; the other four read only `width`/`height` through
+/// [`target_geometry`] and then hardcoded `frames: 1` into their admission context. A plan row
+/// declaring `frames: 2` therefore rendered ONE frame and produced a record whose geometry envelope
+/// claimed a single frame it had not been asked for — a silent, well-formed lie about what was
+/// measured, which is the exact defect class this apparatus exists to make impossible. The two
+/// original messages are reproduced verbatim through `calibration_label` so the pinned negative
+/// tests keep asserting the same wording.
+pub fn validate_still_geometry(request: &Value, calibration_label: &str) -> Result<(), String> {
+    let geometry = planned(request)?
+        .pointer("/target/geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
+        let actual = geometry
+            .get(axis)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
+        if actual != expected {
+            return Err(format!(
+                "{calibration_label} requires geometry.{axis} == {expected}, got {actual}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn target_overlay(request: &Value) -> Result<String, String> {
     planned(request)?
         .pointer("/target/overlay")
@@ -759,6 +798,43 @@ mod tests {
         .clone();
         assert_eq!(comparison_output_bias(&negative, true).unwrap(), Some(0.05));
         assert!(comparison_output_bias(&negative, false).is_err());
+    }
+
+    #[test]
+    fn still_geometry_guard_refuses_every_non_still_axis_and_reproduces_the_pinned_wording() {
+        let still = json!({
+            "planned": { "target": { "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } } }
+        });
+        assert!(validate_still_geometry(&still, "MLX Krea base calibration").is_ok());
+
+        for (axis, value) in [
+            ("frames", 2_u64),
+            ("batch", 2),
+            ("frames", 97),
+            ("batch", 0),
+        ] {
+            let mut request = still.clone();
+            request["planned"]["target"]["geometry"][axis] = json!(value);
+            let error = validate_still_geometry(&request, "MLX SDXL base calibration")
+                .expect_err("an image arm must refuse a non-still geometry");
+            assert_eq!(
+                error,
+                format!("MLX SDXL base calibration requires geometry.{axis} == 1, got {value}")
+            );
+        }
+
+        // A missing or non-integer axis fails closed rather than defaulting to the still value.
+        for axis in ["frames", "batch"] {
+            let mut request = still.clone();
+            request["planned"]["target"]["geometry"][axis] = json!("1");
+            assert!(
+                validate_still_geometry(&request, "MLX Qwen base calibration")
+                    .unwrap_err()
+                    .contains(&format!(
+                        "planned.target.geometry.{axis} must be an integer"
+                    ))
+            );
+        }
     }
 
     #[test]
