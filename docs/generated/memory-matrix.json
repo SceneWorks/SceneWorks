@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d6d4559c2a982565e7549914df53b20bcdee7512aea51397bdc01f8474f6aa31",
+    "sceneWorksRevision": "source-tree:64548a25924088102dc5b441777c653f8b2ade6f6b16c59a195ec9d0c3726329",
     "inferenceRevision": "b965641e388f4db646e4c60ab3f75219737e2cc8",
     "sources": {
       "manifest": {
@@ -10,7 +10,7 @@
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "66897bc83ba0dbb9485dc9a933dd556697b5362e05456feb0abe9fc0c41f925c"
+        "sha256": "6c224aedf01d73e8729937ff2c44de71bebc99c2449afd319f5215004d94442e"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
@@ -30,7 +30,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "6019140373a8c184094083b8a54801ed07fcf98d69f8ec1e7ffa55b2b7338cb1"
+        "sha256": "7d46e6799fb5bebcb3996496613d73caff88a73a20581dbf1e4abab73809405c"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -54,15 +54,15 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "ba2601bee5ebf36703fe7b0ac85e8eea5dec1dbfab6fe1635bc92f399e88aa58"
+        "sha256": "e17383f43ab735be296e3abd1b7b963482371f187b486970b1b756243cdf1bdf"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "270d35228f06ebc74e86801cffcb1544a89f643d7e6f5c6846bc9863454e9abd"
+        "sha256": "0089959cf55853d3c617b86850aa489fa7da6d2070c8f86c50f82acd021a45ff"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
-        "sha256": "b28d90a4611fa069eac8c2081f852daee99015d89a0c4d48b314f1de872d2a3d"
+        "sha256": "508c23bdf295540136980ca414174926be12eeaef5a087d53503fab86cb43167"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",

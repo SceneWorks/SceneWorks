@@ -1341,6 +1341,48 @@ derive_model_list! {
     pub(crate) VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, video_mlx_routed
 }
 
+/// Whether `model` has ANY MLX video route (sc-18814). The `video_mlx_routed` column of
+/// [`VIDEO_MODEL_CAPS`], asked without a payload — the mode-level question is
+/// [`super::mlx::video_mode_is_mlx_eligible`].
+///
+/// Exists so the video memory gate (`crate::video_request::video_admission_surface`) can state its
+/// per-family backend surface from the routing catalog — the backend authority — instead of from
+/// the manifest's advisory `mlx` / `candle` hint objects, which describe intent rather than
+/// routing.
+pub(crate) fn video_model_is_mlx_video_routed(model: &str) -> bool {
+    VIDEO_MLX_ROUTED_MODELS.contains(&model)
+}
+
+/// Whether `model` has ANY candle video route (sc-18814) — the candle half of
+/// [`video_model_is_mlx_video_routed`], and **not** simply the `candle_video_routed` column.
+///
+/// Two families reach candle through their OWN distinct engines rather than through
+/// `CANDLE_VIDEO_ROUTED_MODELS`, so reading that column alone would report them unroutable:
+///
+/// * `scail2_14b` — `candle_video_routed = false` by design (it is not a Wan-VACE model), yet
+///   [`super::candle::scail2_animate_candle_eligible`] /
+///   [`super::candle::scail2_replace_candle_eligible`] route it to the distinct candle SCAIL-2
+///   engine (sc-6837), which the worker dispatches as `CandleVideoRoute::AnimateScail2` /
+///   `::ReplacePersonScail2`.
+/// * `bernini` — in the column, but reached via
+///   [`super::candle::bernini_video_candle_eligible`] rather than the generic txt2video arm.
+///
+/// `krea_realtime_14b` is the one video family with genuinely NO candle engine: there is no
+/// `candle-gen-krea-realtime` at all, its MLX descriptor is `mac_only`, and
+/// `run_video_generate_job` fails an off-Mac krea job loudly rather than routing it elsewhere.
+///
+/// Pinned against the per-model predicates by `crate::video_request`'s
+/// `video_admission_surface_matches_the_routing_catalog`.
+pub(crate) fn video_model_has_candle_video_route(model: &str) -> bool {
+    CANDLE_VIDEO_ROUTED_MODELS.contains(&model) || CANDLE_SCAIL2_VIDEO_MODELS.contains(&model)
+}
+
+/// Video models served off-Mac by a DISTINCT candle engine that is deliberately absent from
+/// [`CANDLE_VIDEO_ROUTED_MODELS`] (sc-6837): the candle SCAIL-2 engine, gated by
+/// [`super::candle::scail2_animate_candle_eligible`] /
+/// [`super::candle::scail2_replace_candle_eligible`] rather than by table membership.
+pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
+
 /// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
 /// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
 /// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
